@@ -199,7 +199,7 @@ function modalProps(
     onSaveDetails: vi.fn(async () => {}),
     onRename: vi.fn(async () => {}),
     onMoveFolder: vi.fn(async () => {}),
-    folderOptions: [],
+    folders: [],
     showFolderControls: true,
     moving: false,
     onAssetChanged: vi.fn(),

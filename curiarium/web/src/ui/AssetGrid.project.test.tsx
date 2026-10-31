@@ -132,7 +132,7 @@ describe("AssetGrid in project mode", () => {
 
     expect(container.querySelector("[data-folder-breadcrumbs]")).toBeNull();
     expect(container.querySelector("[data-folder-tiles]")).toBeNull();
-    expect(screen.queryByRole("option", { name: "Folder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Folder:/ })).toBeNull();
 
     const sortSelect = screen
       .getAllByRole("combobox")

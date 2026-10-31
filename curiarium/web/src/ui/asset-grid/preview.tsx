@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
-import { type Asset, type PreparedPrint, fileUrl } from "../../lib/api";
+import { type Asset, type Folder, type PreparedPrint, fileUrl } from "../../lib/api";
 import { formatBytes } from "../../lib/format";
 import type { PreviewSettings, ResolvedTheme } from "../../lib/settings";
 import { useFileGrants } from "../../lib/useFileGrants";
@@ -210,7 +210,7 @@ export function AssetPreviewModal({
   onSaveDetails,
   onRename,
   onMoveFolder,
-  folderOptions,
+  folders,
   showFolderControls,
   moving,
   onAssetChanged,
@@ -226,7 +226,7 @@ export function AssetPreviewModal({
   onSaveDetails: (id: string, payload: { notes: string; creator: string }) => Promise<void>;
   onRename: (id: string, name: string) => Promise<void>;
   onMoveFolder: (id: string, folder_id: string | null) => Promise<void>;
-  folderOptions: { id: string | null; name: string }[];
+  folders: readonly Folder[];
   showFolderControls: boolean;
   moving: boolean;
   onAssetChanged: (asset: Asset) => void;
@@ -259,6 +259,9 @@ export function AssetPreviewModal({
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Tab") {
+      // A nested dialog (the folder picker) traps Tab itself; once it has taken
+      // the move, this outer list is a superset that would rotate the wrong way.
+      if (event.defaultPrevented) return;
       // `aria-modal="true"` promises modality, so Tab must not walk out into
       // the grid behind the overlay. Cycle within the panel instead.
       const focusable = Array.from(
@@ -362,7 +365,7 @@ export function AssetPreviewModal({
             onSaveDetails={onSaveDetails}
             onRename={onRename}
             onMoveFolder={onMoveFolder}
-            folderOptions={folderOptions}
+            folders={folders}
             showFolderControls={showFolderControls}
             moving={moving}
             initialSection={initialSection}

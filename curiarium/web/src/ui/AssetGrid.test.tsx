@@ -89,6 +89,7 @@ import {
   reorderAssetFiles,
   setTags,
   startLibraryScan,
+  updateAssetFolder,
   updateAssetMeta,
   uploadAsset,
   uploadAssetFile,
@@ -108,6 +109,7 @@ const deleteAssetMock = vi.mocked(deleteAsset);
 const startLibraryScanMock = vi.mocked(startLibraryScan);
 const getLibraryScanStatusMock = vi.mocked(getLibraryScanStatus);
 const updateAssetMetaMock = vi.mocked(updateAssetMeta);
+const updateAssetFolderMock = vi.mocked(updateAssetFolder);
 const uploadAssetMock = vi.mocked(uploadAsset);
 const uploadAssetFileMock = vi.mocked(uploadAssetFile);
 const createFolderMock = vi.mocked(createFolder);
@@ -219,15 +221,11 @@ function menuItemLabels(menu: HTMLElement): string[] {
 }
 
 /**
- * The dialog's folder select, identified by the options `listFolders` provides
- * (`f1`). The card face has no selects at all any more.
+ * The dialog's folder picker, identified by its `Folder:` trigger. The card
+ * face has no folder control at all any more.
  */
-function folderSelectIn(scope: HTMLElement): HTMLSelectElement | null {
-  return (
-    Array.from(scope.querySelectorAll("select")).find(select =>
-      Array.from(select.options).some(option => option.value === "f1"),
-    ) ?? null
-  );
+function folderPickerTriggerIn(scope: HTMLElement): HTMLButtonElement | null {
+  return within(scope).queryByRole("button", { name: /^Folder:/ });
 }
 
 /**
@@ -2571,6 +2569,7 @@ describe("AssetGrid card surface", () => {
     listAssetFileLimitsMock.mockResolvedValue({ ...NO_FILE_LIMITS, count: 1, max_count: 5 });
     deleteAssetMock.mockReset();
     deletePreparedPrintMock.mockReset();
+    updateAssetFolderMock.mockReset();
     fileUrlMock.mockClear();
   });
 
@@ -2684,7 +2683,7 @@ describe("AssetGrid card surface", () => {
     closeCardMenu(missing);
 
     // The dialog is the second home: tag editor, notes/creator editor, the
-    // folder select and the supporting-file console all live there.
+    // folder picker and the supporting-file console all live there.
     const menu = openCardMenu(cardFor("v-bare"));
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Supporting files (1)…" }));
     const dialog = screen.getByRole("dialog", { name: "Bare asset" });
@@ -2693,7 +2692,7 @@ describe("AssetGrid card surface", () => {
     expect(scope.getByRole("button", { name: "Save tags" })).toBeTruthy();
     expect(scope.getByPlaceholderText("Designer or source")).toBeTruthy();
     expect(scope.getByPlaceholderText("Add some details about this asset")).toBeTruthy();
-    expect(folderSelectIn(dialog)).toBeTruthy();
+    expect(folderPickerTriggerIn(dialog)).toBeTruthy();
 
     await scope.findByText("notes.pdf");
     expect(scope.getByRole("button", { name: "Preview notes.pdf" })).toBeTruthy();
@@ -2714,6 +2713,32 @@ describe("AssetGrid card surface", () => {
     }));
     screen.getByRole("dialog", { name: "Bare asset" });
     expect(listAssetFilesMock).not.toHaveBeenCalled();
+  });
+
+  it("moves the asset through the dialog's folder picker", async () => {
+    const bare = { ...assets[0], folder_id: null };
+    // `onMoveFolder` reconciles the RESOLVED row back into the open preview, so
+    // an unset mock (undefined) would revert the optimistic change instead.
+    updateAssetFolderMock.mockResolvedValue({ ...bare, folder_id: "f1" });
+    await renderCards([bare]);
+
+    const dialog = openCardDialog(cardFor("a1"), "Edit details…");
+    expect(
+      within(dialog).getByRole("button", { name: "Folder: Unassigned (top level)" }),
+    ).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Folder:/ }));
+    // `Folder one` is root-level in this describe's `listFolders`, so it is
+    // visible without expanding a branch.
+    fireEvent.click(within(dialog).getByRole("treeitem", { name: "Folder one" }));
+
+    await waitFor(() => expect(updateAssetFolderMock).toHaveBeenCalledWith("a1", "f1"));
+    // The commit, not merely the request: the trigger relabels only once the
+    // resolved row is back in the open preview, and the picker closes itself.
+    await waitFor(() =>
+      expect(within(dialog).getByRole("button", { name: "Folder: Folder one" })).toBeTruthy(),
+    );
+    expect(within(dialog).queryByRole("dialog", { name: "Folder" })).toBeNull();
   });
 
   it("the detail dialog traps focus, closes on Escape and returns focus to the trigger", async () => {

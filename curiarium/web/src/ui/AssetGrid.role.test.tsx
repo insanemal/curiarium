@@ -204,15 +204,11 @@ function cardFor(assetId: string): HTMLElement {
 }
 
 /**
- * The dialog's folder select, identified by the option `listFolders` provides
- * (`f1`). Folder chrome is dialog-only now: the card face has no selects.
+ * The dialog's folder picker, identified by its `Folder:` trigger. Folder
+ * chrome is dialog-only now: the card face has no folder control at all.
  */
-function folderSelectIn(scope: HTMLElement): HTMLSelectElement | null {
-  return (
-    Array.from(scope.querySelectorAll("select")).find(select =>
-      Array.from(select.options).some(option => option.value === "f1"),
-    ) ?? null
-  );
+function folderPickerTriggerIn(scope: HTMLElement): HTMLButtonElement | null {
+  return within(scope).queryByRole("button", { name: /^Folder:/ });
 }
 
 /**
@@ -417,7 +413,7 @@ describe("AssetGrid role capability", () => {
       for (const name of ["Save name", "Save tags", "Save details", "Add files"]) {
         expect(dialogScope.queryByRole("button", { name })).toBeNull();
       }
-      expect(folderSelectIn(dialog)).toBeNull();
+      expect(folderPickerTriggerIn(dialog)).toBeNull();
       // The file list itself is a read: preview and download stay, the
       // reorder/rename/remove controls do not.
       expect(dialogScope.getByRole("button", { name: "Preview notes.pdf" })).toBeTruthy();
@@ -527,9 +523,9 @@ describe("AssetGrid role capability", () => {
 
       const dialog = await expandSupportingFiles(card);
       const dialogScope = within(dialog);
-      // `Add files` and the folder select live in the dialog, not on the card.
+      // `Add files` and the folder picker live in the dialog, not on the card.
       expect(dialogScope.getByRole("button", { name: "Add files" })).toBeTruthy();
-      expect(folderSelectIn(dialog)).toBeTruthy();
+      expect(folderPickerTriggerIn(dialog)).toBeTruthy();
       for (const name of [/Move notes.pdf up/, /Move notes.pdf down/, "Rename", "Remove"]) {
         expect(dialogScope.getByRole("button", { name })).toBeTruthy();
       }
@@ -650,7 +646,7 @@ describe("AssetGrid role capability", () => {
       const dialog = await expandSupportingFiles(card);
       const dialogScope = within(dialog);
       // Moving an asset between folders is asset-level and delete-gated.
-      expect(folderSelectIn(dialog)).toBeNull();
+      expect(folderPickerTriggerIn(dialog)).toBeNull();
       // `DELETE /asset/{id}/files/{file_id}` is WRITE, so Remove goes even
       // though the reorder and rename buttons beside it stay.
       expect(dialogScope.queryByRole("button", { name: "Remove" })).toBeNull();

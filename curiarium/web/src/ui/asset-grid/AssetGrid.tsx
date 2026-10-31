@@ -305,7 +305,6 @@ export default function AssetGrid({
     expandedGroups,
     toggleGroup,
     toggleGroupExpanded,
-    folderOptions,
     subfolders,
     dropTargetName,
   } = useAssetSorting({
@@ -494,7 +493,7 @@ export default function AssetGrid({
           onSaveDetails={onSaveDetails}
           onRename={onRename}
           onMoveFolder={onMoveFolder}
-          folderOptions={folderOptions}
+          folders={folders}
           showFolderControls={!isProject}
           moving={movingId === previewItem.id}
           onAssetChanged={replaceAsset}

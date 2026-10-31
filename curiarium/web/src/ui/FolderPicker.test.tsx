@@ -754,15 +754,14 @@ describe("FolderPicker", () => {
     expect(files).toContain("ui/BulkActionBar.tsx");
     expect(files).toContain("ui/asset-grid/AssetDetailsEditor.tsx");
 
-    const callSites = ["ui/Sidebar.tsx", "ui/BulkActionBar.tsx"];
+    const callSites = [
+      "ui/Sidebar.tsx",
+      "ui/BulkActionBar.tsx",
+      "ui/asset-grid/AssetDetailsEditor.tsx",
+    ];
     const flatSelects = callSites.filter(file => /<select/.test(SOURCES[file]));
     expect(flatSelects).toEqual([]);
     const missingImport = callSites.filter(file => !/import[^;]*FolderPicker/.test(SOURCES[file]));
     expect(missingImport).toEqual([]);
-
-    // Documented exemption: the asset editor keeps its select until Mf-el5v
-    // (outside this ticket's touch-set, which is why only the select is pinned).
-    const deferred = SOURCES["ui/asset-grid/AssetDetailsEditor.tsx"];
-    expect(deferred).toContain("<select");
   });
 });

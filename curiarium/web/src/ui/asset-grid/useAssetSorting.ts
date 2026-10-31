@@ -29,7 +29,6 @@ export type AssetSortingApi = {
   toggleGroupExpanded: (id: string) => void;
   folderById: Record<string, Folder>;
   folderNames: Record<string, string>;
-  folderOptions: { id: string | null; name: string }[];
   subfolders: Folder[];
   dropTargetName: string;
 };
@@ -85,15 +84,6 @@ export function useAssetSorting({
   // Direct subfolders of the open folder, derived from the folder list the grid
   // already fetched — no extra requests.
   const subfolders = useMemo(() => childFolders(folders, folderId ?? null), [folderId, folders]);
-
-  const folderOptions = useMemo(() => {
-    return [
-      { id: null as string | null, name: "Unassigned" },
-      ...folders
-        .map(f => ({ id: f.id, name: folderNames[f.id] || f.name || "Untitled" }))
-        .sort((a, b) => a.name.localeCompare(b.name)),
-    ];
-  }, [folders, folderNames]);
 
   const sortedItems = useMemo(() => {
     // name/size/creator are server-backed: the full listing is already ordered,
@@ -191,7 +181,6 @@ export function useAssetSorting({
     toggleGroupExpanded,
     folderById,
     folderNames,
-    folderOptions,
     subfolders,
     dropTargetName,
   };

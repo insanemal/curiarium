@@ -2,17 +2,17 @@ import {
   useEffect,
   useRef,
   useState,
-  type ChangeEvent,
   type KeyboardEvent,
   type ReactElement,
 } from "react";
 
-import { type Asset } from "../../lib/api";
+import { type Asset, type Folder } from "../../lib/api";
 import {
   normaliseCreator,
   normaliseName,
   normaliseNotes,
 } from "../../lib/metadataValidation";
+import FolderPicker from "../FolderPicker";
 import TagInput from "../TagInput";
 
 export type DetailSection = "rename" | "tags" | "details" | "files";
@@ -25,7 +25,7 @@ type Props = {
   onSaveDetails: (id: string, payload: { notes: string; creator: string }) => Promise<void>;
   onRename: (id: string, name: string) => Promise<void>;
   onMoveFolder: (id: string, folder_id: string | null) => Promise<void>;
-  folderOptions: { id: string | null; name: string }[];
+  folders: readonly Folder[];
   /** Project mode hides every folder control (projects have no folder axis). */
   showFolderControls: boolean;
   moving: boolean;
@@ -45,7 +45,7 @@ export default function AssetDetailsEditor({
   onSaveDetails,
   onRename,
   onMoveFolder,
-  folderOptions,
+  folders,
   showFolderControls,
   moving,
   initialSection,
@@ -181,8 +181,7 @@ export default function AssetDetailsEditor({
     setDetailsDirty(false);
   };
 
-  const handleFolderChange = (event: ChangeEvent<HTMLSelectElement>) => {
-    const next = event.target.value || null;
+  const handleFolderPick = (next: string | null) => {
     const current = asset.folder_id || null;
     if (next === current) return;
     void onMoveFolder(asset.id, next);
@@ -321,23 +320,21 @@ export default function AssetDetailsEditor({
       )}
 
       {showFolderControls && canDelete && (
-        <label className="flex flex-col gap-1">
-          <span className="text-xs font-semibold uppercase text-muted">
-            {moving ? "Updating..." : "Folder"}
-          </span>
-          <select
-            value={asset.folder_id || ""}
-            onChange={handleFolderChange}
+        <div className="flex flex-col gap-1">
+          <FolderPicker
+            id="asset-folder"
+            label="Folder"
+            folders={folders}
+            value={asset.folder_id ?? null}
+            onChange={handleFolderPick}
+            rootLabel="Unassigned (top level)"
             disabled={moving}
-            className="rounded-md border border-panel-strong bg-panel-strong px-2 py-1 text-sm"
-          >
-            {folderOptions.map(option => (
-              <option key={option.id || "none"} value={option.id || ""}>
-                {option.name}
-              </option>
-            ))}
-          </select>
-        </label>
+          />
+          {/* Keeps the old label's in-flight cue without swapping the picker's own label. */}
+          <span role="status" aria-live="polite" className="text-xs text-muted">
+            {moving ? "Updating..." : ""}
+          </span>
+        </div>
       )}
     </div>
   );
