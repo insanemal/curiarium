@@ -59,6 +59,21 @@ function stepIndex(items: CardMenuItem[], active: number, direction: 1 | -1): nu
   return previous ?? enabled[enabled.length - 1];
 }
 
+/** First enabled label with `prefix`, or -1 when nothing matches. */
+function firstMatch(items: CardMenuItem[], prefix: string): number {
+  return items.findIndex(item => !item.disabled && item.label.toLowerCase().startsWith(prefix));
+}
+
+/** First enabled prefix match after `from`, wrapping; stops after one full lap. */
+function nextMatchAfter(items: CardMenuItem[], prefix: string, from: number): number {
+  for (let step = 1; step <= items.length; step += 1) {
+    const index = (from + step) % items.length;
+    const item = items[index];
+    if (item && !item.disabled && item.label.toLowerCase().startsWith(prefix)) return index;
+  }
+  return -1;
+}
+
 type CardMenuPanelProps = {
   label: string;
   sections: CardMenuSection[];
@@ -145,20 +160,33 @@ function CardMenuPanel({
     item.onSelect();
   };
 
+  /**
+   * Typeahead over item labels, cycling rather than filtering.
+   *
+   * A DIFFERENT character appends to the buffer and restarts the search from the
+   * top; a REPEATED character restarts the buffer at that character and advances
+   * from `activeIndex + 1`, wrapping, so "dd" walks the d-matches instead of
+   * building the unmatchable "dd". A lone match therefore re-selects itself (an
+   * idempotent no-op, not a dead end), and no match leaves `activeIndex` alone.
+   * This mirrors `runTypeahead` in `ui/FolderPicker.tsx`, the shipping reference
+   * for the rule; keep the two in step.
+   */
   const runTypeahead = (key: string) => {
     const state = typeaheadRef.current;
     const now = Date.now();
-    if (now - state.lastAt > TYPEAHEAD_RESET_MS) state.buffer = "";
-    state.buffer += key.toLowerCase();
+    const lower = key.toLowerCase();
+    const withinWindow = now - state.lastAt <= TYPEAHEAD_RESET_MS;
+    const repeated = withinWindow && state.buffer.endsWith(lower);
+    state.buffer = `${withinWindow && !repeated ? state.buffer : ""}${lower}`;
     state.lastAt = now;
     if (state.timer) clearTimeout(state.timer);
     state.timer = setTimeout(() => {
       state.buffer = "";
     }, TYPEAHEAD_RESET_MS);
 
-    const match = flatItems.findIndex(
-      item => !item.disabled && item.label.toLowerCase().startsWith(state.buffer),
-    );
+    const match = repeated
+      ? nextMatchAfter(flatItems, state.buffer, activeIndex)
+      : firstMatch(flatItems, state.buffer);
     if (match >= 0) moveActive(match);
   };
 

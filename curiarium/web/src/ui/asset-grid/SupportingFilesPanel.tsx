@@ -82,10 +82,19 @@ export default function SupportingFilesPanel({
 
   // Collapsed panels issue no requests: the dialog must open without touching
   // listAssetFiles/listAssetFileLimits unless the user asked for the files.
+  // `filesExpanded` is deliberately absent from the deps: expansion has two
+  // writers (the header toggle and the upload path) and each one loads on its
+  // own, so keying the effect on it would refresh a second time for every open.
   useEffect(() => {
     if (filesExpanded) void loadSupportingFiles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filesExpanded, asset.id]);
+  }, [asset.id]);
+
+  /** Load only when opening, never when closing. */
+  const toggleExpanded = () => {
+    if (!filesExpanded) void loadSupportingFiles();
+    setFilesExpanded(value => !value);
+  };
 
   useEffect(() => {
     setPreviewFile(null);
@@ -104,15 +113,19 @@ export default function SupportingFilesPanel({
         updated = await uploadAssetFile(asset.id, file);
         onAssetChanged(updated);
       }
-      setFilesExpanded(true);
-      await loadSupportingFiles();
     } catch (err) {
       console.error(err);
       notifyError(err instanceof Error ? err.message : "Failed to add files");
     } finally {
       setFilesUploading(false);
+      // One owner for expansion-after-upload, and deliberately unconditional:
+      // after a fully failed upload the panel opens too, showing the true list
+      // beside the error toast. That is what lets one refresh cover every case
+      // with no `uploaded` flag.
+      setFilesExpanded(true);
       // Refresh even after a partial failure: files before the failing one are
       // already stored, and a limit error must leave the list showing reality.
+      // Last, so filesLoading covers the refresh.
       await loadSupportingFiles();
     }
   };
@@ -226,7 +239,7 @@ export default function SupportingFilesPanel({
         <button
           type="button"
           className="flex min-w-0 items-center gap-2 text-left"
-          onClick={() => setFilesExpanded(value => !value)}
+          onClick={toggleExpanded}
           title={fileLimitsTitle}
         >
           <span className="font-medium">Supporting files</span>
