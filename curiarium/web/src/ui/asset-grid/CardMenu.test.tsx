@@ -152,6 +152,82 @@ describe("CardMenu typeahead", () => {
     fireEvent.keyDown(menu(), { key: "r" });
     expect(activeItemLabel()).toBe("Bravo");
   });
+
+  it("cycles between items that share an initial on a repeated key, wrapping at the end", () => {
+    // A realistic kebab menu: three items start with "D".
+    const sections: CardMenuSection[] = [
+      {
+        items: [
+          { label: "Download", onSelect: () => {} },
+          { label: "Download tag: pla", onSelect: () => {} },
+          { label: "Download tag: petg", onSelect: () => {} },
+        ],
+      },
+    ];
+    render(<CardMenu label="More actions" sections={sections} />);
+    openMenu();
+
+    fireEvent.keyDown(menu(), { key: "d" });
+    expect(activeItemLabel()).toBe("Download");
+
+    fireEvent.keyDown(menu(), { key: "d" });
+    expect(activeItemLabel()).toBe("Download tag: pla");
+
+    fireEvent.keyDown(menu(), { key: "d" });
+    expect(activeItemLabel()).toBe("Download tag: petg");
+
+    // A repeated key walks the matches and wraps back to the first.
+    fireEvent.keyDown(menu(), { key: "d" });
+    expect(activeItemLabel()).toBe("Download");
+  });
+
+  it("skips a disabled same-initial item when cycling", () => {
+    const sections: CardMenuSection[] = [
+      {
+        items: [
+          { label: "Download", onSelect: () => {} },
+          { label: "Download by tag", onSelect: () => {}, disabled: true },
+          { label: "Download by material", onSelect: () => {} },
+        ],
+      },
+    ];
+    render(<CardMenu label="More actions" sections={sections} />);
+    openMenu();
+
+    fireEvent.keyDown(menu(), { key: "d" });
+    expect(activeItemLabel()).toBe("Download");
+
+    fireEvent.keyDown(menu(), { key: "d" });
+    expect(activeItemLabel()).toBe("Download by material");
+  });
+
+  it("restarts the buffer at a repeated letter after a two-letter prefix", () => {
+    // FolderPicker's shipping rule: a repeated character restarts the buffer at
+    // that character instead of building the unmatchable "doo".
+    const sections: CardMenuSection[] = [
+      {
+        items: [
+          { label: "Open preview", onSelect: () => {} },
+          { label: "Download", onSelect: () => {} },
+          { label: "Open in new tab", onSelect: () => {} },
+          { label: "Open folder", onSelect: () => {} },
+        ],
+      },
+    ];
+    render(<CardMenu label="More actions" sections={sections} />);
+    openMenu();
+
+    fireEvent.keyDown(menu(), { key: "d" });
+    expect(activeItemLabel()).toBe("Download");
+
+    // "do" still matches "Download", so the buffer keeps narrowing in place.
+    fireEvent.keyDown(menu(), { key: "o" });
+    expect(activeItemLabel()).toBe("Download");
+
+    // The second "o" restarts at "o" and advances past the active item.
+    fireEvent.keyDown(menu(), { key: "o" });
+    expect(activeItemLabel()).toBe("Open in new tab");
+  });
 });
 
 describe("CardMenu closing", () => {
