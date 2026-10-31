@@ -42,6 +42,7 @@ import asset_file_service
 import asset_service
 import audit
 import auth
+import bundle_service
 import config
 import db
 import import_service
@@ -137,11 +138,14 @@ def isolated_storage(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(library_scan, "STORAGE", storage)
     monkeypatch.setattr(asset_service, "STORAGE", storage)
     monkeypatch.setattr(asset_file_service, "STORAGE", storage)
+    # Detection walks the same root through its own module global.
+    monkeypatch.setattr(bundle_service, "STORAGE", storage)
     run_migrations(engine)
 
     template_before = settings_service.get_storage_template()
     enabled_before = settings_service.get_mount_import_enabled(MOUNT_IMPORT_ENABLED)
     copy_before = settings_service.get_mount_import_copy(MOUNT_IMPORT_COPY)
+    dismissals_before = settings_service.get_setting(settings_service.BUNDLE_DISMISSALS_KEY)
     # `POST /snapshots/retention` is one of the audited routes, so the four
     # settings it writes are saved and restored raw like the two above: a
     # configuration with no rows keeps none, which `test_snapshots.py` asserts.
@@ -160,6 +164,7 @@ def isolated_storage(tmp_path, monkeypatch: pytest.MonkeyPatch):
     settings_service.set_storage_template(template_before)
     settings_service.set_mount_import_enabled(enabled_before)
     settings_service.set_mount_import_copy(copy_before)
+    settings_service.set_setting(settings_service.BUNDLE_DISMISSALS_KEY, dismissals_before or "")
     with Session(engine) as session:
         for key, value in retention_before.items():
             row = session.get(AppConfig, key)
@@ -617,6 +622,39 @@ def call_delete_project(client, headers, ids, monkeypatch) -> Response:
     return client.request("DELETE", f"/project/{created.json()['id']}", headers=headers)
 
 
+def call_create_bundle(client, headers, ids, monkeypatch) -> Response:
+    """A real, ready bundle on the temp root, so the route writes its creation row.
+
+    The bundle is the R1 shape - a root ``README.txt`` and ``LICENSE.txt`` that
+    both parse, beside one registered model - because a create that is blocked
+    writes no row and this sweep asserts one. The setup requests carry no
+    ``X-Request-ID``, so the asset create they cause is not read back as this
+    route's event.
+    """
+    setup = bearer(headers["Authorization"].partition("Bearer ")[2])
+    folder = ok(client.post("/folders", json={"name": f"Bundle {uuid4().hex}"}, headers=setup)).json()
+    upload(client, setup, "cube.stl", folder["id"])
+    folder_dir = db.STORAGE / folder["storage_path"]
+    (folder_dir / "README.txt").write_text(
+        "Moai statue\nCreated by Thingiverse user moai_maker\nLicensed under CC BY-NC\n", encoding="utf-8"
+    )
+    (folder_dir / "LICENSE.txt").write_text(
+        "Moai statue by moai_maker on Thingiverse: https://www.thingiverse.com/thing:2493386\n", encoding="utf-8"
+    )
+    return client.post("/bundles/create", json={"items": [{"key": folder["storage_path"]}]}, headers=headers)
+
+
+def call_dismiss_bundle(client, headers, ids, monkeypatch) -> Response:
+    # A toggle: flip whatever the current state is, so the call always changes
+    # something and therefore always writes its row.
+    key = "sweep/bundle"
+    return client.post(
+        "/bundles/dismiss",
+        json={"keys": [key], "dismissed": key not in bundle_service.get_dismissals()},
+        headers=headers,
+    )
+
+
 # The MFA routes (Mf-lg02) are driven by a throwaway account, never the fixture
 # admin: enrolling the admin would turn `/login` into a challenge and every later
 # spec in this sweep would be a different test. The sweep's request id has to
@@ -747,6 +785,8 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("DELETE", "/folder/{folder_id}"): call_delete_folder,
     ("PATCH", "/project/{project_id}"): call_rename_project,
     ("DELETE", "/project/{project_id}"): call_delete_project,
+    ("POST", "/bundles/create"): call_create_bundle,
+    ("POST", "/bundles/dismiss"): call_dismiss_bundle,
     ("POST", "/trash/purge"): call_purge,
     ("POST", "/settings/storage"): call_storage_settings,
     ("POST", "/settings/mount-import"): call_mount_import_settings,

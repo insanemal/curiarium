@@ -64,6 +64,11 @@ FOLDER_RENAME = "folder.rename"
 FOLDER_MOVE = "folder.move"
 PROJECT_DELETE = "project.delete"
 PROJECT_RENAME = "project.rename"
+# A bundle create is a bulk, disk-derived act: one request may make many projects,
+# so the event doubles as the operator's creation history (Mf-vwqf). Dismissing a
+# bundle is a report filter, but a reversible one worth reading back.
+BUNDLE_CREATE = "bundle.create"
+BUNDLE_DISMISS = "bundle.dismiss"
 TRASH_PURGE = "trash.purge"
 SETTINGS_STORAGE_UPDATE = "settings.storage.update"
 SETTINGS_MOUNT_IMPORT_UPDATE = "settings.mount_import.update"
@@ -139,6 +144,8 @@ ACTIONS: frozenset[str] = frozenset({
     FOLDER_MOVE,
     PROJECT_DELETE,
     PROJECT_RENAME,
+    BUNDLE_CREATE,
+    BUNDLE_DISMISS,
     TRASH_PURGE,
     SETTINGS_STORAGE_UPDATE,
     SETTINGS_MOUNT_IMPORT_UPDATE,
@@ -273,8 +280,14 @@ def record(*events: Event, ctx: AuditContext) -> None:
     """Write events that have no transaction to join; log and raise on failure.
 
     Only for actions whose effect is outside the database (`trash.purge`,
-    `library.scan.start`). There is nothing to roll back, so the residual window
-    is the action itself; the failure must still be visible, never swallowed.
+    `library.scan.start`) and for a creation whose row is written by shared
+    services that own their own sessions (`bundle.create`, `bundle.dismiss`).
+    There is nothing here to roll back: for the filesystem actions the residual
+    window is the action itself, and for a bundle create it is the project row
+    plus its `_bundle` marker, which commit together before this call. The event
+    is the operator's creation history and the re-run's idempotency (the report
+    says `already_created`) is what makes that window safe. The failure must
+    still be visible, never swallowed.
     """
     try:
         with Session(engine) as session:
@@ -376,6 +389,11 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     ("DELETE", "/folder/{folder_id}"): (FOLDER_DELETE, DESTRUCTIVE_SNAPSHOT_TAKEN, DESTRUCTIVE_SNAPSHOT_MISSED),
     ("PATCH", "/project/{project_id}"): (PROJECT_RENAME,),
     ("DELETE", "/project/{project_id}"): (PROJECT_DELETE,),
+    # Creation is audited here while `POST /projects` is exempt, deliberately: a
+    # bundle create is bulk and disk-derived, and the re-run's idempotency is what
+    # keeps the history free of duplicates (Mf-vwqf).
+    ("POST", "/bundles/create"): (BUNDLE_CREATE,),
+    ("POST", "/bundles/dismiss"): (BUNDLE_DISMISS,),
     ("POST", "/trash/purge"): (TRASH_PURGE, DESTRUCTIVE_SNAPSHOT_TAKEN, DESTRUCTIVE_SNAPSHOT_MISSED),
     ("POST", "/settings/storage"): (SETTINGS_STORAGE_UPDATE,),
     ("POST", "/settings/mount-import"): (SETTINGS_MOUNT_IMPORT_UPDATE,),

@@ -6,8 +6,18 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 // mocked, so the component renders without a backend.
 vi.mock("../lib/api", () => ({
   UnauthorizedError: class UnauthorizedError extends Error {},
+  createBundles: vi.fn(),
   createFolder: vi.fn(),
   createUser: vi.fn(),
+  // The bundle card detects as soon as an editor opens Imports, so the mock
+  // must resolve a real empty report rather than undefined.
+  getBundleReport: vi.fn(async () => ({
+    root: "",
+    truncated: false,
+    counts: { total: 0, high: 0, low: 0, ready: 0, blocked: 0, dismissed: 0, already_created: 0 },
+    bundles: [],
+    stale_dismissals: [],
+  })),
   getMountImportSettings: vi.fn(),
   getLibraryScanStatus: vi.fn(),
   getStorageCapabilities: vi.fn(async () => ({ volumes: [] })),
@@ -20,6 +30,7 @@ vi.mock("../lib/api", () => ({
   resetUserPassword: vi.fn(),
   revokeSession: vi.fn(),
   revokeUserSession: vi.fn(),
+  setBundleDismissed: vi.fn(),
   startLibraryScan: vi.fn(),
   updateMountImportSettings: vi.fn(),
   updateStorageSettings: vi.fn(),
@@ -37,9 +48,16 @@ vi.mock("./settings/MfaSection", async () => {
 });
 
 import Settings from "./settings/Settings";
-import { getMountImportSettings, getStorageSettings, listSessions, updateStorageSettings } from "../lib/api";
+import {
+  getBundleReport,
+  getMountImportSettings,
+  getStorageSettings,
+  listSessions,
+  updateStorageSettings,
+} from "../lib/api";
 import type { AppSettings } from "../lib/settings";
 
+const getBundleReportMock = vi.mocked(getBundleReport);
 const getMountImportSettingsMock = vi.mocked(getMountImportSettings);
 const getStorageSettingsMock = vi.mocked(getStorageSettings);
 const listSessionsMock = vi.mocked(listSessions);
@@ -120,6 +138,7 @@ describe("Settings storage structure", () => {
 
 describe("Settings imports", () => {
   beforeEach(() => {
+    getBundleReportMock.mockClear();
     getMountImportSettingsMock.mockReset();
     getMountImportSettingsMock.mockResolvedValue({ enabled: false, copy_files: true, path: null });
   });
@@ -151,25 +170,35 @@ describe("Settings imports", () => {
     expect(next.imports.rememberCookies).toBe(true);
   });
 
-  it("a viewer sees the read-only import runs and cookie cards, not the folder scan", async () => {
+  it("a viewer sees the read-only import runs and cookie cards, not the writable ones", async () => {
     await renderImports("viewer");
 
     expect(screen.getByText("Mount import runs")).toBeTruthy();
     expect(screen.getByText(/Remember import cookies on this device/)).toBeTruthy();
     expect(screen.queryByText("Local folder scan")).toBeNull();
+    expect(screen.queryByText("Vendor bundles")).toBeNull();
+    // Detection walks the whole library server-side: a viewer must never fire it.
+    expect(getBundleReportMock).not.toHaveBeenCalled();
   });
 
-  it("an editor sees both the folder scan card and the read-only cards", async () => {
+  it("an editor sees the folder scan card, the bundle card and the read-only cards", async () => {
     await renderImports("editor");
 
     expect(screen.getByText("Mount import runs")).toBeTruthy();
     expect(screen.getByText("Local folder scan")).toBeTruthy();
+    expect(screen.getByText("Vendor bundles")).toBeTruthy();
+    // The card reports the headline as soon as the mocked report resolves.
+    expect(
+      await screen.findByText("0 bundles found - 0 high confidence, 0 low"),
+    ).toBeTruthy();
+    expect(getBundleReportMock).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/Remember import cookies on this device/)).toBeTruthy();
   });
 });
 
 describe("Settings role gating", () => {
   beforeEach(() => {
+    getBundleReportMock.mockClear();
     getStorageSettingsMock.mockReset();
     getMountImportSettingsMock.mockReset();
   });
@@ -194,6 +223,7 @@ describe("Settings role gating", () => {
     expect(screen.queryByText("Mount import (server)")).toBeNull();
     expect(getMountImportSettingsMock).not.toHaveBeenCalled();
     expect(getStorageSettingsMock).not.toHaveBeenCalled();
+    expect(getBundleReportMock).not.toHaveBeenCalled();
   });
 
   it("replaces the storage section with a notice when a non-admin opens it", async () => {

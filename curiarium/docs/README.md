@@ -31,6 +31,7 @@ What is authoritative, what is historical, and what to read when.
 | [0007](adr/0007-session-lifecycle-and-refresh-replay.md) | Session lifecycle, refresh grace window, replay as compromise |
 | [0008](adr/0008-mfa-totp-enrolment.md) | TOTP enrolment, recovery codes, the admin MFA policy |
 | [0009](adr/0009-first-run-administrator-setup.md) | First-run administrator setup from the browser: an opt-in window that closes itself at the first enabled admin |
+| [0010](adr/0010-vendor-bundle-detection.md) | Vendor bundles are detected from disk as a dry run and become one project each, with no migration and no stored candidate set |
 
 ## Historical — kept for provenance, describes an earlier project
 

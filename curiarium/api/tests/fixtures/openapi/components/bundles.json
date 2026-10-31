@@ -1,0 +1,504 @@
+{
+  "BundleArchiveOut": {
+    "description": "A twin zip beside the bundle folder: provenance, never a member.",
+    "properties": {
+      "rel_path": {
+        "title": "Rel Path",
+        "type": "string"
+      },
+      "twin_verified": {
+        "title": "Twin Verified",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "rel_path",
+      "twin_verified"
+    ],
+    "title": "BundleArchiveOut",
+    "type": "object"
+  },
+  "BundleCoverOut": {
+    "description": "The cover a created project would get, and why that one was chosen.",
+    "properties": {
+      "asset_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Asset Id"
+      },
+      "reason": {
+        "title": "Reason",
+        "type": "string"
+      },
+      "rel_path": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Rel Path"
+      }
+    },
+    "required": [
+      "reason"
+    ],
+    "title": "BundleCoverOut",
+    "type": "object"
+  },
+  "BundleCreateItemIn": {
+    "additionalProperties": false,
+    "description": "One confirmed bundle; a key the fresh report does not know is `failed`.",
+    "properties": {
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Name"
+      },
+      "name_only": {
+        "default": false,
+        "title": "Name Only",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "key"
+    ],
+    "title": "BundleCreateItemIn",
+    "type": "object"
+  },
+  "BundleCreateItemOut": {
+    "description": "What happened to one item: created, skipped, blocked or failed.",
+    "properties": {
+      "assets_added": {
+        "default": 0,
+        "title": "Assets Added",
+        "type": "integer"
+      },
+      "failed_assets": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BatchFailure"
+        },
+        "title": "Failed Assets",
+        "type": "array"
+      },
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Name"
+      },
+      "project_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Project Id"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "skipped_assets": {
+        "default": 0,
+        "title": "Skipped Assets",
+        "type": "integer"
+      },
+      "status": {
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "key",
+      "status"
+    ],
+    "title": "BundleCreateItemOut",
+    "type": "object"
+  },
+  "BundleCreateRequest": {
+    "additionalProperties": false,
+    "description": "The confirmed selection. Partial success is the contract, like `/assets/batch/*`.",
+    "properties": {
+      "items": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleCreateItemIn"
+        },
+        "title": "Items",
+        "type": "array"
+      }
+    },
+    "title": "BundleCreateRequest",
+    "type": "object"
+  },
+  "BundleCreateResponse": {
+    "description": "Per-status counters plus one result per requested item.",
+    "properties": {
+      "blocked": {
+        "default": 0,
+        "title": "Blocked",
+        "type": "integer"
+      },
+      "created": {
+        "default": 0,
+        "title": "Created",
+        "type": "integer"
+      },
+      "failed": {
+        "default": 0,
+        "title": "Failed",
+        "type": "integer"
+      },
+      "results": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleCreateItemOut"
+        },
+        "title": "Results",
+        "type": "array"
+      },
+      "skipped": {
+        "default": 0,
+        "title": "Skipped",
+        "type": "integer"
+      }
+    },
+    "title": "BundleCreateResponse",
+    "type": "object"
+  },
+  "BundleDetectCountsOut": {
+    "description": "The headline numbers, computed over the rows the report actually shows.",
+    "properties": {
+      "already_created": {
+        "default": 0,
+        "title": "Already Created",
+        "type": "integer"
+      },
+      "blocked": {
+        "default": 0,
+        "title": "Blocked",
+        "type": "integer"
+      },
+      "dismissed": {
+        "default": 0,
+        "title": "Dismissed",
+        "type": "integer"
+      },
+      "high": {
+        "default": 0,
+        "title": "High",
+        "type": "integer"
+      },
+      "low": {
+        "default": 0,
+        "title": "Low",
+        "type": "integer"
+      },
+      "ready": {
+        "default": 0,
+        "title": "Ready",
+        "type": "integer"
+      },
+      "total": {
+        "default": 0,
+        "title": "Total",
+        "type": "integer"
+      }
+    },
+    "title": "BundleDetectCountsOut",
+    "type": "object"
+  },
+  "BundleDetectItemOut": {
+    "description": "One detected bundle: what it is, what it counts, and whether it can be created.",
+    "properties": {
+      "archive": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BundleArchiveOut"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "assets_total": {
+        "default": 0,
+        "title": "Assets Total",
+        "type": "integer"
+      },
+      "blocked_reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Blocked Reason"
+      },
+      "confidence": {
+        "title": "Confidence",
+        "type": "string"
+      },
+      "cover": {
+        "$ref": "#/components/schemas/BundleCoverOut"
+      },
+      "creator": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Creator"
+      },
+      "description_excerpt": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Description Excerpt"
+      },
+      "detector": {
+        "title": "Detector",
+        "type": "string"
+      },
+      "dismissed": {
+        "default": false,
+        "title": "Dismissed",
+        "type": "boolean"
+      },
+      "existing_project": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Existing Project"
+      },
+      "image_count": {
+        "default": 0,
+        "title": "Image Count",
+        "type": "integer"
+      },
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "licence": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Licence"
+      },
+      "licence_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Licence Url"
+      },
+      "metadata_shape": {
+        "title": "Metadata Shape",
+        "type": "string"
+      },
+      "model_count": {
+        "default": 0,
+        "title": "Model Count",
+        "type": "integer"
+      },
+      "name_suggestion": {
+        "title": "Name Suggestion",
+        "type": "string"
+      },
+      "other_count": {
+        "default": 0,
+        "title": "Other Count",
+        "type": "integer"
+      },
+      "rel_path": {
+        "title": "Rel Path",
+        "type": "string"
+      },
+      "source_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Source Url"
+      },
+      "status": {
+        "title": "Status",
+        "type": "string"
+      },
+      "text_count": {
+        "default": 0,
+        "title": "Text Count",
+        "type": "integer"
+      },
+      "title": {
+        "title": "Title",
+        "type": "string"
+      }
+    },
+    "required": [
+      "key",
+      "rel_path",
+      "title",
+      "name_suggestion",
+      "detector",
+      "confidence",
+      "metadata_shape",
+      "cover",
+      "status"
+    ],
+    "title": "BundleDetectItemOut",
+    "type": "object"
+  },
+  "BundleDismissRequest": {
+    "additionalProperties": false,
+    "description": "A toggle, so a dismissal always has a visible undo.",
+    "properties": {
+      "dismissed": {
+        "default": true,
+        "title": "Dismissed",
+        "type": "boolean"
+      },
+      "keys": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Keys",
+        "type": "array"
+      }
+    },
+    "title": "BundleDismissRequest",
+    "type": "object"
+  },
+  "BundleDismissResponse": {
+    "description": "The dismissal map after the change, plus the keys that match no bundle.",
+    "properties": {
+      "dismissed": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Dismissed",
+        "type": "array"
+      },
+      "stale_dismissals": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Stale Dismissals",
+        "type": "array"
+      }
+    },
+    "title": "BundleDismissResponse",
+    "type": "object"
+  },
+  "BundleReportOut": {
+    "description": "A dry-run view of the storage root. Reading it writes nothing.",
+    "properties": {
+      "bundles": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleDetectItemOut"
+        },
+        "title": "Bundles",
+        "type": "array"
+      },
+      "counts": {
+        "$ref": "#/components/schemas/BundleDetectCountsOut"
+      },
+      "root": {
+        "title": "Root",
+        "type": "string"
+      },
+      "stale_dismissals": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Stale Dismissals",
+        "type": "array"
+      },
+      "truncated": {
+        "default": false,
+        "title": "Truncated",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "root",
+      "counts"
+    ],
+    "title": "BundleReportOut",
+    "type": "object"
+  }
+}

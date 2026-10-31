@@ -1,7 +1,7 @@
 """Per-route permission sweeps driven by `permissions.ROUTE_PERMISSIONS`.
 
 Why this file exists: Mf-2nbc enforces a level with a *per-route dependency*, and
-the only thing that keeps 93 hand-written declarations honest is a test that
+the only thing that keeps 97 hand-written declarations honest is a test that
 visits every route at every role. The sweeps below are parametrised from
 `permissions.ROUTE_PERMISSIONS`, so that table is both the documentation and the
 test plan: add a route without classifying it and
@@ -50,6 +50,7 @@ import accounts
 import asset_file_service
 import asset_service
 import auth
+import bundle_service
 import db
 import import_runs
 import library_scan
@@ -216,8 +217,8 @@ def cheap_password_hashing(monkeypatch: pytest.MonkeyPatch) -> None:
 def isolated_storage(tmp_path, monkeypatch: pytest.MonkeyPatch):
     """Point every storage binding at a temp root and undo the rows a test made.
 
-    `db`, `library_scan`, `asset_service`, `asset_file_service` and `main` all
-    bind their paths at import time, so each module global is patched. Rows are
+    `db`, `library_scan`, `asset_service`, `asset_file_service`, `bundle_service`
+    and `main` all bind their paths at import time, so each module global is patched. Rows are
     deleted afterwards because the database is shared for the whole session and
     later files assume an empty library.
     """
@@ -230,6 +231,8 @@ def isolated_storage(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(library_scan, "STORAGE", storage)
     monkeypatch.setattr(asset_service, "STORAGE", storage)
     monkeypatch.setattr(asset_file_service, "STORAGE", storage)
+    # Detection walks the same root through its own module global.
+    monkeypatch.setattr(bundle_service, "STORAGE", storage)
     run_migrations(engine)
 
     template_before = settings_service.get_storage_template()
@@ -942,6 +945,23 @@ def call_remove_project_assets(client: TestClient, headers: dict[str, str], ids:
     )
 
 
+# The bundle routes (Mf-vwqf). Detection is a read of the temp storage root, so
+# the report is empty and the same under every role. Creation and dismissal name
+# a key that is not a live bundle: create answers 200 with zeros and writes
+# nothing, and the dismissal toggle is idempotent, so repeated role sweeps cannot
+# change what a later sweep sees.
+def call_bundle_report(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    return client.get("/bundles/detect", headers=headers)
+
+
+def call_create_bundles(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    return client.post("/bundles/create", json={"items": [{"key": "no/such/bundle"}]}, headers=headers)
+
+
+def call_dismiss_bundles(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    return client.post("/bundles/dismiss", json={"keys": ["no/such/bundle"], "dismissed": True}, headers=headers)
+
+
 # SSO is off in this module (the matrix tests never configure a provider), so
 # these three answer 503 rather than redirecting. What is under test here is the
 # permission level, and a public route is public either way.
@@ -1164,6 +1184,9 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("GET", "/project/{project_id}/assets"): call_project_assets,
     ("POST", "/project/{project_id}/assets"): call_add_project_assets,
     ("DELETE", "/project/{project_id}/assets"): call_remove_project_assets,
+    ("GET", "/bundles/detect"): call_bundle_report,
+    ("POST", "/bundles/create"): call_create_bundles,
+    ("POST", "/bundles/dismiss"): call_dismiss_bundles,
 }
 
 # What a permitted caller must get back. The five `/import*` routes are absent on
@@ -1274,6 +1297,9 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("GET", "/project/{project_id}/assets"): 200,
     ("POST", "/project/{project_id}/assets"): 200,
     ("DELETE", "/project/{project_id}/assets"): 200,
+    ("GET", "/bundles/detect"): 200,
+    ("POST", "/bundles/create"): 200,
+    ("POST", "/bundles/dismiss"): 200,
 }
 
 
@@ -1399,7 +1425,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 94 routes - 11 public / 33 read / 19 contribute / 13 write / 18 admin.
+    """The matrix is pinned at 97 routes - 11 public / 34 read / 21 contribute / 13 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1409,11 +1435,11 @@ def test_the_matrix_is_the_documented_size() -> None:
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 94, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 97, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 33,
-        permissions.CONTRIBUTE: 19,
+        permissions.READ: 34,
+        permissions.CONTRIBUTE: 21,
         permissions.WRITE: 13,
         permissions.ADMIN: 18,
     }, counts

@@ -121,11 +121,19 @@ def create_project(
     licence: Optional[str] = None,
     licence_url: Optional[str] = None,
     origin: str = "own",
+    *,
+    metadata: Optional[dict] = None,
 ) -> Project:
     """Insert one project; the caller's session commits.
 
     Creation is an exempt audit class (like an upload or a new folder), so this
     stages no event: `project.delete` and `project.rename` are the audited edits.
+
+    `metadata` is the reserved `_`-prefixed marker a caller owns (bundle
+    detection writes `_bundle`). It is merged into the new row before the insert,
+    so the row and its marker commit together and a crash can never leave a
+    project that no caller can map back to what made it. `None` keeps the old
+    behaviour, a fresh empty object.
     """
     name = _clean_name(name)
     if cover_asset_id:
@@ -140,6 +148,7 @@ def create_project(
         licence=licence,
         licence_url=licence_url,
         origin=origin,
+        metadata_json="{}" if metadata is None else merge_project_marker(None, metadata),
         created_at=stamp,
         updated_at=stamp,
     )
@@ -388,25 +397,30 @@ def find_or_create_import_project(
         return project.id, True
 
 
-def set_project_metadata_marker(project_id: str, marker: dict) -> None:
-    """Merge a reserved `_`-prefixed marker into the project's metadata object.
+def merge_project_marker(metadata_json: Optional[str], marker: dict) -> str:
+    """Merge `_`-prefixed keys into a metadata object; anything but an object reads {}.
 
     The column is parsed here rather than through `routers.presenters`, because a
     service importing a router's presenter would invert the layering. Anything
     that is not a JSON object reads as {}, the same rule the presenter uses, and
     a non-underscore key (real print settings) is never clobbered.
     """
+    try:
+        parsed = json.loads(metadata_json or "{}")
+    except (TypeError, ValueError):
+        parsed = {}
+    metadata = parsed if isinstance(parsed, dict) else {}
+    for key, value in marker.items():
+        if key.startswith("_"):
+            metadata[key] = value
+    return json.dumps(metadata)
+
+
+def set_project_metadata_marker(project_id: str, marker: dict) -> None:
+    """Merge a reserved `_`-prefixed marker into the project's metadata object."""
     with Session(engine) as session:
         project = get_project(session, project_id)
-        try:
-            parsed = json.loads(project.metadata_json or "{}")
-        except (TypeError, ValueError):
-            parsed = {}
-        metadata = parsed if isinstance(parsed, dict) else {}
-        for key, value in marker.items():
-            if key.startswith("_"):
-                metadata[key] = value
-        project.metadata_json = json.dumps(metadata)
+        project.metadata_json = merge_project_marker(project.metadata_json, marker)
         project.updated_at = _now()
         session.add(project)
         session.commit()

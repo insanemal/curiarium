@@ -406,6 +406,17 @@ def _walk_storage(root: Path, *, include_hidden: bool = False) -> Iterator[Tuple
         yield rel_dir, file_entries, ignored
 
 
+def iter_directories(root: Path, *, include_hidden: bool = False) -> Iterator[Tuple[str, List[os.DirEntry], int]]:
+    """Yield ``(rel_dir, file_entries, ignored_entries)`` for a read-only walk.
+
+    A read-only caller outside this module (bundle detection) wants the library's
+    own pruning - ``RESERVED_DIRS``, hidden names, symlinked directories - without
+    importing the underscore name it lives behind. Same generator, same policy,
+    one implementation: this is a documented alias, not a second walker.
+    """
+    return _walk_storage(root, include_hidden=include_hidden)
+
+
 def _name_parts(filename: str) -> Tuple[str, str]:
     """The on-disk stem of one filename and its lowercased suffix."""
     path = PurePath(filename)

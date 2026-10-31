@@ -1599,6 +1599,162 @@
       "summary": "Oidc Status"
     }
   },
+  "/bundles/create": {
+    "post": {
+      "description": "Create one project per confirmed bundle; partial success is the contract.\n\nThe report is recomputed first and every key is looked up in it, so a key the\nclient sends is never trusted on its own. A bundle that is blocked, or that\nalready became a project, creates nothing and says so per item.",
+      "operationId": "create_bundles_bundles_create_post",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BundleCreateRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleCreateResponse"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Create Bundles"
+    }
+  },
+  "/bundles/detect": {
+    "get": {
+      "description": "The whole detection report, recomputed from disk now. Writes nothing.\n\nA READ: no folder healing, no rows, no commits. `path` scopes the walk and\n`limit` bounds the rows; the counts still describe everything found and\n`truncated` says rows were withheld.",
+      "operationId": "detect_bundles_bundles_detect_get",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "path",
+          "required": false,
+          "schema": {
+            "default": "",
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "default": 200,
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "include_dismissed",
+          "required": false,
+          "schema": {
+            "default": false,
+            "title": "Include Dismissed",
+            "type": "boolean"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleReportOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Detect Bundles"
+    }
+  },
+  "/bundles/dismiss": {
+    "post": {
+      "description": "Hide or un-hide bundles in the report; a toggle, so dismiss has an undo.",
+      "operationId": "dismiss_bundles_bundles_dismiss_post",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BundleDismissRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleDismissResponse"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Dismiss Bundles"
+    }
+  },
   "/creators": {
     "get": {
       "description": "Distinct non-empty creators, deduped and sorted case-insensitively.\n\nTakes the same scoping filters as `GET /assets` and `GET /tags`, so the\nfacet works in library mode, folder mode and project mode. An unknown\nproject is a 404 like every other project route.",

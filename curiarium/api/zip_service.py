@@ -2,7 +2,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import List, Optional
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 from fastapi import BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
@@ -44,6 +44,40 @@ def sanitize_folder_name(name: str) -> str:
     cleaned = (name or "").replace("\x00", "").strip()
     cleaned = cleaned.replace("/", "_").replace("\\", "_")
     return cleaned or "folder"
+
+
+def read_zip_text_entry(zip_path: Path, entry_path: str, max_bytes: int) -> Optional[str]:
+    """Read one member as text without extracting anything, or ``None``.
+
+    This is the only read path in the module that never extracts: bundle
+    detection has to look inside an archive the library has not imported, and
+    writing those bytes to disk as a side effect of a read would make the report
+    a mutation. The cap is enforced twice on purpose - a declared
+    ``file_size`` over ``max_bytes`` refuses before the stream is opened, and the
+    stream itself is read for at most ``max_bytes + 1`` bytes, because the
+    declaration is metadata a crafted archive can lie about and the bytes are the
+    only truth. Anything over the cap, a bad archive and an unreadable file all
+    answer ``None`` rather than raising.
+    """
+    normalized = normalize_zip_entry_path(entry_path)
+    if not normalized:
+        return None
+    try:
+        with ZipFile(zip_path) as zf:
+            info = None
+            for candidate in zf.infolist():
+                if normalize_zip_entry_path(candidate.filename) == normalized:
+                    info = candidate
+                    break
+            if info is None or int(info.file_size or 0) > max_bytes:
+                return None
+            with zf.open(info) as stream:
+                payload = stream.read(max_bytes + 1)
+    except (BadZipFile, OSError):
+        return None
+    if len(payload) > max_bytes:
+        return None
+    return payload.decode("utf-8", errors="replace")
 
 
 def list_zip_entries(zip_path: Path) -> List[dict]:

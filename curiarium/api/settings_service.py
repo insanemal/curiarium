@@ -13,6 +13,9 @@ MOUNT_IMPORT_ENABLED_KEY = "mount_import_enabled"
 MOUNT_IMPORT_COPY_KEY = "mount_import_copy"
 STORAGE_TEMPLATE_KEY = "storage_path_template"
 DEFAULT_STORAGE_TEMPLATE = "{folder}/{model}/{filename}"
+# One key holds the whole dismissal map: a bundle key is a rel path, so a row per
+# bundle would be a working set we never read one row at a time (Mf-vwqf).
+BUNDLE_DISMISSALS_KEY = "bundle.dismissals"
 
 
 def get_setting(key: str) -> Optional[str]:

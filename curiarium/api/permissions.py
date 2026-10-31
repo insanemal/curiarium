@@ -264,6 +264,8 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("POST", "/download/zip"): READ,
     ("GET", "/folders"): READ,
     ("GET", "/projects"): READ,
+    # A report computed from disk on demand; it writes nothing, so a viewer reads it.
+    ("GET", "/bundles/detect"): READ,
     ("GET", "/project/{project_id}/assets"): READ,
     # A pure SELECT that counts what a delete would remove.
     ("GET", "/folder/{folder_id}/delete-preview"): READ,
@@ -300,6 +302,10 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("POST", "/asset/{asset_id}/meta"): CONTRIBUTE,
     ("POST", "/folders"): CONTRIBUTE,
     ("POST", "/projects"): CONTRIBUTE,
+    # One project per confirmed bundle: the same power as `POST /projects`, in bulk.
+    ("POST", "/bundles/create"): CONTRIBUTE,
+    # A dismissal is a reversible report filter, not a library edit.
+    ("POST", "/bundles/dismiss"): CONTRIBUTE,
     ("PATCH", "/project/{project_id}"): CONTRIBUTE,
     ("POST", "/project/{project_id}/assets"): CONTRIBUTE,
     # Removes membership, not the asset: the join row goes, the bytes stay.

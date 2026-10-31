@@ -1,0 +1,150 @@
+// Vendor bundle detection: a dry-run report computed from disk, plus the
+// create and dismiss actions that follow it. Field names are the server's
+// snake_case verbatim - the report is served straight from the API.
+
+import { authHeaders } from "../auth";
+import type { BatchFailure } from "./assets";
+import { apiBase } from "./baseUrl";
+import { UnauthorizedError, assertOk, readErrorMessage } from "./http";
+
+/** The largest image in a bundle, registered or not. `reason` says which. */
+export type BundleCover = {
+  asset_id: string | null;
+  rel_path: string | null;
+  reason: string;
+};
+
+/** A twin zip: provenance for the folder that is the project's truth. */
+export type BundleArchive = {
+  rel_path: string;
+  twin_verified: boolean;
+};
+
+/** One detected bundle. `status` and `confidence` are orthogonal. */
+export type BundleDetectItem = {
+  key: string;
+  rel_path: string;
+  title: string;
+  name_suggestion: string;
+  creator: string | null;
+  licence: string | null;
+  licence_url: string | null;
+  source_url: string | null;
+  detector: string;
+  confidence: string;
+  metadata_shape: string;
+  description_excerpt: string | null;
+  model_count: number;
+  image_count: number;
+  text_count: number;
+  other_count: number;
+  cover: BundleCover;
+  assets_total: number;
+  status: string;
+  blocked_reason: string | null;
+  archive: BundleArchive | null;
+  existing_project: string | null;
+  dismissed: boolean;
+};
+
+export type BundleDetectCounts = {
+  total: number;
+  high: number;
+  low: number;
+  ready: number;
+  blocked: number;
+  dismissed: number;
+  already_created: number;
+};
+
+export type BundleReport = {
+  root: string;
+  truncated: boolean;
+  counts: BundleDetectCounts;
+  bundles: BundleDetectItem[];
+  /** Dismissal keys that match no live bundle any more (a directory renamed). */
+  stale_dismissals: string[];
+};
+
+export type BundleReportQuery = {
+  /** Scopes the walk; "" is the whole storage root. */
+  path?: string;
+  limit?: number;
+  includeDismissed?: boolean;
+};
+
+export type BundleCreateItem = {
+  key: string;
+  /** Absent means "use the server's name suggestion". */
+  name?: string | null;
+  name_only?: boolean;
+};
+
+export type BundleCreateItemResult = {
+  key: string;
+  status: string;
+  project_id: string | null;
+  name: string | null;
+  assets_added: number;
+  skipped_assets: number;
+  failed_assets: BatchFailure[];
+  reason: string | null;
+};
+
+export type BundleCreateResponse = {
+  created: number;
+  skipped: number;
+  blocked: number;
+  failed: number;
+  results: BundleCreateItemResult[];
+};
+
+export type BundleDismissResponse = {
+  dismissed: string[];
+  stale_dismissals: string[];
+};
+
+/** The report is a dry run: detection writes nothing to disk and no rows. */
+export async function getBundleReport(params: BundleReportQuery = {}): Promise<BundleReport> {
+  const qs = new URLSearchParams();
+  if (params.path) qs.set("path", params.path);
+  if (typeof params.limit === "number") qs.set("limit", String(params.limit));
+  if (typeof params.includeDismissed === "boolean") {
+    qs.set("include_dismissed", params.includeDismissed ? "true" : "false");
+  }
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  const res = await fetch(`${apiBase()}/bundles/detect${suffix}`, { headers: authHeaders() });
+  assertOk(res, "Failed to load the bundle report");
+  return res.json();
+}
+
+/** Creates one project per item; partial success is the contract. */
+export async function createBundles(items: BundleCreateItem[]): Promise<BundleCreateResponse> {
+  const res = await fetch(`${apiBase()}/bundles/create`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ items }),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, "Failed to create the selected bundles"));
+  }
+  return res.json();
+}
+
+/** A toggle rather than a one-way dismiss, so the UI can offer an undo. */
+export async function setBundleDismissed(
+  keys: string[],
+  dismissed: boolean,
+): Promise<BundleDismissResponse> {
+  const res = await fetch(`${apiBase()}/bundles/dismiss`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ keys, dismissed }),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, "Failed to dismiss the selected bundles"));
+  }
+  return res.json();
+}

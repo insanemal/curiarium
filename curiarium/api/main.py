@@ -52,6 +52,7 @@ from routers import (
     assets,
     audit_log,
     auth_users,
+    bundles,
     folders,
     imports,
     library,
@@ -97,6 +98,9 @@ API_ROUTERS = (
     folders.router,
     oidc_routes.router,
     projects.router,
+    # Immediately after the project surface it creates into: a bundle create is a
+    # bulk `POST /projects`, so the two routers sit together in the served order.
+    bundles.router,
     trash.router,
 )
 

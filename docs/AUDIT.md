@@ -67,7 +67,7 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 50 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 52 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
@@ -85,6 +85,8 @@ could honestly reconstruct.
 | `folder.move` | `PATCH /folder/{folder_id}` (only when the parent changes) | folder id | `{"from", "to"}` parent ids | fail-closed |
 | `project.delete` | `DELETE /project/{project_id}` | project id | `{"name"}` | fail-closed |
 | `project.rename` | `PATCH /project/{project_id}` (only when the name changes) | project id | `{"from", "to"}` names | fail-closed |
+| `bundle.create` | `POST /bundles/create` (one row per created bundle) | the bundle key: the storage-root-relative directory, or the zip's relative path | `{"project_id", "created", "assets_added", "assets_failed", "detector", "confidence", "name_only"}` - which rule matched and how sure it was, never the parsed documents | fail-loud: the project and its memberships are committed by shared services that own their sessions |
+| `bundle.dismiss` | `POST /bundles/dismiss` (one row per key that actually changed) | the bundle key | `{"dismissed"}` - `true` for a dismissal, `false` for its undo | fail-loud: the map lives in the appconfig store, which commits in its own session |
 | `trash.purge` | `POST /trash/purge` | `"trash"` | `{"purged", "bytes", "failed"}` from `trash_service.purge()` | fail-loud |
 | `settings.storage.update` | `POST /settings/storage` | `"storage_path_template"` | `{"from", "to"}` templates | fail-closed |
 | `settings.mount_import.update` | `POST /settings/mount-import` | `"mount_import"` | `{"enabled", "copy_files"}` | fail-closed |
@@ -221,8 +223,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 94 routes, 37
-of them `GET`; the remaining 57 split into 43 audited keys and 14 exempt keys.
+out of scope by construction: they change nothing. The matrix has 97 routes, 38
+of them `GET`; the remaining 59 split into 45 audited keys and 14 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without
@@ -261,6 +263,30 @@ later, and `folder.delete` or `project.delete` is what is recorded. **Creating a
 asset is not exempt any more (Mf-0u1y): it is its own audited class**, so the
 `asset.create` row is what says a file arrived, when, and through which door. Three
 decisions about that class are the ones a reviewer has to sign off on.
+
+**A bundle create is audited even though `POST /projects` is exempt (Mf-vwqf).**
+The exemption's reason is that a project create "creates a project", and the
+object it creates can be destroyed later, at which point `project.delete` is what
+is recorded. `POST /bundles/create` diverges deliberately, for two reasons.
+First, it is a *bulk, disk-derived* act: one confirmation can turn forty
+directories into forty projects, and the fact worth recording is not "a project
+row appeared" but "this directory on this disk became this project" - which no
+other surface states. Second, with no pending table and no migration the event
+doubles as the operator's **creation history**:
+`GET /audit?action=bundle.create` is the only record of which bundles were
+confirmed, by whom, when, and which were created name-only, while the `_bundle`
+marker on each project says what created that row rather than who asked for it.
+Both actions are written with `audit.record` rather than `audit.stage`, for the
+same reason `snapshot.create` is: the effect is committed by shared services that
+own their sessions (`project_service.create_project`,
+`project_service.add_assets`), so there is no request transaction to join. That
+makes them fail-loud - a failed row raises, after `log.exception`, instead of
+being swallowed - and the residual window is a committed project whose
+`bundle.create` row did not land. The three commits a created bundle takes (the
+row and its marker, the memberships, the audit row) are accepted for the same
+reason; what makes the window safe is idempotency, not atomicity, because a
+re-run reports `already_created` and never duplicates, so a crash between them
+leaves a project that is visible and repairable rather than one that is missing.
 
 **Scan and mount import write no per-asset rows.** They are background work with no
 route and no actor - the same reason the scheduler's `snapshot.schedule.skipped` and
@@ -536,7 +562,7 @@ administration).
 | Parameter | Type | Semantics |
 |---|---|---|
 | `actor` | string | exact match, case-insensitive (both sides lowered, value stripped) |
-| `action` | string | exact match, case-sensitive - one of the 49 names above |
+| `action` | string | exact match, case-sensitive - one of the 52 names above |
 | `target` | string | case-sensitive substring match; `%`, `_` and `\` are escaped, so it is a literal substring. An asset id also returns that asset's `asset.create` row, because creation's target is the new id |
 | `since` | string | `created_at >= value` |
 | `until` | string | `created_at <= value` |
