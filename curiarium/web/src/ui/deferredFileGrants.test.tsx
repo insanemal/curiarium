@@ -8,6 +8,7 @@
 // (`useFileGrants` -> `primeGrants` -> `POST /file-grants` -> `fileUrl`) runs
 // end to end.
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { type ComponentProps } from "react";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Asset, AssetFile, AssetFileLimits } from "../lib/api";
@@ -29,6 +30,9 @@ const GRANT_TTL_SECONDS = 60;
 
 /** Everything `POST /file-grants` was asked for, one entry per request. */
 let mintRequests: string[][] = [];
+
+/** Every supporting-file GET path, so an unasked-for preview fetch is visible. */
+let listRequests: string[] = [];
 
 /** Every minted URL gets a fresh `sig`, so a re-mint is distinguishable. */
 let sigCounter = 0;
@@ -91,10 +95,12 @@ function installFetchStub(): void {
           })),
         });
       }
-      if (/\/asset\/[^/]+\/files\/limits$/.test(path)) {
+      if (method === "GET" && /\/asset\/[^/]+\/files\/limits$/.test(path)) {
+        listRequests.push(path);
         return jsonResponse(FILE_LIMITS);
       }
-      if (/\/asset\/[^/]+\/files$/.test(path)) {
+      if (method === "GET" && /\/asset\/[^/]+\/files$/.test(path)) {
+        listRequests.push(path);
         return jsonResponse([SUPPORTING_FILE]);
       }
       return jsonResponse({});
@@ -152,23 +158,15 @@ function cardProps(overrides: Partial<AssetCardProps> = {}): AssetCardProps {
     item: PNG_ASSET,
     canContribute: false,
     canDelete: false,
-    onSaveTags: vi.fn(),
-    onSaveDetails: vi.fn(),
-    onRename: vi.fn(),
     onPreview: vi.fn(),
+    onOpenDetails: vi.fn(),
     onDownloadSingle: vi.fn(),
     onDownloadByTag: vi.fn(),
-    onDownloadSelected: vi.fn(),
     downloading: false,
     onDelete: vi.fn(),
     onAddToProject: vi.fn(),
-    onMoveFolder: vi.fn(),
-    folderOptions: [],
-    moving: false,
     selected: false,
     onToggleSelected: vi.fn(),
-    hasSelection: false,
-    bulkDownloading: false,
     slicerEnabled: false,
     slicerLabel: "Orca",
     onOpenInSlicer: vi.fn(),
@@ -181,9 +179,33 @@ function cardProps(overrides: Partial<AssetCardProps> = {}): AssetCardProps {
     onForgetMissing: vi.fn(),
     onRescanMissing: vi.fn(),
     rescanning: false,
-    onRequestConfirm: vi.fn(),
+    onClearPreparedPrint: vi.fn(),
+    preparedClearing: false,
     ...overrides,
   } satisfies AssetCardProps;
+}
+
+/** The dialog now takes every editor callback as a required prop, no defaults. */
+function modalProps(
+  overrides: Partial<ComponentProps<typeof AssetPreviewModal>> = {},
+): ComponentProps<typeof AssetPreviewModal> {
+  return {
+    asset: PNG_ASSET,
+    theme: "dark",
+    onClose: vi.fn(),
+    canContribute: true,
+    canDelete: true,
+    onSaveTags: vi.fn(async () => {}),
+    onSaveDetails: vi.fn(async () => {}),
+    onRename: vi.fn(async () => {}),
+    onMoveFolder: vi.fn(async () => {}),
+    folderOptions: [],
+    showFolderControls: true,
+    moving: false,
+    onAssetChanged: vi.fn(),
+    onRequestConfirm: vi.fn(),
+    ...overrides,
+  };
 }
 
 function imgSrc(container: HTMLElement): string {
@@ -196,9 +218,19 @@ function downloadLink(): HTMLAnchorElement {
   return screen.getByRole("link", { name: "Download" }) as HTMLAnchorElement;
 }
 
+/** The supporting-file row's own Download link, distinct from the dialog's. */
+function supportingDownloadLink(): HTMLAnchorElement {
+  const match = screen
+    .getAllByRole("link", { name: "Download" })
+    .find(link => link.getAttribute("download") === SUPPORTING_FILE.filename);
+  if (!match) throw new Error("expected the supporting file's Download link");
+  return match as HTMLAnchorElement;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   mintRequests = [];
+  listRequests = [];
   sigCounter = 0;
   resetFileGrants();
   configureGrantMinter(mintFileGrants);
@@ -279,7 +311,7 @@ describe("deferred file grants", () => {
     // Nothing is mounted, so the clock passes any earlier expiry unchecked.
     await advance(61_000);
 
-    const view = render(<AssetPreviewModal asset={PNG_ASSET} theme="dark" onClose={() => {}} />);
+    const view = render(<AssetPreviewModal {...modalProps()} />);
     expect(screen.getByText("Preparing preview...")).toBeTruthy();
     expect(view.container.querySelector("img")).toBeNull();
 
@@ -321,24 +353,42 @@ describe("deferred file grants", () => {
     expect(sigOf(refreshed.href)).not.toBe(firstSig);
   });
 
-  it("the card's supporting-file row Download anchor re-mints", async () => {
-    render(<AssetCard {...cardProps({ item: { ...PNG_ASSET, supporting_file_count: 1 } })} />);
-    await flush();
-
-    fireEvent.click(screen.getByRole("button", { name: /supporting files/i }));
+  it("the detail dialog's supporting-file row Download anchor re-mints rather than extending", async () => {
+    render(
+      <AssetPreviewModal
+        {...modalProps({
+          asset: { ...PNG_ASSET, supporting_file_count: 1 },
+          initialSection: "files",
+        })}
+      />,
+    );
     await flush();
     screen.getByRole("button", { name: `Preview ${SUPPORTING_FILE.filename}` });
 
-    const link = downloadLink();
+    const link = supportingDownloadLink();
     expect(link.getAttribute("href")).toContain("sig=");
     expect(link.getAttribute("download")).toBe(SUPPORTING_FILE.filename);
     const firstSig = sigOf(link.href);
 
     await advance(61_000);
 
-    const refreshed = downloadLink();
+    const refreshed = supportingDownloadLink();
     expect(sigOf(refreshed.href)).not.toBeNull();
     expect(sigOf(refreshed.href)).not.toBe(firstSig);
+  });
+
+  it("opening the detail dialog issues no supporting-file request until the panel is expanded", async () => {
+    render(<AssetPreviewModal {...modalProps()} />);
+    await flush();
+
+    // A plain open must not list files: that was one request per preview open.
+    expect(listRequests).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: /supporting files/i }));
+    await flush();
+
+    expect(listRequests.some(path => /\/files$/.test(path))).toBe(true);
+    expect(listRequests.some(path => /\/files\/limits$/.test(path))).toBe(true);
   });
 
   it("the slicer handoff re-mints at click time, not at fetch time", async () => {

@@ -21,6 +21,15 @@ function estimatedRows(rows: number) {
 
 const ROW_STRIDE = ESTIMATED_ROW_HEIGHT + GRID_GAP_PX;
 
+/**
+ * Last row whose top is at or above `y` when every row uses the estimate.
+ * Kept as arithmetic over the symbols so a retune of ESTIMATED_ROW_HEIGHT
+ * updates the expectation instead of silently breaking it.
+ */
+function estimatedRowAt(y: number): number {
+  return Math.floor(y / ROW_STRIDE);
+}
+
 describe("colsForWidth", () => {
   it("matches the card min-width plus gap arithmetic", () => {
     expect(CARD_MIN_WIDTH_PX).toBe(260);
@@ -75,9 +84,18 @@ describe("chunkRows", () => {
 
 describe("rowOffsets / rowsTotal", () => {
   it("treats unmeasured and invalid heights as the estimate", () => {
-    const heights = [360, 400, 0];
-    expect(rowOffsets(heights)).toEqual([0, 376, 792]);
-    expect(rowsTotal(heights)).toBe(360 + 400 + 360 + 2 * GRID_GAP_PX);
+    // A row the virtualiser has already measured: an explicit number, never the
+    // estimate, so the two can never be confused when the estimate is retuned.
+    const measuredRow = 412;
+    const heights = [measuredRow, 400, 0];
+    expect(rowOffsets(heights)).toEqual([
+      0,
+      measuredRow + GRID_GAP_PX,
+      measuredRow + 400 + 2 * GRID_GAP_PX,
+    ]);
+    expect(rowsTotal(heights)).toBe(
+      measuredRow + 400 + ESTIMATED_ROW_HEIGHT + 2 * GRID_GAP_PX,
+    );
     expect(rowHeightAt(heights, 1)).toBe(400);
     expect(rowHeightAt(heights, 2)).toBe(ESTIMATED_ROW_HEIGHT);
     expect(rowHeightAt([Number.NaN], 0)).toBe(ESTIMATED_ROW_HEIGHT);
@@ -103,18 +121,25 @@ describe("computeVirtualWindow", () => {
     const { tops, total } = estimatedRows(20);
     expect(
       computeVirtualWindow({ offset: 0, viewportHeight: 768, tops, total }),
-    ).toEqual({ startRow: 0, endRow: 4 });
+    ).toEqual({ startRow: 0, endRow: estimatedRowAt(768 - 1) + OVERSCAN_ROWS });
   });
 
   it("renders overscan on both sides in the middle", () => {
     const { tops, total } = estimatedRows(20);
+    const offset = 1400;
+    // The viewport bottom now lands in row 6 (it was row 5 at the old 360
+    // estimate), so the window ends on 6 + overscan.
     expect(
-      computeVirtualWindow({ offset: 1400, viewportHeight: 768, tops, total }),
-    ).toEqual({ startRow: 1, endRow: 7 });
+      computeVirtualWindow({ offset, viewportHeight: 768, tops, total }),
+    ).toEqual({
+      startRow: estimatedRowAt(offset) - OVERSCAN_ROWS,
+      endRow: estimatedRowAt(offset + 768 - 1) + OVERSCAN_ROWS,
+    });
   });
 
   it("clamps overscan at the bottom end", () => {
-    const { tops, total } = estimatedRows(20);
+    const rows = 20;
+    const { tops, total } = estimatedRows(rows);
     expect(
       computeVirtualWindow({
         offset: total - 1,
@@ -122,7 +147,7 @@ describe("computeVirtualWindow", () => {
         tops,
         total,
       }),
-    ).toEqual({ startRow: 17, endRow: 19 });
+    ).toEqual({ startRow: rows - 1 - OVERSCAN_ROWS, endRow: rows - 1 });
   });
 
   it("renders nothing for zero rows", () => {
@@ -164,7 +189,8 @@ describe("computeVirtualWindow", () => {
   });
 
   it("never exceeds the row count with a large overscan", () => {
-    const { tops, total } = estimatedRows(4);
+    const rows = 4;
+    const { tops, total } = estimatedRows(rows);
     const window = computeVirtualWindow({
       offset: total - 1,
       viewportHeight: 768,
@@ -173,7 +199,7 @@ describe("computeVirtualWindow", () => {
       overscanRows: 50,
     });
     expect(window.startRow).toBe(0);
-    expect(window.endRow).toBe(3);
+    expect(window.endRow).toBe(rows - 1);
   });
 
   it("still produces a valid window for degenerate viewports and offsets", () => {

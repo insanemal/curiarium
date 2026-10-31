@@ -16,8 +16,18 @@
 export const CARD_MIN_WIDTH_PX = 260;
 /** Gap between cards and between rows, mirrored by Tailwind's `gap-4`. */
 export const GRID_GAP_PX = 16;
-/** Height assumed for a row until it has actually been measured. */
-export const ESTIMATED_ROW_HEIGHT = 360;
+/**
+ * Height assumed for a row until it has actually been measured.
+ *
+ * This number is DERIVED, not measured: there is no browser harness in
+ * `curiarium/web` and jsdom returns zero rects, so the estimate is itemised
+ * from the card's box instead. A card is h-40 preview (160 px) + p-3 (24 px)
+ * + 2 px border + name (20) + fact line (15) + filename (15) + attribution
+ * (16) + tag row (22) + footer (28) + five `gap-2` gaps (40) = 342, rounded
+ * up to 344. A slight overshoot is safer than an undershoot for scroll
+ * stability; the grouped mode is the non-virtualised safety net.
+ */
+export const ESTIMATED_ROW_HEIGHT = 344;
 /** Extra rows rendered above and below the viewport (and the column count). */
 export const OVERSCAN_ROWS = 2;
 

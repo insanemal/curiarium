@@ -1,15 +1,19 @@
-import React from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import { type Asset, type PreparedPrint, fileUrl } from "../../lib/api";
 import { formatBytes } from "../../lib/format";
 import type { PreviewSettings, ResolvedTheme } from "../../lib/settings";
 import { useFileGrants } from "../../lib/useFileGrants";
+import type { ConfirmRequest } from "../ConfirmDialog";
 import FileDownloadLink from "../FileDownloadLink";
 import LightBurnPreview from "../LightBurnPreview";
 import TagBadge from "../TagBadge";
+import AssetDetailsEditor, { type DetailSection } from "./AssetDetailsEditor";
+import SupportingFilesPanel from "./SupportingFilesPanel";
 import {
   LIGHTBURN_EXTS,
   MODEL_EXTS,
   extOf,
+  formatMissingSince,
   type PreviewVariant,
 } from "./assetGridMeta";
 
@@ -196,10 +200,96 @@ export function renderPreviewContent(
   );
 }
 
-export function AssetPreviewModal({ asset, theme, onClose }: { asset: Asset; theme: ResolvedTheme; onClose: () => void }) {
+export function AssetPreviewModal({
+  asset,
+  theme,
+  onClose,
+  canContribute,
+  canDelete,
+  onSaveTags,
+  onSaveDetails,
+  onRename,
+  onMoveFolder,
+  folderOptions,
+  showFolderControls,
+  moving,
+  onAssetChanged,
+  onRequestConfirm,
+  initialSection,
+}: {
+  asset: Asset;
+  theme: ResolvedTheme;
+  onClose: () => void;
+  canContribute: boolean;
+  canDelete: boolean;
+  onSaveTags: (id: string, tags: string[]) => Promise<void>;
+  onSaveDetails: (id: string, payload: { notes: string; creator: string }) => Promise<void>;
+  onRename: (id: string, name: string) => Promise<void>;
+  onMoveFolder: (id: string, folder_id: string | null) => Promise<void>;
+  folderOptions: { id: string | null; name: string }[];
+  showFolderControls: boolean;
+  moving: boolean;
+  onAssetChanged: (asset: Asset) => void;
+  onRequestConfirm: (request: ConfirmRequest) => void;
+  initialSection?: DetailSection | null;
+}) {
   // Prime the preview's grants on open: a cold modal would otherwise fire an
   // unsigned <img>/<iframe>/model request and 401.
   const ready = useFileGrants([asset.url, asset.thumb_url]);
+  const headingId = useId();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  // Captured before any child effect can move focus (child effects run first),
+  // and restored on close unless the opener has since unmounted.
+  const [previouslyFocused] = useState<HTMLElement | null>(() =>
+    typeof document !== "undefined" && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
+
+  useEffect(() => {
+    // A menu item that names a field lets that field's own mount effect win;
+    // focusing the panel here would otherwise steal it back.
+    if (!initialSection || initialSection === "files") panelRef.current?.focus();
+    return () => {
+      if (previouslyFocused && previouslyFocused.isConnected) previouslyFocused.focus();
+    };
+    // The section is the dialog's opening intent and never changes in place.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Tab") {
+      // `aria-modal="true"` promises modality, so Tab must not walk out into
+      // the grid behind the overlay. Cycle within the panel instead.
+      const focusable = Array.from(
+        event.currentTarget.querySelectorAll<HTMLElement>(
+          'button, input, textarea, select, a[href], [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter(element => !element.hasAttribute("disabled"));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      // The panel itself can hold focus (it is the initial focus target when no
+      // field was named), so a backwards Tab from there must also stay inside.
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+      return;
+    }
+    // An inline editor that consumed Escape (a reverted rename) must not also
+    // close the dialog under the user.
+    if (event.key !== "Escape" || event.defaultPrevented) return;
+    // A nested dialog (a supporting-file preview) owns the key while it is
+    // open: closing its host out from under it would strand the user.
+    if (panelRef.current?.querySelector('[role="dialog"]')) return;
+    event.preventDefault();
+    onClose();
+  };
+
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   return (
     <div
@@ -207,12 +297,18 @@ export function AssetPreviewModal({ asset, theme, onClose }: { asset: Asset; the
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headingId}
+        tabIndex={-1}
         className="bg-panel-strong rounded-lg shadow-2xl max-w-5xl w-full max-h-full overflow-hidden flex flex-col"
         onClick={stop}
+        onKeyDown={handleKeyDown}
       >
         <div className="flex items-center justify-between border-b border-panel px-4 py-3">
           <div>
-            <h2 className="text-lg font-semibold">{asset.name}</h2>
+            <h2 id={headingId} className="text-lg font-semibold">{asset.name}</h2>
             <p className="text-sm opacity-70">
               {asset.filename} · {formatBytes(asset.size)}
             </p>
@@ -226,6 +322,13 @@ export function AssetPreviewModal({ asset, theme, onClose }: { asset: Asset; the
             )}
             {asset.prepared_print && (
               <div className="mt-2"><PreparedPrintSummary prepared={asset.prepared_print} /></div>
+            )}
+            {asset.missing_since && (
+              // The card keeps only the "File missing" headline now, so the date
+              // lives here, where there is room for it (Mf-xmty).
+              <p className="mt-2 text-xs text-red-700 dark:text-red-300">
+                File missing from storage since {formatMissingSince(asset.missing_since)}.
+              </p>
             )}
           </div>
           <button
@@ -248,11 +351,30 @@ export function AssetPreviewModal({ asset, theme, onClose }: { asset: Asset; the
               <span className="text-xs opacity-60">No tags</span>
             )}
           </div>
-          {asset.notes && (
-            <div className="text-sm border border-dashed border-panel-strong rounded-md p-3 whitespace-pre-wrap">
-              {asset.notes}
-            </div>
-          )}
+          {/* The notes prose block that used to sit here is gone: the editor
+              below shows the same text and, for a contributor, edits it in
+              place — printing it twice was the clutter this ticket removes. */}
+          <AssetDetailsEditor
+            asset={asset}
+            canContribute={canContribute}
+            canDelete={canDelete}
+            onSaveTags={onSaveTags}
+            onSaveDetails={onSaveDetails}
+            onRename={onRename}
+            onMoveFolder={onMoveFolder}
+            folderOptions={folderOptions}
+            showFolderControls={showFolderControls}
+            moving={moving}
+            initialSection={initialSection}
+          />
+          <SupportingFilesPanel
+            asset={asset}
+            canContribute={canContribute}
+            canDelete={canDelete}
+            onAssetChanged={onAssetChanged}
+            onRequestConfirm={onRequestConfirm}
+            defaultExpanded={initialSection === "files"}
+          />
           <div className="flex gap-3">
             <FileDownloadLink
               className="px-3 py-2 rounded-md bg-accent text-sm"

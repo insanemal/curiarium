@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
@@ -22,7 +23,7 @@ vi.mock("../LightBurnPreview", () => ({
 }));
 
 import type { Asset, PreparedPrint } from "../../lib/api";
-import { PreparedPrintSummary, renderPreviewContent } from "./preview";
+import { AssetPreviewModal, PreparedPrintSummary, renderPreviewContent } from "./preview";
 
 afterEach(cleanup);
 
@@ -165,5 +166,87 @@ describe("renderPreviewContent 3D snapshot wiring", () => {
     // The modal renders the interactive viewer, so it is not on the persist path.
     await act(async () => {});
     expect(modelSnapshotProps).toHaveLength(0);
+  });
+});
+
+const MODAL_ASSET: Asset = {
+  id: "a9",
+  name: "Wall bracket",
+  filename: "bracket.stl",
+  mime: "model/stl",
+  size: 4096,
+  tags: [],
+  url: "/api/assets/a9/file",
+  thumb_url: "/api/assets/a9/thumb",
+  supporting_file_count: 0,
+};
+
+/** Every editor callback is a required prop on the upgraded dialog, no defaults. */
+function modalProps(
+  overrides: Partial<ComponentProps<typeof AssetPreviewModal>> = {},
+): ComponentProps<typeof AssetPreviewModal> {
+  return {
+    asset: MODAL_ASSET,
+    theme: "dark",
+    onClose: vi.fn(),
+    canContribute: false,
+    canDelete: false,
+    onSaveTags: vi.fn(async () => {}),
+    onSaveDetails: vi.fn(async () => {}),
+    onRename: vi.fn(async () => {}),
+    onMoveFolder: vi.fn(async () => {}),
+    folderOptions: [],
+    showFolderControls: true,
+    moving: false,
+    onAssetChanged: vi.fn(),
+    onRequestConfirm: vi.fn(),
+    ...overrides,
+  };
+}
+
+describe("AssetPreviewModal dialog upgrade", () => {
+  it("is a modal dialog labelled by the asset name", () => {
+    render(<AssetPreviewModal {...modalProps()} />);
+
+    const dialog = screen.getByRole("dialog", { name: MODAL_ASSET.name });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(screen.getByRole("heading", { name: MODAL_ASSET.name })).toBeTruthy();
+  });
+
+  it("closes on Escape and calls onClose once", () => {
+    const onClose = vi.fn();
+    render(<AssetPreviewModal {...modalProps({ onClose })} />);
+
+    const dialog = screen.getByRole("dialog", { name: MODAL_ASSET.name });
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("moves focus in on open and restores it to the opener on unmount", () => {
+    const opener = document.createElement("button");
+    opener.textContent = "Open details";
+    document.body.appendChild(opener);
+    opener.focus();
+
+    const { unmount } = render(<AssetPreviewModal {...modalProps()} />);
+    const dialog = screen.getByRole("dialog", { name: MODAL_ASSET.name });
+    expect(document.activeElement).toBe(dialog);
+
+    unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  it("keeps both Close buttons wired to onClose", () => {
+    const onClose = vi.fn();
+    render(<AssetPreviewModal {...modalProps({ onClose })} />);
+
+    const closeButtons = screen.getAllByRole("button", { name: "Close" });
+    expect(closeButtons).toHaveLength(2);
+    fireEvent.click(closeButtons[0]);
+    fireEvent.click(closeButtons[1]);
+
+    expect(onClose).toHaveBeenCalledTimes(2);
   });
 });

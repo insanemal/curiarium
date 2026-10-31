@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createRef, type ReactElement } from "react";
+import { Profiler, createRef, type ReactElement } from "react";
 
 import { UnauthorizedError, type Asset, type AssetFile, type Folder } from "../lib/api";
 import { AssetNotFoundError } from "../lib/api/assets";
@@ -10,6 +10,7 @@ import {
   GRID_GAP_PX,
   OVERSCAN_ROWS,
   colsForWidth,
+  computeVirtualWindow,
   rowOffsets,
   rowsTotal,
 } from "../lib/virtualGrid";
@@ -179,6 +180,70 @@ function cardCheckboxes(): HTMLInputElement[] {
   return screen.getAllByRole("checkbox", { name: "Select" }) as HTMLInputElement[];
 }
 
+/** Cards are the only nodes carrying the asset id, so this is never ambiguous. */
+function cardFor(assetId: string): HTMLElement {
+  const card = document.querySelector<HTMLElement>(`[data-asset-id="${assetId}"]`);
+  if (!card) throw new Error(`card ${assetId} is not rendered`);
+  return card;
+}
+
+/**
+ * Opens a card's kebab and returns the menu.
+ *
+ * The menu is portalled to `document.body` (the card is `overflow-hidden`, so
+ * an in-flow menu would be clipped), which means it is NEVER inside the card
+ * and must always be queried at screen scope.
+ */
+function openCardMenu(card: HTMLElement): HTMLElement {
+  fireEvent.click(within(card).getByRole("button", { name: "More actions" }));
+  return screen.getByRole("menu");
+}
+
+/** Opens a card's detail dialog through a named menu item and returns it. */
+function openCardDialog(card: HTMLElement, item: string): HTMLElement {
+  const menu = openCardMenu(card);
+  fireEvent.click(within(menu).getByRole("menuitem", { name: item }));
+  return screen.getByRole("dialog");
+}
+
+/** Closes the open menu through its own keyboard path, as a user would. */
+function closeCardMenu(menu: HTMLElement): void {
+  fireEvent.keyDown(menu, { key: "Escape" });
+}
+
+/** Menu item labels in DOM order, which is the order the card built them in. */
+function menuItemLabels(menu: HTMLElement): string[] {
+  return within(menu)
+    .getAllByRole("menuitem")
+    .map(item => item.textContent ?? "");
+}
+
+/**
+ * The dialog's folder select, identified by the options `listFolders` provides
+ * (`f1`). The card face has no selects at all any more.
+ */
+function folderSelectIn(scope: HTMLElement): HTMLSelectElement | null {
+  return (
+    Array.from(scope.querySelectorAll("select")).find(select =>
+      Array.from(select.options).some(option => option.value === "f1"),
+    ) ?? null
+  );
+}
+
+/**
+ * The rendered row window implied by the shipped geometry for `offset`.
+ *
+ * Derived from `computeVirtualWindow` rather than from `ceil(viewport/stride)`:
+ * the visible row count depends on the offset's phase inside a row, so a naive
+ * ceiling silently under-counts whenever the estimate changes.
+ */
+function expectedCardsAt(offset: number, rowCount: number, viewportHeight = 768): number {
+  const tops = rowOffsets(new Array<number>(rowCount).fill(0));
+  const total = rowsTotal(new Array<number>(rowCount).fill(0));
+  const range = computeVirtualWindow({ offset, viewportHeight, tops, total });
+  return (range.endRow - range.startRow + 1) * colsForWidth(window.innerWidth);
+}
+
 const assets: Asset[] = [
   {
     id: "a1",
@@ -247,6 +312,44 @@ function makeAsset(batch: number, index: number): Asset {
 
 function makeBatch(batch: number, size: number): Asset[] {
   return Array.from({ length: size }, (_, i) => makeAsset(batch, i + 1));
+}
+
+/** Flat fixture order: the server sorts name ascending and the client keeps it. */
+const flatAssets = [...assets].sort((a, b) => a.name.localeCompare(b.name));
+
+/**
+ * `fileUrl` call counts per asset URL: a faithful card-body render counter.
+ * `renderPreviewContent` runs on every card render and unconditionally calls
+ * `fileUrl(asset.url)`.
+ */
+function cardBodyCounts(): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const asset of assets) {
+    counts[asset.id] = fileUrlMock.mock.calls.filter(([url]) => url === asset.url).length;
+  }
+  return counts;
+}
+
+/**
+ * Guards the probe itself: a count of zero for any asset would let a
+ * "did not re-render" assertion pass because nothing was ever rendered.
+ */
+function expectProbeCovered(counts: Record<string, number>): void {
+  for (const asset of assets) {
+    expect(counts[asset.id], `fileUrl was never called for ${asset.id}`).toBeGreaterThan(0);
+  }
+  const mountedCardCount = cardCheckboxes().length;
+  expect(fileUrlMock.mock.calls.length).toBeGreaterThanOrEqual(mountedCardCount);
+}
+
+async function renderFirstBatch(): Promise<HTMLInputElement> {
+  render(<AssetGrid canContribute canDelete theme="dark" />);
+  await waitFor(() => expect(listAssets).toHaveBeenCalledTimes(1));
+  await screen.findByText("Calibration cube");
+  await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
+  return screen.getByPlaceholderText(
+    "Search title, filename, notes...",
+  ) as HTMLInputElement;
 }
 
 function sortSelect(): HTMLSelectElement {
@@ -548,39 +651,20 @@ describe("AssetGrid asset refresh", () => {
   });
 
   // `renderPreviewContent` runs on every card render and unconditionally calls
-  // `fileUrl(asset.url)`, so a per-URL call count is a faithful render counter.
+  // `fileUrl(asset.url)`, so a per-URL call count is a faithful render counter
+  // for a card's body. The helpers live at module scope because the interaction
+  // and Profiler probes below need exactly the same fixture and baseline.
   describe("card render probe", () => {
-    /** Flat grid order: the server sorts name ascending, and the client keeps it. */
-    const flatOrder = [...assets].sort((a, b) => a.name.localeCompare(b.name));
-
-    function renderCounts(): Record<string, number> {
-      const counts: Record<string, number> = {};
-      for (const asset of assets) {
-        counts[asset.id] = fileUrlMock.mock.calls.filter(([url]) => url === asset.url).length;
-      }
-      return counts;
-    }
-
-    async function renderFirstBatch(): Promise<HTMLInputElement> {
-      render(<AssetGrid canContribute canDelete theme="dark" />);
-      await waitFor(() => expect(listAssets).toHaveBeenCalledTimes(1));
-      await screen.findByText("Calibration cube");
-      await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
-      return screen.getByPlaceholderText(
-        "Search title, filename, notes...",
-      ) as HTMLInputElement;
-    }
-
     it("does not re-render existing cards while typing in the search box", async () => {
       const searchInput = await renderFirstBatch();
-      const before = renderCounts();
-      expect(before[flatOrder[0].id]).toBeGreaterThan(0);
+      const before = cardBodyCounts();
+      expectProbeCovered(before);
 
       fireEvent.change(searchInput, { target: { value: "c" } });
       fireEvent.change(searchInput, { target: { value: "cu" } });
 
       expect(searchInput.value).toBe("cu");
-      expect(renderCounts()).toEqual(before);
+      expect(cardBodyCounts()).toEqual(before);
       // Typing alone never refetches, same as before.
       expect(listAssets).toHaveBeenCalledTimes(1);
     });
@@ -588,25 +672,27 @@ describe("AssetGrid asset refresh", () => {
     it("re-renders only the card whose selection changed", async () => {
       await renderFirstBatch();
       const checkboxes = cardCheckboxes();
-      expect(checkboxes.length).toBe(flatOrder.length);
+      expect(checkboxes.length).toBe(flatAssets.length);
 
       // The first click flips `hasSelection` false -> true, which may legally
       // re-render every card; take the baseline after it settles.
       fireEvent.click(checkboxes[0]);
       expect(checkboxes[0].checked).toBe(true);
-      const baseline = renderCounts();
+      const baseline = cardBodyCounts();
+      expectProbeCovered(baseline);
 
       fireEvent.click(checkboxes[1]);
       expect(checkboxes[1].checked).toBe(true);
 
-      const after = renderCounts();
-      expect(after[flatOrder[1].id]).toBe(baseline[flatOrder[1].id] + 1);
-      expect(after[flatOrder[0].id]).toBe(baseline[flatOrder[0].id]);
-      expect(after[flatOrder[2].id]).toBe(baseline[flatOrder[2].id]);
+      const after = cardBodyCounts();
+      expect(after[flatAssets[1].id]).toBe(baseline[flatAssets[1].id] + 1);
+      expect(after[flatAssets[0].id]).toBe(baseline[flatAssets[0].id]);
+      expect(after[flatAssets[2].id]).toBe(baseline[flatAssets[2].id]);
     });
 
     it("search still refetches with the typed query", async () => {
       const searchInput = await renderFirstBatch();
+      expectProbeCovered(cardBodyCounts());
 
       fireEvent.change(searchInput, { target: { value: "cube" } });
       fireEvent.keyDown(searchInput, { key: "Enter" });
@@ -623,6 +709,94 @@ describe("AssetGrid asset refresh", () => {
       const buttonCall = callQuery(2);
       expect(buttonCall.q).toBe("spool");
       expect(buttonCall.offset).toBe(0);
+    });
+  });
+
+  // The card body is the expensive subtree: if an interaction re-executes it,
+  // every card's preview work is repeated. `fileUrl` call counts pin that.
+  describe("card-body executions", () => {
+    it("pins card-body executions per interaction", async () => {
+      const searchInput = await renderFirstBatch();
+      const checkboxes = cardCheckboxes();
+
+      // Selection toggle: the clicked card repaints itself (+1); its neighbours
+      // must not be re-executed at all (0).
+      fireEvent.click(checkboxes[0]);
+      const baseline = cardBodyCounts();
+      fireEvent.click(checkboxes[1]);
+      expect(cardBodyCounts()[flatAssets[1].id]).toBe(baseline[flatAssets[1].id] + 1);
+      expect(cardBodyCounts()[flatAssets[0].id]).toBe(baseline[flatAssets[0].id]);
+      expect(cardBodyCounts()[flatAssets[2].id]).toBe(baseline[flatAssets[2].id]);
+
+      // Opening a kebab menu: the open state lives inside `CardMenu`, so the
+      // card body is NOT re-executed (0). The plan for this ticket anticipated
+      // 1 (a card-local open flag); 0 is the stronger result and is what the
+      // measured probe reports.
+      const beforeMenu = cardBodyCounts();
+      const menu = openCardMenu(cardFor("a1"));
+      expect(cardBodyCounts()).toEqual(beforeMenu);
+      closeCardMenu(menu);
+
+      // Typing in the search box owns its draft inside `AssetSearch`, so no
+      // card body runs (0) and no refetch is issued.
+      const beforeTyping = cardBodyCounts();
+      fireEvent.change(searchInput, { target: { value: "c" } });
+      fireEvent.change(searchInput, { target: { value: "cu" } });
+      expect(cardBodyCounts()).toEqual(beforeTyping);
+      expect(listAssetsMock.mock.calls.length).toBe(1);
+    });
+  });
+
+  // Commit counts are asserted; durations are only logged. jsdom has no layout,
+  // so `actualDuration`/`baseDuration` there are timing noise, not a budget.
+  describe("render commits", () => {
+    it("commits at most once per interaction, durations logged only", async () => {
+      const commits: { phase: string; actualDuration: number; baseDuration: number }[] = [];
+      render(
+        <Profiler
+          id="asset-grid"
+          onRender={(_id, phase, actualDuration, baseDuration) => {
+            commits.push({ phase, actualDuration, baseDuration });
+          }}
+        >
+          <AssetGrid canContribute canDelete theme="dark" />
+        </Profiler>,
+      );
+      await waitFor(() => expect(listAssets).toHaveBeenCalledTimes(1));
+      await screen.findByText("Calibration cube");
+      await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
+
+      const logDurations = (label: string) => {
+        console.log(
+          `[AssetGrid profiler] ${label}:`,
+          commits.map(c => ({ phase: c.phase, actual: c.actualDuration, base: c.baseDuration })),
+        );
+      };
+
+      // The mount/fetch settle is not an interaction: measure from a clean slate.
+      commits.length = 0;
+
+      fireEvent.click(cardCheckboxes()[0]);
+      logDurations("selection toggle");
+      expect(commits).toHaveLength(1);
+
+      commits.length = 0;
+      const menu = openCardMenu(cardFor("a1"));
+      logDurations("open kebab");
+      expect(commits).toHaveLength(1);
+      commits.length = 0;
+      closeCardMenu(menu);
+      commits.length = 0;
+
+      // Two characters arriving in one input event are a single commit of the
+      // search box's own draft state: `AssetSearch` owns it, so no card and no
+      // grid state re-renders (the `card-body executions` test pins that too).
+      const searchInput = screen.getByPlaceholderText(
+        "Search title, filename, notes...",
+      ) as HTMLInputElement;
+      fireEvent.change(searchInput, { target: { value: "cu" } });
+      logDurations("typing");
+      expect(commits.length).toBeLessThanOrEqual(1);
     });
   });
 
@@ -901,7 +1075,7 @@ describe("virtualized flat grid", () => {
     expect(screen.getByText(`Asset ${firstVisibleRow * cols + 1}`)).toBeTruthy();
     expect(mountedRowIndexes()[0]).toBe(firstVisibleRow - OVERSCAN_ROWS);
     // Same bound in the middle: overscan on both sides, still nowhere near 2000.
-    expect(checkboxCount()).toBe((visibleRows + OVERSCAN_ROWS * 2) * cols);
+    expect(checkboxCount()).toBe(expectedCardsAt(middleOffset, Math.ceil(total / cols)));
     expect(checkboxCount()).toBeLessThan(100);
   });
 
@@ -916,8 +1090,7 @@ describe("virtualized flat grid", () => {
 
     const cols = colsForWidth(window.innerWidth);
     const stride = ESTIMATED_ROW_HEIGHT + GRID_GAP_PX;
-    const visibleRows = Math.ceil(768 / stride);
-    const bounded = (visibleRows + OVERSCAN_ROWS * 2) * cols;
+    const totalRows = Math.ceil(total / cols);
 
     const offset = 1400;
     scrollGrid(scroller, offset);
@@ -926,7 +1099,10 @@ describe("virtualized flat grid", () => {
     const firstVisibleRow = Math.floor(offset / stride);
     expect(firstVisibleRow).toBe(3);
     expect(screen.getByText(`Asset ${firstVisibleRow * cols + 1}`)).toBeTruthy();
-    expect(checkboxCount()).toBe(bounded);
+    // The DOM is exactly the geometry's window at this offset; the visible row
+    // count depends on the offset's phase inside a row, so it is derived rather
+    // than ceiling the viewport/stride ratio.
+    expect(checkboxCount()).toBe(expectedCardsAt(offset, totalRows));
 
     // A server-sorted key refetches, but the loaded page must not be re-sorted
     // client-side: the window stays at the same offset.
@@ -936,7 +1112,7 @@ describe("virtualized flat grid", () => {
     expect(scroller.scrollTop).toBe(offset);
     expect(screen.queryByText("Asset 60")).toBeNull();
     expect(screen.queryByText("Asset 1")).toBeNull();
-    expect(checkboxCount()).toBe(bounded);
+    expect(checkboxCount()).toBe(expectedCardsAt(offset, totalRows));
 
     // A filtered result set of the same size must not snap the list back to the
     // top either.
@@ -1034,13 +1210,16 @@ describe("virtualized flat grid", () => {
     // A long jump drops the pin (the DOM must stay bounded by the viewport) and
     // the row - with the focus inside it - is unmounted as usual.
     scrollGrid(scroller, 6000);
-    await waitFor(() => expect(mountedRowIndexes()[0]).toBe(13));
+    const jumpOffset = 6000;
+    await waitFor(() =>
+      expect(mountedRowIndexes()[0]).toBe(Math.floor(jumpOffset / stride) - OVERSCAN_ROWS),
+    );
     expect(document.querySelector('[data-row-index="1"]')).toBeNull();
     expect(document.activeElement).not.toBe(focused);
 
     const cols = colsForWidth(window.innerWidth);
     expect(checkboxCount()).toBe(
-      (Math.ceil(768 / stride) + OVERSCAN_ROWS * 2) * cols,
+      expectedCardsAt(jumpOffset, Math.ceil(total / cols)),
     );
   });
 
@@ -1190,13 +1369,21 @@ describe("AssetGrid missing assets", () => {
     await screen.findByText(/File missing/i);
     expect(screen.getByText(missingAsset.name)).toBeTruthy();
     expect(screen.getByText("Calibration cube")).toBeTruthy();
+
+    // The card keeps only the headline now, so the date it lost moved into the
+    // detail dialog, where there is room for the sentence.
+    const dialog = openCardDialog(cardFor(missingAsset.id), "Open preview");
+    expect(within(dialog).getByText(/File missing from storage since/)).toBeTruthy();
   });
 
   it("Forget entry opens the same delete dialog and requires the typed file name", async () => {
     render(<AssetGrid canContribute canDelete theme="dark" />);
 
     await screen.findByText(/File missing/i);
-    fireEvent.click(screen.getByRole("button", { name: "Forget entry" }));
+    // `Forget entry` moved behind the card's kebab; the menu is portalled, so it
+    // is queried at screen scope, never `within(card)`.
+    const menu = openCardMenu(cardFor(missingAsset.id));
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Forget entry" }));
 
     const dialog = within(screen.getByRole("dialog", { name: /Forget/ }));
     expect(deleteAssetMock).not.toHaveBeenCalled();
@@ -1226,7 +1413,9 @@ describe("AssetGrid missing assets", () => {
     await screen.findByText(/File missing/i);
     const callsBefore = listAssetsMock.mock.calls.length;
 
-    fireEvent.click(screen.getByRole("button", { name: "Re-scan" }));
+    fireEvent.click(
+      within(openCardMenu(cardFor(missingAsset.id))).getByRole("menuitem", { name: "Re-scan" }),
+    );
 
     await waitFor(() => expect(startLibraryScanMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(callsBefore + 1));
@@ -1633,16 +1822,40 @@ describe("AssetGrid shared dialogs and toasts", () => {
     };
   }
 
-  async function expandSupportingFiles() {
-    fireEvent.click(screen.getByRole("button", { name: /Supporting files/ }));
+  /**
+   * Opens the card's kebab and its `Supporting files (N)…` item, then waits for
+   * the dialog's list. Returns the dialog: everything that used to live on the
+   * card now renders inside it, so assertions scope here, not `within(card)`.
+   */
+  async function expandSupportingFiles(card: HTMLElement): Promise<HTMLElement> {
+    const menu = openCardMenu(card);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /Supporting files/ }));
+    const dialog = screen.getByRole("dialog");
+    // Opening through the menu expands the panel, and only the expansion issues
+    // the list request: wait for it to settle before touching the rows.
+    await waitFor(() => expect(within(dialog).queryByText("Loading files...")).toBeNull());
+    return dialog;
   }
 
-  /** The card's own Delete button, never the bulk bar's identically named one. */
-  function cardDeleteButton(index = 0): HTMLElement {
-    const bar = screen.queryByTestId("bulk-action-bar");
-    const buttons = screen.getAllByRole("button", { name: "Delete" });
-    const cardButtons = bar ? buttons.filter(button => !bar.contains(button)) : buttons;
-    return cardButtons[index];
+  /** The first card in flat grid order (the one a single-card test acts on). */
+  function firstCard(): HTMLElement {
+    const card = document.querySelector<HTMLElement>("[data-asset-id]");
+    if (!card) throw new Error("no card rendered");
+    return card;
+  }
+
+  /**
+   * Opens a card's kebab and returns its `Delete` item.
+   *
+   * The bulk bar still renders an identically named `Delete` button, so the
+   * menu is the only collision-free home for the card's own Delete. Asserting
+   * exactly one menuitem keeps that anti-collision intent.
+   */
+  function cardDeleteItem(card: HTMLElement): HTMLElement {
+    const menu = openCardMenu(card);
+    const items = within(menu).getAllByRole("menuitem", { name: "Delete" });
+    expect(items).toHaveLength(1);
+    return items[0];
   }
 
   function makeDrop(files: File[]) {
@@ -1655,7 +1868,7 @@ describe("AssetGrid shared dialogs and toasts", () => {
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await waitForGrid();
 
-    fireEvent.click(cardDeleteButton());
+    fireEvent.click(cardDeleteItem(firstCard()));
 
     // The dialog says what actually happens and gates the button on the file name.
     screen.getByRole("dialog", { name: /Delete/ });
@@ -1669,7 +1882,7 @@ describe("AssetGrid shared dialogs and toasts", () => {
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await waitForGrid();
 
-    fireEvent.click(cardDeleteButton());
+    fireEvent.click(cardDeleteItem(firstCard()));
     const dialog = screen.getByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
@@ -1684,7 +1897,7 @@ describe("AssetGrid shared dialogs and toasts", () => {
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await waitForGrid();
 
-    fireEvent.click(cardDeleteButton());
+    fireEvent.click(cardDeleteItem(firstCard()));
     const dialog = within(screen.getByRole("dialog", { name: /Delete/ }));
     fireEvent.change(dialog.getByLabelText("Type the file name to confirm"), {
       target: { value: assets[0].filename },
@@ -1710,7 +1923,7 @@ describe("AssetGrid shared dialogs and toasts", () => {
     fireEvent.click(boxes[0]);
     fireEvent.click(boxes[1]);
 
-    fireEvent.click(cardDeleteButton());
+    fireEvent.click(cardDeleteItem(firstCard()));
     const dialog = within(screen.getByRole("dialog", { name: "Delete 2 selected items?" }));
     // Several assets are confirmed by the step, never by typing N names.
     expect(dialog.queryByLabelText("Type the file name to confirm")).toBeNull();
@@ -1724,26 +1937,49 @@ describe("AssetGrid shared dialogs and toasts", () => {
     expect(deleteAssetMock).not.toHaveBeenCalled();
   });
 
+  /**
+   * The dialog's tag textbox.
+   *
+   * TagInput only shows its placeholder while the list is empty, and an asset
+   * with tags starts non-empty, so the field is identified semantically: every
+   * other dialog textbox has an aria-label (Name) or a placeholder (Creator,
+   * Notes) while this one is labelled by the tag list around it.
+   */
+  function tagTextbox(dialog: HTMLElement): HTMLInputElement {
+    const input = within(dialog)
+      .getAllByRole("textbox")
+      .find(el => !el.getAttribute("aria-label") && !el.getAttribute("placeholder"));
+    if (!input) throw new Error("tag textbox not found");
+    return input as HTMLInputElement;
+  }
+
   it("a failed rename emits exactly one toast and reverts the field", async () => {
     listAssetsMock.mockResolvedValue({ items: [assets[0]], hasMore: false });
     updateAssetMetaMock.mockRejectedValue(new Error("server says no"));
 
     renderWithToaster(<AssetGrid canContribute canDelete theme="dark" />);
     await waitForGrid();
+    const card = firstCard();
 
-    fireEvent.doubleClick(screen.getByText("Calibration cube"));
-    const input = screen.getByDisplayValue("Calibration cube");
+    // Renaming moved into the detail dialog: the kebab's `Rename…` item opens it
+    // focused on the Name field. Double-clicking the card name no longer starts
+    // an edit.
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Rename…" }));
+    const dialog = within(screen.getByRole("dialog"));
+    const input = dialog.getByLabelText("Name") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "Renamed cube" } });
-    fireEvent.blur(input);
+    fireEvent.click(dialog.getByRole("button", { name: "Save name" }));
 
     await waitFor(() => expect(screen.getByTestId("toaster")).toBeTruthy());
     const alerts = toaster().getAllByRole("alert");
     expect(alerts).toHaveLength(1);
     expect(alerts[0].textContent).toContain("server says no");
 
-    // The card reverts to the server-side name (the catch only resets the field).
-    await waitFor(() => expect(screen.queryByDisplayValue("Renamed cube")).toBeNull());
-    expect(screen.getByText("Calibration cube")).toBeTruthy();
+    // The field reverts to the server-side name (the catch only resets the
+    // field); the card never shows the rejected draft.
+    await waitFor(() => expect(input.value).toBe("Calibration cube"));
+    expect(within(card).getByText("Calibration cube")).toBeTruthy();
+    expect(within(card).queryByText("Renamed cube")).toBeNull();
   });
 
   it("renaming an item on a later page keeps the loaded window and paging cursor", async () => {
@@ -1796,6 +2032,7 @@ describe("AssetGrid shared dialogs and toasts", () => {
     updateAssetMetaMock.mockResolvedValue({ ...targetRow, name: newName });
 
     const targetText = await screen.findByText(targetName);
+    const card = targetText.closest("[data-asset-id]") as HTMLElement;
 
     // A page-2 card that is mounted right now must still be mounted after.
     const siblingName = screen
@@ -1804,10 +2041,11 @@ describe("AssetGrid shared dialogs and toasts", () => {
       .find(name => name !== targetName);
     if (!siblingName) throw new Error("no page-2 sibling was mounted");
 
-    fireEvent.doubleClick(targetText);
-    const input = screen.getByDisplayValue(targetName);
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Rename…" }));
+    const dialog = within(screen.getByRole("dialog"));
+    const input = dialog.getByLabelText("Name") as HTMLInputElement;
     fireEvent.change(input, { target: { value: newName } });
-    fireEvent.blur(input);
+    fireEvent.click(dialog.getByRole("button", { name: "Save name" }));
 
     await waitFor(() => expect(updateAssetMetaMock).toHaveBeenCalledTimes(1));
     expect(updateAssetMetaMock).toHaveBeenCalledWith(targetRow.id, { name: newName });
@@ -1818,7 +2056,12 @@ describe("AssetGrid shared dialogs and toasts", () => {
       listAssetsMock.mock.calls.slice(1).every(([params]) => (params?.offset ?? 0) !== 0),
     ).toBe(true);
 
-    await waitFor(() => expect(screen.getByText(newName)).toBeTruthy());
+    // The dialog repeats the asset name, so close it before asserting the card
+    // face, where the reconciled row must show the new name.
+    fireEvent.click(dialog.getAllByRole("button", { name: "Close" })[0]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    const renamedCard = screen.getByText(newName).closest("[data-asset-id]") as HTMLElement;
     // The window did not reset: a page-2 sibling is still mounted beside it.
     expect(screen.getByText(siblingName)).toBeTruthy();
     expect(screen.queryByText("Page 1 item 1")).toBeNull();
@@ -1829,7 +2072,7 @@ describe("AssetGrid shared dialogs and toasts", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
     await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(3));
     expect(callQuery(2).offset).toBe(pageSize * 2);
-    await waitFor(() => expect(screen.getByText(newName)).toBeTruthy());
+    await waitFor(() => expect(within(renamedCard).getByText(newName)).toBeTruthy());
   });
 
   it("a single tag save updates the row in place without a refetch", async () => {
@@ -1840,13 +2083,15 @@ describe("AssetGrid shared dialogs and toasts", () => {
     await waitForGrid();
     const callsBefore = listAssetsMock.mock.calls.length;
 
-    const card = screen.getByText("Calibration cube").closest("[data-asset-id]") as HTMLElement;
-    const cardScope = within(card);
-    fireEvent.click(cardScope.getByRole("button", { name: "Edit tags" }));
-    const tagInput = cardScope.getByRole("textbox");
+    const card = cardFor("a1");
+    // The tag editor is a dialog section now: the kebab's `Edit tags…` item
+    // opens it focused on the tag field.
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Edit tags…" }));
+    const dialog = screen.getByRole("dialog");
+    const tagInput = tagTextbox(dialog);
     fireEvent.change(tagInput, { target: { value: "strong" } });
     fireEvent.keyDown(tagInput, { key: "Enter" });
-    fireEvent.click(cardScope.getByRole("button", { name: "Save" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save tags" }));
 
     await waitFor(() => expect(setTagsMock).toHaveBeenCalledTimes(1));
     expect(setTagsMock).toHaveBeenCalledWith("a1", ["pla", "strong"]);
@@ -1863,13 +2108,13 @@ describe("AssetGrid shared dialogs and toasts", () => {
     renderWithToaster(<AssetGrid canContribute canDelete theme="dark" onUnauthorized={onUnauthorized} />);
     await waitForGrid();
 
-    const card = screen.getByText("Calibration cube").closest("[data-asset-id]") as HTMLElement;
-    const cardScope = within(card);
-    fireEvent.click(cardScope.getByRole("button", { name: "Edit tags" }));
-    const tagInput = cardScope.getByRole("textbox");
+    const card = cardFor("a1");
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Edit tags…" }));
+    const dialog = screen.getByRole("dialog");
+    const tagInput = tagTextbox(dialog);
     fireEvent.change(tagInput, { target: { value: "strong" } });
     fireEvent.keyDown(tagInput, { key: "Enter" });
-    fireEvent.click(cardScope.getByRole("button", { name: "Save" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save tags" }));
 
     await waitFor(() => expect(setTagsMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1));
@@ -1894,7 +2139,7 @@ describe("AssetGrid shared dialogs and toasts", () => {
     await screen.findByText("Asset 1");
     const callsBefore = listAssetsMock.mock.calls.length;
 
-    fireEvent.click(cardDeleteButton());
+    fireEvent.click(cardDeleteItem(firstCard()));
     const dialog = within(screen.getByRole("dialog", { name: /Delete/ }));
     fireEvent.change(dialog.getByLabelText("Type the file name to confirm"), {
       target: { value: loaded[0].filename },
@@ -1925,7 +2170,7 @@ describe("AssetGrid shared dialogs and toasts", () => {
     await waitForGrid();
     const callsBefore = listAssetsMock.mock.calls.length;
 
-    fireEvent.click(cardDeleteButton());
+    fireEvent.click(cardDeleteItem(firstCard()));
     const dialog = within(screen.getByRole("dialog", { name: /Delete/ }));
     fireEvent.change(dialog.getByLabelText("Type the file name to confirm"), {
       target: { value: assets[0].filename },
@@ -1977,14 +2222,16 @@ describe("AssetGrid shared dialogs and toasts", () => {
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Spool holder");
 
-    fireEvent.click(screen.getByRole("button", { name: /Supporting files/ }));
-    await screen.findByText("instructions.pdf");
-    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    const dialog = await expandSupportingFiles(cardFor("b2"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
 
-    const dialog = screen.getByRole("dialog", { name: "Remove instructions.pdf from this model?" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    const confirm = screen.getByRole("dialog", { name: "Remove instructions.pdf from this model?" });
+    fireEvent.click(within(confirm).getByRole("button", { name: "Cancel" }));
 
-    expect(screen.queryByRole("dialog")).toBeNull();
+    // Only the confirmation closes; the detail dialog underneath stays open.
+    expect(
+      screen.queryByRole("dialog", { name: "Remove instructions.pdf from this model?" }),
+    ).toBeNull();
     expect(deleteAssetFileMock).not.toHaveBeenCalled();
   });
 
@@ -2002,19 +2249,18 @@ describe("AssetGrid shared dialogs and toasts", () => {
 
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Spool holder");
-    await expandSupportingFiles();
-    await screen.findByText("instructions.pdf");
+    const dialog = within(await expandSupportingFiles(cardFor("b2")));
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Rename" })[0]);
-    const input = screen.getByLabelText("Rename instructions.pdf");
+    fireEvent.click(dialog.getAllByRole("button", { name: "Rename" })[0]);
+    const input = dialog.getByLabelText("Rename instructions.pdf");
     fireEvent.change(input, { target: { value: "guide.pdf" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(dialog.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
       expect(renameAssetFileMock).toHaveBeenCalledWith("b2", "sf1", "guide.pdf"),
     );
-    await screen.findByText("guide.pdf");
-    expect(screen.queryByText("instructions.pdf")).toBeNull();
+    await dialog.findByText("guide.pdf");
+    expect(dialog.queryByText("instructions.pdf")).toBeNull();
   });
 
   it("reorders supporting files with the up/down buttons", async () => {
@@ -2034,15 +2280,14 @@ describe("AssetGrid shared dialogs and toasts", () => {
 
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Spool holder");
-    await expandSupportingFiles();
-    await screen.findByText("instructions.pdf");
+    const dialog = within(await expandSupportingFiles(cardFor("b2")));
 
-    fireEvent.click(screen.getByRole("button", { name: "Move instructions.pdf down" }));
+    fireEvent.click(dialog.getByRole("button", { name: "Move instructions.pdf down" }));
     await waitFor(() =>
       expect(reorderAssetFilesMock).toHaveBeenCalledWith("b2", ["sf2", "sf1"]),
     );
     await waitFor(() => {
-      const names = screen
+      const names = dialog
         .getAllByRole("button", { name: /^Preview / })
         .map(button => button.textContent);
       expect(names).toEqual(["notes.txt", "instructions.pdf"]);
@@ -2057,10 +2302,9 @@ describe("AssetGrid shared dialogs and toasts", () => {
 
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Spool holder");
-    await expandSupportingFiles();
-    await screen.findByText("instructions.pdf");
+    const details = within(await expandSupportingFiles(cardFor("b2")));
 
-    fireEvent.click(screen.getByRole("button", { name: "Preview instructions.pdf" }));
+    fireEvent.click(details.getByRole("button", { name: "Preview instructions.pdf" }));
     const dialog = screen.getByRole("dialog", { name: "instructions.pdf" });
     const frame = within(dialog).getByTitle("instructions.pdf") as HTMLIFrameElement;
     expect(frame.getAttribute("src")).toBe("/files/sf1?inline=1");
@@ -2081,10 +2325,9 @@ describe("AssetGrid shared dialogs and toasts", () => {
     try {
       render(<AssetGrid canContribute canDelete theme="dark" />);
       await screen.findByText("Spool holder");
-      await expandSupportingFiles();
-      await screen.findByText("notes.txt");
+      const details = within(await expandSupportingFiles(cardFor("b2")));
 
-      fireEvent.click(screen.getByRole("button", { name: "Preview notes.txt" }));
+      fireEvent.click(details.getByRole("button", { name: "Preview notes.txt" }));
       const dialog = screen.getByRole("dialog", { name: "notes.txt" });
       await within(dialog).findByText("assembly notes");
       expect(fetchMock).toHaveBeenCalledWith(
@@ -2111,11 +2354,10 @@ describe("AssetGrid shared dialogs and toasts", () => {
 
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Spool holder");
-    await expandSupportingFiles();
-    await screen.findByText("instructions.pdf");
+    const dialog = within(await expandSupportingFiles(cardFor("b2")));
 
-    expect(screen.getByText("1 / 2")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Add files" }) as HTMLButtonElement).disabled).toBe(
+    expect(dialog.getByText("1 / 2")).toBeTruthy();
+    expect((dialog.getByRole("button", { name: "Add files" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
   });
@@ -2135,13 +2377,12 @@ describe("AssetGrid shared dialogs and toasts", () => {
 
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Spool holder");
-    await expandSupportingFiles();
-    await screen.findByText("instructions.pdf");
+    const dialog = within(await expandSupportingFiles(cardFor("b2")));
 
-    const add = screen.getByRole("button", { name: "Add files" }) as HTMLButtonElement;
+    const add = dialog.getByRole("button", { name: "Add files" }) as HTMLButtonElement;
     await waitFor(() => expect(add.disabled).toBe(true));
     expect(add.getAttribute("title")).toBe("Supporting file limit reached (1)");
-    expect(screen.getByText("1 / 1")).toBeTruthy();
+    expect(dialog.getByText("1 / 1")).toBeTruthy();
   });
 
   it("surfaces a 413 supporting-file upload message in a toast", async () => {
@@ -2152,8 +2393,12 @@ describe("AssetGrid shared dialogs and toasts", () => {
 
     const { container } = renderWithToaster(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Spool holder");
+    const dialog = await expandSupportingFiles(cardFor("b2"));
 
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    // The upload input lives in the dialog's supporting-files panel now, so the
+    // query must be scoped there (the grid card ships no file input at all).
+    const input = dialog.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(container.querySelector('input[type="file"]')).toBe(input);
     fireEvent.change(input, {
       target: { files: [new File(["x"], "huge.pdf", { type: "application/pdf" })] },
     });
@@ -2183,7 +2428,11 @@ describe("AssetGrid shared dialogs and toasts", () => {
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Calibration cube");
 
-    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    // "Clear prepared print" is a kebab item now; the confirmation it asks for
+    // is still the shared `ConfirmDialog`.
+    fireEvent.click(
+      within(openCardMenu(cardFor("a1"))).getByRole("menuitem", { name: "Clear prepared print" }),
+    );
 
     const dialog = screen.getByRole("dialog", {
       name: "Clear the attached prepared print from this model?",
@@ -2207,29 +2456,26 @@ describe("AssetGrid shared dialogs and toasts", () => {
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await waitForGrid();
     const callsBefore = listAssetsMock.mock.calls.length;
+    const card = cardFor("a1");
 
-    fireEvent.click(screen.getByRole("button", { name: "Expand" }));
-
-    // Scope to the card: the toolbar's creator filter shares the "Creator" label.
-    const editButton = screen.getByRole("button", { name: "Edit details" });
-    const card = editButton.closest("[data-asset-id]") as HTMLElement;
-    fireEvent.click(editButton);
-    expect(card).toBeTruthy();
-    const cardScope = within(card);
+    // The details editor lives in the detail dialog; the kebab's `Edit details…`
+    // item opens it focused on the Creator field.
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Edit details…" }));
+    const dialogScope = within(screen.getByRole("dialog"));
 
     // The retired field is neither offered nor echoed back into the form.
-    expect(cardScope.queryByPlaceholderText("Collection name")).toBeNull();
-    expect(cardScope.queryByLabelText(/collection/i)).toBeNull();
-    expect(cardScope.getByLabelText("Creator")).toBeTruthy();
-    expect(cardScope.getByLabelText("Notes")).toBeTruthy();
+    expect(dialogScope.queryByPlaceholderText("Collection name")).toBeNull();
+    expect(dialogScope.queryByLabelText(/collection/i)).toBeNull();
+    expect(dialogScope.getByLabelText("Creator")).toBeTruthy();
+    expect(dialogScope.getByLabelText("Notes")).toBeTruthy();
 
-    fireEvent.change(cardScope.getByPlaceholderText("Designer or source"), {
+    fireEvent.change(dialogScope.getByPlaceholderText("Designer or source"), {
       target: { value: "New creator" },
     });
-    fireEvent.change(cardScope.getByPlaceholderText("Add some details about this asset"), {
+    fireEvent.change(dialogScope.getByPlaceholderText("Add some details about this asset"), {
       target: { value: "New notes" },
     });
-    fireEvent.click(cardScope.getByRole("button", { name: "Save" }));
+    fireEvent.click(dialogScope.getByRole("button", { name: "Save details" }));
 
     await waitFor(() => expect(updateAssetMetaMock).toHaveBeenCalledTimes(1));
     const [id, payload] = updateAssetMetaMock.mock.calls[0];
@@ -2239,10 +2485,17 @@ describe("AssetGrid shared dialogs and toasts", () => {
     expect(Object.keys(payload as object).sort()).toEqual(["creator", "notes"]);
     expect(payload).toEqual({ notes: "New notes", creator: "New creator" });
 
-    // The server row is reconciled in place: the card shows the saved values
-    // and the grid never refetches page 1.
-    await waitFor(() => expect(cardScope.getByText("By New creator")).toBeTruthy());
-    expect(cardScope.getByText("New notes")).toBeTruthy();
+    // The dialog's editor holds the reconciled server row...
+    await waitFor(() =>
+      expect(
+        (dialogScope.getByPlaceholderText("Add some details about this asset") as HTMLTextAreaElement)
+          .value,
+      ).toBe("New notes"),
+    );
+    // ...and the card face shows the saved creator, so the row was reconciled in
+    // place and the grid never refetched page 1.
+    fireEvent.click(dialogScope.getAllByRole("button", { name: "Close" })[0]);
+    await waitFor(() => expect(within(card).getByText("By New creator")).toBeTruthy());
     expect(listAssetsMock.mock.calls.length).toBe(callsBefore);
   });
 
@@ -2254,20 +2507,18 @@ describe("AssetGrid shared dialogs and toasts", () => {
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await waitForGrid();
     const callsBefore = listAssetsMock.mock.calls.length;
+    const card = cardFor("a1");
 
-    fireEvent.click(screen.getByRole("button", { name: "Expand" }));
-    const editButton = screen.getByRole("button", { name: "Edit details" });
-    const card = editButton.closest("[data-asset-id]") as HTMLElement;
-    fireEvent.click(editButton);
-    const cardScope = within(card);
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Edit details…" }));
+    const dialogScope = within(screen.getByRole("dialog"));
 
-    fireEvent.change(cardScope.getByPlaceholderText("Designer or source"), {
+    fireEvent.change(dialogScope.getByPlaceholderText("Designer or source"), {
       target: { value: "" },
     });
-    fireEvent.change(cardScope.getByPlaceholderText("Add some details about this asset"), {
+    fireEvent.change(dialogScope.getByPlaceholderText("Add some details about this asset"), {
       target: { value: "" },
     });
-    fireEvent.click(cardScope.getByRole("button", { name: "Save" }));
+    fireEvent.click(dialogScope.getByRole("button", { name: "Save details" }));
 
     await waitFor(() => expect(updateAssetMetaMock).toHaveBeenCalledTimes(1));
     const payload = updateAssetMetaMock.mock.calls[0][1];
@@ -2275,10 +2526,257 @@ describe("AssetGrid shared dialogs and toasts", () => {
     // string clears, so the card must not send null for an emptied field.
     expect(payload).toEqual({ notes: "", creator: "" });
 
-    // Cleared in place from the server row, again without a refetch.
-    await waitFor(() => expect(cardScope.getByText("Not set")).toBeTruthy());
-    expect(cardScope.getByText("Add notes")).toBeTruthy();
+    // The read-only `Not set` / `Add notes` block only renders for a
+    // non-contributor, so a contributor proves the clear through the fields the
+    // server row was reconciled into: both are empty, and the card face no
+    // longer claims an attribution line. Still no refetch.
+    await waitFor(() =>
+      expect(
+        (dialogScope.getByPlaceholderText("Designer or source") as HTMLInputElement).value,
+      ).toBe(""),
+    );
+    expect(
+      (dialogScope.getByPlaceholderText("Add some details about this asset") as HTMLTextAreaElement)
+        .value,
+    ).toBe("");
+    fireEvent.click(dialogScope.getAllByRole("button", { name: "Close" })[0]);
+    await waitFor(() => expect(within(card).queryByText(/^By /)).toBeNull());
     expect(listAssetsMock.mock.calls.length).toBe(callsBefore);
+  });
+});
+
+// The card face is preview + name + fact line + filename + attribution + tags +
+// the `Select` checkbox + one kebab trigger. Everything rare moved behind that
+// kebab or into the detail dialog; these tests pin where each control landed.
+// Measured (M1) for an editor-privileged bare card: 39 -> 14 nodes and 11 -> 2
+// interactive controls per card; tagged 47->19, prepared 44->18, missing 45->16
+// (all 11 -> 2), and `select` 2->0 / `input[type=file]` 1->0 everywhere.
+describe("AssetGrid card surface", () => {
+  const supportingFile: AssetFile = {
+    id: "sf1",
+    filename: "notes.pdf",
+    mime: "application/pdf",
+    size: 12,
+    position: 0,
+    url: "/files/sf1",
+  };
+
+  beforeEach(() => {
+    resetToasts();
+    listAssetsMock.mockReset();
+    listFoldersMock.mockReset();
+    listFoldersMock.mockResolvedValue([{ id: "f1", name: "Folder one", tags: [] }]);
+    listAssetFilesMock.mockReset();
+    listAssetFilesMock.mockResolvedValue([supportingFile]);
+    listAssetFileLimitsMock.mockReset();
+    listAssetFileLimitsMock.mockResolvedValue({ ...NO_FILE_LIMITS, count: 1, max_count: 5 });
+    deleteAssetMock.mockReset();
+    deletePreparedPrintMock.mockReset();
+    fileUrlMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+
+  async function renderCards(items: Asset[]) {
+    listAssetsMock.mockResolvedValue({ items, hasMore: false });
+    render(<AssetGrid canContribute canDelete theme="dark" />);
+    await screen.findByText(items[0].name);
+    await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
+  }
+
+  it("the card face offers no file-management control", async () => {
+    await renderCards(assets);
+
+    const management =
+      /Add files|Supporting files|Move .* up|Rename|Edit tags|Edit details|Add to project/;
+    for (const asset of assets) {
+      const card = cardFor(asset.id);
+      // None of the retired console survives on the card face...
+      expect(within(card).queryByRole("button", { name: management })).toBeNull();
+      // ...and neither do the controls it was built from.
+      expect(card.querySelectorAll("select, textarea, input[type=file]")).toHaveLength(0);
+      // The only named controls are the selection checkbox and the kebab.
+      expect(within(card).getByRole("checkbox", { name: "Select" })).toBeTruthy();
+      expect(
+        within(card).getAllByRole("button").map(button => button.getAttribute("aria-label")),
+      ).toEqual(["More actions"]);
+    }
+  });
+
+  it("every former card control has a home", async () => {
+    const variants: Asset[] = [
+      {
+        ...assets[0],
+        id: "v-bare",
+        name: "Bare asset",
+        filename: "bare.stl",
+        tags: [],
+        supporting_file_count: 1,
+      },
+      {
+        ...assets[0],
+        id: "v-tagged",
+        name: "Tagged asset",
+        filename: "tagged.stl",
+        tags: ["pla", "strong"],
+        supporting_file_count: 1,
+      },
+      {
+        ...assets[0],
+        id: "v-prepared",
+        name: "Prepared asset",
+        filename: "prepared.stl",
+        tags: [],
+        supporting_file_count: 1,
+        prepared_print: { printer: "X1C", removable: true },
+      },
+      {
+        ...assets[0],
+        id: "v-missing",
+        name: "Missing asset",
+        filename: "missing.stl",
+        tags: [],
+        supporting_file_count: 1,
+        missing_since: "2026-10-27T11:31:34+00:00",
+      },
+    ];
+    await renderCards(variants);
+
+    // Every variant carries one supporting file, so the count in the menu item
+    // label is 1.
+    const tools = [
+      "Open preview",
+      "Download",
+      "Add to project…",
+      "Rename…",
+      "Edit tags…",
+      "Edit details…",
+      "Supporting files (1)…",
+    ];
+
+    const bare = openCardMenu(cardFor("v-bare"));
+    expect(menuItemLabels(bare)).toEqual([...tools, "Delete"]);
+    closeCardMenu(bare);
+
+    // Tags add the download-by-tag group between Download and the tools.
+    const tagged = openCardMenu(cardFor("v-tagged"));
+    expect(menuItemLabels(tagged)).toEqual([
+      "Open preview",
+      "Download",
+      "Download tag: pla",
+      "Download tag: strong",
+      ...tools.slice(2),
+      "Delete",
+    ]);
+    expect(within(tagged).getByRole("group", { name: "Download by tag" })).toBeTruthy();
+    closeCardMenu(tagged);
+
+    // A removable prepared print keeps its clear action, just behind the kebab.
+    const prepared = openCardMenu(cardFor("v-prepared"));
+    expect(menuItemLabels(prepared)).toEqual([...tools, "Clear prepared print", "Delete"]);
+    closeCardMenu(prepared);
+
+    // The missing variant keeps its repair actions, both canDelete-gated.
+    const missing = openCardMenu(cardFor("v-missing"));
+    expect(menuItemLabels(missing)).toEqual([...tools, "Re-scan", "Forget entry", "Delete"]);
+    closeCardMenu(missing);
+
+    // The dialog is the second home: tag editor, notes/creator editor, the
+    // folder select and the supporting-file console all live there.
+    const menu = openCardMenu(cardFor("v-bare"));
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Supporting files (1)…" }));
+    const dialog = screen.getByRole("dialog", { name: "Bare asset" });
+    const scope = within(dialog);
+
+    expect(scope.getByRole("button", { name: "Save tags" })).toBeTruthy();
+    expect(scope.getByPlaceholderText("Designer or source")).toBeTruthy();
+    expect(scope.getByPlaceholderText("Add some details about this asset")).toBeTruthy();
+    expect(folderSelectIn(dialog)).toBeTruthy();
+
+    await scope.findByText("notes.pdf");
+    expect(scope.getByRole("button", { name: "Preview notes.pdf" })).toBeTruthy();
+    expect(scope.getByRole("button", { name: "Move notes.pdf down" })).toBeTruthy();
+    expect(scope.getByRole("button", { name: "Rename" })).toBeTruthy();
+    expect(scope.getByRole("button", { name: "Remove" })).toBeTruthy();
+    // The asset download and the per-file download are both anchors.
+    expect(scope.getAllByRole("link", { name: "Download" })).toHaveLength(2);
+
+    // A plain preview opens the same dialog with the files panel collapsed, and
+    // a collapsed panel issues no list request.
+    fireEvent.click(scope.getAllByRole("button", { name: "Close" })[0]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    listAssetFilesMock.mockClear();
+
+    fireEvent.click(within(openCardMenu(cardFor("v-bare"))).getByRole("menuitem", {
+      name: "Open preview",
+    }));
+    screen.getByRole("dialog", { name: "Bare asset" });
+    expect(listAssetFilesMock).not.toHaveBeenCalled();
+  });
+
+  it("the detail dialog traps focus, closes on Escape and returns focus to the trigger", async () => {
+    await renderCards([assets[0]]);
+
+    const card = cardFor("a1");
+    const trigger = within(card).getByRole("button", { name: "More actions" });
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Edit details…" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Calibration cube" });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    // The item that opened the dialog names the field to land on.
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(
+      within(dialog).getByPlaceholderText("Designer or source"),
+    );
+
+    // `aria-modal` promises containment, so Tab cycles inside the panel rather
+    // than walking out into the grid behind the overlay.
+    const focusable = Array.from(
+      dialog.querySelectorAll<HTMLElement>('button, input, textarea, select, a[href]'),
+    ).filter(element => !element.hasAttribute("disabled"));
+    focusable[focusable.length - 1].focus();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Tab" });
+    expect(document.activeElement).toBe(focusable[0]);
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Focus returns to the control that opened the dialog, not to <body>.
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("keeps the dialog open when an inline editor consumes Escape", async () => {
+    updateAssetMetaMock.mockClear();
+    await renderCards([assets[0]]);
+
+    const dialog = openCardDialog(cardFor("a1"), "Rename…");
+    const nameInput = within(dialog).getByLabelText("Name") as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "Draft name" } });
+
+    // The field reverts its own draft and the dialog must survive the same key.
+    fireEvent.keyDown(nameInput, { key: "Escape" });
+    expect(nameInput.value).toBe("Calibration cube");
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    // Escape reverted the draft, so no rename was ever sent.
+    expect(updateAssetMetaMock).not.toHaveBeenCalled();
+  });
+
+  it("closes only the nested supporting-file preview on Escape", async () => {
+    await renderCards([{ ...assets[0], supporting_file_count: 1 }]);
+
+    const dialog = openCardDialog(cardFor("a1"), "Supporting files (1)…");
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Preview notes.pdf" }));
+    const preview = await screen.findByRole("dialog", { name: "notes.pdf" });
+
+    // The nested preview owns Escape; the host dialog must not close with it.
+    fireEvent.keyDown(preview, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "notes.pdf" })).toBeNull(),
+    );
+    expect(screen.getByRole("dialog", { name: "Calibration cube" })).toBe(dialog);
   });
 });
 

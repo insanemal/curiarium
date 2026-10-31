@@ -18,6 +18,7 @@ import { useVirtualRows } from "../useVirtualRows";
 import AssetGridBody from "./AssetGridBody";
 import AssetToolbar from "./AssetToolbar";
 import AssetCard from "./AssetCard";
+import type { DetailSection } from "./AssetDetailsEditor";
 import { AssetPreviewModal } from "./preview";
 import { noop } from "./assetGridMeta";
 import { useAssetActions } from "./useAssetActions";
@@ -78,6 +79,7 @@ export default function AssetGrid({
 }: Props) {
   const isProject = projectId != null;
   const [previewItem, setPreviewItem] = useState<Asset | null>(null);
+  const [previewSection, setPreviewSection] = useState<DetailSection | null>(null);
   // The assets the user asked to delete, or null when the dialog is closed. The
   // parent stays the only owner of the request so the grid's optimistic update
   // and selection retention keep a single path.
@@ -152,7 +154,6 @@ export default function AssetGrid({
     bulkSetTags,
     bulkSetMeta,
     bulkAddToProject,
-    bulkDownloading,
     downloadSelected,
     downloadByTag,
   } = useBulkActions({
@@ -178,6 +179,8 @@ export default function AssetGrid({
     onSaveDetails,
     onRename,
     onMoveFolder,
+    clearPreparedPrint,
+    preparedClearingId,
     downloadSingle,
     openInSlicer,
     openInEngraving,
@@ -258,6 +261,20 @@ export default function AssetGrid({
   });
 
   const closeDeleteDialog = useStableCallback(() => setDeleteTargets(null));
+
+  // Stable identities so `AssetCard`'s memo keeps skipping untouched cards.
+  const openPreview = useStableCallback((asset: Asset | null) => {
+    setPreviewSection(null);
+    setPreviewItem(asset);
+  });
+  const openDetails = useStableCallback((asset: Asset, section: DetailSection) => {
+    setPreviewSection(section);
+    setPreviewItem(asset);
+  });
+  const closePreview = useStableCallback(() => {
+    setPreviewItem(null);
+    setPreviewSection(null);
+  });
 
   const openMetaDialog = useStableCallback(() => {
     if (!selectedIds.size) return;
@@ -343,24 +360,15 @@ export default function AssetGrid({
       item={item}
       canContribute={canContribute}
       canDelete={canDelete}
-      onSaveTags={onSaveTags}
-      onSaveDetails={onSaveDetails}
-      onRename={onRename}
-      onPreview={setPreviewItem}
+      onPreview={openPreview}
+      onOpenDetails={openDetails}
       onDownloadSingle={downloadSingle}
+      onDownloadByTag={downloadByTag}
       downloading={downloadingId === item.id}
       onDelete={removeAsset}
       onAddToProject={addToProject}
-      onMoveFolder={onMoveFolder}
-      folderOptions={folderOptions}
-      showFolderControls={!isProject}
-      moving={movingId === item.id}
-      onDownloadByTag={downloadByTag}
-      onDownloadSelected={downloadSelected}
       selected={selectedIds.has(item.id)}
       onToggleSelected={toggleSelected}
-      hasSelection={selectedIds.size > 0}
-      bulkDownloading={Boolean(bulkDownloading)}
       slicerEnabled={slicerEnabled}
       slicerLabel={slicerLabel}
       onOpenInSlicer={openInSlicer}
@@ -373,7 +381,8 @@ export default function AssetGrid({
       onForgetMissing={forgetMissingAsset}
       onRescanMissing={rescanMissing}
       rescanning={rescanning}
-      onRequestConfirm={requestConfirm}
+      onClearPreparedPrint={clearPreparedPrint}
+      preparedClearing={preparedClearingId === item.id}
     />
   );
 
@@ -475,7 +484,23 @@ export default function AssetGrid({
         loadMore={loadMore}
       />
       {previewItem && (
-        <AssetPreviewModal asset={previewItem} theme={theme} onClose={() => setPreviewItem(null)} />
+        <AssetPreviewModal
+          asset={previewItem}
+          theme={theme}
+          onClose={closePreview}
+          canContribute={canContribute}
+          canDelete={canDelete}
+          onSaveTags={onSaveTags}
+          onSaveDetails={onSaveDetails}
+          onRename={onRename}
+          onMoveFolder={onMoveFolder}
+          folderOptions={folderOptions}
+          showFolderControls={!isProject}
+          moving={movingId === previewItem.id}
+          onAssetChanged={replaceAsset}
+          onRequestConfirm={requestConfirm}
+          initialSection={previewSection}
+        />
       )}
       </div>
       {pendingConfirm && (

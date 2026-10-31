@@ -9,6 +9,7 @@ import {
 import {
   type Asset,
   UnauthorizedError,
+  deletePreparedPrint,
   downloadAsset,
   fileUrl,
   getLibraryScanStatus,
@@ -79,6 +80,8 @@ export type AssetActionsApi = {
   ) => Promise<void>;
   onRename: (id: string, name: string) => Promise<void>;
   onMoveFolder: (id: string, folder_id: string | null) => Promise<void>;
+  clearPreparedPrint: (asset: Asset) => void;
+  preparedClearingId: string | null;
   downloadSingle: (asset: Asset) => Promise<void>;
   openInSlicer: (asset: Asset) => void;
   openInEngraving: (asset: Asset) => void;
@@ -122,6 +125,7 @@ export function useAssetActions({
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
   const [movingId, setMovingId] = useState<string | null>(null);
+  const [preparedClearingId, setPreparedClearingId] = useState<string | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<ConfirmRequest | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const confirmRunningRef = useRef(false);
@@ -161,6 +165,27 @@ export function useAssetActions({
   // memoised cards can request one without re-rendering.
   const requestConfirm = useStableCallback((request: ConfirmRequest) => {
     setPendingConfirm(request);
+  });
+
+  // Clearing a prepared print used to be card-local state; it now lives here so
+  // the kebab menu's only job is to ask for the confirmation.
+  const clearPreparedPrint = useStableCallback((asset: Asset) => {
+    requestConfirm({
+      title: "Clear the attached prepared print from this model?",
+      danger: true,
+      confirmLabel: "Clear",
+      run: async () => {
+        setPreparedClearingId(asset.id);
+        try {
+          replaceAsset(await deletePreparedPrint(asset.id));
+        } catch (err) {
+          console.error(err);
+          notifyError(err instanceof Error ? err.message : "Failed to clear prepared print");
+        } finally {
+          setPreparedClearingId(null);
+        }
+      },
+    });
   });
 
   const runPendingConfirm = useStableCallback(async () => {
@@ -361,6 +386,8 @@ export function useAssetActions({
     onSaveDetails,
     onRename,
     onMoveFolder,
+    clearPreparedPrint,
+    preparedClearingId,
     downloadSingle,
     openInSlicer,
     openInEngraving,

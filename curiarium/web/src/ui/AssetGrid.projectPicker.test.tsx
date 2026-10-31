@@ -137,9 +137,15 @@ describe("AssetGrid add-to-project", () => {
     boxes.forEach(box => fireEvent.click(box));
 
     // Scope to one card: the bulk bar above it carries a button of the same
-    // name, so a bare getAllByRole would not prove the card path.
+    // name, so a bare getAllByRole would not prove the card path. The card's
+    // action now lives behind its kebab menu, so open that first.
     const card = document.querySelector('[data-asset-id="asset-2"]') as HTMLElement;
-    fireEvent.click(within(card).getByRole("button", { name: "Add to project…" }));
+    fireEvent.click(within(card).getByRole("button", { name: "More actions" }));
+
+    const menuItem = screen.getByRole("menuitem", { name: "Add to project…" });
+    // Exactly one card menu is open, so this cannot be the bulk bar's button.
+    expect(screen.getAllByRole("menuitem", { name: "Add to project…" })).toHaveLength(1);
+    fireEvent.click(menuItem);
 
     const dialog = await screen.findByRole("dialog", { name: "Add to project" });
     fireEvent.click(await within(dialog).findByRole("radio", { name: "Hydra" }));

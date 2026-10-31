@@ -203,31 +203,57 @@ function cardFor(assetId: string): HTMLElement {
   return card;
 }
 
-function folderSelectIn(card: HTMLElement): HTMLSelectElement | null {
+/**
+ * The dialog's folder select, identified by the option `listFolders` provides
+ * (`f1`). Folder chrome is dialog-only now: the card face has no selects.
+ */
+function folderSelectIn(scope: HTMLElement): HTMLSelectElement | null {
   return (
-    Array.from(card.querySelectorAll("select")).find(select =>
-      // The folder options come from `listFolders`, so "f1" identifies it.
+    Array.from(scope.querySelectorAll("select")).find(select =>
       Array.from(select.options).some(option => option.value === "f1"),
     ) ?? null
   );
 }
 
-function downloadSelectIn(card: HTMLElement): HTMLSelectElement | null {
-  return (
-    Array.from(card.querySelectorAll("select")).find(select =>
-      Array.from(select.options).some(option => option.textContent === "Download..."),
-    ) ?? null
-  );
+/**
+ * Opens a card's kebab and returns the menu.
+ *
+ * The menu is portalled to `document.body` (the card is `overflow-hidden`), so
+ * it is never inside the card: always query it at screen scope.
+ */
+function openCardMenu(card: HTMLElement): HTMLElement {
+  fireEvent.click(within(card).getByRole("button", { name: "More actions" }));
+  return screen.getByRole("menu");
 }
 
-/** The supporting-file list only loads once the card section is expanded. */
-async function expandSupportingFiles(card: HTMLElement) {
-  fireEvent.click(within(card).getByRole("button", { name: /Supporting files/ }));
-  return within(card).findByText("notes.pdf");
+function closeCardMenu(menu: HTMLElement): void {
+  fireEvent.keyDown(menu, { key: "Escape" });
+}
+
+/** Opens a card's dialog through a named menu item and returns the dialog. */
+function openCardDialog(card: HTMLElement, item: string): HTMLElement {
+  const menu = openCardMenu(card);
+  fireEvent.click(within(menu).getByRole("menuitem", { name: item }));
+  return screen.getByRole("dialog");
+}
+
+/**
+ * The supporting-file list only loads once the panel is expanded, and only the
+ * `Supporting files (N)…` menu item opens it expanded. Returns the dialog.
+ */
+async function expandSupportingFiles(card: HTMLElement): Promise<HTMLElement> {
+  const dialog = openCardDialog(card, `Supporting files (1)…`);
+  await within(dialog).findByText("notes.pdf");
+  return dialog;
 }
 
 /** Clicks every control a viewer can reach, skipping hidden inputs. */
 function clickEveryVisibleControl(): void {
+  // Every card control lives behind its kebab now: open each trigger first so
+  // the portalled menu items are in `document` for the sweep below.
+  for (const trigger of screen.queryAllByRole("button", { name: "More actions" })) {
+    fireEvent.click(trigger);
+  }
   const controls = Array.from(
     document.querySelectorAll<HTMLElement>("button, select, input, a"),
   );
@@ -358,34 +384,64 @@ describe("AssetGrid role capability", () => {
       await screen.findByText("Calibration cube");
 
       const card = cardFor("a1");
-      for (const name of ["Edit tags", "Add to project…", "Delete", "Add files"]) {
-        expect(within(card).queryByRole("button", { name })).toBeNull();
-      }
-      expect(folderSelectIn(card)).toBeNull();
-
-      // Reads stay: the selection checkbox, the download menu and the counts.
+      // The card face is exactly two controls now.
       expect(within(card).getByRole("checkbox", { name: "Select" })).toBeTruthy();
-      expect(downloadSelectIn(card)).toBeTruthy();
-      expect(within(card).getByRole("button", { name: /Supporting files/ }).textContent).toContain(
-        "1",
-      );
+      expect(within(card).getByRole("button", { name: "More actions" })).toBeTruthy();
       expect(within(card).getByText("By Ada")).toBeTruthy();
       expect(within(card).getByText("pla")).toBeTruthy();
 
-      await expandSupportingFiles(card);
+      // Reads stay in the menu (the download select it replaced is gone from
+      // every surface); every write item a viewer must not see is absent, not
+      // disabled.
+      const menu = openCardMenu(card);
+      expect(within(menu).getByRole("menuitem", { name: "Open preview" })).toBeTruthy();
+      expect(within(menu).getByRole("menuitem", { name: "Download" })).toBeTruthy();
+      expect(within(menu).getByRole("menuitem", { name: "Supporting files (1)…" })).toBeTruthy();
+      for (const name of [
+        "Rename…",
+        "Edit tags…",
+        "Edit details…",
+        "Delete",
+        "Add to project…",
+        "Clear prepared print",
+        "Re-scan",
+        "Forget entry",
+      ]) {
+        expect(within(menu).queryByRole("menuitem", { name })).toBeNull();
+      }
+      closeCardMenu(menu);
+
+      const dialog = await expandSupportingFiles(card);
+      const dialogScope = within(dialog);
+      // The dialog's editors are gated too: no save routes and no folder axis.
+      for (const name of ["Save name", "Save tags", "Save details", "Add files"]) {
+        expect(dialogScope.queryByRole("button", { name })).toBeNull();
+      }
+      expect(folderSelectIn(dialog)).toBeNull();
       // The file list itself is a read: preview and download stay, the
       // reorder/rename/remove controls do not.
-      expect(within(card).getByRole("button", { name: "Preview notes.pdf" })).toBeTruthy();
-      expect(within(card).getByRole("link", { name: "Download" })).toBeTruthy();
+      expect(dialogScope.getByRole("button", { name: "Preview notes.pdf" })).toBeTruthy();
+      // The asset download and the per-file download are both anchors.
+      expect(dialogScope.getAllByRole("link", { name: "Download" })).toHaveLength(2);
       for (const name of [/Move notes.pdf up/, /Move notes.pdf down/, "Rename", "Remove"]) {
-        expect(within(card).queryByRole("button", { name })).toBeNull();
+        expect(dialogScope.queryByRole("button", { name })).toBeNull();
       }
 
       // The read-only creator/notes display survives; its editor trigger does not.
-      fireEvent.click(within(card).getByRole("button", { name: "Expand" }));
-      expect(within(card).getByText("Ada")).toBeTruthy();
-      expect(within(card).getByText("Strong print")).toBeTruthy();
-      expect(within(card).queryByRole("button", { name: "Edit details" })).toBeNull();
+      // `By Ada` appears twice (dialog header + read-only block), so count it.
+      expect(dialogScope.getAllByText("By Ada").length).toBeGreaterThan(0);
+      expect(dialogScope.getByText("Strong print")).toBeTruthy();
+    });
+
+    it("shows the read-only Not set / Add notes block on an undocumented asset", async () => {
+      renderGrid(VIEWER);
+      await screen.findByText("Prepared spool");
+
+      const dialog = openCardDialog(cardFor("b2"), "Open preview");
+      // Neither has a creator nor notes, so the viewer's read-only block is the
+      // only place these placeholders can come from.
+      expect(within(dialog).getByText("Not set")).toBeTruthy();
+      expect(within(dialog).getByText("Add notes")).toBeTruthy();
     });
 
     it("keeps the missing-file banner but not its repair controls", async () => {
@@ -394,8 +450,9 @@ describe("AssetGrid role capability", () => {
 
       const card = cardFor("m3");
       expect(within(card).getByText("File missing")).toBeTruthy();
-      expect(within(card).queryByRole("button", { name: "Re-scan" })).toBeNull();
-      expect(within(card).queryByRole("button", { name: "Forget entry" })).toBeNull();
+      const menu = openCardMenu(card);
+      expect(within(menu).queryByRole("menuitem", { name: "Re-scan" })).toBeNull();
+      expect(within(menu).queryByRole("menuitem", { name: "Forget entry" })).toBeNull();
     });
 
     it("keeps the prepared-print summary but drops its clear action", async () => {
@@ -404,7 +461,8 @@ describe("AssetGrid role capability", () => {
 
       const card = cardFor("b2");
       expect(within(card).getByText("Prepared for X1C")).toBeTruthy();
-      expect(within(card).queryByRole("button", { name: "Clear" })).toBeNull();
+      const menu = openCardMenu(card);
+      expect(within(menu).queryByRole("menuitem", { name: "Clear prepared print" })).toBeNull();
     });
 
     it("leaves the card name as plain text when it is double-clicked", async () => {
@@ -454,34 +512,56 @@ describe("AssetGrid role capability", () => {
       await screen.findByText("Calibration cube");
 
       const card = cardFor("a1");
-      for (const name of ["Edit tags", "Add to project…", "Delete", "Add files"]) {
-        expect(within(card).getByRole("button", { name })).toBeTruthy();
+      const menu = openCardMenu(card);
+      for (const name of [
+        "Add to project…",
+        "Rename…",
+        "Edit tags…",
+        "Edit details…",
+        "Supporting files (1)…",
+        "Delete",
+      ]) {
+        expect(within(menu).getByRole("menuitem", { name })).toBeTruthy();
       }
-      expect(folderSelectIn(card)).toBeTruthy();
+      closeCardMenu(menu);
 
-      await expandSupportingFiles(card);
+      const dialog = await expandSupportingFiles(card);
+      const dialogScope = within(dialog);
+      // `Add files` and the folder select live in the dialog, not on the card.
+      expect(dialogScope.getByRole("button", { name: "Add files" })).toBeTruthy();
+      expect(folderSelectIn(dialog)).toBeTruthy();
       for (const name of [/Move notes.pdf up/, /Move notes.pdf down/, "Rename", "Remove"]) {
-        expect(within(card).getByRole("button", { name })).toBeTruthy();
+        expect(dialogScope.getByRole("button", { name })).toBeTruthy();
       }
+      // The details editor is interactive inside the dialog, not just visible.
+      expect(dialogScope.getByRole("button", { name: "Save details" })).toBeTruthy();
+      expect(dialogScope.getByPlaceholderText("Designer or source")).toBeTruthy();
+      expect(dialogScope.getByRole("button", { name: "Save tags" })).toBeTruthy();
+      fireEvent.click(dialogScope.getAllByRole("button", { name: "Close" })[0]);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
-      fireEvent.click(within(card).getByRole("button", { name: "Expand" }));
-      expect(within(card).getByRole("button", { name: "Edit details" })).toBeTruthy();
+      // Repair actions are kebab items on the missing variant...
+      const missingMenu = openCardMenu(cardFor("m3"));
+      expect(within(missingMenu).getByRole("menuitem", { name: "Re-scan" })).toBeTruthy();
+      expect(within(missingMenu).getByRole("menuitem", { name: "Forget entry" })).toBeTruthy();
+      closeCardMenu(missingMenu);
 
-      const missing = cardFor("m3");
-      expect(within(missing).getByRole("button", { name: "Re-scan" })).toBeTruthy();
-      expect(within(missing).getByRole("button", { name: "Forget entry" })).toBeTruthy();
-
-      expect(within(cardFor("b2")).getByRole("button", { name: "Clear" })).toBeTruthy();
+      // ...and the prepared-print clear is the last destructive item.
+      const preparedMenu = openCardMenu(cardFor("b2"));
+      expect(
+        within(preparedMenu).getByRole("menuitem", { name: "Clear prepared print" }),
+      ).toBeTruthy();
     });
 
     it("drops the open tag editor when the role is demoted mid-edit", async () => {
       const { rerender } = renderGrid(EDITOR);
       await screen.findByText("Calibration cube");
 
-      fireEvent.click(within(cardFor("a1")).getByRole("button", { name: "Edit tags" }));
+      const card = cardFor("a1");
+      const dialog = openCardDialog(card, "Edit tags…");
       // The tag editor is open: its Save button is the marker (the placeholder
       // is empty for an asset that already carries tags).
-      expect(within(cardFor("a1")).getByRole("button", { name: "Save" })).toBeTruthy();
+      expect(within(dialog).getByRole("button", { name: "Save tags" })).toBeTruthy();
 
       rerender(
         <>
@@ -492,9 +572,11 @@ describe("AssetGrid role capability", () => {
 
       // The editor cannot outlive the capability that opened it.
       await waitFor(() =>
-        expect(within(cardFor("a1")).queryByRole("button", { name: "Save" })).toBeNull(),
+        expect(within(dialog).queryByRole("button", { name: "Save tags" })).toBeNull(),
       );
-      expect(screen.queryByRole("button", { name: "Edit tags" })).toBeNull();
+      // Nor can the menu offer a way back in.
+      const menu = openCardMenu(card);
+      expect(within(menu).queryByRole("menuitem", { name: "Edit tags…" })).toBeNull();
     });
   });
 
@@ -522,30 +604,37 @@ describe("AssetGrid role capability", () => {
       await screen.findByText("Calibration cube");
 
       const card = cardFor("a1");
-      for (const name of ["Add files", "Edit tags", "Add to project…"]) {
-        expect(within(card).getByRole("button", { name })).toBeTruthy();
+      const menu = openCardMenu(card);
+      for (const name of ["Add to project…", "Edit tags…", "Edit details…"]) {
+        expect(within(menu).getByRole("menuitem", { name })).toBeTruthy();
       }
+      // Renaming the asset itself is a delete-gated write, so a contributor
+      // gets no `Rename…` item.
+      expect(within(menu).queryByRole("menuitem", { name: "Rename…" })).toBeNull();
+      closeCardMenu(menu);
 
-      await expandSupportingFiles(card);
+      const dialog = await expandSupportingFiles(card);
+      const dialogScope = within(dialog);
+      // The upload surface lives in the dialog now.
+      expect(dialogScope.getByRole("button", { name: "Add files" })).toBeTruthy();
       // Opening the list and its preview is a read, so both stay.
-      expect(within(card).getByRole("button", { name: "Preview notes.pdf" })).toBeTruthy();
+      expect(dialogScope.getByRole("button", { name: "Preview notes.pdf" })).toBeTruthy();
       // Reorder and the display-only rename are contribute in the API matrix
       // (`PUT /asset/{id}/files/order`, `PATCH /asset/{id}/files/{file_id}`):
       // they never touch the bytes, so a contributor keeps them.
       for (const name of [/Move notes.pdf up/, /Move notes.pdf down/, "Rename"]) {
-        expect(within(card).getByRole("button", { name })).toBeTruthy();
+        expect(dialogScope.getByRole("button", { name })).toBeTruthy();
       }
 
-      // The details editor opens and is interactive, not just visible.
-      fireEvent.click(within(card).getByRole("button", { name: "Expand" }));
-      fireEvent.click(within(card).getByRole("button", { name: "Edit details" }));
-      expect(within(card).getByRole("button", { name: "Save" })).toBeTruthy();
-      expect(within(card).getByPlaceholderText("Designer or source")).toBeTruthy();
-      fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+      // The details editor is interactive, not just visible.
+      expect(dialogScope.getByRole("button", { name: "Save details" })).toBeTruthy();
+      expect(dialogScope.getByPlaceholderText("Designer or source")).toBeTruthy();
+      // One Cancel per editor block (tags and details).
+      expect(dialogScope.getAllByRole("button", { name: "Cancel" })).toHaveLength(2);
 
-      // The tag editor opens too: its Save button only exists while it is open.
-      fireEvent.click(within(card).getByRole("button", { name: "Edit tags" }));
-      expect(within(card).getByRole("button", { name: "Save" })).toBeTruthy();
+      // The tag editor is open in the same dialog: its Save button only exists
+      // while the capability that renders it holds.
+      expect(dialogScope.getByRole("button", { name: "Save tags" })).toBeTruthy();
     });
 
     it("loses the destroy controls a viewer also lacks", async () => {
@@ -553,19 +642,28 @@ describe("AssetGrid role capability", () => {
       await screen.findByText("Calibration cube");
 
       const card = cardFor("a1");
-      expect(within(card).queryByRole("button", { name: "Delete" })).toBeNull();
-      expect(folderSelectIn(card)).toBeNull();
+      const menu = openCardMenu(card);
+      expect(within(menu).queryByRole("menuitem", { name: "Delete" })).toBeNull();
+      expect(within(menu).queryByRole("menuitem", { name: "Rename…" })).toBeNull();
+      closeCardMenu(menu);
 
-      await expandSupportingFiles(card);
+      const dialog = await expandSupportingFiles(card);
+      const dialogScope = within(dialog);
+      // Moving an asset between folders is asset-level and delete-gated.
+      expect(folderSelectIn(dialog)).toBeNull();
       // `DELETE /asset/{id}/files/{file_id}` is WRITE, so Remove goes even
       // though the reorder and rename buttons beside it stay.
-      expect(within(card).queryByRole("button", { name: "Remove" })).toBeNull();
+      expect(dialogScope.queryByRole("button", { name: "Remove" })).toBeNull();
 
-      const missing = cardFor("m3");
-      expect(within(missing).queryByRole("button", { name: "Re-scan" })).toBeNull();
-      expect(within(missing).queryByRole("button", { name: "Forget entry" })).toBeNull();
+      const missingMenu = openCardMenu(cardFor("m3"));
+      expect(within(missingMenu).queryByRole("menuitem", { name: "Re-scan" })).toBeNull();
+      expect(within(missingMenu).queryByRole("menuitem", { name: "Forget entry" })).toBeNull();
+      closeCardMenu(missingMenu);
 
-      expect(within(cardFor("b2")).queryByRole("button", { name: "Clear" })).toBeNull();
+      const preparedMenu = openCardMenu(cardFor("b2"));
+      expect(
+        within(preparedMenu).queryByRole("menuitem", { name: "Clear prepared print" }),
+      ).toBeNull();
     });
 
     it("leaves the card name as plain text when it is double-clicked", async () => {
@@ -586,8 +684,21 @@ describe("AssetGrid role capability", () => {
       await screen.findByText("Calibration cube");
 
       const card = cardFor("a1");
-      fireEvent.click(within(card).getByRole("button", { name: "Add files" }));
-      fireEvent.click(within(card).getByRole("button", { name: "Add to project…" }));
+      // `Add files` is a contribute surface in the dialog; clicking it opens the
+      // OS picker, never a request.
+      const dialog = await expandSupportingFiles(card);
+      const dialogScope = within(dialog);
+      fireEvent.click(dialogScope.getByRole("button", { name: "Add files" }));
+      fireEvent.click(dialogScope.getAllByRole("button", { name: "Close" })[0]);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+      fireEvent.click(
+        within(openCardMenu(card)).getByRole("menuitem", { name: "Add to project…" }),
+      );
+      // The project picker is a contribute route; close it so the bar below is
+      // the only open surface.
+      const picker = within(screen.getByRole("dialog", { name: "Add to project" }));
+      fireEvent.click(picker.getByRole("button", { name: "Cancel" }));
 
       const boxes = screen.getAllByRole("checkbox", { name: "Select" });
       fireEvent.click(boxes[0]);
