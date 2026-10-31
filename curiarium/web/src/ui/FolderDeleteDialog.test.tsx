@@ -22,6 +22,8 @@ const BASE_PREVIEW: FolderDeletePreview = {
   files: 5,
   bytes: 4096,
   in_trash: false,
+  // BASE_PREVIEW describes a folder with no directory on disk, so no bytes move.
+  would_move_bytes: false,
 };
 
 type Overrides = {
@@ -95,6 +97,25 @@ describe("FolderDeleteDialog", () => {
     expect(path.tagName).toBe("CODE");
     expect(dialog().getByText(/first moved to the server/)).toBeTruthy();
     expect(dialog().queryByText(/not linked to a directory on disk/)).toBeNull();
+  });
+
+  it("says a name-derived directory moves to the trash when an unlinked folder still has bytes", async () => {
+    getFolderDeletePreviewMock.mockResolvedValue({
+      ...BASE_PREVIEW,
+      storage_path: null,
+      would_move_bytes: true,
+    });
+    renderDialog();
+
+    // The unlinked flag stays, but the "nothing moves" claim must be gone.
+    expect(await dialog().findByText(/not linked to a directory on disk/)).toBeTruthy();
+    expect(dialog().queryByText(/nothing is moved to .trash/)).toBeNull();
+    expect(dialog().queryByText(/removes only its records/)).toBeNull();
+
+    expect(dialog().getByText(/a directory for it does exist in storage/)).toBeTruthy();
+    expect(dialog().getByText(/moves that directory into the server/)).toBeTruthy();
+    // The bytes really do land in .trash, so the restore caveat applies.
+    expect(dialog().getByText(/move the folder back from/)).toBeTruthy();
   });
 
   it("deletes only once the folder name is typed and reports the result", async () => {

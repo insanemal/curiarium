@@ -21,8 +21,12 @@ export type FolderDeletePreview = {
   files: number;
   bytes: number;
   in_trash: boolean;
+  // The backend's conservative answer to "will this delete move any file into
+  // .trash?" - true even for a folder with no recorded storage_path, when the
+  // delete still renames a name-derived directory on disk into .trash.
+  would_move_bytes: boolean;
   // The folder's own directory identity on disk; null for a migrated legacy
-  // row, which has no directory to move.
+  // row, which has no directory of its own recorded.
   storage_path?: string | null;
   snapshot?: SnapshotNotice | null;
 };

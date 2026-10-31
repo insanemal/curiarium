@@ -728,6 +728,7 @@ def test_delete_preview_counts_and_writes_nothing(isolated_storage: Path) -> Non
             "bytes": 30,
             "in_trash": False,
             "storage_path": "Parent",
+            "would_move_bytes": True,
             "snapshot": notice(snapshots.SnapshotReason.PRE_DELETE, "warn"),
         }
 
@@ -750,6 +751,92 @@ def test_delete_preview_reports_folder_already_in_trash(isolated_storage: Path) 
 
     assert preview.status_code == 200, preview.text
     assert preview.json()["in_trash"] is True
+
+
+def test_a_path_less_folder_under_a_healed_parent_still_moves_bytes(
+    isolated_storage: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delete renames a real directory, so the preview must not say it moves nothing.
+
+    A NULL-path child under a healed parent gets its path from convergence at
+    delete time; the preview reads the same name-derived path read-only, and the
+    snapshot gate agrees with it instead of skipping the snapshot.
+    """
+    storage = isolated_storage
+    parent_id = insert_folder_row("n1", storage_path="Unsorted/coll/files/n1")
+    child_id = insert_folder_row("sub", parent_id=parent_id)
+    write_placeholder_file(storage / "Unsorted" / "coll" / "files" / "n1" / "sub" / "part.stl")
+    before = filesystem_snapshot(storage)
+
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        preview = client.get(f"/folder/{child_id}/delete-preview", headers=headers)
+        assert preview.status_code == 200, preview.text
+        body = preview.json()
+        assert body["storage_path"] is None
+        assert body["would_move_bytes"] is True
+        assert (body["folders"], body["assets"], body["files"], body["bytes"]) == (1, 0, 0, 0)
+
+        # The snapshot gate and the preview must not disagree about the delete.
+        with Session(engine) as session:
+            child = session.get(Folder, child_id)
+            assert trash_service.folder_delete_holds_bytes(session, child) is True
+
+        # Read-only: no convergence, no row write, no filesystem change.
+        assert read_folder(child_id).storage_path is None
+        assert read_folder(parent_id).storage_path == "Unsorted/coll/files/n1"
+        assert not (storage / ".trash").exists()
+        assert filesystem_snapshot(storage) == before
+
+        snapshot_fakes.use_provider(monkeypatch, storage)
+        response = client.delete(f"/folder/{child_id}?confirm_name=sub", headers=headers)
+        assert response.status_code == 200, response.text
+        deleted = response.json()
+
+    assert deleted["snapshot"]["action"] == "snapshot"
+    assert deleted["trash_path"] is not None
+    assert (storage / deleted["trash_path"] / "part.stl").read_bytes() == b"placeholder"
+
+
+def test_a_path_less_folder_with_no_directory_moves_nothing(isolated_storage: Path) -> None:
+    """A NULL-path root with no directory on disk has nothing for its delete to move."""
+    storage = isolated_storage
+    folder_id = insert_folder_row("Ghost")
+
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        preview = client.get(f"/folder/{folder_id}/delete-preview", headers=headers)
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["storage_path"] is None
+        assert preview.json()["would_move_bytes"] is False
+
+        response = client.delete(f"/folder/{folder_id}?confirm_name=Ghost", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["trash_path"] is None
+
+    assert not (storage / ".trash").exists()
+
+
+def test_a_linked_folder_with_files_moves_bytes_and_an_empty_one_does_not(
+    isolated_storage: Path,
+) -> None:
+    """A set storage_path is honoured as-is: its directory decides, not its rows."""
+    storage = isolated_storage
+    linked_id = insert_folder_row("Linked", storage_path="Linked")
+    write_placeholder_file(storage / "Linked" / "model.stl")
+    empty_id = insert_folder_row("Empty", storage_path="Empty")
+    (storage / "Empty").mkdir(parents=True)
+
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        linked = client.get(f"/folder/{linked_id}/delete-preview", headers=headers)
+        empty = client.get(f"/folder/{empty_id}/delete-preview", headers=headers)
+
+    assert linked.status_code == 200, linked.text
+    assert linked.json()["would_move_bytes"] is True
+    assert empty.status_code == 200, empty.text
+    assert empty.json()["would_move_bytes"] is False
 
 
 # --- carve-outs -------------------------------------------------------------

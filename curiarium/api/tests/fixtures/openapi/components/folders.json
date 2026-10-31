@@ -41,6 +41,10 @@
           }
         ],
         "title": "Storage Path"
+      },
+      "would_move_bytes": {
+        "title": "Would Move Bytes",
+        "type": "boolean"
       }
     },
     "required": [
@@ -48,7 +52,8 @@
       "assets",
       "files",
       "bytes",
-      "in_trash"
+      "in_trash",
+      "would_move_bytes"
     ],
     "title": "FolderDeletePreviewOut",
     "type": "object"

@@ -85,6 +85,7 @@ describe("Sidebar folder deletion", () => {
       files: 4,
       bytes: 2048,
       in_trash: false,
+      would_move_bytes: true,
     });
   });
 

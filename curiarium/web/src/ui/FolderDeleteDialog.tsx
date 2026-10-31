@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import {
   UnauthorizedError,
   deleteFolder,
@@ -20,10 +20,57 @@ function errorMessage(err: unknown, fallback: string) {
   return fallback;
 }
 
-// A legacy folder row migrated from v3 has no directory on disk and none can be
-// recovered, so the delete must not promise a .trash move it cannot make.
+// Rendered only when the preview says no bytes will move: a NULL storage_path on
+// its own is not proof of that, because the delete converges a name-derived
+// directory for a path-less row and moves it when it exists (Mf-um7x).
 const NO_DIRECTORY_NOTE =
   "This folder is not linked to a directory on disk. Deleting it removes only its records - nothing is moved to .trash.";
+
+type DiskNoticeProps = { preview: FolderDeletePreview };
+
+// Restoring is manual and lossy in every case where bytes really reach .trash.
+function RestoreNote(): ReactElement {
+  return (
+    <p className="opacity-80">
+      Restoring is file-level only: move the folder back from <code>.trash</code> by
+      hand and rescan the storage folder. The files come back; their metadata (names,
+      tags, notes, prepared-print details) does not.
+    </p>
+  );
+}
+
+/** What the delete does with bytes on disk, keyed on the preview alone. */
+function DiskNotice({ preview }: DiskNoticeProps): ReactElement {
+  const linkedDirectory = preview.storage_path?.trim() ?? "";
+  if (linkedDirectory) {
+    return (
+      <>
+        <p className="opacity-80">
+          The files in <code>{linkedDirectory}</code> are first moved to the
+          server&apos;s <code>.trash</code> folder, so nothing is freed yet. Bytes are
+          only deleted for good when someone runs <strong>Empty trash</strong> in
+          Settings → Storage.
+        </p>
+        <RestoreNote />
+      </>
+    );
+  }
+  if (preview.would_move_bytes) {
+    return (
+      <>
+        <p className="opacity-80">
+          This folder is not linked to a directory on disk, but a directory for it does
+          exist in storage under a name derived from the folder&apos;s name. Deleting
+          moves that directory into the server&apos;s <code>.trash</code> folder first,
+          so nothing is freed yet. Bytes are only deleted for good when someone runs{" "}
+          <strong>Empty trash</strong> in Settings → Storage.
+        </p>
+        <RestoreNote />
+      </>
+    );
+  }
+  return <p className="opacity-80">{NO_DIRECTORY_NOTE}</p>;
+}
 
 export default function FolderDeleteDialog({ folder, onCancel, onDeleted, onUnauthorized }: Props) {
   const [preview, setPreview] = useState<FolderDeletePreview | null>(null);
@@ -56,7 +103,6 @@ export default function FolderDeleteDialog({ folder, onCancel, onDeleted, onUnau
   }, [folder.id, onUnauthorized]);
 
   const notice = preview?.snapshot ?? null;
-  const linkedDirectory = preview?.storage_path?.trim() ?? "";
   const canDelete = !busy
     && !loading
     && !previewError
@@ -103,23 +149,7 @@ export default function FolderDeleteDialog({ folder, onCancel, onDeleted, onUnau
             This permanently removes the folder and everything inside it: its subfolders
             and their files, plus every asset recorded in the library for this subtree.
           </p>
-          {preview && (linkedDirectory ? (
-            <>
-              <p className="opacity-80">
-                The files in <code>{linkedDirectory}</code> are first moved to the
-                server&apos;s <code>.trash</code> folder, so nothing is freed yet. Bytes are
-                only deleted for good when someone runs <strong>Empty trash</strong> in
-                Settings → Storage.
-              </p>
-              <p className="opacity-80">
-                Restoring is file-level only: move the folder back from <code>.trash</code> by
-                hand and rescan the storage folder. The files come back; their metadata (names,
-                tags, notes, prepared-print details) does not.
-              </p>
-            </>
-          ) : (
-            <p className="opacity-80">{NO_DIRECTORY_NOTE}</p>
-          ))}
+          {preview && <DiskNotice preview={preview} />}
 
           {loading && <p className="opacity-70">Checking what would be deleted…</p>}
 

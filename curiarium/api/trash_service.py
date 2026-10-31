@@ -205,12 +205,15 @@ def folder_delete_preview(session: Session, folder: Folder) -> dict:
 
     Read-only on purpose: the UI needs this for its confirmation modal, and a
     preview must never converge ancestors, create `.trash`, or write a row.
+    `would_move_bytes` is read off `folder_paths.preview_converged_path`, which
+    computes the path a delete would converge for a path-less row without
+    persisting it, so the dialog agrees with the delete it describes.
     """
     subtree = folder_paths.folder_subtree(session, folder.id)
     subtree_ids = {node.id for node in subtree}
     assets = _selected_assets(session, subtree_ids, folder.storage_path)
     supporting_count = sum(int(asset.supporting_file_count or 0) for asset in assets)
-    return {
+    preview = {
         "folders": len(subtree),
         "assets": len(assets),
         "files": len(assets) + supporting_count,
@@ -218,28 +221,29 @@ def folder_delete_preview(session: Session, folder: Folder) -> dict:
         "in_trash": _is_in_trash(folder),
         "storage_path": folder.storage_path,
     }
+    preview["would_move_bytes"] = _would_move_bytes(session, folder, preview)
+    return preview
 
 
-def folder_delete_holds_bytes(session: Session, folder: Folder) -> bool:
-    """Whether deleting this folder would displace or destroy any byte.
+def _would_move_bytes(session: Session, folder: Folder, preview: dict) -> bool:
+    """Whether deleting this folder would rename any byte into the trash.
 
     Conservative on purpose: a tracked asset counts even when its file is zero
     bytes, because there is still a file to move, and supporting files count
     too. Any entry inside the directory counts, so untracked bytes below the top
     level make this true as well. Only a folder no preview can see bytes in --
-    no tracked assets, a storage path that is empty, or a directory that is
+    no tracked assets, a path that no longer resolves, or a directory that is
     missing or empty -- is reported as holding nothing.
+
+    `preview` is the already-computed preview dict, so this helper never asks
+    for a preview itself and the preview path cannot recurse. A path-less row is
+    asked for the name-derived path its delete would converge, read-only.
     """
-    preview = folder_delete_preview(session, folder)
     if preview["assets"] or preview["files"] or preview["bytes"]:
         return True
-    relative = folder.storage_path
+    relative = folder.storage_path or folder_paths.preview_converged_path(session, folder.id)
     if not relative:
-        # A legacy metadata-only row: the scan wrote these before it recorded
-        # paths, and heals them on the next scan. The delete converges a path
-        # for it, so this helper claims nothing about it; anything such a delete
-        # does rename moves into `.trash` and is covered by the purge's own
-        # fresh snapshot.
+        # The folder no longer resolves: no path means no directory to move.
         return False
     try:
         directory = resolve_inside_storage(relative)
@@ -256,6 +260,16 @@ def folder_delete_holds_bytes(session: Session, folder: Folder) -> bool:
         # An unreadable directory is the delete's own 409 (Mf-c2gw), not this
         # helper's verdict: assume it holds bytes and let the route answer.
         return True
+
+
+def folder_delete_holds_bytes(session: Session, folder: Folder) -> bool:
+    """Whether deleting this folder would displace or destroy any byte.
+
+    A path-less folder's delete converges a name-derived path, so the read-only
+    twin decides whether THAT directory holds bytes; nothing is claimed about it
+    that the delete does not do. Every other rule is `_would_move_bytes`'s.
+    """
+    return _would_move_bytes(session, folder, folder_delete_preview(session, folder))
 
 
 # Moves ----------------------------------------------------------

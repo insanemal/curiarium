@@ -33,6 +33,7 @@ __all__ = [
     "folder_path_segment",
     "folder_subtree",
     "join_relative",
+    "preview_converged_path",
     "sibling_scope",
 ]
 
@@ -125,15 +126,15 @@ def folder_subtree(session: Session, folder_id: str) -> list[Folder]:
     return ordered
 
 
-def converge_ancestor_paths(session: Session, folder_id: Optional[str]) -> str:
-    """Give every path-less ancestor of `folder_id` a `storage_path`, root first.
+def _ancestor_chain(session: Session, folder_id: Optional[str]) -> list[Folder]:
+    """Load `folder_id`'s ancestor line root-first, ending at a gap or a cycle.
 
-    Returns `folder_id`'s relative path, or "" when there is no folder. Persist
-    only: nothing is created, moved or renamed on disk. Folders that already have
-    a path keep it exactly.
+    The whole folder table is read once, so a deep tree costs one query. A
+    missing `folder_id` yields an empty chain; a repeated id ends the walk, so a
+    `parent_id` cycle terminates instead of looping forever.
     """
     if not folder_id:
-        return ""
+        return []
 
     folders = {folder.id: folder for folder in session.exec(select(Folder))}
     chain: list[Folder] = []
@@ -144,22 +145,63 @@ def converge_ancestor_paths(session: Session, folder_id: Optional[str]) -> str:
         chain.append(current)
         current = folders.get(current.parent_id) if current.parent_id else None
     chain.reverse()
+    return chain
 
+
+def _chain_relative_paths(session: Session, chain: list[Folder]) -> dict[str, str]:
+    """Derive every chain folder's storage-relative path, root first.
+
+    Read-only: a folder with a path keeps it verbatim and a path-less one is
+    allocated against its parent's scope, but no attribute is assigned and no
+    row is written. The parent's path comes from the map already computed for
+    the chain, so the result is exactly what `converge_ancestor_paths` persists.
+    """
+    paths: dict[str, str] = {
+        folder.id: folder.storage_path for folder in chain if folder.storage_path
+    }
     for folder in chain:
-        if folder.storage_path:
+        if folder.id in paths:
             continue
-        parent = folders.get(folder.parent_id) if folder.parent_id else None
-        parent_relative = (parent.storage_path or "") if parent else ""
+        parent_relative = paths.get(folder.parent_id, "") if folder.parent_id else ""
         # A folder is excluded from its own scope: otherwise its own NULL name
         # segment counts as `used` and pushes it to `Name (2)`.
         segment = allocate_segment(folder.name, *sibling_scope(session, folder.parent_id, {folder.id}))
-        folder.storage_path = join_relative(parent_relative, segment)
-        session.add(folder)
+        paths[folder.id] = join_relative(parent_relative, segment)
+    return paths
 
+
+def converge_ancestor_paths(session: Session, folder_id: Optional[str]) -> str:
+    """Give every path-less ancestor of `folder_id` a `storage_path`, root first.
+
+    Returns `folder_id`'s relative path, or "" when there is no folder. Persist
+    only: nothing is created, moved or renamed on disk. Folders that already have
+    a path keep it exactly.
+    """
+    chain = _ancestor_chain(session, folder_id)
     if not chain:
         # `folder_id` no longer exists (deleted while we were looking at it).
         return ""
+
+    paths = _chain_relative_paths(session, chain)
+    for folder in chain:
+        computed = paths[folder.id]
+        if folder.storage_path != computed:
+            folder.storage_path = computed
+            session.add(folder)
     return chain[-1].storage_path or ""
+
+
+def preview_converged_path(session: Session, folder_id: Optional[str]) -> str:
+    """The path `converge_ancestor_paths` would return, without persisting it.
+
+    Read-only on purpose: a folder delete preview calls this, so it must never
+    converge an ancestor, write a row or mutate an ORM object. Returns "" when
+    the folder does not exist.
+    """
+    chain = _ancestor_chain(session, folder_id)
+    if not chain:
+        return ""
+    return _chain_relative_paths(session, chain)[chain[-1].id]
 
 
 def derive_subtree_paths(
