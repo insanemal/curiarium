@@ -1,4 +1,7 @@
 """Tests for the storage-root scanner (filesystem-authoritative library, phase 1)."""
+import logging
+import re
+import threading
 import time
 from datetime import datetime, timedelta
 from math import ceil
@@ -17,6 +20,7 @@ from db import STORAGE, engine
 from library_scan import scan_storage_root
 from migrations import run_migrations
 from models import Asset, AuditEvent, Folder
+from schemas.library import LibraryScanStatusOut
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -764,10 +768,13 @@ def test_permanent_batch_failure_fails_the_whole_batch(temp_library: Path, monke
     status = scan_storage_root()
 
     assert status.registered == 0
-    # The whole batch is accounted for as failed, not a single counter bump.
+    # Every file in the rolled-back batch is accounted for individually, so
+    # `failed` still matches the captured texts one for one (Mf-e8zp).
     assert status.failed == total
-    assert len(status.errors) == 1
-    assert status.errors[0].startswith(f"batch of {total} rolled back:")
+    assert len(status.errors) == total
+    assert status.errors_omitted == 0
+    assert all(error.startswith("uncommittable/part-") for error in status.errors)
+    assert status.errors[0].startswith("uncommittable/part-")
     # Tried once, retried once, then given up on.
     assert attempts == [total, total]
     assert _library_rows("uncommittable/") == {}
@@ -827,3 +834,199 @@ def test_rescanning_heals_a_folder_created_without_a_path(library_root):
         healed = session.exec(select(Folder).where(Folder.name == "Loose")).first()
     assert healed is not None
     assert healed.storage_path == "Loose"
+
+
+# --- per-run state, bounded failure reporting and the run log (Mf-e8zp) -------
+#
+# A run is its own `ScanState`: the old module-global bag was reset in place at
+# the start of the next run, so one scan could zero the numbers a client was
+# still reading, and `errors[-20:]` served 20 of 67 failures without saying so.
+# Everything below pins the replacements: one run, one state, one summary log
+# line, and `failed == len(errors) + errors_omitted`.
+
+
+def test_a_rejected_file_is_logged_with_its_path_and_error_class(
+    temp_library: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Same stem in one folder: both derive the model name "part", so exactly one
+    # row is rejected by the unique index and must be readable in the log.
+    _write_under(temp_library, "logged/part.stl", b"solid a\n")
+    _write_under(temp_library, "logged/part.step", b"step a\n")
+
+    with caplog.at_level(logging.WARNING, logger=library_scan.log.name):
+        status = scan_storage_root()
+
+    assert status.failed == 1
+    rejected_path = ({"logged/part.stl", "logged/part.step"} - set(_library_rows("logged/"))).pop()
+    matching = [record for record in caplog.records if record.getMessage().startswith(f"{rejected_path}: ")]
+    assert len(matching) == 1
+    assert matching[0].levelno == logging.WARNING
+    # The class name is what an operator needs to tell a collision from an IO error.
+    assert "IntegrityError" in matching[0].getMessage()
+
+
+def test_a_completed_scan_logs_exactly_one_summary_line(
+    temp_library: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_under(temp_library, "summary/one.stl", b"solid x\n")
+
+    with caplog.at_level(logging.INFO, logger=library_scan.log.name):
+        status = scan_storage_root()
+
+    summaries = [record for record in caplog.records if record.getMessage().startswith("library scan finished in")]
+    assert len(summaries) == 1
+    message = summaries[0].getMessage()
+    assert summaries[0].levelno == logging.INFO
+    assert re.search(r"finished in \d+\.\ds", message)
+    snapshot = status.as_dict()
+    for counter in ("registered", "known", "ignored", "missing", "failed"):
+        assert f"{counter}={snapshot[counter]}" in message
+    # The same run is what `scan_status()` serves, counters included.
+    assert library_scan.scan_status() == snapshot
+
+
+def test_an_aborted_scan_still_logs_one_summary_line(
+    temp_library: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_under(temp_library, "aborted/one.stl", b"solid x\n")
+
+    def exploding_walk(root):
+        raise RuntimeError("walker interrupted")
+        yield  # pragma: no cover - keeps this a generator so the raise lands mid-walk
+
+    monkeypatch.setattr(library_scan, "_walk_storage", exploding_walk)
+    with caplog.at_level(logging.INFO, logger=library_scan.log.name):
+        with pytest.raises(RuntimeError, match="walker interrupted"):
+            scan_storage_root()
+
+    summaries = [record for record in caplog.records if record.getMessage().startswith("library scan finished in")]
+    assert len(summaries) == 1
+    assert "failed=1" in summaries[0].getMessage()
+    assert any(
+        "scan aborted: RuntimeError: walker interrupted" in record.getMessage() for record in caplog.records
+    )
+    # The aborted run does not leave the module looking like a scan is in flight.
+    assert library_scan.scan_status()["running"] is False
+
+
+def test_failed_count_reconciles_with_captured_texts(
+    temp_library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Root-level files are walked first, so the collision pair lands in the first
+    # batch that commits and the batch below it is the one that gets rolled back.
+    _write_under(temp_library, "part.stl", b"solid a\n")
+    _write_under(temp_library, "part.step", b"step a\n")
+    total = library_scan.BATCH_SIZE
+    for index in range(total):
+        _write_under(temp_library, f"batch-fail/part-{index:03d}.stl", b"solid x\n")
+
+    real_commit = library_scan._commit_batch
+    calls = {"n": 0}
+
+    def failing_trailing_batch(session, pending, cache):
+        # Calls 2 and 3 are the trailing batch and its one retry.
+        calls["n"] += 1
+        if calls["n"] in (2, 3):
+            raise RuntimeError("database is locked")
+        return real_commit(session, pending, cache)
+
+    monkeypatch.setattr(library_scan, "_commit_batch", failing_trailing_batch)
+    status = scan_storage_root()
+
+    assert status.failed > 0
+    assert status.failed == len(status.errors) + status.errors_omitted
+    assert status.errors_omitted == 0
+    for message in status.errors:
+        rel_path = message.split(": ", 1)[0]
+        assert (temp_library / rel_path).exists(), message
+
+
+def test_a_truncated_error_list_is_reported_as_a_pair(
+    temp_library: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    for index in range(5):
+        _write_under(temp_library, f"truncated-{index}/part.stl", b"solid a\n")
+        _write_under(temp_library, f"truncated-{index}/part.step", b"step a\n")
+
+    monkeypatch.setattr(library_scan, "MAX_REPORTED_FAILURES", 3)
+    with caplog.at_level(logging.WARNING, logger=library_scan.log.name):
+        status = scan_storage_root()
+
+    # The cap bounds the log and the captured list together.
+    assert status.failed == 5
+    assert len(status.errors) == 3
+    assert status.errors_omitted == 2
+    notice = [r for r in caplog.records if "further failures are not logged individually" in r.getMessage()]
+    assert len(notice) == 1
+    # The wire view keeps the pair reconcilable and stays schema-shaped.
+    snapshot = library_scan.scan_status()
+    assert snapshot["failed"] == len(snapshot["errors"]) + status.errors_omitted
+
+
+def test_scan_status_fields_match_the_schema() -> None:
+    state = library_scan.ScanState()
+    assert set(state.as_dict()) == set(LibraryScanStatusOut.model_fields)
+    assert "errors_omitted" not in state.as_dict()
+
+
+def test_two_runs_do_not_share_counters(temp_library: Path) -> None:
+    _write_under(temp_library, "shared-a/part.stl", b"solid a\n")
+    _write_under(temp_library, "shared-a/part.step", b"step a\n")
+
+    first = scan_storage_root()
+    assert first.failed == 1
+    assert len(first.errors) == 1
+    # The rejected half of the collision stays unregistered, so drop it: the
+    # second run must be clean, not a repeat of the same failure.
+    rejected = ({"shared-a/part.stl", "shared-a/part.step"} - set(_library_rows("shared-a/"))).pop()
+    (temp_library / rejected).unlink()
+
+    _write_under(temp_library, "shared-b/fresh.stl", b"solid fresh\n")
+    second = scan_storage_root()
+
+    assert (second.failed, second.errors) == (0, [])
+    snapshot = library_scan.scan_status()
+    assert snapshot["failed"] == 0
+    assert snapshot["errors"] == []
+    # `registered` describes only the second run, never the first one's work.
+    assert snapshot["registered"] == 1
+
+
+def test_a_second_scan_is_refused_while_one_is_running(
+    temp_library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_under(temp_library, "refused/one.stl", b"solid x\n")
+    _write_under(temp_library, "refused/part.stl", b"solid a\n")
+    _write_under(temp_library, "refused/part.step", b"step a\n")
+
+    real_walk = library_scan._walk_storage
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def gated_walk(root):
+        entered.set()
+        assert gate.wait(timeout=10)
+        yield from real_walk(root)
+
+    monkeypatch.setattr(library_scan, "_walk_storage", gated_walk)
+    assert library_scan.start_scan() is True
+    try:
+        assert entered.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while not library_scan.scan_status()["running"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        before = library_scan.scan_status()
+        assert library_scan.start_scan() is False
+        with pytest.raises(library_scan.ScanAlreadyRunning):
+            scan_storage_root()
+        # A refused run changes nothing about the one holding the slot.
+        assert library_scan.scan_status() == before
+    finally:
+        gate.set()
+        deadline = time.monotonic() + 10
+        while library_scan.scan_status()["running"]:
+            if time.monotonic() > deadline:
+                raise AssertionError("the first run never finished")
+            time.sleep(0.01)

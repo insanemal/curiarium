@@ -58,6 +58,23 @@ How a scan behaves:
   same model name) fails exactly that one row with ``"<rel_path>: <error>"``
   while the rest of the batch still lands.
 
+Every run is its own state object:
+
+* a run is created once, published once as the current run, and every counter
+  and failure note is written through that instance - never through a reused
+  counter bag that a later run resets out from under an earlier one;
+* the first ``MAX_REPORTED_FAILURES`` (100) failures of a run are both logged
+  (one WARNING each, ``"<rel_path>: <ExcClass>: <exc>"``) and captured on the
+  run; every failure after that is still counted, but neither logged
+  individually nor captured. ``failed == len(errors) + errors_omitted`` always
+  holds, so a client can show "the first N of M" without the counts disagreeing;
+* a run that still holds the slot refuses a second one: ``start_scan`` returns
+  False and a direct ``scan_storage_root`` raises ``ScanAlreadyRunning``. A
+  finished run stays the current one until the next run replaces it, because the
+  web client keys "the scan just finished" off ``finished_at``;
+* a run logs exactly one summary line when it ends, and an aborted run logs one
+  too - its counters plus a recorded ``scan aborted: ...`` failure.
+
 Two registration writers share this machinery: the storage scan
 (``scan_storage_root``, which also owns the missing-flag pass) and mount import
 (``mount_import`` via ``register_tree``). They are serialised by
@@ -66,6 +83,7 @@ files missing, so pointing a registration walk at a mount can never mark the
 library missing.
 """
 import json
+import logging
 import os
 import threading
 import time
@@ -85,6 +103,8 @@ from models import Asset, Folder
 from prepared_print import inspect_prepared_print
 from zip_service import sanitize_folder_name
 
+log = logging.getLogger(__name__)
+
 # App-owned directories inside the storage root. Never library content.
 RESERVED_DIRS = {"thumbs", "bundles", ".incoming"}
 # OS/tool debris that is never a library item.
@@ -98,6 +118,14 @@ BATCH_SIZE = 200
 # back on its own; stop instead of hammering it.
 MAX_CONSECUTIVE_BATCH_FAILURES = 3
 
+# Failures are both logged and captured, and both are bounded by the same cap so
+# the two cannot disagree: `failed == len(errors) + errors_omitted`.
+MAX_REPORTED_FAILURES = 100
+
+
+class ScanAlreadyRunning(RuntimeError):
+    """A second storage scan was started while one still holds the slot."""
+
 
 @dataclass
 class ScanState:
@@ -110,10 +138,18 @@ class ScanState:
     missing: int = 0         # tracked files that are no longer on disk
     failed: int = 0          # files that could not be registered
     errors: List[str] = field(default_factory=list)
+    errors_omitted: int = 0  # failures counted but not captured/logged (past the cap)
 
     def as_dict(self) -> dict:
+        """The wire view: every captured text, and no internal-only fields.
+
+        ``errors`` is *not* truncated. ``failed`` is the total and
+        ``len(errors)`` is what is shown, which is the pair a client needs; the
+        old ``errors[-20:]`` slice silently served 20 of 67 and made the counts
+        look wrong (Mf-e8zp). ``errors_omitted`` stays internal for that reason.
+        """
         data = asdict(self)
-        data["errors"] = self.errors[-20:]
+        data.pop("errors_omitted", None)
         return data
 
 
@@ -153,7 +189,9 @@ class TreePlan:
     folders_are_directories: bool = True
 
 
-_state = ScanState()
+# The most recently started run. Never a reused counter bag: a run is created
+# once, published once here, and every mutation goes through that instance.
+_current: Optional[ScanState] = None
 _state_lock = threading.Lock()
 
 # Only one registration run writes at a time: folder rows are looked up and then
@@ -166,9 +204,17 @@ _write_lock = threading.Lock()
 _local = threading.local()
 
 
-def _active_state() -> ScanState:
-    """Counters of the registration run active in this thread, else the scan's."""
-    return getattr(_local, "state", None) or _state
+def _active_state() -> Optional[ScanState]:
+    """The run owning this thread, else the current run; None before any run.
+
+    The plain read of ``_current`` is deliberate: it is only rebound under
+    ``_state_lock``, and any consistent run is an acceptable answer to "where do
+    these counters go".
+    """
+    state = getattr(_local, "state", None)
+    if state is not None:
+        return state
+    return _current
 
 
 def _active_plan() -> Optional["TreePlan"]:
@@ -177,51 +223,115 @@ def _active_plan() -> Optional["TreePlan"]:
 
 
 def scan_status() -> dict:
+    """The current (or last finished) run, or an empty run before the first one."""
     with _state_lock:
-        return _state.as_dict()
+        current = _current
+    return ScanState().as_dict() if current is None else current.as_dict()
 
 
 def start_scan() -> bool:
     """Start a background scan. Returns False when one is already running."""
-    with _state_lock:
-        if _state.running:
-            return False
-        _state.running = True
-        _state.started_at = time.time()
-        _state.finished_at = None
-    threading.Thread(target=_run_scan, name="library-scan", daemon=True).start()
+    try:
+        run = _begin_run(None)
+    except ScanAlreadyRunning:
+        return False
+    threading.Thread(target=_run_scan, args=(run,), name="library-scan", daemon=True).start()
     return True
 
 
-def _run_scan() -> None:
+def _begin_run(state: Optional[ScanState]) -> ScanState:
+    """Claim the single run slot and return the run this call owns.
+
+    A fresh ``ScanState`` starts at zero, which is why a run never has to reset
+    another run's counters: the old in-place reset was what let one scan zero the
+    numbers of the scan whose status the client was still reading.
+    """
+    global _current
+    with _state_lock:
+        if _current is not None and _current.running and _current is not state:
+            raise ScanAlreadyRunning("a library scan is already running")
+        run = state if state is not None else ScanState()
+        run.running = True
+        if run.started_at is None:
+            run.started_at = time.time()
+        run.finished_at = None
+        _current = run
+        return run
+
+
+def _run_scan(run: ScanState) -> None:
+    """The background entry point: a daemon thread has nowhere to re-raise."""
     try:
-        scan_storage_root()
-    except Exception as exc:  # keep the status endpoint honest on unexpected failure
-        with _state_lock:
-            _state.failed += 1
-            _state.errors.append(f"scan aborted: {exc}")
-    finally:
-        with _state_lock:
-            _state.running = False
-            _state.finished_at = time.time()
+        scan_storage_root(state=run)
+    except ScanAlreadyRunning:
+        # another caller claimed the slot first; this run never walked anything
+        pass
+    except Exception:
+        # already counted on the run and logged by _note_failure
+        pass
 
 
 def note_error(message: str) -> None:
-    """Count one failed file against the active registration run."""
+    """Count one failed file against the run that owns this thread, and log it."""
     state = _active_state()
+    if state is None:
+        # no run owns it: never swallow a failure just because it is uncounted
+        log.warning("%s", message)
+        return
+    _note_failure(state, message)
+
+
+def _note_failure(state: ScanState, message: str) -> None:
+    """Count one failed file, capture it, and log it - all under one cap.
+
+    The cap governs the log and the captured list together, so
+    ``failed == len(errors) + errors_omitted`` always holds.
+    """
+    log_message = False
+    capped = False
     with _state_lock:
         state.failed += 1
-        if len(state.errors) < 200:
+        if len(state.errors) < MAX_REPORTED_FAILURES:
             state.errors.append(message)
+            log_message = True
+            capped = len(state.errors) == MAX_REPORTED_FAILURES
+        else:
+            state.errors_omitted += 1
+    if log_message:
+        log.warning("%s", message)
+    if capped:
+        log.warning(
+            "library scan: reporting the first %d failures only; further failures are not logged individually",
+            MAX_REPORTED_FAILURES,
+        )
 
 
-def _note_batch_failure(message: str, count: int) -> None:
-    """One note for a whole rolled-back batch; every file in it is failed."""
+def _note_batch_failure(rel_paths: Sequence[str], exc: Exception) -> None:
+    """Every file in a rolled-back batch failed; one note each, same format."""
+    detail = f"{type(exc).__name__}: {exc}"
     state = _active_state()
+    for rel_path in rel_paths:
+        if state is None:
+            log.warning("%s: %s", rel_path, detail)
+        else:
+            _note_failure(state, f"{rel_path}: {detail}")
+
+
+def _finish_run(run: ScanState) -> None:
+    """Close the run and log exactly one summary line for it.
+
+    In a ``finally`` so an aborted run gets its one line too; it never swallows
+    the abort, which is the caller's to re-raise.
+    """
     with _state_lock:
-        state.failed += count
-        if len(state.errors) < 200:
-            state.errors.append(message)
+        run.running = False
+        run.finished_at = time.time()
+        duration = run.finished_at - run.started_at if run.started_at is not None else 0.0
+    log.log(
+        logging.WARNING if run.failed else logging.INFO,
+        "library scan finished in %.1fs: registered=%d known=%d ignored=%d missing=%d failed=%d",
+        duration, run.registered, run.known, run.ignored, run.missing, run.failed,
+    )
 
 
 def _walk_storage(root: Path, *, include_hidden: bool = False) -> Iterator[Tuple[str, List[os.DirEntry], int]]:
@@ -313,12 +423,16 @@ def _apply_missing_flags(session: Session, flag_ids: List[str], clear_ids: List[
     session.commit()
 
 
-def _flag_missing_assets(session: Session, root: Path, seen: set, now: str) -> None:
+def _flag_missing_assets(
+    session: Session, root: Path, seen: set, now: str, state: ScanState
+) -> None:
     """Set or clear ``missing_since`` for every candidate row, in bounded batches.
 
     Candidates are keyset-paginated by id and written with at most one commit per
     ``BATCH_SIZE`` changes, so neither the candidate set nor the dirty ids are
-    held in memory for a whole tree.
+    held in memory for a whole tree. A rolled-back flag batch is a diagnostic in
+    the log only: it is not a failed file, so it must not inflate ``errors``
+    without bumping ``failed``.
     """
     flag_ids: List[str] = []
     clear_ids: List[str] = []
@@ -340,11 +454,10 @@ def _flag_missing_assets(session: Session, root: Path, seen: set, now: str) -> N
                 session.rollback()
                 # not a registration failure: these rows simply stay un-flagged
                 # (or flagged) and the next scan converges.
-                with _state_lock:
-                    if len(_state.errors) < 200:
-                        _state.errors.append(
-                            f"missing-flag batch of {len(flag_ids) + len(clear_ids)} rolled back: {exc}"
-                        )
+                log.warning(
+                    "missing-flag batch of %d rolled back: %s: %s",
+                    len(flag_ids) + len(clear_ids), type(exc).__name__, exc,
+                )
                 flag_ids.clear()
                 clear_ids.clear()
                 consecutive_failures += 1
@@ -385,7 +498,7 @@ def _flag_missing_assets(session: Session, root: Path, seen: set, now: str) -> N
                 flag_ids.append(asset_id)
         if page_missing:
             with _state_lock:
-                _state.missing += page_missing
+                state.missing += page_missing
         if len(flag_ids) + len(clear_ids) >= BATCH_SIZE:
             flush()
 
@@ -532,7 +645,7 @@ def _commit_batch(
         except Exception as exc:
             if asset in session:
                 session.expunge(asset)
-            note_error(f"{item.rel_path}: {exc}")
+            note_error(f"{item.rel_path}: {type(exc).__name__}: {exc}")
             rejected.append(item)
     for item in rejected:
         pending.remove(item)
@@ -583,7 +696,8 @@ def _flush_batch(
         except Exception as exc:
             session.rollback()
             cache.clear()
-            _note_batch_failure(f"batch of {len(pending)} rolled back: {exc}", len(pending))
+            # every file still pending failed, in the order it was discovered
+            _note_batch_failure([item.rel_path for item in pending], exc)
             return None
     _save_thumbnails(root, thumbnails)
     return [rel_path for _asset_id, rel_path, _mime in thumbnails]
@@ -642,7 +756,7 @@ def _register_tree(session: Session, plan: TreePlan, state: ScanState, seen: set
                 try:
                     size = entry.stat(follow_symlinks=False).st_size
                 except OSError as exc:
-                    note_error(f"{rel_path}: {exc}")
+                    note_error(f"{rel_path}: {type(exc).__name__}: {exc}")
                     continue
                 if not plan.accept(rel_path, size):
                     with _state_lock:
@@ -677,45 +791,50 @@ def _storage_plan(root: Path, tracked: set) -> TreePlan:
     return TreePlan(root=root, tracked=tracked, keys_for=_self_key, accept=_accept_every_file, build=partial(build_asset, root))
 
 
-def scan_storage_root() -> ScanState:
+def scan_storage_root(state: Optional[ScanState] = None) -> ScanState:
     """Walk the storage root and register unknown files. Safe to call directly.
 
-    Counters describe this scan only; callers that need history should read the
-    status endpoint before starting another run.
+    This is the single owner of a storage-scan run: it claims the slot through
+    ``_begin_run``, walks, and closes the run in a ``finally``. Counters describe
+    this scan only; a caller that needs history reads the status endpoint, which
+    keeps the last finished run visible. A second direct call while one holds the
+    slot raises ``ScanAlreadyRunning``; an abort is recorded on the run and then
+    re-raised.
     """
-    with _state_lock:
-        _state.registered = 0
-        _state.known = 0
-        _state.ignored = 0
-        _state.missing = 0
-        _state.failed = 0
-        _state.errors = []
+    run = _begin_run(state)
+    try:
+        root = STORAGE.resolve()
+        if not root.exists() or not root.is_dir():
+            _note_failure(run, f"storage root not found: {root}")
+            return run
 
-    root = STORAGE.resolve()
-    if not root.exists() or not root.is_dir():
-        note_error(f"storage root not found: {root}")
-        return _state
+        # one timestamp per run: every asset the scan first notices as missing this
+        # pass shares it, so the value is stable and order-independent.
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    # one timestamp per run: every asset the scan first notices as missing this
-    # pass shares it, so the value is stable and order-independent.
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with _write_lock, Session(engine) as session:
+            tracked = set(
+                session.exec(
+                    select(Asset.storage_path).where(Asset.storage_path.is_not(None))
+                ).all()
+            )
 
-    with _write_lock, Session(engine) as session:
-        tracked = set(
-            session.exec(
-                select(Asset.storage_path).where(Asset.storage_path.is_not(None))
-            ).all()
-        )
+            seen: set = set()
+            _register_tree(session, _storage_plan(root, tracked), run, seen)
 
-        seen: set = set()
-        _register_tree(session, _storage_plan(root, tracked), _state, seen)
+            # registers nothing and deletes nothing: it only stamps or clears
+            # ``missing_since``. The ``missing`` counter covers managed rows only,
+            # while reference rows may be flagged too.
+            _flag_missing_assets(session, root, seen, now, run)
 
-        # registers nothing and deletes nothing: it only stamps or clears
-        # ``missing_since``. The ``missing`` counter covers managed rows only,
-        # while reference rows may be flagged too.
-        _flag_missing_assets(session, root, seen, now)
-
-    return _state
+        return run
+    except Exception as exc:
+        # counted and logged here; re-raised because the interrupted-walk and
+        # circuit-breaker contracts pin the raise
+        _note_failure(run, f"scan aborted: {type(exc).__name__}: {exc}")
+        raise
+    finally:
+        _finish_run(run)
 
 
 def register_tree(plan: TreePlan, state: Optional[ScanState] = None) -> ScanState:

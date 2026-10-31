@@ -1,4 +1,5 @@
 import TrashCard from "../TrashCard";
+import LibraryScanFailures from "./LibraryScanFailures";
 import SnapshotCard from "./SnapshotCard";
 import StorageCapabilitiesCard from "./StorageCapabilitiesCard";
 import type { LibraryScanState } from "./useLibraryScan";
@@ -145,11 +146,7 @@ export default function StorageSection({ storage, libraryScanState, onUnauthoriz
           )}
           {libraryScanError && <span className="text-xs text-red-400">{libraryScanError}</span>}
         </div>
-        {Boolean(libraryScan?.errors?.length) && (
-          <div className="rounded-md border border-dashed border-panel-strong p-3 font-mono text-[11px] break-all">
-            {libraryScan?.errors.map((message, index) => <div key={index}>{message}</div>)}
-          </div>
-        )}
+        {libraryScan && <LibraryScanFailures failed={libraryScan.failed} errors={libraryScan.errors} />}
       </div>
 
       <StorageCapabilitiesCard state={storageCapabilities} />

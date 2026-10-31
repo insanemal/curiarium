@@ -43,6 +43,7 @@ from import_service import (
     open_import_response,
 )
 from library_scan import scan_status, start_scan
+from logging_setup import configure_logging
 from migrations import run_migrations
 from mount_import import mount_import_should_run, scan_mount_imports
 from request_id import RequestIDMiddleware
@@ -102,6 +103,9 @@ API_ROUTERS = (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # First, before any other boot line: uvicorn's own LOGGING_CONFIG leaves the
+    # root logger handler-less, so without this every app log record is dropped.
+    configure_logging()
     validate_auth_configuration()
     # The same fail-closed contract one feature over: a half-configured or
     # fail-open SSO setup must stop the boot, not surface as a login that
