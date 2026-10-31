@@ -70,6 +70,33 @@ describe("FolderDeleteDialog", () => {
 
   afterEach(cleanup);
 
+  it("says nothing moves to the trash when the folder has no directory", async () => {
+    getFolderDeletePreviewMock.mockResolvedValue({ ...BASE_PREVIEW, storage_path: null });
+    renderDialog();
+
+    expect(
+      await dialog().findByText(
+        "This folder is not linked to a directory on disk. Deleting it removes only its records - nothing is moved to .trash.",
+      ),
+    ).toBeTruthy();
+    // The .trash promises are gone, not just accompanied by the new sentence.
+    expect(dialog().queryByText(/first moved to the server/)).toBeNull();
+    expect(dialog().queryByText(/move the folder back from/)).toBeNull();
+  });
+
+  it("shows the linked directory", async () => {
+    getFolderDeletePreviewMock.mockResolvedValue({
+      ...BASE_PREVIEW,
+      storage_path: "Parent/Child",
+    });
+    renderDialog();
+
+    const path = await dialog().findByText("Parent/Child");
+    expect(path.tagName).toBe("CODE");
+    expect(dialog().getByText(/first moved to the server/)).toBeTruthy();
+    expect(dialog().queryByText(/not linked to a directory on disk/)).toBeNull();
+  });
+
   it("deletes only once the folder name is typed and reports the result", async () => {
     const { onDeleted } = renderDialog();
 

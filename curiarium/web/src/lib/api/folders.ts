@@ -21,6 +21,9 @@ export type FolderDeletePreview = {
   files: number;
   bytes: number;
   in_trash: boolean;
+  // The folder's own directory identity on disk; null for a migrated legacy
+  // row, which has no directory to move.
+  storage_path?: string | null;
   snapshot?: SnapshotNotice | null;
 };
 

@@ -30,6 +30,17 @@
             "type": "null"
           }
         ]
+      },
+      "storage_path": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Storage Path"
       }
     },
     "required": [

@@ -25,6 +25,9 @@ class FolderDeletePreviewOut(BaseModel):
   files: int
   bytes: int
   in_trash: bool
+  # The row's own directory identity (NULL for a migrated legacy row), so the
+  # UI can badge a delete that would move bytes it cannot name.
+  storage_path: Optional[str] = None
   snapshot: Optional[SnapshotNoticeOut] = None
 
 
