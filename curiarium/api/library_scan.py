@@ -44,14 +44,15 @@ How a scan behaves:
   that were actually committed; a row that failed and was rolled back is
   ``failed``, never ``registered``;
 * folder rows are created only for a directory that had a file to register in
-  this run - never eagerly on directory entry. For the storage scan they stay
-  metadata-only (``storage_path`` is ``None``; migration 004 gave folders a
-  directory identity for runtime-created ones, scan-created rows are converged
-  later), while a plan that materialises directories (mount copy mode) gives its
-  folder rows their real relative path, because folder rename and delete have to
-  move the real directory. A directory name that sanitises differently from its
-  folder row can therefore still collide, which is surfaced as an error rather
-  than a silent overwrite;
+  this run - never eagerly on directory entry. A walk over real directories (the
+  storage scan, mount copy mode) gives its folder rows the real relative path,
+  because folder rename and delete have to move the real directory; a reference
+  walk leaves it ``None`` because the bytes live outside storage. A row that
+  already owns the directory is *adopted* instead of duplicated, and the
+  asset-evidence backfill below heals migrated rows the walk never touches. A
+  name-matched row with no path whose directory another row already owns keeps
+  its NULL path: the file still registers against it, and the existing owner
+  keeps the directory, so neither write is forced through the unique index;
 * prepared-print metadata is inspected inline on a best-effort basis; a file
   that cannot be read registers anyway and is not counted as a failure (the
   startup backfill retries it);
@@ -87,11 +88,13 @@ Every run is its own state object:
   too - its counters plus a recorded ``scan aborted: ...`` failure.
 
 Two registration writers share this machinery: the storage scan
-(``scan_storage_root``, which also owns the missing-flag pass) and mount import
-(``mount_import`` via ``register_tree``). They are serialised by
-``_write_lock``, because both create folder rows. Only the storage scan flags
-files missing, so pointing a registration walk at a mount can never mark the
-library missing.
+(``scan_storage_root``, which also owns the missing-flag pass and the
+asset-evidence folder backfill) and mount import (``mount_import`` via
+``register_tree``). They are serialised by ``_write_lock``, because both create
+folder rows. Only the storage scan flags files missing, so pointing a
+registration walk at a mount can never mark the library missing. Mount import is
+not a backfill caller: its asset paths are relative to the mount root, not the
+storage root.
 """
 import json
 import logging
@@ -107,6 +110,7 @@ from typing import Callable, Iterable, Iterator, List, Optional, Sequence, Tuple
 from sqlalchemy import or_, update
 from sqlmodel import Session, select
 
+import folder_paths
 from asset_service import ensure_model_thumbnail, folder_name_index, save_thumb
 from config import DEFAULT_MOUNT_IMPORT_EXTS
 from db import STORAGE, engine
@@ -621,6 +625,21 @@ def resolve_dir_folder(
     reused by ``(parent_id, name)`` are healed: a row created before this was
     true has ``storage_path`` NULL, and the next scan fills it in rather than
     leaving a folder that claims to be a directory but is not.
+
+    A directory can also be owned by a row with a *different* label: the
+    asset-evidence backfill (``folder_paths.backfill_paths_from_asset_dirs``)
+    links a migrated folder to its real directory without renaming it or
+    reparenting it. When no ``(parent_id, name)`` row matches, that row is
+    adopted by id instead of inserting a second row for the same path - without
+    this the first new file in a healed legacy directory dies on
+    ``idx_folder_storage_path_unique`` and the scan aborts. Adoption never
+    rewrites the adopted row; only its id is reused.
+
+    A ``(parent_id, name)`` row that matches but has no path is healed only when
+    that directory is still free. If a different row already owns it, the heal is
+    skipped and the name-matched row keeps its NULL path, because flushing the
+    write would collide with ``idx_folder_storage_path_unique`` and abort the
+    scan.
     """
     parent_id: Optional[str] = None
     parent_key = "root"
@@ -641,15 +660,45 @@ def resolve_dir_folder(
                 if with_storage_path and not existing.storage_path:
                     # heal a row created while the scan still wrote metadata-only
                     # folders (found on the first real deployment, 2026-10-31)
-                    existing.storage_path = "/".join(consumed)
-                    session.add(existing)
-                    session.flush()
+                    storage_path = "/".join(consumed)
+                    owner_id = session.exec(
+                        select(Folder.id).where(
+                            Folder.storage_path.collate("NOCASE") == storage_path
+                        )
+                    ).first()
+                    if owner_id is not None and owner_id != existing.id:
+                        # The asset-evidence backfill linked this directory to a
+                        # migrated row under a different label. Healing this row
+                        # would collide with idx_folder_storage_path_unique and
+                        # abort the whole scan, so the existing owner keeps the
+                        # directory and this row keeps its NULL path.
+                        log.warning(
+                            "folder heal skipped: %s already owned by folder %s; folder %s stays pathless",
+                            storage_path, owner_id, existing.id,
+                        )
+                    else:
+                        existing.storage_path = storage_path
+                        session.add(existing)
+                        session.flush()
             else:
                 storage_path = "/".join(consumed) if with_storage_path else None
-                folder = Folder(name=name, tags_json="[]", parent_id=parent_id, storage_path=storage_path)
-                session.add(folder)
-                session.flush()
-                folder_id = folder.id
+                adopted = None
+                if storage_path:
+                    # A migrated folder already owns this directory under a
+                    # different label; reuse its id instead of colliding with
+                    # idx_folder_storage_path_unique.
+                    adopted = session.exec(
+                        select(Folder).where(
+                            Folder.storage_path.collate("NOCASE") == storage_path
+                        )
+                    ).first()
+                if adopted is not None:
+                    folder_id = adopted.id
+                else:
+                    folder = Folder(name=name, tags_json="[]", parent_id=parent_id, storage_path=storage_path)
+                    session.add(folder)
+                    session.flush()
+                    folder_id = folder.id
             cache[key] = folder_id
         parent_id = folder_id
         parent_key = key
@@ -984,6 +1033,12 @@ def scan_storage_root(state: Optional[ScanState] = None) -> ScanState:
             # ``missing_since``. The ``missing`` counter covers managed rows only,
             # while reference rows may be flagged too.
             _flag_missing_assets(session, root, seen, now, run)
+
+            # After the walk and after the fresh flags: the walk's own name-heal
+            # wins for every directory it touched, and this run's missing flags
+            # are part of the liveness evidence. Pure ORM, no filesystem call, so
+            # an unmounted volume cannot make a scan fail here.
+            folder_paths.backfill_paths_from_asset_dirs(session)
 
         return run
     except Exception as exc:

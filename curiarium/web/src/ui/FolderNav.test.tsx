@@ -6,11 +6,17 @@ import type { Folder } from "../lib/api";
 import FolderBreadcrumbs, { FolderTiles } from "./FolderNav";
 
 const folders: Folder[] = [
-  { id: "parts", name: "Parts", tags: [] },
-  { id: "clamps", name: "Clamps", tags: [], parent_id: "parts" },
-  { id: "brackets", name: "Brackets", tags: [], parent_id: "parts" },
-  { id: "corners", name: "Corners", tags: [], parent_id: "brackets" },
-  { id: "elsewhere", name: "Elsewhere", tags: [] },
+  { id: "parts", name: "Parts", tags: [], storage_path: "Parts" },
+  { id: "clamps", name: "Clamps", tags: [], parent_id: "parts", storage_path: "Parts/Clamps" },
+  { id: "brackets", name: "Brackets", tags: [], parent_id: "parts", storage_path: "Parts/Brackets" },
+  {
+    id: "corners",
+    name: "Corners",
+    tags: [],
+    parent_id: "brackets",
+    storage_path: "Parts/Brackets/Corners",
+  },
+  { id: "elsewhere", name: "Elsewhere", tags: [], storage_path: "Elsewhere" },
 ];
 
 function breadcrumbsNav(): HTMLElement {
@@ -121,5 +127,40 @@ describe("FolderTiles", () => {
     onNavigate.mockClear();
     fireEvent.keyDown(clamps, { key: "a" });
     expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("flags a subfolder that is not linked to a directory", () => {
+    // A migrated legacy row keeps a NULL storage path - and the API may hand
+    // the empty string - because its assets cannot be pinned to one directory.
+    const mixed: Folder[] = [
+      { id: "parts", name: "Parts", tags: [], storage_path: "Parts" },
+      { id: "clamps", name: "Clamps", tags: [], parent_id: "parts", storage_path: "Parts/Clamps" },
+      { id: "legacy", name: "Legacy", tags: [], parent_id: "parts", storage_path: null },
+      { id: "blank", name: "Blank", tags: [], parent_id: "parts", storage_path: "" },
+    ];
+
+    render(<FolderTiles folders={mixed} folderId="parts" onNavigate={vi.fn()} />);
+
+    const tiles = within(folderTiles());
+
+    function expectNoDirectory(tile: HTMLElement) {
+      expect(tile.getAttribute("data-folder-tile-no-directory")).toBe("true");
+      expect(tile.getAttribute("title")).toBe(
+        "No directory on disk - files are grouped by metadata only",
+      );
+      const contents = within(tile);
+      expect(contents.getByText("No directory")).toBeTruthy();
+      // The note is screen-reader text, not a tooltip-only hint.
+      expect(contents.getByText(/files are grouped by metadata only/)).toBeTruthy();
+    }
+
+    expectNoDirectory(tiles.getByRole("button", { name: /Legacy/ }));
+    expectNoDirectory(tiles.getByRole("button", { name: /Blank/ }));
+
+    // A linked child carries neither the attribute nor the badge.
+    const linked = tiles.getByRole("button", { name: /Clamps/ });
+    expect(linked.hasAttribute("data-folder-tile-no-directory")).toBe(false);
+    expect(linked.getAttribute("title")).toBeNull();
+    expect(within(linked).queryByText("No directory")).toBeNull();
   });
 });

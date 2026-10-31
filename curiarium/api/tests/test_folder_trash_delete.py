@@ -727,6 +727,7 @@ def test_delete_preview_counts_and_writes_nothing(isolated_storage: Path) -> Non
             "files": 5,
             "bytes": 30,
             "in_trash": False,
+            "storage_path": "Parent",
             "snapshot": notice(snapshots.SnapshotReason.PRE_DELETE, "warn"),
         }
 

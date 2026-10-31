@@ -216,6 +216,7 @@ def folder_delete_preview(session: Session, folder: Folder) -> dict:
         "files": len(assets) + supporting_count,
         "bytes": sum(int(asset.size or 0) for asset in assets),
         "in_trash": _is_in_trash(folder),
+        "storage_path": folder.storage_path,
     }
 
 
