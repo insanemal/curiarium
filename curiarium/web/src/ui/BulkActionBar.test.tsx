@@ -10,10 +10,9 @@ function renderBar(overrides: Partial<BulkActionBarProps> = {}) {
     canContribute: true,
     canDelete: true,
     count: 3,
-    folderOptions: [
-      { id: null, name: "Unassigned" },
-      { id: "f1", name: "Folder one" },
-      { id: "f2", name: "Folder two" },
+    folders: [
+      { id: "f1", name: "Folder one", tags: [], parent_id: null },
+      { id: "f2", name: "Folder two", tags: [], parent_id: null },
     ],
     busy: null,
     failures: null,
@@ -54,19 +53,20 @@ describe("BulkActionBar", () => {
   it("moves the selection to the chosen folder", () => {
     const { props } = renderBar();
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Target folder" }), {
-      target: { value: "f2" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: /^Target folder:/ }));
+    const picker = within(screen.getByRole("dialog", { name: "Target folder" }));
+    fireEvent.click(picker.getByRole("treeitem", { name: "Folder two" }));
     fireEvent.click(screen.getByRole("button", { name: "Move" }));
 
     expect(props.onMove).toHaveBeenCalledTimes(1);
+    // The committed folder id reaches the handler, not just the button press.
     expect(props.onMove).toHaveBeenCalledWith("f2");
   });
 
   it("hides the move control when folder controls are disabled", () => {
     renderBar({ showFolderControls: false });
 
-    expect(screen.queryByRole("combobox", { name: "Target folder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Target folder:/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Move" })).toBeNull();
     // Everything else stays available.
     expect(screen.getByRole("button", { name: "Add tags" })).toBeTruthy();
@@ -158,7 +158,7 @@ describe("BulkActionBar", () => {
     for (const name of ["Move", "Add tags", "Remove tags", "Edit metadata…", "Download zip", "Delete", "Select all", "Clear"]) {
       expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
     }
-    expect((screen.getByRole("combobox", { name: "Target folder" }) as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /^Target folder:/ }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("textbox", { name: "Tags" }) as HTMLInputElement).disabled).toBe(true);
   });
 
@@ -214,7 +214,7 @@ describe("BulkActionBar role capability", () => {
     for (const name of [...CONTRIBUTE_CONTROLS, ...DELETE_CONTROLS]) {
       expect(screen.getByRole("button", { name })).toBeTruthy();
     }
-    expect(screen.getByRole("combobox", { name: "Target folder" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Target folder:/ })).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "Tags" })).toBeTruthy();
     for (const name of READ_CONTROLS) {
       expect(screen.getByRole("button", { name })).toBeTruthy();
@@ -236,7 +236,7 @@ describe("BulkActionBar role capability", () => {
     for (const name of DELETE_CONTROLS) {
       expect(screen.queryByRole("button", { name })).toBeNull();
     }
-    expect(screen.queryByRole("combobox", { name: "Target folder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Target folder:/ })).toBeNull();
 
     // Reads are never capability-gated.
     for (const name of READ_CONTROLS) {
@@ -254,7 +254,7 @@ describe("BulkActionBar role capability", () => {
     for (const name of [...CONTRIBUTE_CONTROLS, ...DELETE_CONTROLS]) {
       expect(screen.queryByRole("button", { name })).toBeNull();
     }
-    expect(screen.queryByRole("combobox", { name: "Target folder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Target folder:/ })).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Tags" })).toBeNull();
   });
 

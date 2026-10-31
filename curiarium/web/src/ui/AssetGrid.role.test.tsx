@@ -497,7 +497,7 @@ describe("AssetGrid role capability", () => {
       ]) {
         expect(bar.queryByRole("button", { name })).toBeNull();
       }
-      expect(bar.queryByRole("combobox", { name: "Target folder" })).toBeNull();
+      expect(bar.queryByRole("button", { name: /^Target folder:/ })).toBeNull();
       expect(bar.queryByRole("textbox", { name: "Tags" })).toBeNull();
 
       for (const name of ["Download zip", "Select all", "Clear"]) {
@@ -711,7 +711,7 @@ describe("AssetGrid role capability", () => {
       for (const name of ["Move", "Delete"]) {
         expect(bar.queryByRole("button", { name })).toBeNull();
       }
-      expect(bar.queryByRole("combobox", { name: "Target folder" })).toBeNull();
+      expect(bar.queryByRole("button", { name: /^Target folder:/ })).toBeNull();
 
       // A contribute route, so the batch tag call is allowed to fire; the
       // destroy routes are not.

@@ -394,4 +394,107 @@ html, body, #root { height: 100%; }
   .sidebar-settings:hover { color: var(--mv-text); background: var(--mv-panel-soft); }
   .sidebar-settings.is-selected { color: var(--mv-text); background: var(--mv-accent-soft); }
   .sidebar-settings.is-selected svg { color: var(--mv-accent); }
+
+  /* FolderPicker (Mf-08sb): a searchable parent-folder tree that replaces the
+     flat location <select>s. Colours come only from the `--mv-*` palette. */
+  .sidebar-editor-field { @apply flex flex-col gap-1; }
+
+  .folder-picker { @apply relative flex min-w-0 flex-col gap-1; }
+  .folder-picker-label { @apply text-[10px] font-semibold uppercase tracking-wider; color: var(--mv-text-subtle); }
+
+  .folder-picker-trigger {
+    @apply flex h-9 w-full items-center gap-2 rounded-lg border px-2.5 text-left text-xs outline-none;
+    color: var(--mv-text);
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-soft);
+  }
+
+  .folder-picker-trigger:hover { border-color: var(--mv-accent-border); background: var(--mv-panel); }
+  .folder-picker-trigger:focus-visible { border-color: var(--mv-accent); box-shadow: 0 0 0 3px var(--mv-accent-soft); }
+  .folder-picker-trigger[aria-expanded="true"] { border-color: var(--mv-accent); background: var(--mv-panel); }
+  .folder-picker-trigger:disabled { @apply cursor-not-allowed opacity-50; }
+
+  .folder-picker-value { @apply min-w-0 flex-1 truncate; }
+  .folder-picker-icon { @apply h-4 w-4 shrink-0; color: var(--mv-text-subtle); }
+  .folder-picker-chevron { @apply h-4 w-4 shrink-0; color: var(--mv-text-muted); }
+
+  .folder-picker-scrim {
+    @apply fixed inset-0 z-50 flex items-center justify-center p-4;
+    background: color-mix(in srgb, var(--mv-panel-overlay) 72%, transparent);
+  }
+
+  .folder-picker-panel {
+    @apply flex w-full max-w-[22rem] flex-col overflow-hidden rounded-xl border shadow-2xl;
+    max-height: min(28rem, 80vh);
+    color: var(--mv-text);
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-strong);
+  }
+
+  .folder-picker-search {
+    @apply flex shrink-0 items-center gap-2 border-b px-3 py-2;
+    border-color: var(--mv-border);
+  }
+
+  .folder-picker-input {
+    @apply w-full bg-transparent text-xs outline-none;
+    color: var(--mv-text);
+  }
+
+  .folder-picker-input::placeholder { color: var(--mv-text-subtle); }
+
+  .folder-picker-tree,
+  .folder-picker-list {
+    @apply flex-1 overflow-y-auto p-1;
+    list-style: none;
+  }
+
+  .folder-picker-row {
+    @apply flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-xs outline-none;
+    color: var(--mv-text);
+  }
+
+  .folder-picker-row:hover { background: var(--mv-panel-soft); }
+  .folder-picker-row:focus-visible { box-shadow: 0 0 0 2px var(--mv-accent); }
+  .folder-picker-row.is-active { background: var(--mv-accent-soft); }
+
+  .folder-picker-row.is-current {
+    @apply font-semibold;
+    background: color-mix(in srgb, var(--mv-accent-soft) 70%, var(--mv-panel-strong));
+    box-shadow: inset 2px 0 0 var(--mv-accent);
+  }
+
+  .folder-picker-row.is-current > svg { @apply h-3.5 w-3.5 shrink-0; color: var(--mv-accent); }
+  .folder-picker-row.is-excluded { @apply cursor-not-allowed opacity-50; }
+  .folder-picker-row.is-excluded:hover { background: transparent; }
+  .folder-picker-row.is-root { color: var(--mv-text-muted); }
+
+  .folder-picker-indent { @apply h-4 shrink-0; }
+
+  .folder-picker-branch {
+    @apply grid h-5 w-5 shrink-0 place-items-center rounded;
+    color: var(--mv-text-subtle);
+  }
+
+  .folder-picker-branch:hover { color: var(--mv-text); background: var(--mv-panel-soft); }
+  .folder-picker-branch svg { @apply h-3.5 w-3.5; }
+
+  .folder-picker-row-name { @apply min-w-0 truncate; }
+  .folder-picker-path { @apply truncate pl-1 text-[10px]; color: var(--mv-text-muted); }
+  .folder-picker-reason { @apply shrink-0 pl-1 text-[10px] italic; color: var(--mv-text-muted); }
+
+  .folder-picker-foot {
+    @apply flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2;
+    border-color: var(--mv-border);
+  }
+
+  .folder-picker-status { @apply truncate text-[10px]; color: var(--mv-text-muted); }
+
+  .folder-picker-cancel {
+    @apply shrink-0 rounded-md border px-2 py-1 text-[11px] font-semibold;
+    color: var(--mv-text);
+    border-color: var(--mv-border-strong);
+  }
+
+  .folder-picker-cancel:hover { background: var(--mv-panel-soft); }
 }

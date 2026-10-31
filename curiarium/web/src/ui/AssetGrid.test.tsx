@@ -1748,10 +1748,9 @@ describe("AssetGrid bulk actions", () => {
 
     selectCards(2);
     const bar = bulkBar();
-    await waitFor(() => expect(bar.getByRole("option", { name: "Two" })).toBeTruthy());
-    fireEvent.change(bar.getByRole("combobox", { name: "Target folder" }), {
-      target: { value: "f2" },
-    });
+    fireEvent.click(bar.getByRole("button", { name: /^Target folder:/ }));
+    const picker = within(screen.getByRole("dialog", { name: "Target folder" }));
+    fireEvent.click(picker.getByRole("treeitem", { name: "Two" }));
     fireEvent.click(bar.getByRole("button", { name: "Move" }));
 
     await waitFor(() => expect(batchMoveAssetsMock).toHaveBeenCalledTimes(1));

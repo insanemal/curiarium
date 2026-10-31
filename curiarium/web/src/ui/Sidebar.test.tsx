@@ -35,12 +35,13 @@ vi.mock("../lib/uploadTree", async importOriginal => {
 
 import Sidebar from "./Sidebar";
 import Toaster from "./Toaster";
-import { createFolder, deleteFolder, getFolderDeletePreview, listFolders } from "../lib/api";
+import { createFolder, deleteFolder, getFolderDeletePreview, listFolders, updateFolder } from "../lib/api";
 import { uploadEntriesToFolder } from "../lib/uploadTree";
 import { resetToasts } from "../lib/toast";
 
 const listFoldersMock = vi.mocked(listFolders);
 const createFolderMock = vi.mocked(createFolder);
+const updateFolderMock = vi.mocked(updateFolder);
 const deleteFolderMock = vi.mocked(deleteFolder);
 const previewMock = vi.mocked(getFolderDeletePreview);
 const uploadEntriesMock = vi.mocked(uploadEntriesToFolder);
@@ -526,6 +527,8 @@ describe("Sidebar new folder parent", () => {
     listFoldersMock.mockResolvedValue(folders);
     createFolderMock.mockReset();
     createFolderMock.mockResolvedValue({ id: "new", name: "new", tags: [] });
+    updateFolderMock.mockReset();
+    updateFolderMock.mockResolvedValue({ id: "a", name: "Alpha", tags: [] });
   });
 
   afterEach(() => {
@@ -583,13 +586,71 @@ describe("Sidebar new folder parent", () => {
 
     fireEvent.click(screen.getByTitle("New folder"));
     const dialog = await screen.findByRole("dialog", { name: "Create folder" });
-    const location = within(dialog).getByLabelText("Location") as HTMLSelectElement;
-    expect(location.value).toBe("");
+    // The picker's trigger carries the current location, so the default is
+    // readable before anything is opened.
+    const trigger = within(dialog).getByRole("button", { name: /Root \(top level\)$/ });
 
-    fireEvent.change(location, { target: { value: "f2" } });
+    fireEvent.click(trigger);
+    const picker = within(await screen.findByRole("dialog", { name: "Location" }));
+    fireEvent.click(picker.getByRole("treeitem", { name: "Victim" }));
     submitCreate(dialog, "Elsewhere");
 
     await waitFor(() => expect(createFolderMock).toHaveBeenCalledWith("Elsewhere", [], "f2"));
+  });
+
+  it("keeps the Create folder dialog open when Escape closes the picker", async () => {
+    render(<Sidebar selectedId="f1" onSelect={vi.fn()} role="editor" />);
+    await screen.findByText("Keep");
+
+    fireEvent.click(screen.getByTitle("New folder"));
+    const dialog = await screen.findByRole("dialog", { name: "Create folder" });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Location:/ }));
+
+    const picker = await screen.findByRole("dialog", { name: "Location" });
+    // Escape is handled (and swallowed) by the nested picker only.
+    fireEvent.keyDown(within(picker).getByLabelText("Search folders in Location"), { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Location" })).toBeNull());
+    expect(screen.getByRole("dialog", { name: "Create folder" })).toBeTruthy();
+  });
+
+  it("never offers the folder being moved or its descendants as a destination", async () => {
+    const nested: Folder[] = [
+      { id: "a", name: "Alpha", tags: [] },
+      { id: "b", name: "Beta", tags: [], parent_id: "a" },
+      { id: "c", name: "Gamma", tags: [], parent_id: "b" },
+      { id: "d", name: "Delta", tags: [] },
+    ];
+    listFoldersMock.mockResolvedValue(nested);
+    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="editor" />);
+    await screen.findByText("Alpha");
+
+    fireEvent.click(within(folderMenu("Alpha")).getByText(/Rename & edit/));
+    const editor = await screen.findByRole("dialog", { name: "Edit folder" });
+    fireEvent.click(within(editor).getByRole("button", { name: /^Location:/ }));
+
+    const picker = within(await screen.findByRole("dialog", { name: "Location" }));
+    // Alpha is collapsed in the picker: expand it to expose the subtree.
+    fireEvent.click(picker.getByRole("button", { name: "Expand" }));
+    fireEvent.click(picker.getByRole("button", { name: "Expand" }));
+
+    const alphaRow = picker.getByRole("treeitem", { name: /^Alpha/ });
+    expect(alphaRow.getAttribute("aria-disabled")).toBe("true");
+    expect(within(alphaRow).getByText("Can't move a folder into itself")).toBeTruthy();
+
+    for (const name of [/^Beta/, /^Gamma/]) {
+      const row = picker.getByRole("treeitem", { name });
+      expect(row.getAttribute("aria-disabled")).toBe("true");
+      expect(within(row).getByText("Inside the folder being moved")).toBeTruthy();
+    }
+
+    const deltaRow = picker.getByRole("treeitem", { name: /^Delta/ });
+    expect(deltaRow.hasAttribute("aria-disabled")).toBe(false);
+    fireEvent.click(deltaRow);
+
+    fireEvent.click(within(editor).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(updateFolderMock).toHaveBeenCalledWith("a", "Alpha", [], "d"));
   });
 });
 

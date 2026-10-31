@@ -16,13 +16,14 @@ import {
 } from "lucide-react";
 import { Folder, UnauthorizedError, createFolder, downloadFolderZip, listFolders, updateFolder } from "../lib/api";
 import { roleAtLeast, type Role } from "../lib/auth";
-import { flattenFolderTree } from "../lib/folderTree";
+import { ROOT_GROUP, childrenIndex, descendantIds, flattenFolderTree, folderPath } from "../lib/folderTree";
 import { saveResponseToDisk } from "../lib/download";
 import { entriesFromDataTransfer } from "../lib/uploadTree";
 import { notifyError } from "../lib/toast";
 import TagInput from "./TagInput";
 import { useUpload } from "./useUpload";
 import FolderDeleteDialog from "./FolderDeleteDialog";
+import FolderPicker from "./FolderPicker";
 import SidebarFooter from "./SidebarFooter";
 
 type Props = {
@@ -41,6 +42,8 @@ type Props = {
 };
 
 const DROP_ALL_ID = "__all";
+/** Create cannot invalidate its own destination, so nothing is excluded there. */
+const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
 export default function Sidebar({
   selectedId,
@@ -266,56 +269,19 @@ export default function Sidebar({
     });
   }, [selectedId, folderById]);
 
-  const isDescendant = React.useCallback(
-    (candidateId: string, targetId: string) => {
-      let current = folderById[candidateId];
-      const guard = new Set<string>();
-      while (current) {
-        if (!current.parent_id) return false;
-        if (current.parent_id === targetId) return true;
-        if (guard.has(current.parent_id)) break;
-        guard.add(current.parent_id);
-        current = folderById[current.parent_id];
-      }
-      return false;
-    },
-    [folderById]
+  const pathLabel = React.useCallback(
+    (folder: Folder) => folderPath(folders, folder.id).map(segment => segment.name).join(" / "),
+    [folders]
   );
 
-  const folderPath = React.useCallback(
-    (folder: Folder) => {
-      const segments = [folder.name || "Untitled"];
-      let current = folder;
-      const guard = new Set<string>([folder.id]);
-      while (current.parent_id) {
-        const parent = folderById[current.parent_id];
-        if (!parent || guard.has(parent.id)) break;
-        segments.unshift(parent.name || "Untitled");
-        guard.add(parent.id);
-        current = parent;
-      }
-      return segments.join(" / ");
-    },
-    [folderById]
+  const childrenMap = React.useMemo(() => childrenIndex(folders), [folders]);
+
+  // A folder can never be moved into itself or into its own subtree: both are
+  // structurally unreachable in the edit picker, so the API cannot be asked.
+  const editExcludeIds = React.useMemo(
+    () => (editing ? new Set([editing, ...descendantIds(folders, editing)]) : NO_EXCLUSIONS),
+    [editing, folders]
   );
-
-  const folderOptions = React.useMemo(() => {
-    const opts = [{ id: null as string | null, name: "(Root)" }];
-    const sorted = [...folders].sort((a, b) => folderPath(a).localeCompare(folderPath(b)));
-    sorted.forEach(f => opts.push({ id: f.id, name: folderPath(f) }));
-    return opts;
-  }, [folders, folderPath]);
-
-  const childrenMap = React.useMemo(() => {
-    const map: Record<string, Folder[]> = {};
-    const push = (key: string, f: Folder) => {
-      if (!map[key]) map[key] = [];
-      map[key].push(f);
-    };
-    folders.forEach(f => push(f.parent_id || "__root", f));
-    Object.values(map).forEach(list => list.sort((a, b) => a.name.localeCompare(b.name)));
-    return map;
-  }, [folders]);
 
   const visibleFolderIds = React.useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -323,7 +289,7 @@ export default function Sidebar({
 
     const visible = new Set<string>();
     folders.forEach(folder => {
-      if (!folderPath(folder).toLocaleLowerCase().includes(normalizedQuery)) return;
+      if (!pathLabel(folder).toLocaleLowerCase().includes(normalizedQuery)) return;
       let current: Folder | undefined = folder;
       const guard = new Set<string>();
       while (current && !guard.has(current.id)) {
@@ -333,11 +299,11 @@ export default function Sidebar({
       }
     });
     return visible;
-  }, [folderById, folderPath, folders, query]);
+  }, [folderById, pathLabel, folders, query]);
 
   // Default-expand root folders so they are visible
   useEffect(() => {
-    const roots = childrenMap["__root"] || [];
+    const roots = childrenMap[ROOT_GROUP] ?? [];
     if (!roots.length) return;
     setExpanded(prev => {
       const next = new Set(prev);
@@ -510,7 +476,7 @@ export default function Sidebar({
             type="button"
             className="sidebar-tree-label"
             onClick={() => onSelect(folder.id)}
-            title={folderPath(folder)}
+            title={pathLabel(folder)}
             tabIndex={-1}
           >
             {isOpen && children.length ? (
@@ -644,7 +610,7 @@ export default function Sidebar({
           aria-label="Folders"
           onKeyDown={handleTreeKeyDown}
         >
-          {(childrenMap["__root"] || []).map(f => renderFolderNode(f, 0))}
+          {(childrenMap[ROOT_GROUP] ?? []).map(f => renderFolderNode(f, 0))}
           {folders.length === 0 && (
             <div className="sidebar-empty" role="none">
               <FolderPlus className="h-5 w-5" />
@@ -684,14 +650,17 @@ export default function Sidebar({
               placeholder="Folder name"
             />
           </label>
-          <label>
-            <span>Location</span>
-            <select value={newParent || ""} onChange={e => setNewParent(e.target.value || null)}>
-              {folderOptions.map(opt => (
-                <option key={opt.id ?? "root"} value={opt.id || ""}>{opt.name}</option>
-              ))}
-            </select>
-          </label>
+          <div className="sidebar-editor-field">
+            <FolderPicker
+              id="folder-create-location"
+              label="Location"
+              folders={folders}
+              value={newParent}
+              onChange={setNewParent}
+              excludeIds={NO_EXCLUSIONS}
+              disabled={busy}
+            />
+          </div>
           <div className="sidebar-editor-actions">
             <button disabled={busy || !newName.trim()} className="primary" onClick={create}><Check className="h-4 w-4" /> Create</button>
             <button onClick={()=>{ setCreating(false); setNewParent(null); }}>Cancel</button>
@@ -718,16 +687,18 @@ export default function Sidebar({
               }}
             />
           </label>
-          <label>
-            <span>Location</span>
-            <select value={editParent || ""} onChange={e => setEditParent(e.target.value || null)}>
-              {folderOptions
-                .filter(opt => !editing || (opt.id !== editing && !(opt.id && isDescendant(opt.id, editing))))
-                .map(opt => (
-                  <option key={opt.id ?? "root"} value={opt.id || ""}>{opt.name}</option>
-                ))}
-            </select>
-          </label>
+          <div className="sidebar-editor-field">
+            <FolderPicker
+              id="folder-edit-location"
+              label="Location"
+              folders={folders}
+              value={editParent}
+              onChange={setEditParent}
+              excludeIds={editExcludeIds}
+              selfId={editing}
+              disabled={busy}
+            />
+          </div>
           <TagInput value={editTags} onChange={setEditTags} placeholder="Add folder tags" />
           <div className="sidebar-editor-actions">
             <button disabled={busy} className="primary" onClick={saveEdit}><Check className="h-4 w-4" /> Save changes</button>

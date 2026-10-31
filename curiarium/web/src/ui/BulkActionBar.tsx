@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 
-import type { BatchFailure } from "../lib/api";
+import type { BatchFailure, Folder } from "../lib/api";
+import FolderPicker from "./FolderPicker";
 
 export type BulkActionBarProps = {
   /** Contribute capability: tags, metadata and project membership.
@@ -9,7 +10,8 @@ export type BulkActionBarProps = {
   /** Delete capability: move and destroy. */
   canDelete: boolean;
   count: number;
-  folderOptions: { id: string | null; name: string }[];
+  /** Every folder, so the target picker can browse and search the tree. */
+  folders: readonly Folder[];
   /** Project mode hides the move control: projects have no folders. */
   showFolderControls?: boolean;
   busy: { label: string; count: number } | null;
@@ -55,7 +57,7 @@ export default function BulkActionBar({
   canContribute,
   canDelete,
   count,
-  folderOptions,
+  folders,
   showFolderControls = true,
   busy,
   failures,
@@ -107,19 +109,15 @@ export default function BulkActionBar({
       <div className="flex flex-wrap items-center gap-2 text-sm">
         {canDelete && showFolderControls && (
           <>
-            <select
-              aria-label="Target folder"
-              value={moveTarget}
-              onChange={e => setMoveTarget(e.target.value)}
+            <FolderPicker
+              id="bulk-move-target"
+              label="Target folder"
+              folders={folders}
+              value={moveTarget || null}
+              onChange={id => setMoveTarget(id ?? "")}
+              rootLabel="Unassigned (top level)"
               disabled={disabled}
-              className="px-2 py-1 rounded-md border border-panel-strong bg-panel-soft disabled:opacity-60"
-            >
-              {folderOptions.map(option => (
-                <option key={option.id || "none"} value={option.id || ""}>
-                  {option.name}
-                </option>
-              ))}
-            </select>
+            />
             <button
               type="button"
               onClick={() => onMove(moveTarget || null)}

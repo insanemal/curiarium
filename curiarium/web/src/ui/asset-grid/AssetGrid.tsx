@@ -417,7 +417,7 @@ export default function AssetGrid({
         canContribute={canContribute}
         canDelete={canDelete}
         count={selectedIds.size}
-        folderOptions={folderOptions}
+        folders={folders}
         showFolderControls={!isProject}
         busy={bulkBusy}
         failures={bulkFailures}
