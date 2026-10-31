@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlmodel import Session, select
 
+import asset_service
 import audit
 import library_scan
 import main
@@ -198,6 +200,39 @@ def _library_rows(prefix: str) -> dict:
         }
 
 
+def _delete_rows_under(prefix: str) -> None:
+    """Delete the asset rows under `prefix`, leaving the files on disk."""
+    with Session(engine) as session:
+        for asset in session.exec(select(Asset)).all():
+            if (asset.storage_path or "").startswith(prefix):
+                session.delete(asset)
+        session.commit()
+
+
+def _forge_name_collision(monkeypatch: pytest.MonkeyPatch, *rel_paths: str):
+    """Make the naming pre-pass hand these files one identical display name.
+
+    Mf-tkdp derives a name *around* every taken name, so a plain tree can no
+    longer produce a unique-index rejection - which is the point of the ticket.
+    The tests below still pin what happens *after* one (a rejected row fails only
+    itself, and the counts still reconcile), so the rejection is injected at the
+    one seam that can still produce it: the pure derivation. Returns the real
+    function so a test that needs a later run to derive honestly can restore it.
+    """
+    forged = {Path(rel_path).name for rel_path in rel_paths}
+    real = library_scan.derive_asset_names
+
+    def colliding(present, wanted, taken):
+        names = real(present, wanted, taken)
+        return {
+            filename: ("forge-collision" if filename in forged else name)
+            for filename, name in names.items()
+        }
+
+    monkeypatch.setattr(library_scan, "derive_asset_names", colliding)
+    return real
+
+
 def _folders_named(name: str) -> list:
     with Session(engine) as session:
         return [
@@ -270,13 +305,15 @@ def test_scan_commits_in_batches(temp_library: Path) -> None:
     assert len(commits) <= ceil(total / library_scan.BATCH_SIZE) + 2
 
 
-def test_scan_fails_only_the_row_that_collides(temp_library: Path) -> None:
-    # Same stem in one folder: both derive the model name "part", and the unique
-    # (folder, name) index makes exactly one of them impossible to insert.
+def test_scan_fails_only_the_row_that_collides(temp_library: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The naming pre-pass steps around every taken name, so a plain same-stem
+    # pair no longer collides. Inject the rejection at the derivation seam and
+    # pin what a scan does with it: one bad row fails, the rest of the batch lands.
     _write_under(temp_library, "collision/part.stl", b"solid a\n")
     _write_under(temp_library, "collision/part.step", b"step a\n")
     _write_under(temp_library, "collision/other.stl", b"solid b\n")
     _write_under(temp_library, "collision/another.stl", b"solid c\n")
+    _forge_name_collision(monkeypatch, "collision/part.stl", "collision/part.step")
 
     status = scan_storage_root()
 
@@ -846,12 +883,13 @@ def test_rescanning_heals_a_folder_created_without_a_path(library_root):
 
 
 def test_a_rejected_file_is_logged_with_its_path_and_error_class(
-    temp_library: Path, caplog: pytest.LogCaptureFixture
+    temp_library: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Same stem in one folder: both derive the model name "part", so exactly one
-    # row is rejected by the unique index and must be readable in the log.
+    # A name rejection is injected at the derivation seam (a plain tree can no
+    # longer produce one); the rejected row must be readable in the log.
     _write_under(temp_library, "logged/part.stl", b"solid a\n")
     _write_under(temp_library, "logged/part.step", b"step a\n")
+    _forge_name_collision(monkeypatch, "logged/part.stl", "logged/part.step")
 
     with caplog.at_level(logging.WARNING, logger=library_scan.log.name):
         status = scan_storage_root()
@@ -912,10 +950,13 @@ def test_an_aborted_scan_still_logs_one_summary_line(
 def test_failed_count_reconciles_with_captured_texts(
     temp_library: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Root-level files are walked first, so the collision pair lands in the first
-    # batch that commits and the batch below it is the one that gets rolled back.
+    # Root-level files are walked first, so the injected collision pair lands in
+    # the first batch that commits and the batch below it is the one that gets
+    # rolled back. The rejection is injected because the derivation itself can no
+    # longer collide.
     _write_under(temp_library, "part.stl", b"solid a\n")
     _write_under(temp_library, "part.step", b"step a\n")
+    _forge_name_collision(monkeypatch, "part.stl", "part.step")
     total = library_scan.BATCH_SIZE
     for index in range(total):
         _write_under(temp_library, f"batch-fail/part-{index:03d}.stl", b"solid x\n")
@@ -933,7 +974,9 @@ def test_failed_count_reconciles_with_captured_texts(
     monkeypatch.setattr(library_scan, "_commit_batch", failing_trailing_batch)
     status = scan_storage_root()
 
-    assert status.failed > 0
+    # 1 row-level rejection (the forged pair) plus the trailing batch and its
+    # retry (2 files): the forged pair lands in batch 1, the last 2 files in batch 2.
+    assert status.failed == 3
     assert status.failed == len(status.errors) + status.errors_omitted
     assert status.errors_omitted == 0
     for message in status.errors:
@@ -944,9 +987,14 @@ def test_failed_count_reconciles_with_captured_texts(
 def test_a_truncated_error_list_is_reported_as_a_pair(
     temp_library: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # The helper keys on basenames, so two forged names cover every directory; one
+    # rejected row per directory makes 5 failures, capped at 3 captured texts.
+    forged = []
     for index in range(5):
         _write_under(temp_library, f"truncated-{index}/part.stl", b"solid a\n")
         _write_under(temp_library, f"truncated-{index}/part.step", b"step a\n")
+        forged.extend([f"truncated-{index}/part.stl", f"truncated-{index}/part.step"])
+    _forge_name_collision(monkeypatch, *forged)
 
     monkeypatch.setattr(library_scan, "MAX_REPORTED_FAILURES", 3)
     with caplog.at_level(logging.WARNING, logger=library_scan.log.name):
@@ -969,17 +1017,20 @@ def test_scan_status_fields_match_the_schema() -> None:
     assert "errors_omitted" not in state.as_dict()
 
 
-def test_two_runs_do_not_share_counters(temp_library: Path) -> None:
+def test_two_runs_do_not_share_counters(temp_library: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_under(temp_library, "shared-a/part.stl", b"solid a\n")
     _write_under(temp_library, "shared-a/part.step", b"step a\n")
+    real_derive = _forge_name_collision(monkeypatch, "shared-a/part.stl", "shared-a/part.step")
 
     first = scan_storage_root()
     assert first.failed == 1
     assert len(first.errors) == 1
-    # The rejected half of the collision stays unregistered, so drop it: the
-    # second run must be clean, not a repeat of the same failure.
+    # The rejected half of the forged collision stays unregistered, so drop it.
     rejected = ({"shared-a/part.stl", "shared-a/part.step"} - set(_library_rows("shared-a/"))).pop()
     (temp_library / rejected).unlink()
+    # Withdraw the forge: the surviving sibling is already tracked, and a second
+    # forged run would re-collide on a row that is already committed.
+    monkeypatch.setattr(library_scan, "derive_asset_names", real_derive)
 
     _write_under(temp_library, "shared-b/fresh.stl", b"solid fresh\n")
     second = scan_storage_root()
@@ -1030,3 +1081,325 @@ def test_a_second_scan_is_refused_while_one_is_running(
             if time.monotonic() > deadline:
                 raise AssertionError("the first run never finished")
             time.sleep(0.01)
+
+
+# --- derived display names (Mf-tkdp) ----------------------------------------
+#
+# A name is derived per directory before the rows go pending, from the disk
+# listing plus the folder's already-taken names. Same tree, same names - on every
+# scan, across batch boundaries, and with no rename of an existing row.
+
+
+def test_a_format_set_and_an_artifact_suffix_all_register(temp_library: Path) -> None:
+    _write_under(temp_library, "formats/a.stl", b"solid a\n")
+    _write_under(temp_library, "formats/a.3mf", b"3mf a\n")
+    _write_under(temp_library, "formats/a.s#5", b"s#5 a\n")
+
+    status = scan_storage_root()
+
+    rows = _library_rows("formats/")
+    assert len(rows) == 3
+    assert {asset.name for asset in rows.values()} == {"a (stl)", "a (3mf)", "a.s#5"}
+    for rel_path, asset in rows.items():
+        assert asset.title == asset.name
+        assert asset.filename == Path(rel_path).name
+    assert status.registered == 3
+    assert status.failed == 0
+
+
+def test_a_single_file_keeps_the_bare_stem(temp_library: Path) -> None:
+    _write_under(temp_library, "single/a.stl", b"solid a\n")
+
+    status = scan_storage_root()
+
+    rows = _library_rows("single/")
+    assert set(rows) == {"single/a.stl"}
+    assert rows["single/a.stl"].name == "a"
+    assert status.registered == 1
+
+
+def test_the_live_electronics_folder_registers_every_file(temp_library: Path) -> None:
+    # The live shape: a bare-named row from before the rule existed, then its
+    # artefacts. The old row must keep its name and the siblings step around it.
+    _write_under(temp_library, "Electronics/multifilament.stl", b"solid m\n")
+    scan_storage_root()
+    seed = _library_rows("Electronics/")["Electronics/multifilament.stl"]
+    seed_snapshot = (seed.id, seed.name, seed.filename)
+    assert seed_snapshot[1:] == ("multifilament", "multifilament.stl")
+
+    for suffix in (".fcstd", ".s#5", ".b#9"):
+        _write_under(temp_library, f"Electronics/multifilament{suffix}", b"artefact\n")
+    second = scan_storage_root()
+
+    rows = _library_rows("Electronics/")
+    assert len(rows) == 4
+    assert len({asset.name for asset in rows.values()}) == 4
+    seed_after = rows["Electronics/multifilament.stl"]
+    assert (seed_after.id, seed_after.name, seed_after.filename) == seed_snapshot
+    new_names = {rows[f"Electronics/multifilament{suffix}"].name for suffix in (".fcstd", ".s#5", ".b#9")}
+    assert new_names == {"multifilament.fcstd", "multifilament.s#5", "multifilament.b#9"}
+    assert second.registered == 3
+    assert second.failed == 0
+
+
+def test_the_live_electronics_folder_registers_eleven_rows(temp_library: Path) -> None:
+    _write_under(temp_library, "Electronics/multifilament.stl", b"solid m\n")
+    scan_storage_root()
+    seed = _library_rows("Electronics/")["Electronics/multifilament.stl"]
+    seed_snapshot = (seed.id, seed.name, seed.filename)
+
+    artefacts = [
+        "multifilament.fcstd",
+        "multifilament.brd",
+        "multifilament.sch",
+        "multifilament.s#3",
+        "multifilament.s#5",
+        "multifilament.s#7",
+        "multifilament.s#9",
+        "multifilament.b#3",
+        "multifilament.b#5",
+        "multifilament.b#9",
+    ]
+    for name in artefacts:
+        _write_under(temp_library, f"Electronics/{name}", b"artefact\n")
+    second = scan_storage_root()
+
+    rows = _library_rows("Electronics/")
+    assert len(rows) == 11
+    assert len({asset.name for asset in rows.values()}) == 11
+    seed_after = rows["Electronics/multifilament.stl"]
+    assert (seed_after.id, seed_after.name, seed_after.filename) == seed_snapshot
+    # Eagle/KiCad artefacts keep their full filenames.
+    for name in artefacts:
+        assert rows[f"Electronics/{name}"].name == name
+    assert second.registered == 10
+    assert second.failed == 0
+
+
+def test_a_format_set_registers_every_member(temp_library: Path) -> None:
+    for suffix in (".stl", ".3mf", ".step"):
+        _write_under(temp_library, f"set/part{suffix}", b"model\n")
+
+    status = scan_storage_root()
+
+    rows = _library_rows("set/")
+    assert len(rows) == 3
+    assert {asset.name for asset in rows.values()} == {"part (stl)", "part (3mf)", "part (step)"}
+    assert status.failed == 0
+
+
+def test_a_rescan_does_not_rename_existing_rows(temp_library: Path) -> None:
+    _write_under(temp_library, "stable/part.stl", b"solid a\n")
+    scan_storage_root()
+    original = _library_rows("stable/")["stable/part.stl"]
+    snapshot = (original.id, original.name, original.filename, original.storage_path)
+    assert snapshot[1] == "part"
+
+    for suffix, expected in ((".3mf", "part (3mf)"), (".step", "part (step)")):
+        _write_under(temp_library, f"stable/part{suffix}", b"model\n")
+        scan_storage_root()
+        rows = _library_rows("stable/")
+        row = rows["stable/part.stl"]
+        assert (row.id, row.name, row.filename, row.storage_path) == snapshot
+        assert rows[f"stable/part{suffix}"].name == expected
+
+
+def test_the_same_tree_scanned_into_a_cleared_library_gets_the_same_names(temp_library: Path) -> None:
+    # The derivation reads the disk listing, not database state, so clearing the
+    # rows and rescanning the same tree reproduces the same names.
+    for rel_path in ("cleared/part.stl", "cleared/part.3mf", "cleared/part.s#5"):
+        _write_under(temp_library, rel_path, b"model\n")
+    first = scan_storage_root()
+    first_names = {rel_path: asset.name for rel_path, asset in _library_rows("cleared/").items()}
+    assert len(first_names) == first.registered
+
+    _delete_rows_under("cleared/")
+    assert _library_rows("cleared/") == {}
+
+    second = scan_storage_root()
+    second_names = {rel_path: asset.name for rel_path, asset in _library_rows("cleared/").items()}
+    assert second_names == first_names
+    assert second.registered == len(second_names)
+
+
+def test_a_format_set_split_across_batches_gets_the_same_names(
+    temp_library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Naming a directory happens before any row goes pending, so a batch boundary
+    # cannot change a name: this kills "suffix the second one seen".
+    dirs = ("split-a", "split-b")
+    for directory in dirs:
+        for suffix in (".stl", ".3mf", ".step"):
+            _write_under(temp_library, f"{directory}/part{suffix}", b"model\n")
+
+    real_batch_size = library_scan.BATCH_SIZE
+    monkeypatch.setattr(library_scan, "BATCH_SIZE", 1)
+    scan_storage_root()
+    first_names = {rel_path: asset.name for rel_path, asset in _library_rows("split-").items()}
+
+    _delete_rows_under("split-")
+    monkeypatch.setattr(library_scan, "BATCH_SIZE", real_batch_size)
+    scan_storage_root()
+    second_names = {rel_path: asset.name for rel_path, asset in _library_rows("split-").items()}
+
+    assert second_names == first_names
+    for directory in dirs:
+        assert {second_names[f"{directory}/part{suffix}"] for suffix in (".stl", ".3mf", ".step")} == {
+            "part (stl)",
+            "part (3mf)",
+            "part (step)",
+        }
+
+
+def test_names_are_compared_case_insensitively(temp_library: Path) -> None:
+    # idx_asset_folder_name_unique is COLLATE NOCASE; casefold() is a superset, so
+    # a name SQLite would reject is never handed out.
+    _write_under(temp_library, "Case/Part.stl", b"solid a\n")
+    _write_under(temp_library, "Case/part.3mf", b"3mf a\n")
+    _write_under(temp_library, "Shout/SOLO.stl", b"solid solo\n")
+    scan_storage_root()
+
+    case_rows = _library_rows("Case/")
+    assert len(case_rows) == 2
+    assert {asset.name for asset in case_rows.values()} == {"Part (stl)", "part (3mf)"}
+
+    solo = _library_rows("Shout/")["Shout/SOLO.stl"]
+    solo_snapshot = (solo.id, solo.name, solo.filename)
+    assert solo.name == "SOLO"
+
+    _write_under(temp_library, "Shout/solo.stl", b"solid solo 2\n")
+    scan_storage_root()
+
+    shout_rows = _library_rows("Shout/")
+    assert len(shout_rows) == 2
+    assert shout_rows["Shout/solo.stl"].name == "solo (stl)"
+    solo_after = shout_rows["Shout/SOLO.stl"]
+    assert (solo_after.id, solo_after.name, solo_after.filename) == solo_snapshot
+
+
+LIVE_ELECTRONICS_FILES = [
+    "multifilament.stl",
+    "multifilament.fcstd",
+    "multifilament.brd",
+    "multifilament.sch",
+    "multifilament.s#3",
+    "multifilament.s#5",
+    "multifilament.s#7",
+    "multifilament.s#9",
+    "multifilament.b#3",
+    "multifilament.b#5",
+    "multifilament.b#9",
+]
+
+
+@pytest.mark.parametrize(
+    ("present", "wanted", "taken", "expected"),
+    [
+        pytest.param(["solo.stl"], ["solo.stl"], set(), {"solo.stl": "solo"}, id="unique-stem"),
+        pytest.param(
+            ["part.stl", "part.3mf", "part.step"],
+            ["part.stl", "part.3mf", "part.step"],
+            set(),
+            {"part.stl": "part (stl)", "part.3mf": "part (3mf)", "part.step": "part (step)"},
+            id="format-set",
+        ),
+        pytest.param(
+            ["multifilament.s#5"], ["multifilament.s#5"], set(), {"multifilament.s#5": "multifilament.s#5"},
+            id="artifact-suffix",
+        ),
+        pytest.param(["assembly.pdf"], ["assembly.pdf"], set(), {"assembly.pdf": "assembly.pdf"}, id="non-naming-ext"),
+        pytest.param(["solo.stl"], ["solo.stl"], {"solo"}, {"solo.stl": "solo (stl)"}, id="bare-stem-taken"),
+        pytest.param(
+            ["solo.stl"], ["solo.stl"], {"solo", "solo (stl)"}, {"solo.stl": "solo (stl) (2)"}, id="escalate"
+        ),
+        pytest.param(
+            ["part (stl)", "part.stl", "part.3mf"],
+            ["part (stl)", "part.stl", "part.3mf"],
+            set(),
+            {"part (stl)": "part (stl)", "part.3mf": "part (3mf)", "part.stl": "part (stl) (2)"},
+            id="literal-wins",
+        ),
+        pytest.param(
+            ["Part.stl", "part.3mf"],
+            ["Part.stl", "part.3mf"],
+            set(),
+            {"Part.stl": "Part (stl)", "part.3mf": "part (3mf)"},
+            id="casing-preserved",
+        ),
+        pytest.param(
+            ["Part.stl", "PART.stl"],
+            ["Part.stl", "PART.stl"],
+            set(),
+            {"PART.stl": "PART (stl)", "Part.stl": "Part (stl) (2)"},
+            id="casefold-tie-break",
+        ),
+        pytest.param(
+            ["solo", "solo.stl"],
+            ["solo", "solo.stl"],
+            set(),
+            {"solo": "solo", "solo.stl": "solo (stl)"},
+            id="suffixless-first",
+        ),
+        pytest.param(
+            ["solo.stl"], ["solo.stl"], {"solo (stl)"}, {"solo.stl": "solo"}, id="base-before-suffixed"
+        ),
+        pytest.param(["x."], ["x."], set(), {"x.": "x."}, id="dot-suffix"),
+        pytest.param(
+            LIVE_ELECTRONICS_FILES,
+            ["multifilament.stl", "multifilament.fcstd", "multifilament.s#5"],
+            {"multifilament"},
+            {
+                "multifilament.stl": "multifilament (stl)",
+                "multifilament.fcstd": "multifilament.fcstd",
+                "multifilament.s#5": "multifilament.s#5",
+            },
+            id="live-electronics",
+        ),
+    ],
+)
+def test_the_derived_name_table(present, wanted, taken, expected) -> None:
+    original_taken = set(taken)
+    assert library_scan.derive_asset_names(present, wanted, taken) == expected
+    # Pure: the caller's taken-set is not mutated.
+    assert taken == original_taken
+
+
+def test_an_upload_name_is_respected_by_a_later_scan(temp_library: Path) -> None:
+    # Upload/scan coherence: an upload's name is a taken name the scan derives
+    # around, while the upload door keeps its 409 for a scan-registered name.
+    _write_under(temp_library, "Coexist/part.stl", b"solid a\n")
+    with Session(engine) as session:
+        folder_id = library_scan.resolve_dir_folder(session, "Coexist", {}, with_storage_path=True)
+        session.add(
+            Asset(
+                name="part",
+                title="part",
+                filename="part.stl",
+                mime="model/stl",
+                size=(temp_library / "Coexist/part.stl").stat().st_size,
+                storage_path="Coexist/part.stl",
+                folder_id=folder_id,
+            )
+        )
+        session.commit()
+
+    uploaded = _library_rows("Coexist/")["Coexist/part.stl"]
+    uploaded_snapshot = (uploaded.id, uploaded.name, uploaded.filename)
+
+    _write_under(temp_library, "Coexist/part.3mf", b"3mf a\n")
+    status = scan_storage_root()
+
+    rows = _library_rows("Coexist/")
+    assert status.registered == 1
+    assert rows["Coexist/part.3mf"].name == "part (3mf)"
+    untouched = rows["Coexist/part.stl"]
+    assert (untouched.id, untouched.name, untouched.filename) == uploaded_snapshot
+
+    # The upload door keeps its 409; the scan steps around the upload's names,
+    # not the other way round.
+    with Session(engine) as session:
+        with pytest.raises(HTTPException) as excinfo:
+            asset_service.unique_model_name(
+                session, asset_service.model_name_from_filename("part.3mf"), folder_id
+            )
+    assert excinfo.value.status_code == 409

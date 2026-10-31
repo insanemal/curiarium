@@ -33,8 +33,9 @@ gone.
 How a scan behaves:
 
 * the tree is walked iteratively, one directory at a time, so peak memory is a
-  single directory's entry list, the batch being registered and the set of
-  relative paths already known - not the whole tree of rows;
+  single directory's entry list plus its accepted-file list, the batch being
+  registered and the set of relative paths already known - not the whole tree of
+  rows;
 * rows are committed in batches of ``BATCH_SIZE``. An interruption (a crash, a
   killed process, a raised error) leaves whole committed batches behind and the
   in-flight batch rolled back, so a rescan picks up exactly where the last one
@@ -54,9 +55,19 @@ How a scan behaves:
 * prepared-print metadata is inspected inline on a best-effort basis; a file
   that cannot be read registers anyway and is not counted as a failure (the
   startup backfill retries it);
-* a same-stem collision (``gear.stl`` + ``gear.3mf`` in one folder derive the
-  same model name) fails exactly that one row with ``"<rel_path>: <error>"``
-  while the rest of the batch still lands.
+* a display name is derived per directory before the rows go pending: a stem
+  that is unique in its directory keeps the bare stem, two or more nameable
+  files sharing a stem split by extension (``part (stl)`` / ``part (3mf)``), and
+  a suffix the library does not recognise as a model file keeps its whole
+  filename (``multifilament.s#5``). The derivation is a pure function of the
+  directory listing plus the folder's already-taken names, read once per
+  directory, so the same tree gets the same names on every scan and a batch
+  boundary cannot change a name (Mf-tkdp);
+* an existing row is never renamed: a name taken before this rule existed (a bare
+  ``multifilament``) stays as it is and its siblings step around it;
+* a row that still cannot be inserted (a concurrent upload took the name between
+  the read and the insert) fails exactly that one row with ``"<rel_path>:
+  <error>"`` while the rest of the batch still lands.
 
 Every run is its own state object:
 
@@ -90,13 +101,14 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import partial
-from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Sequence, Tuple
+from pathlib import Path, PurePath
+from typing import Callable, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from sqlalchemy import or_, update
 from sqlmodel import Session, select
 
-from asset_service import ensure_model_thumbnail, save_thumb
+from asset_service import ensure_model_thumbnail, folder_name_index, save_thumb
+from config import DEFAULT_MOUNT_IMPORT_EXTS
 from db import STORAGE, engine
 from file_utils import guess_mime_from_path
 from models import Asset, Folder
@@ -110,6 +122,11 @@ RESERVED_DIRS = {"thumbs", "bundles", ".incoming"}
 # OS/tool debris that is never a library item.
 IGNORED_FILENAMES = {"Thumbs.db", "desktop.ini", ".DS_Store"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+# Extensions whose stem is a usable display name. This is a snapshot of the
+# module constant on purpose - NOT parse_mount_import_exts(MOUNT_IMPORT_EXTS_RAW):
+# a deployment's extension override decides what mount import copies, and must
+# never change what a file is called.
+NAMING_EXTS = frozenset(DEFAULT_MOUNT_IMPORT_EXTS)
 
 # Rows are committed in batches so one run does not hold a write transaction for
 # the whole tree, and so a long scan leaves a usable partial state.
@@ -178,7 +195,7 @@ class TreePlan:
     tracked: set  # dedupe keys already in the database
     keys_for: Callable[[str], Sequence[str]]  # relative path -> its dedupe keys
     accept: Callable[[str, int], bool]  # relative path + size -> register it?
-    build: Callable[[str, int], Asset]  # relative path + size -> unsaved row
+    build: Callable[[str, int, str], Asset]  # relative path + size + derived name -> unsaved row
     dest_root: Optional[Path] = None  # copy target; None registers files in place
     prepare: Optional[Callable[[Session, List[PendingAsset], dict], None]] = None
     include_hidden: bool = False
@@ -357,6 +374,10 @@ def _walk_storage(root: Path, *, include_hidden: bool = False) -> Iterator[Tuple
                 entries = list(scan)
         except OSError:
             continue
+        # readdir order must never leak into a tie-break: names are derived per
+        # directory and the order files are named in has to be a function of the
+        # tree, not of the filesystem.
+        entries.sort(key=lambda entry: (entry.name.casefold(), entry.name))
 
         file_entries: List[os.DirEntry] = []
         ignored = 0
@@ -383,6 +404,66 @@ def _walk_storage(root: Path, *, include_hidden: bool = False) -> Iterator[Tuple
                 continue
             file_entries.append(entry)
         yield rel_dir, file_entries, ignored
+
+
+def _name_parts(filename: str) -> Tuple[str, str]:
+    """The on-disk stem of one filename and its lowercased suffix."""
+    path = PurePath(filename)
+    return path.stem, path.suffix.lower()
+
+
+def derive_asset_names(present: Sequence[str], wanted: Sequence[str], taken: Iterable[str]) -> dict[str, str]:
+    """Give every file in one directory a distinct, stable display name.
+
+    ``present`` is every filename the plan accepts in that directory, tracked or
+    not, so the answer is a function of the tree and not of database state;
+    ``wanted`` is the subset that needs a name now; ``taken`` is the case-folded
+    set of names the folder already holds. Pure: no IO, no session, and ``taken``
+    is not mutated - the caller decides what to remember.
+
+    The rule (Mf-tkdp):
+    * a suffix the library does not treat as a model file keeps the whole
+      filename, so ``multifilament.s#5`` stays itself;
+    * a stem that is unique in the directory keeps the bare stem (``solo``);
+    * two or more nameable files sharing a stem split by extension
+      (``part (stl)`` / ``part (3mf)``);
+    * anything still taken escalates with `` (2)``, `` (3)``, ...
+    All comparisons are ``casefold()``, a superset of SQLite's ASCII ``NOCASE``,
+    so a skipped name is only ever one SQLite would have allowed; the name keeps
+    the on-disk casing of the stem and the lowercased extension. Files are named
+    in ``(casefold, raw)`` order and every assignment joins the taken-set as it
+    is made, which is what makes a batch boundary unable to change a name.
+    """
+    stem_groups: dict = {}
+    for filename in set(present):
+        stem, ext = _name_parts(filename)
+        if ext in NAMING_EXTS:
+            key = stem.casefold()
+            stem_groups[key] = stem_groups.get(key, 0) + 1
+
+    remaining = set(taken)
+    names: dict = {}
+    for filename in sorted(set(wanted), key=lambda f: (f.casefold(), f)):
+        stem, ext = _name_parts(filename)
+        if ext not in NAMING_EXTS:
+            candidates = [filename]
+        elif stem_groups.get(stem.casefold(), 0) >= 2:
+            candidates = [f"{stem} ({ext[1:]})"]
+        else:
+            candidates = [stem, f"{stem} ({ext[1:]})"]
+        for candidate in candidates:
+            if candidate.casefold() not in remaining:
+                chosen = candidate
+                break
+        else:
+            last = candidates[-1]
+            number = 2
+            while f"{last} ({number})".casefold() in remaining:
+                number += 1
+            chosen = f"{last} ({number})"
+        remaining.add(chosen.casefold())
+        names[filename] = chosen
+    return names
 
 
 def _asset_file_is_present(
@@ -573,17 +654,22 @@ def _prepared_metadata(path: Path, filename: str) -> Optional[str]:
     return json.dumps(metadata) if metadata else None
 
 
-def build_asset(root: Path, rel_path: str, size: int, created_via: str = "scan") -> Asset:
+def build_asset(root: Path, rel_path: str, size: int, name: str, created_via: str = "scan") -> Asset:
     """Build the whole row up front, so the write phase needs no extra reads.
 
     A scan has no actor - it is background work with no request and no user - so
     `created_by` stays NULL and only the door is stamped. `created_via` is a
     parameter rather than a hardcoded "scan" because mount import reuses this
     builder for the same walk: the caller names its own door.
+
+    ``name`` is derived by the caller because only the per-directory pre-pass
+    knows the folder's siblings and already-taken names (Mf-tkdp), while
+    ``filename`` stays the on-disk basename - so a row can have ``name="part
+    (stl)"`` with ``filename="part.stl"``. A later metadata rename re-renders the
+    filename from the name (``part (stl).stl``), which is cosmetic and out of
+    scope for Mf-tkdp.
     """
-    file_path = Path(rel_path)
-    filename = file_path.name
-    name = file_path.stem or filename
+    filename = Path(rel_path).name
     return Asset(
         name=name,
         filename=filename,
@@ -598,6 +684,19 @@ def build_asset(root: Path, rel_path: str, size: int, created_via: str = "scan")
     )
 
 
+def _folder_id_for(plan: Optional[TreePlan], session: Session, rel_dir: str, cache: dict) -> Optional[str]:
+    """The folder row standing for one directory, created if missing.
+
+    The single folder resolver: the per-directory naming pre-pass and
+    ``_assign_folders`` both go through it, so a directory's folder is resolved
+    once per run and the cache is the only authority on it. Folder rows stay
+    outside the per-row savepoints (``resolve_dir_folder`` flushes but does not
+    commit) and land with the batch.
+    """
+    as_directories = True if plan is None else plan.folders_are_directories
+    return resolve_dir_folder(session, rel_dir, cache, with_storage_path=as_directories)
+
+
 def _assign_folders(session: Session, pending: List[PendingAsset], cache: dict) -> None:
     """Resolve every folder id before any of these assets enters the session.
 
@@ -606,13 +705,8 @@ def _assign_folders(session: Session, pending: List[PendingAsset], cache: dict) 
     reference walk, whose bytes live outside storage, says no.
     """
     plan = _active_plan()
-    as_directories = True if plan is None else plan.folders_are_directories
-    folder_ids = [
-        resolve_dir_folder(session, item.rel_dir, cache, with_storage_path=as_directories)
-        for item in pending
-    ]
-    for item, folder_id in zip(pending, folder_ids, strict=True):
-        item.asset.folder_id = folder_id
+    for item in pending:
+        item.asset.folder_id = _folder_id_for(plan, session, item.rel_dir, cache)
 
 
 def _commit_batch(
@@ -703,6 +797,35 @@ def _flush_batch(
     return [rel_path for _asset_id, rel_path, _mime in thumbnails]
 
 
+def _directory_names(
+    session: Session,
+    plan: TreePlan,
+    rel_dir: str,
+    accepted: Sequence[Tuple[str, int]],
+    wanted: Sequence[str],
+    cache: dict,
+    assigned: dict,
+) -> dict[str, str]:
+    """Derive display names for one directory's new files, keyed by rel path.
+
+    Runs before the rows go pending, because this is the only point in the walk
+    where the directory's whole listing, its folder id and an unflushed session
+    all exist at once. One folder read per directory with new files: O(dirs)
+    queries, not O(files x folder contents).
+    """
+    folder_id = _folder_id_for(plan, session, rel_dir, cache)
+    bucket = folder_id or ""
+    taken = assigned.setdefault(bucket, set())
+    taken |= folder_name_index(session, folder_id)
+    names = derive_asset_names(
+        [Path(rel_path).name for rel_path, _size in accepted],
+        [Path(rel_path).name for rel_path in wanted],
+        taken,
+    )
+    taken.update(name.casefold() for name in names.values())
+    return {rel_path: names[Path(rel_path).name] for rel_path in wanted}
+
+
 def _register_tree(session: Session, plan: TreePlan, state: ScanState, seen: set) -> None:
     """Walk ``plan.root`` and register what the plan accepts, in batches.
 
@@ -719,6 +842,13 @@ def _register_tree(session: Session, plan: TreePlan, state: ScanState, seen: set
     folder_cache: dict = {}
     pending: List[PendingAsset] = []
     consecutive_failures = 0
+    # Run-scoped names already handed out, keyed by the index's own bucket:
+    # ``folder_id or ""`` is exactly ``COALESCE(folder_id, '')`` in
+    # idx_asset_folder_name_unique, so it counts rows still sitting in the
+    # unflushed ``pending`` batch (which a database read cannot see) and
+    # directories that resolve to the same folder. Without it BATCH_SIZE could
+    # change a name; with it the run's answer is a function of the tree alone.
+    assigned_names: dict = {}
 
     def flush() -> None:
         """Commit what is pending and account for it."""
@@ -744,6 +874,8 @@ def _register_tree(session: Session, plan: TreePlan, state: ScanState, seen: set
             if ignored:
                 with _state_lock:
                     state.ignored += ignored
+            # one directory's accepted files, kept only until its names are derived
+            accepted: List[Tuple[str, int]] = []
             for entry in file_entries:
                 if entry.name in IGNORED_FILENAMES or (not plan.include_hidden and entry.name.startswith(".")):
                     with _state_lock:
@@ -762,11 +894,26 @@ def _register_tree(session: Session, plan: TreePlan, state: ScanState, seen: set
                     with _state_lock:
                         state.ignored += 1
                     continue
+                accepted.append((rel_path, size))
+
+            # naming needs the directory's whole accepted listing, so it runs as
+            # its own pass before any row of this directory goes pending
+            wanted: List[str] = []
+            for rel_path, _size in accepted:
                 if any(key in plan.tracked for key in plan.keys_for(rel_path)):
                     with _state_lock:
                         state.known += 1
                     continue
-                pending.append(PendingAsset(asset=plan.build(rel_path, size), rel_path=rel_path, rel_dir=rel_dir))
+                wanted.append(rel_path)
+            if not wanted:
+                continue
+            names = _directory_names(session, plan, rel_dir, accepted, wanted, folder_cache, assigned_names)
+            for rel_path, size in accepted:
+                if rel_path not in names:
+                    continue
+                pending.append(
+                    PendingAsset(asset=plan.build(rel_path, size, names[rel_path]), rel_path=rel_path, rel_dir=rel_dir)
+                )
                 if len(pending) >= BATCH_SIZE:
                     flush()
 

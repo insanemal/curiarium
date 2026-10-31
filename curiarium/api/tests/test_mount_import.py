@@ -12,6 +12,7 @@ from typing import Optional
 import pytest
 from sqlalchemy import event
 from sqlmodel import Session, select
+from test_library_scan import _forge_name_collision
 
 import audit
 import library_scan
@@ -321,10 +322,12 @@ def test_switching_modes_the_other_way_registers_nothing(mount_and_storage, monk
 # --- per-file policy ---------------------------------------------------------
 
 
-def test_same_stem_collision_fails_only_that_row(mount_and_storage) -> None:
+def test_a_rejected_row_still_fails_only_itself(mount_and_storage, monkeypatch) -> None:
     mount, _storage = mount_and_storage
     _write(mount, "a/part.stl")
     _write(mount, "a/part.step", b"step a\n")
+    # Both doors share the naming rule, so this must hold for mount import too.
+    _forge_name_collision(monkeypatch, "a/part.stl", "a/part.step")
     before = _asset_ids()
 
     state = mount_import.scan_mount_imports()

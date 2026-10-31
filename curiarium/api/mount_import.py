@@ -12,7 +12,11 @@ Two modes, chosen by the ``mount_import_copy`` setting:
 
 The registration path is the library scanner's (``register_tree``): the same
 walk, the same 200-row batching, and no per-file ``finalize_asset_record``. A
-mount import run never flags files missing - only the storage scan does.
+mount import run never flags files missing - only the storage scan does. The
+naming rule lives in the shared walk too, so a mount import (copy and reference
+mode alike) names rows exactly as the storage scan does: a reference row is a
+library asset with a display name, and mount import had the identical
+silent-drop bug when two files shared a stem.
 
 Idempotency is by destination storage path and by the absolute ``source_path``
 of files under this mount, so re-running registers nothing. Switching modes does
@@ -176,8 +180,8 @@ def scan_mount_imports() -> Optional[ScanState]:
             return False
         return True
 
-    def build(rel_path: str, size: int) -> Asset:
-        row = build_asset(root, rel_path, size, created_via="mount-import")
+    def build(rel_path: str, size: int, name: str) -> Asset:
+        row = build_asset(root, rel_path, size, name, created_via="mount-import")
         if not copy_files:
             row.storage_path = None
             row.source_path = _source_key(root, rel_path)

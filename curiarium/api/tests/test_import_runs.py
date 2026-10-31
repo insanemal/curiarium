@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
+from test_library_scan import _forge_name_collision
 
 import import_runs
 import library_scan
@@ -144,10 +145,11 @@ def test_run_list_is_empty_by_default(client: TestClient) -> None:
     assert response.json() == {"runs": [], "total": 0, "limit": 20, "offset": 0}
 
 
-def test_real_run_persists_counters_and_errors(mount_and_storage) -> None:
+def test_real_run_persists_counters_and_errors(mount_and_storage, monkeypatch) -> None:
     mount, _storage = mount_and_storage
     _write(mount, "a/part.stl")
     _write(mount, "a/part.step", b"step a\n")
+    _forge_name_collision(monkeypatch, "a/part.stl", "a/part.step")
     before = _run_ids()
 
     state = mount_import.scan_mount_imports()

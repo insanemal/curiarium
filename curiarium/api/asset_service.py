@@ -177,13 +177,37 @@ def model_name_for_rename(name: str, current_filename: str) -> str:
     return candidate
 
 
+def folder_name_index(session: Session, folder_id: Optional[str]) -> set[str]:
+    """Case-folded names taken in one folder, read as columns only.
+
+    The one definition of "a name in this folder": ``model_names_in_folder``
+    delegates here when it has nothing to exclude, and the library scan pre-checks
+    a derived name against it, so the scan and the 409 classifier can never
+    disagree. ``folder_id=None`` stays an ``IS NULL`` comparison because the index
+    buckets unfiled rows under ``COALESCE(folder_id, '')``.
+
+    Columns only on purpose: the scan calls this once per directory with new
+    files and must not materialise a whole folder's rows to do it.
+    """
+    statement = select(Asset.name, Asset.filename).where(Asset.folder_id == folder_id)
+    return {
+        (name or model_name_from_filename(filename)).casefold()
+        for name, filename in session.exec(statement).all()
+    }
+
+
 def model_names_in_folder(session: Session, folder_id: Optional[str], exclude_id: Optional[str] = None) -> set[str]:
     """Case-folded model names in one folder, matching the unique index's scope.
+
+    Delegates to ``folder_name_index`` whenever there is nothing to exclude, so
+    there is exactly one definition of what a taken name is.
 
     ``folder_id=None`` stays an ``IS NULL`` comparison because the index buckets
     unfiled rows under COALESCE(folder_id, '') and the comparison happens in
     Python so SQLite never has to agree about case folding.
     """
+    if exclude_id is None:
+        return folder_name_index(session, folder_id)
     statement = select(Asset).where(Asset.folder_id == folder_id)
     return {
         (row.name or model_name_from_filename(row.filename)).casefold()
