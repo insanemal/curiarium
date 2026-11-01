@@ -2399,6 +2399,95 @@
       "summary": "Import From Link"
     }
   },
+  "/import/archive": {
+    "post": {
+      "description": "Extract an archive already in the library into its twin directory.\n\nThin on purpose: the containment, budget, no-clobber and audit decisions live\nin ``archive_service``, which maps a ``SnapshotPathError`` with\n``snapshot_guard.status_for`` itself.",
+      "operationId": "import_archive_entries_import_archive_post",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ArchiveExtractRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveExtractOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Import Archive Entries"
+    }
+  },
+  "/import/archive/entries": {
+    "get": {
+      "description": "List an archive the library already holds; reads only, writes nothing.",
+      "operationId": "list_import_archive_entries_import_archive_entries_get",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "path",
+          "required": true,
+          "schema": {
+            "title": "Path",
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveEntriesOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "List Import Archive Entries"
+    }
+  },
   "/import/inspect": {
     "post": {
       "operationId": "inspect_import_link_import_inspect_post",

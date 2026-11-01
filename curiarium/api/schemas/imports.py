@@ -8,6 +8,9 @@ from .assets import AssetOut
 from .projects import ProjectOut
 
 __all__ = [
+  "ArchiveEntriesOut",
+  "ArchiveExtractOut",
+  "ArchiveExtractRequest",
   "ImportInspectOut",
   "ImportProjectOut",
   "ImportProjectRequest",
@@ -40,6 +43,40 @@ class ImportInspectOut(BaseModel):
 class ZipEntryOut(BaseModel):
   path: str
   size: int
+
+
+class ArchiveEntriesOut(BaseModel):
+  """One archive the library already holds, as the entries door lists it.
+
+  `path` echoes the request's library-relative path (normalised), so a client can
+  show what it read without re-deriving it.
+  """
+
+  path: str
+  entries: List[ZipEntryOut]
+
+
+class ArchiveExtractRequest(BaseModel):
+  """An archive already in the library; `entries=None` means every member."""
+
+  path: str
+  entries: Optional[List[str]] = None
+
+
+class ArchiveExtractOut(BaseModel):
+  """What an in-library extract did, or that it had nothing left to do.
+
+  `already_present` is the idempotent outcome: every destination existed, so the
+  request wrote nothing, started no scan and wrote no audit row. `destination`
+  is library-relative, the twin directory beside the zip.
+  """
+
+  path: str
+  destination: str
+  files: int
+  bytes: int
+  already_present: bool
+  scan_started: bool
 
 
 class ImportZipEntriesRequest(ImportRequest):

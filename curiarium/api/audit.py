@@ -59,6 +59,9 @@ ASSET_FILE_DELETE = "asset.file.delete"
 ASSET_FILE_RENAME = "asset.file.rename"
 ASSET_FILE_REORDER = "asset.file.reorder"
 ASSET_PREPARED_PRINT_DELETE = "asset.prepared_print.delete"
+# An archive already in the library extracted in place into its twin directory
+# (Mf-1zmd). One row per successful extract; an idempotent no-op writes none.
+ARCHIVE_EXTRACT = "archive.extract"
 FOLDER_DELETE = "folder.delete"
 FOLDER_RENAME = "folder.rename"
 FOLDER_MOVE = "folder.move"
@@ -139,6 +142,7 @@ ACTIONS: frozenset[str] = frozenset({
     ASSET_FILE_RENAME,
     ASSET_FILE_REORDER,
     ASSET_PREPARED_PRINT_DELETE,
+    ARCHIVE_EXTRACT,
     FOLDER_DELETE,
     FOLDER_RENAME,
     FOLDER_MOVE,
@@ -372,6 +376,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     ("POST", "/import"): (ASSET_CREATE,),
     ("POST", "/import/project"): (ASSET_CREATE,),
     ("POST", "/import/zip"): (ASSET_CREATE,),
+    # An in-library extract writes files but no asset rows: the next scan is what
+    # registers them, so this is the operator's record of the extraction itself.
+    ("POST", "/import/archive"): (ARCHIVE_EXTRACT,),
     # An asset delete that empties a folder's directory also retires that
     # folder's row (Mf-sdnj), so both routes below may write `folder.delete`
     # alongside their own `asset.delete`.

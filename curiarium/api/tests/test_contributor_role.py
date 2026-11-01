@@ -468,9 +468,9 @@ def test_a_contributor_action_is_audited_with_the_contributor_role(client: TestC
     # coverage guard sees 43 audited / 14 exempt routes. Mf-lyj2 added the
     # first-run setup route to the audited half (41 -> 42), Mf-rnrn the
     # account retirement route (42 -> 43) and Mf-vwqf the bundle create and
-    # dismiss pair (43 -> 45), which is why the number here is not the
-    # contributor ticket's.
+    # dismiss pair (43 -> 45) and Mf-1zmd the archive extract route (45 -> 46),
+    # which is why the number here is not the contributor ticket's.
     assert audit.ROUTE_ACTIONS[("POST", "/upload")] == (audit.ASSET_CREATE,)
     assert audit.assert_audit_coverage() is audit.ROUTE_ACTIONS
-    assert len(audit.ROUTE_ACTIONS) == 45
+    assert len(audit.ROUTE_ACTIONS) == 46
     assert len(audit.EXEMPT_ROUTES) == 14

@@ -22,6 +22,15 @@ vi.mock("../LightBurnPreview", () => ({
   },
 }));
 
+// The preview footer mounts `ArchiveExtractAction`, which imports the api barrel.
+// Only the two archive calls are replaced; the rest of the barrel (`fileUrl`,
+// the grant transport) has to stay real for the modal to render at all.
+vi.mock("../../lib/api", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../lib/api")>()),
+  listArchiveEntries: vi.fn(),
+  extractArchive: vi.fn(),
+}));
+
 import type { Asset, Folder, PreparedPrint } from "../../lib/api";
 import { AssetPreviewModal, PreparedPrintSummary, renderPreviewContent } from "./preview";
 
@@ -248,6 +257,48 @@ describe("AssetPreviewModal dialog upgrade", () => {
     fireEvent.click(closeButtons[1]);
 
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("AssetPreviewModal archive extraction", () => {
+  const ZIP_ASSET: Asset = { ...MODAL_ASSET, filename: "Moai.zip", mime: "application/zip" };
+
+  it("offers the extract action for a zip the library holds", () => {
+    render(
+      <AssetPreviewModal
+        {...modalProps({ canContribute: true, asset: { ...ZIP_ASSET, storage_path: "Moai.zip" } })}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Extract Moai.zip" })).toBeTruthy();
+  });
+
+  it("offers nothing for a zip row with no library path", () => {
+    // A mount/reference row has no `storage_path`: extracting would need a path
+    // this asset does not own.
+    render(<AssetPreviewModal {...modalProps({ canContribute: true, asset: ZIP_ASSET })} />);
+
+    expect(screen.queryByRole("button", { name: "Extract Moai.zip" })).toBeNull();
+  });
+
+  it("offers nothing for a non-zip asset", () => {
+    render(
+      <AssetPreviewModal
+        {...modalProps({ canContribute: true, asset: { ...MODAL_ASSET, storage_path: "bracket.stl" } })}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /^Extract / })).toBeNull();
+  });
+
+  it("offers nothing to a reader", () => {
+    render(
+      <AssetPreviewModal
+        {...modalProps({ canContribute: false, asset: { ...ZIP_ASSET, storage_path: "Moai.zip" } })}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Extract Moai.zip" })).toBeNull();
   });
 });
 

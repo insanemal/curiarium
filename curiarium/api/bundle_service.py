@@ -20,8 +20,10 @@ nothing, so a mismatch is information for the operator (``False``), not an
 assertion to raise. A zip with no extracted twin is still read, through
 ``zip_service.read_zip_text_entry`` (bounded, never extracted), so the report can
 show its provenance; it is always ``blocked``/``archive_only``, because creation
-happens from registered assets and extraction/registration is the existing
-``POST /import/zip`` + library-scan path.
+happens from registered assets. The extraction/registration door for an archive
+already in the library is ``POST /import/archive`` (Mf-1zmd): it extracts the zip
+in place into the twin directory this detector already pairs, and the next scan
+registers it, so no detector change is involved.
 
 **Why ``_folder_index`` keys on ``Folder.storage_path``.** A bundle is only
 creatable when its directory is a *registered* directory, meaning a ``Folder``

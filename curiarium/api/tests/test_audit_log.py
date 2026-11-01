@@ -464,6 +464,18 @@ def call_import_zip(client, headers, ids, monkeypatch) -> Response:
         )
 
 
+def call_import_archive(client, headers, ids, monkeypatch) -> Response:
+    # An archive already in the temp storage root, so the request exercises the real
+    # extract path. The scan is stubbed because a real background walk would race
+    # the row assertion: this sweep is about the audit row, not the scan.
+    storage = Path(db.STORAGE)
+    storage.mkdir(parents=True, exist_ok=True)
+    with ZipFile(storage / "sweep.zip", "w") as archive:
+        archive.writestr("sweep.stl", STL_BYTES)
+    monkeypatch.setattr(main, "start_scan", lambda: True)
+    return client.post("/import/archive", json={"path": "sweep.zip"}, headers=headers)
+
+
 def call_rename_asset(client, headers, ids, monkeypatch) -> Response:
     return client.post(f"/asset/{ids.asset_id}/rename", json={"filename": "renamed.stl"}, headers=headers)
 
@@ -771,6 +783,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/import"): call_import,
     ("POST", "/import/project"): call_import_project,
     ("POST", "/import/zip"): call_import_zip,
+    ("POST", "/import/archive"): call_import_archive,
     ("DELETE", "/asset/{asset_id}"): call_delete_asset,
     ("POST", "/assets/batch/delete"): call_batch_delete,
     ("POST", "/asset/{asset_id}/rename"): call_rename_asset,

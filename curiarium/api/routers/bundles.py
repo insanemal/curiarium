@@ -12,8 +12,10 @@ event doubles as the operator's creation history. The re-run is idempotent, so t
 event is the history, never a duplicate.
 
 A zip with no extracted twin is reported and always ``blocked``/``archive_only``:
-creation happens from *registered* assets, so the operator path is
-``POST /import/zip`` and then a library scan, never a create from an archive.
+creation happens from *registered* assets, so the extraction door is
+``POST /import/archive`` - an archive already in the library extracts in place
+into its twin directory - and a scan then registers it, never a create from an
+archive.
 """
 
 from typing import Optional

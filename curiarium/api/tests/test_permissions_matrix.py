@@ -1,7 +1,7 @@
 """Per-route permission sweeps driven by `permissions.ROUTE_PERMISSIONS`.
 
 Why this file exists: Mf-2nbc enforces a level with a *per-route dependency*, and
-the only thing that keeps 98 hand-written declarations honest is a test that
+the only thing that keeps 100 hand-written declarations honest is a test that
 visits every route at every role. The sweeps below are parametrised from
 `permissions.ROUTE_PERMISSIONS`, so that table is both the documentation and the
 test plan: add a route without classifying it and
@@ -656,6 +656,19 @@ def call_import_zip(client: TestClient, headers: dict[str, str], ids: Ids, monke
     return client.post("/import/zip", json={"url": IMPORT_URL, "entries": ["cube.stl"]}, headers=headers)
 
 
+def call_import_archive_entries(
+    client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch
+) -> Response:
+    # A path that is not in the library: a 404 before any read, so the sweep has
+    # no side effect and no archive has to be staged for every parametrised run.
+    return client.get("/import/archive/entries", params={"path": "missing.zip"}, headers=headers)
+
+
+def call_import_archive(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    # Same reason: the archive is missing, so the refusal is the 404 under test.
+    return client.post("/import/archive", json={"path": "missing.zip"}, headers=headers)
+
+
 def call_upload_supporting_file(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     return client.post(
         f"/asset/{ids.asset_id}/files",
@@ -1140,6 +1153,8 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/import/inspect"): call_import_inspect,
     ("POST", "/import/zip/entries"): call_import_zip_entries,
     ("POST", "/import/zip"): call_import_zip,
+    ("GET", "/import/archive/entries"): call_import_archive_entries,
+    ("POST", "/import/archive"): call_import_archive,
     ("GET", "/imports/runs"): call_list_import_runs,
     ("GET", "/imports/runs/{run_id}"): call_import_run_detail,
     ("POST", "/asset/{asset_id}/files"): call_upload_supporting_file,
@@ -1223,6 +1238,10 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("GET", "/library/scan"): 200,
     ("GET", "/imports/runs"): 200,
     ("GET", "/imports/runs/{run_id}"): 200,
+    # Mf-1zmd: the archive is not in the library, so both doors answer the honest
+    # 404 without reading or writing anything.
+    ("GET", "/import/archive/entries"): 404,
+    ("POST", "/import/archive"): 404,
     ("GET", "/file/{asset_id}/{name}"): 200,
     ("GET", "/asset/{asset_id}/files"): 200,
     ("GET", "/asset/{asset_id}/files/{file_id}"): 200,
@@ -1432,7 +1451,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 98 routes - 11 public / 35 read / 21 contribute / 13 write / 18 admin.
+    """The matrix is pinned at 100 routes - 11 public / 36 read / 22 contribute / 13 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1442,11 +1461,11 @@ def test_the_matrix_is_the_documented_size() -> None:
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 98, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 100, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 35,
-        permissions.CONTRIBUTE: 21,
+        permissions.READ: 36,
+        permissions.CONTRIBUTE: 22,
         permissions.WRITE: 13,
         permissions.ADMIN: 18,
     }, counts
