@@ -43,6 +43,14 @@ README_TEXT = "Moai statue -No overhang\nCreated by Thingiverse user moai_maker\
 LICENSE_TEXT = f"Moai statue -No overhang by moai_maker on Thingiverse: {THING_URL}\n"
 STL_BYTES = b"solid cube\nendsolid cube\n"
 
+# The two real Thingiverse exports from the ticket. A real export sometimes ships
+# the created-by sentence in README.txt and the title line in LICENSE.txt, the
+# other way round from the Moai fixture above.
+CAT_NAME = "2-color_standing_cat_62536"
+CAT_CREATED_BY = "This thing was created by Thingiverse user nervoussystem, and is licensed under cc-nc-sa.\n"
+CAT_TITLE_LINE = "2-color standing cat by nervoussystem on Thingiverse: https://www.thingiverse.com/thing:62536\n"
+CAT_URL = "https://www.thingiverse.com/thing:62536"
+
 # The Moai previews, in the order they are written. The fourth is the largest, so
 # it is the cover the report must pick.
 IMAGE_SIZES = (100, 400, 200, 900, 300)
@@ -1042,3 +1050,145 @@ def test_the_zip_reader_answers_none_for_a_missing_member_and_a_bad_archive(tmp_
 
     assert zip_service.read_zip_text_entry(zip_path, "missing.txt", 4096) is None
     assert zip_service.read_zip_text_entry(broken, "ok.txt", 4096) is None
+
+
+# --- the real ticket shape: swapped documents -------------------------------
+#
+# A real Thingiverse export is not keyed to a filename: either document may hold
+# the created-by sentence or the title line. These tests drive the ticket's real
+# swapped shape through the same scan + detect + create path the box uses.
+
+
+def swapped_cat_bundle(root: Path) -> Path:
+    """The ticket's swapped root pair: README is the title line, LICENSE the created-by."""
+    bundle = root / CAT_NAME
+    write_text(bundle / "README.txt", CAT_TITLE_LINE)
+    write_text(bundle / "LICENSE.txt", CAT_CREATED_BY)
+    write_file(bundle / "files" / "part.stl", STL_BYTES)
+    write_file(bundle / "images" / "1.jpg", b"j" * 20)
+    return bundle
+
+
+def test_a_swapped_cat_bundle_is_high_ready_and_creates_one_project(client: TestClient, isolated_storage: Path) -> None:
+    swapped_cat_bundle(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), CAT_NAME)
+
+    assert row["confidence"] == "high"
+    assert row["detector"] == "thingiverse-readme"
+    assert row["metadata_shape"] == "root-docs"
+    assert row["title"] == "2-color standing cat"
+    assert row["creator"] == "nervoussystem"
+    assert row["licence"] == "CC BY-NC-SA"
+    assert row["licence_url"] == "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+    assert row["source_url"] == CAT_URL
+    assert row["status"] == "ready", "the unchanged Mf-um7x readiness path"
+    assert row["model_count"] == 1
+
+    created = create(client, headers, [{"key": CAT_NAME}])
+
+    assert created["created"] == 1
+    project_id = created["results"][0]["project_id"]
+    project = project_listing(client, headers)[project_id]
+    assert project["name"] == "2-color standing cat"
+    assert project["creator"] == "nervoussystem"
+    assert project["licence"] == "CC BY-NC-SA"
+    assert project["licence_url"] == "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+    assert project["source_url"] == CAT_URL
+    assert project["description"] == CAT_CREATED_BY.strip()
+    assert member_count(project_id) == 1
+
+
+def test_a_swapped_zip_is_high_and_stays_archive_only(client: TestClient, isolated_storage: Path) -> None:
+    write_zip(
+        isolated_storage / "Cat.zip",
+        {
+            "README.txt": CAT_TITLE_LINE.encode(),
+            "LICENSE.txt": CAT_CREATED_BY.encode(),
+            "files/part.stl": STL_BYTES,
+            "images/1.jpg": b"j" * 20,
+        },
+    )
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), "Cat.zip")
+
+    assert row["confidence"] == "high"
+    assert row["creator"] == "nervoussystem"
+    assert row["source_url"] == CAT_URL
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+
+    blocked = create(client, headers, [{"key": "Cat.zip"}])
+
+    assert blocked["blocked"] == 1
+    assert project_listing(client, headers) == {}
+
+
+def test_the_fourth_document_is_read_so_a_sibling_merge_can_complete(client: TestClient, isolated_storage: Path) -> None:
+    bundle = isolated_storage / "Mixed"
+    write_text(bundle / "README.txt", CAT_CREATED_BY)
+    write_text(bundle / "LICENSE.txt", "All rights reserved.\n")
+    write_text(bundle / "Mixed_README", CAT_TITLE_LINE)
+    write_text(bundle / "Mixed_LICENSE", CAT_CREATED_BY)
+    write_file(bundle / "files" / "part.stl", STL_BYTES)
+    scan()
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), "Mixed")
+
+    # The root pair cannot complete (no title/url), so the sibling pair must be
+    # reached. At the old cap of three the fourth document, `Mixed_LICENSE`, was
+    # never read, so this tree fell to low confidence.
+    assert row["confidence"] == "high"
+    assert row["detector"] == "thingiverse-sibling-docs"
+    assert row["creator"] == "nervoussystem"
+
+    view = bundle_detect.BundleSnapshot(
+        bundle_name="Mixed",
+        rel_dir="Mixed",
+        entries=(
+            bundle_detect.BundleEntry(rel_path="README.txt", size=100),
+            bundle_detect.BundleEntry(rel_path="LICENSE.txt", size=100),
+            bundle_detect.BundleEntry(rel_path="Mixed_README", size=100),
+            bundle_detect.BundleEntry(rel_path="Mixed_LICENSE", size=100),
+            bundle_detect.BundleEntry(rel_path="files/part.stl", size=len(STL_BYTES)),
+        ),
+    )
+    assert bundle_detect.doc_entry_candidates(view) == (
+        "README.txt",
+        "LICENSE.txt",
+        "Mixed_README",
+        "Mixed_LICENSE",
+    )
+
+
+def test_a_swapped_legacy_sibling_bundle_detects_and_creates(client: TestClient, isolated_storage: Path) -> None:
+    name = "Legacy Cat"
+    bundle = isolated_storage / name
+    write_text(bundle / f"{name}_README" / "readme.txt", CAT_TITLE_LINE)
+    write_text(bundle / f"{name}_LICENSE" / "license.txt", CAT_CREATED_BY)
+    write_file(bundle / "part.stl", STL_BYTES)
+    write_file(bundle / "preview.jpg", b"j" * 20)
+    scan()
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), name)
+
+    assert row["confidence"] == "high"
+    assert row["detector"] == "thingiverse-sibling-docs"
+    assert row["metadata_shape"] == "sibling-docs"
+    assert row["title"] == "2-color standing cat"
+    assert row["creator"] == "nervoussystem"
+    assert row["status"] == "ready"
+
+    created = create(client, headers, [{"key": name}])
+
+    assert created["created"] == 1
+    project_id = created["results"][0]["project_id"]
+    project = project_listing(client, headers)[project_id]
+    assert project["creator"] == "nervoussystem"
+    assert project["source_url"] == CAT_URL
+    assert member_count(project_id) == 1

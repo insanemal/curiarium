@@ -8,6 +8,9 @@
 
 **Extended:** ticket `Mf-h0p8` (R3 depth bound, container rule, create-time refusal).
 
+**Extended:** ticket `Mf-0780` (markers merged per named pair, so detection no
+longer depends on which of the two documents shipped which sentence).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -55,8 +58,8 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 
    | # | Detector | Confidence | Shape | Fires when |
    |---|---|---|---|---|
-   | R1 | `thingiverse-readme` | `high` | `root-docs` | the bundle root holds both `README.txt` and `LICENSE.txt`, **and both parse**: the README yields `created by Thingiverse user <name>` and `licensed under <token>`, the LICENSE matches `<title> by <creator> on Thingiverse: <url>` |
-   | R2 | `thingiverse-sibling-docs` | `high` | `sibling-docs` | the same pair shipped beside the files as `<bundle>_README` / `<bundle>_LICENSE` - as two files, or as two directories each holding one text file (the legacy flattening) - and both parse |
+   | R1 | `thingiverse-readme` | `high` | `root-docs` | the bundle root holds `README.txt` and/or `LICENSE.txt` - **at least one** of the two - and between them the pair carries both of Thingiverse's markers **in whichever document they were shipped**: `created by Thingiverse user <name>` with `licensed under <token>` on one side, `<title> by <creator> on Thingiverse: <url>` on the other |
+   | R2 | `thingiverse-sibling-docs` | `high` | `sibling-docs` | the same pair shipped beside the files as `<bundle>_README` / `<bundle>_LICENSE` - as two files, or as two directories each holding one text file (the legacy flattening) - at least one of them present, and both markers present in whichever of the two documents holds them |
    | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model **at the bundle's own depth** (depth 0, or depth 1 under `files/`), one image and one text entry |
 
    `high` therefore means *the vendor told us*, never *there is a `.txt` file*.
@@ -65,10 +68,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    only, every provenance field `None` - or is not a bundle at all. The title is
    the parsed licence title, else `display_name(bundle_name)` (a leading
    `^\d+[_-]+` ordinal dropped, underscores to spaces, whitespace collapsed, no
-   dash rewriting); the creator is the README's, the licence and its URL come
-   from an explicit token table, and an unknown token is echoed back with **no**
-   URL, because a guessed licence link is a legal statement we are not entitled
-   to make. The cover is the largest image, ties broken by path.
+   dash rewriting); the creator is the created-by sentence's, the licence and
+   its URL come from an explicit token table, and an unknown token is echoed
+   back with **no** URL, because a guessed licence link is a legal statement we
+   are not entitled to make. The description is the document that carried the
+   created-by sentence, and it is `None` when nothing did. The cover is the
+   largest image, ties broken by path.
 
    The model evidence for R3 is bounded to the bundle's own depth - depth 0, or
    depth 1 under `R3_MODEL_DIRS` (`{"files"}`) - and images and text stay
@@ -102,7 +107,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    storage root through `library_scan.iter_directories` (a documented public
    wrapper over the library's own `_walk_storage`, so a read-only caller outside
    that module reuses its pruning instead of importing an underscore name),
-   builds each candidate's snapshot, reads at most three documents bounded by
+   builds each candidate's snapshot, reads at most four documents bounded by
    `BUNDLE_DOC_MAX_BYTES`, and resolves each candidate against the database. It
    writes nothing - no row, no file, no folder healing - which is what makes it
    safe on a `READ` route.
@@ -316,6 +321,70 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     meaning database readiness (Mf-um7x), and a detection mistake must not
     masquerade as an unresolved `Folder`.
 
+15. **A document says what it is; the filename is a tie-break.** Detection was
+    originally keyed to file names: `README.txt` had to carry `created by
+    Thingiverse user <name>` with `licensed under <token>`, and `LICENSE.txt`
+    had to carry `<title> by <creator> on Thingiverse: <url>`. Real exports are
+    under no such obligation: the two real directory shapes in the ticket differ
+    only in which document carries which sentence, the contents swapped between
+    them, and only **11 of 92** bundles parsed - the remaining 81 sitting at low
+    confidence while carrying identical information in the other file. So the
+    question worth asking was never "which file is this?" but "what does the
+    text say?":
+
+    * `_scan_doc(text)` returns the markers one document carries - the
+      created-by creator and licence token from `_README_MARKERS`, and the
+      title, title-line creator, URL and thing id from `_LICENSE_LINE` - and
+      the filename is never consulted.
+    * `_merge_pair(paths, docs)` folds one **named pair** in candidate order.
+      The created-by creator wins outright and its document becomes the
+      `description`; the title-line creator is a fallback **only** when the
+      pair carries no created-by sentence anywhere, and that fallback has no
+      created-by document, so `description` is `None`. Licence token, title and
+      URL each take the first non-empty value seen, so path order is a
+      tie-break and nothing is preferred because of the file it lived in;
+      `thing_id` comes from the same match as the winning URL and may be
+      `None`. The merge returns `None` unless creator **and** licence token
+      **and** title **and** URL are all present, so a half-parsed pair is never
+      promoted to high confidence.
+    * Pair discovery is per named pair and needs only one member:
+      `_root_pair_paths` takes whichever of `README.txt` / `LICENSE.txt`
+      exists at depth 0 (**at least one**), and `_sibling_pair_paths` takes
+      `<bundle>_README` / `<bundle>_LICENSE` in either the file form or the
+      legacy one-text-file-directory form (**at least one**). One document
+      carrying both markers is therefore R1 or R2 `high`, whichever name it
+      shipped under.
+    * Merging is scoped to a named pair only, so a generic `notes.txt` that
+      happens to carry both markers stays `low` and keeps reporting
+      `generic-bundle` / `generic` as its detector and shape. A stray prose
+      file is not a document pair, and detection must not pretend it is.
+    * `MAX_DOC_CANDIDATES` moved 3 -> 4. With two readable pairs the old bound
+      cut the second sibling document (`README.txt`, `LICENSE.txt`,
+      `X_README`, `X_LICENSE`), so the sibling merge could never complete;
+      four is exactly the number of named marker documents.
+    * Two shipped `_LICENSE_LINE` defects went with it. The `^` anchor plus
+      `MULTILINE` let a marker sitting mid-line after another sentence leak
+      that sentence into the title, and a non-greedy title split at the wrong
+      `" by "` in a title that itself contains one. The line regex is now
+      unanchored, not `MULTILINE`, with a **greedy** title, and the captured
+      title is trimmed at its **last** `[.!?]\s+` sentence boundary - a bare dot
+      is not a boundary, so `v1.2` survives. The cost is accepted rather than
+      guessed around: a genuine title containing `". "` (`Dr. No Replica`)
+      loses its leading part, which is indistinguishable from a sentence of
+      prose sitting before the marker.
+
+    This changes DETECTION, never READINESS. `status` and `blocked_reason`
+    still come from the database alone - the resolved `Folder.storage_path` and
+    the registered model assets - so detection cannot flip any bundle's
+    `status`, and nothing about the Mf-um7x legacy refusal changes. The report's
+    *row set* can change, which is the one consequence that is real: flipping a
+    bundle from low to high changes tree *claiming*, not just values, because
+    `iter_bundle_candidates` exempts high-confidence candidates from the Mf-h0p8
+    container skip. The exemption stays sound for the reason it was argued
+    there - a high bundle's marker documents sit at depth 0, so it attaches only
+    its own models - and the container-rule tests are the regression signal for
+    that.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -345,6 +414,20 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   live under a directory other than `files/` is likewise no longer offered - it
   fails closed rather than wrongly created - and `R3_MODEL_DIRS` is where a
   second known model directory is added.
+* **A title containing a sentence boundary loses its leading part.** `Dr. No
+  Replica` is reported as `No Replica`, because the trim that keeps a preceding
+  sentence of prose out of the title is the same trim that eats the title. It is
+  accepted and pinned as a known limitation
+  (`test_a_title_containing_a_sentence_boundary_is_a_known_limitation`), not
+  guessed around: the two shapes are byte-identical.
+* **The live improvement is not a number this repository can assert.** The
+  ticket's "81 of 92 become high" claim cannot be re-measured here - the live
+  library is off limits, and a fixture is not that library. The evidence this
+  ADR offers instead is shape parity: every marker-bearing layout that can be
+  constructed - canonical root pair, swapped root pair, both markers in one
+  document (newline-separated and mid-line), swapped sibling pair as files and
+  as legacy directories - parses to the same facts whichever file holds which
+  sentence. Anything stronger would be a claim about a disk we do not have.
 * **The detection walk is a synchronous multi-thousand-stat walk on a `READ`
   route.** It is bounded by `MAX_SCAN_ENTRIES`, by the scan's own pruning, by
   the document caps and by `limit`, the client fetches once per card open and
@@ -464,6 +547,27 @@ unchanged.
   container of a zip-only bundle are both rejected; and a direct `_create_one`
   call proves the `contains_bundles` refusal writes no `Project` row while an
   ordinary depth-0 trio still creates.
+- The same two files now also pin the marker merge, because a detection keyed to
+  file names silently loses a real bundle. In `tests/test_bundle_detect.py`: the
+  canonical and the swapped root pair produce identical `creator`, `licence`,
+  `licence_url`, `title`, `source_url`, `thing_id`, `detector` and
+  `metadata_shape`; both markers in one document are `high`, both
+  newline-separated and mid-line, with no preceding sentence leaking into the
+  title; the swapped sibling pair is the same bundle in file form and in the
+  legacy one-text-file-directory form; a named pair with no created-by sentence
+  anywhere still parses `high` through the title line's creator **and reports no
+  description**; an incomplete named pair stays `low` and invents nothing; a
+  generic `notes.txt` carrying both markers stays `low` with
+  `detector: generic-bundle`; a title that contains ` by ` keeps it; a version
+  in the title survives a bare dot; and
+  `test_all_four_named_documents_fit_the_candidate_cap` pins
+  `MAX_DOC_CANDIDATES == 4` with the old cap of three as the starvation witness.
+  In `tests/test_bundle_service.py`, end to end through
+  `TestClient(main.app)`: a swapped bundle is `high` **and** `ready` and creates
+  one project carrying the creator, licence, licence URL, source URL and the
+  created-by document as its description; a swapped zip is `high` and
+  `blocked`/`archive_only` and creates nothing; and a mixed layout completes
+  only because the fourth document is read.
 - `tests/test_bundles_api.py` covers the HTTP surface as a role sweep: a viewer
   can `GET /bundles/detect` (200) and both POSTs answer 403 with
   `permissions.DENY_DETAIL[CONTRIBUTE]`; the report body matches the pinned
@@ -514,4 +618,8 @@ This ADR is superseded if any of the following becomes true:
   high-confidence candidate starts being demoted for containing one;
 - creation stops refusing a low candidate whose registered assets outnumber its
   own snapshot's, or that refusal starts reporting `blocked` instead of
-  `failed`.
+  `failed`;
+- detection starts preferring a document by its filename again, beyond the fixed
+  tie-break order `_root_pair_paths` / `_sibling_pair_paths` establish;
+- the pair merge stops requiring all four provenance fields before it reports
+  high confidence, or a named-pair merge starts reaching outside its own pair.
