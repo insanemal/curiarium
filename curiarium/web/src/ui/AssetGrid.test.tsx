@@ -65,6 +65,7 @@ vi.mock("./LightBurnPreview", () => ({
 }));
 
 import AssetGrid from "./asset-grid/AssetGrid";
+import { GROUP_CARD_CAP } from "./asset-grid/assetGridMeta";
 import Toaster from "./Toaster";
 import { resetToasts } from "../lib/toast";
 import {
@@ -3063,5 +3064,435 @@ describe("folder cards", () => {
     const bottomSpacer = document.querySelector<HTMLElement>('[data-virtual-spacer="bottom"]');
     expect(bottomSpacer).toBeTruthy();
     expect(Number.parseFloat(bottomSpacer?.style.height ?? "0")).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The pinned "missing files" queue (Mf-1tx3).
+ *
+ * `missing` is a prop of `useAssetList`, deliberately absent from `RefreshOpts`,
+ * so no toolbar control can drop it: the controls may only narrow the pinned
+ * set. These tests pin that scope (listing AND facets), the grid's honest
+ * non-results (a failed fetch is not an empty queue, a failed scan is not a
+ * clean disk), and the behaviour that must survive the new scope
+ * (virtualisation, the grouped cap, selection and the card actions).
+ */
+describe("missing files queue (Mf-1tx3)", () => {
+  beforeEach(() => {
+    resetToasts();
+    listAssetsMock.mockReset();
+    listAssetsMock.mockResolvedValue({ items: [missingAsset, ...assets], hasMore: false });
+    listTagsMock.mockReset();
+    listTagsMock.mockResolvedValue(["pla", "sign"]);
+    listCreatorsMock.mockReset();
+    listCreatorsMock.mockResolvedValue(["Ada"]);
+    listFoldersMock.mockReset();
+    listFoldersMock.mockResolvedValue([]);
+    startLibraryScanMock.mockReset();
+    getLibraryScanStatusMock.mockReset();
+    fileUrlMock.mockClear();
+  });
+
+  afterEach(cleanup);
+
+  const pinnedProps = {
+    canContribute: true,
+    canDelete: true,
+    theme: "dark" as const,
+    missingOnly: true,
+    missingScan: "unknown" as const,
+  };
+
+  function renderQueue() {
+    return render(<AssetGrid {...pinnedProps} />);
+  }
+
+  /**
+   * The last `listAssets` argument, read straight off the mock. `callQuery`
+   * throws when a call omits explicit paging, and facet-only assertions do not
+   * always involve a fresh listing window.
+   */
+  function lastAssetsParams() {
+    return listAssetsMock.mock.calls[listAssetsMock.mock.calls.length - 1]?.[0];
+  }
+
+  /** Last argument of each facet request, i.e. the request the last control triggered. */
+  function lastFacetParams() {
+    return {
+      tagCall: listTagsMock.mock.calls[listTagsMock.mock.calls.length - 1]?.[0],
+      creatorCall: listCreatorsMock.mock.calls[listCreatorsMock.mock.calls.length - 1]?.[0],
+    };
+  }
+
+  /** Waits until neither the toolbar nor the queue is mid-fetch. */
+  async function settleGrid() {
+    await waitFor(() => expect(screen.queryAllByText("Loading...")).toHaveLength(0));
+  }
+
+  /** The retryable error panel: the failure lands a tick after mount. */
+  async function errorPanel(): Promise<HTMLElement> {
+    return waitFor(() => {
+      const found = document.querySelector<HTMLElement>("[data-grid-error]");
+      if (!found) throw new Error("error panel not rendered");
+      return found;
+    });
+  }
+
+  /** The missing empty-state block for a scan outcome. */
+  async function missingEmptyBlock(outcome: string): Promise<HTMLElement> {
+    return waitFor(() => {
+      const found = document.querySelector<HTMLElement>(`[data-missing-empty="${outcome}"]`);
+      if (!found) throw new Error(`${outcome} empty-state not rendered`);
+      return found;
+    });
+  }
+
+  async function expectPinned(control: string, opts: { facets?: boolean } = {}) {
+    const facets = opts.facets ?? true;
+    await settleGrid();
+    expect(lastAssetsParams()?.missing, `${control} dropped the pin from the listing`).toBe(true);
+    if (!facets) return;
+    const { tagCall, creatorCall } = lastFacetParams();
+    expect(tagCall?.missing, `${control} dropped the pin from the tag chips`).toBe(true);
+    expect(creatorCall?.missing, `${control} dropped the pin from the creators`).toBe(true);
+  }
+
+  /** Runs one toolbar control and pins the requests it issues. */
+  async function runControl(
+    control: string,
+    action: () => void,
+    opts: { facets?: boolean } = {},
+  ) {
+    const before = listAssetsMock.mock.calls.length;
+    action();
+    await waitFor(() =>
+      expect(
+        listAssetsMock.mock.calls.length,
+        `${control} did not refetch the listing`,
+      ).toBe(before + 1),
+    );
+    await expectPinned(control, opts);
+  }
+
+  it("pins missing on the first page with a server limit and offset", async () => {
+    renderQueue();
+
+    await waitFor(() => expect(listAssetsMock).toHaveBeenCalledTimes(1));
+    const first = lastAssetsParams();
+    expect(first?.missing).toBe(true);
+    expect(typeof first?.limit).toBe("number");
+    expect(typeof first?.offset).toBe("number");
+    expect(first?.offset).toBe(0);
+  });
+
+  it("keeps the pin on the facets and the listing through every toolbar control", async () => {
+    // A unique page per offset so "Load more" cannot append duplicate rows.
+    listAssetsMock.mockImplementation(async params => {
+      const offset = params?.offset ?? 0;
+      const page = makeSyntheticBatch(4, `Page${offset}`).map((asset, index) => {
+        const id = `${asset.id}-${offset}-${index}`;
+        return { ...asset, id, url: `/api/assets/${id}/file`, thumb_url: `/api/assets/${id}/thumb` };
+      });
+      return { items: page, hasMore: offset === 0 };
+    });
+
+    renderQueue();
+    await waitFor(() => expect(listAssetsMock).toHaveBeenCalledTimes(1));
+    await expectPinned("first load");
+
+    const search = screen.getByPlaceholderText(
+      "Search title, filename, notes...",
+    ) as HTMLInputElement;
+    await runControl("search submit", () => {
+      fireEvent.change(search, { target: { value: "lost" } });
+      fireEvent.keyDown(search, { key: "Enter" });
+    });
+
+    await runControl("sort key change", () => {
+      fireEvent.change(sortSelect(), { target: { value: "size" } });
+    });
+
+    await runControl("sort direction toggle", () => {
+      fireEvent.click(screen.getByRole("button", { name: "Asc" }));
+    });
+
+    await runControl("creator select", () => {
+      fireEvent.change(screen.getByLabelText("Creator"), { target: { value: "Ada" } });
+    });
+
+    await runControl("tag chip", () => {
+      fireEvent.click(screen.getByRole("button", { name: "pla" }));
+    });
+
+    await runControl("not in any project", () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: "Not in any project" }));
+    });
+
+    // `loadMore` fetches no facets on purpose: only the listing extends.
+    await runControl(
+      "Load more",
+      () => {
+        fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+      },
+      { facets: false },
+    );
+
+    await runControl("Reset", () => {
+      fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    });
+  });
+
+  it("cannot be escaped with Reset", async () => {
+    renderQueue();
+    await waitFor(() => expect(listAssetsMock).toHaveBeenCalledTimes(1));
+    await settleGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "pla" }));
+    await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(2));
+    await settleGrid();
+
+    fireEvent.change(screen.getByLabelText("Creator"), { target: { value: "Ada" } });
+    await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(3));
+    await settleGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(4));
+    await settleGrid();
+
+    const last = lastAssetsParams();
+    expect(last?.missing).toBe(true);
+    // `Reset` clears tags and the creator; it cannot reach the pinned scope.
+    expect(last?.tags ?? []).toEqual([]);
+    expect(last?.creator ?? null).toBeNull();
+  });
+
+  it("keeps the pin when the grid is refetched by a scan or by App", async () => {
+    const view = renderQueue();
+    await waitFor(() => expect(listAssetsMock).toHaveBeenCalledTimes(1));
+    await screen.findByText(missingAsset.name);
+
+    const callsBeforeBump = listAssetsMock.mock.calls.length;
+    view.rerender(<AssetGrid {...pinnedProps} assetsVersion={1} />);
+    await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(callsBeforeBump + 1));
+    await settleGrid();
+    expect(lastAssetsParams()?.missing).toBe(true);
+
+    startLibraryScanMock.mockResolvedValue(idleScanStatus());
+    getLibraryScanStatusMock.mockResolvedValue(idleScanStatus());
+    const callsBeforeScan = listAssetsMock.mock.calls.length;
+
+    fireEvent.click(
+      within(openCardMenu(cardFor(missingAsset.id))).getByRole("menuitem", { name: "Re-scan" }),
+    );
+
+    await waitFor(() => expect(startLibraryScanMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(listAssetsMock.mock.calls.length).toBeGreaterThan(callsBeforeScan));
+    // Every refetch the scan triggers is still the pinned queue.
+    for (const [params] of listAssetsMock.mock.calls.slice(callsBeforeScan)) {
+      expect(params?.missing).toBe(true);
+    }
+  });
+
+  it("stays virtualised in the flat branch under the pin", async () => {
+    const total = 2000;
+    listAssetsMock.mockResolvedValue({ items: makeSyntheticBatch(total), hasMore: false });
+
+    renderQueue();
+
+    await screen.findByText("Asset 1");
+    expect(document.querySelector("[data-virtual-grid]")).toBeTruthy();
+
+    const rowCount = Math.ceil(total / colsForWidth(window.innerWidth));
+    expect(checkboxCount()).toBe(expectedCardsAt(0, rowCount));
+    expect(checkboxCount()).toBeLessThan(100);
+
+    // Deep in the list is not in the DOM at all; the spacer carries the rest.
+    expect(screen.queryByText("Asset 1000")).toBeNull();
+    const bottomSpacer = document.querySelector<HTMLElement>('[data-virtual-spacer="bottom"]');
+    expect(bottomSpacer).toBeTruthy();
+    expect(Number.parseFloat(bottomSpacer?.style.height ?? "0")).toBeGreaterThan(0);
+  });
+
+  it("keeps the grouped branch a cap, not a virtualised list", async () => {
+    // This preserves HEAD behaviour: only the flat branch is virtualised.
+    // Retrofitting virtualisation into the grouped branch is a different
+    // ticket; the pin must not change that.
+    listAssetsMock.mockResolvedValue({ items: makeSyntheticBatch(30), hasMore: false });
+
+    renderQueue();
+    await screen.findByText("Asset 1");
+    fireEvent.change(sortSelect(), { target: { value: "type" } });
+
+    const header = await screen.findByRole("button", { name: /30 items/ });
+    expect(within(header).getByText("PNG")).toBeTruthy();
+    expect(document.querySelector("[data-virtual-grid]")).toBeNull();
+    expect(checkboxCount()).toBe(GROUP_CARD_CAP);
+    expect(screen.queryByText("Asset 30")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all 30" }));
+    await screen.findByRole("button", { name: "Show fewer" });
+    expect(screen.getByText("Asset 30")).toBeTruthy();
+    expect(checkboxCount()).toBe(30);
+  });
+
+  it("keeps selection, the bulk bar, the preview and the card actions under the pin", async () => {
+    renderQueue();
+    await screen.findByText(missingAsset.name);
+    await settleGrid();
+
+    // Select-all fills the bar with exactly the loaded rows.
+    fireEvent.click(cardCheckboxes()[0]);
+    const bar = within(screen.getByTestId("bulk-action-bar"));
+    fireEvent.click(bar.getByRole("button", { name: "Select all" }));
+    expect(bar.getByText("4 selected")).toBeTruthy();
+
+    // A missing file is not a place: the folder chrome is gone entirely.
+    expect(document.querySelector("[data-folder-breadcrumbs]")).toBeNull();
+    expect(document.querySelector("[data-folder-tiles]")).toBeNull();
+
+    // The preview opens from the card's menu exactly as before.
+    const preview = openCardDialog(cardFor(missingAsset.id), "Open preview");
+    expect(within(preview).getByText(/File missing from storage since/)).toBeTruthy();
+    fireEvent.keyDown(preview, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    // The card's actions survive the pin: both missing-file items are offered.
+    const menu = openCardMenu(cardFor(missingAsset.id));
+    expect(menuItemLabels(menu)).toEqual(expect.arrayContaining(["Re-scan", "Forget entry"]));
+    closeCardMenu(menu);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    // Keyboard path: the trigger opens the menu, which focuses its first
+    // enabled item; arrows walk it. jsdom does not synthesise a browser's
+    // Enter->click activation on a focused native button, so the choice is
+    // driven by clicking the item the keyboard actually focused.
+    const card = cardFor(missingAsset.id);
+    const trigger = within(card).getByRole("button", { name: "More actions" });
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+    fireEvent.click(trigger);
+
+    const keyboardMenu = screen.getByRole("menu");
+    expect((document.activeElement as HTMLElement).getAttribute("role")).toBe("menuitem");
+    fireEvent.keyDown(keyboardMenu, { key: "End" });
+    // "Delete" is the last enabled item; "Forget entry" sits just above it.
+    fireEvent.keyDown(keyboardMenu, { key: "ArrowUp" });
+    const focused = document.activeElement as HTMLElement;
+    expect(focused.getAttribute("role")).toBe("menuitem");
+    expect(focused.textContent).toBe("Forget entry");
+
+    fireEvent.click(focused);
+    expect(screen.getByRole("dialog", { name: /Forget/ })).toBeTruthy();
+    expect(deleteAssetMock).not.toHaveBeenCalled();
+  });
+
+  it("renders the on-disk copy only for a clean scan", async () => {
+    listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+
+    render(<AssetGrid canContribute canDelete theme="dark" missingOnly missingScan="clean" />);
+
+    const block = await missingEmptyBlock("clean");
+    expect(within(block).getByText("Every file an asset points at is on disk.")).toBeTruthy();
+    expect(document.querySelector("[data-grid-error]")).toBeNull();
+  });
+
+  it("keeps an unknown scan flag-truth", async () => {
+    listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+
+    render(<AssetGrid canContribute canDelete theme="dark" missingOnly missingScan="unknown" />);
+    expect(
+      within(await missingEmptyBlock("unknown")).getByText("No missing files flagged"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/is on disk/)).toBeNull();
+    cleanup();
+
+    // An omitted scan prop is not evidence of a clean disk either.
+    render(<AssetGrid canContribute canDelete theme="dark" missingOnly />);
+    expect(
+      within(await missingEmptyBlock("unknown")).getByText("No missing files flagged"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/is on disk/)).toBeNull();
+  });
+
+  it("does not call a failed scan a clean disk", async () => {
+    listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+
+    render(<AssetGrid canContribute canDelete theme="dark" missingOnly missingScan="failed" />);
+
+    const block = await missingEmptyBlock("failed");
+    expect(within(block).getByText(/did not finish/)).toBeTruthy();
+    expect(screen.queryByText(/is on disk/)).toBeNull();
+  });
+
+  it("calls an empty pinned result with a filter an empty result, not an empty queue", async () => {
+    listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+
+    // A search that matched nothing.
+    renderQueue();
+    await waitFor(() => expect(listAssetsMock).toHaveBeenCalledTimes(1));
+    await settleGrid();
+    const search = screen.getByPlaceholderText(
+      "Search title, filename, notes...",
+    ) as HTMLInputElement;
+    fireEvent.change(search, { target: { value: "nothing-matches" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() => expect(document.querySelector("[data-missing-empty-filter]")).toBeTruthy());
+    expect(screen.queryByText(/is on disk/)).toBeNull();
+    expect(screen.queryByText("No missing files flagged")).toBeNull();
+    cleanup();
+
+    // A creator filter that matched nothing.
+    renderQueue();
+    await settleGrid();
+    fireEvent.change(screen.getByLabelText("Creator"), { target: { value: "Ada" } });
+    await waitFor(() => expect(document.querySelector("[data-missing-empty-filter]")).toBeTruthy());
+    expect(screen.queryByText(/is on disk/)).toBeNull();
+    cleanup();
+
+    // "Not in any project" on an empty queue.
+    renderQueue();
+    await settleGrid();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Not in any project" }));
+    await waitFor(() => expect(document.querySelector("[data-missing-empty-filter]")).toBeTruthy());
+    expect(screen.queryByText(/is on disk/)).toBeNull();
+  });
+
+  it("shows a retryable error instead of an empty queue when the listing fails", async () => {
+    listAssetsMock.mockRejectedValueOnce(new Error("boom"));
+
+    renderWithToaster(<AssetGrid {...pinnedProps} />);
+
+    const panel = await errorPanel();
+    expect(within(panel).getByText("Could not load the files")).toBeTruthy();
+    expect(within(panel).getByText("Failed to load assets.")).toBeTruthy();
+    // The empty-state copy must never be painted over a failed request.
+    expect(document.querySelector("[data-missing-empty]")).toBeNull();
+    expect(screen.queryByText("No missing files flagged")).toBeNull();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(listAssetsMock).toHaveBeenCalledTimes(2));
+    expect(lastAssetsParams()?.missing).toBe(true);
+    await screen.findByText(missingAsset.name);
+  });
+
+  it("clears the error once a retry succeeds", async () => {
+    listAssetsMock.mockRejectedValueOnce(new Error("boom"));
+
+    renderWithToaster(<AssetGrid {...pinnedProps} />);
+
+    fireEvent.click(within(await errorPanel()).getByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(document.querySelector("[data-grid-error]")).toBeNull());
+    await screen.findByText(missingAsset.name);
+  });
+
+  it("shows a loading line on first load in the pinned mode", async () => {
+    listAssetsMock.mockReturnValue(new Promise<never>(() => {}));
+
+    renderQueue();
+
+    const line = await screen.findByText("Loading missing files…");
+    expect(line.getAttribute("data-missing-loading")).not.toBeNull();
   });
 });

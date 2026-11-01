@@ -4,7 +4,8 @@ An absent `folder_id` means "no folder filter", so the API could not express
 "assets at the library root" at all. These tests pin the explicit `unfiled` flag
 on the listing and both facets, the deliberate 400 when it is combined with
 `folder_id`, and `GET /assets/counts`, which must stay whole-library so the
-sidebar labels cannot claim a filtered picture.
+sidebar labels cannot claim a filtered picture - all three of its numbers
+(total, root, flagged missing) are places or states of the whole library.
 
 The suite shares a session-level database, so every listing is narrowed by a
 per-test query prefix and every row name carries a uuid. The counts route takes
@@ -90,12 +91,15 @@ def counts(client: TestClient, headers: dict, **params) -> dict:
     return response.json()
 
 
-def database_counts() -> tuple[int, int]:
-    """The same two numbers, read straight from the shared database."""
+def database_counts() -> tuple[int, int, int]:
+    """The same three numbers, read straight from the shared database."""
     with Session(engine) as session:
         total = session.exec(select(func.count()).select_from(Asset)).one()
         unfiled = session.exec(select(func.count()).select_from(Asset).where(Asset.folder_id.is_(None))).one()
-    return total, unfiled
+        missing = session.exec(
+            select(func.count()).select_from(Asset).where(Asset.missing_since.is_not(None))
+        ).one()
+    return total, unfiled, missing
 
 
 @pytest.fixture(autouse=True)
@@ -214,14 +218,18 @@ def test_counts_are_whole_library_and_root_and_ignore_every_filter(isolated_stor
         after = counts(client, headers)
         assert after["total"] == baseline["total"] + 4
         assert after["unfiled"] == baseline["unfiled"] + 2
+        assert after["missing"] == baseline["missing"]
 
-        # The same two numbers as the rows themselves, so the route cannot drift
-        # from the definition: total is the whole library, unfiled is the root.
-        assert (after["total"], after["unfiled"]) == database_counts()
+        # The same three numbers as the rows themselves, so the route cannot
+        # drift from the definition: total is the whole library, unfiled is the
+        # root, missing is the rows a scan flagged (none of these four are).
+        assert (after["total"], after["unfiled"], after["missing"]) == database_counts()
 
         # The route declares no filters; junk query parameters are ignored, so
         # a caller cannot make the sidebar labels describe a filtered picture.
-        junk = counts(client, headers, q=probe, tags=f"{probe}-tag", folder_id=parent_id, unfiled="true")
+        junk = counts(
+            client, headers, q=probe, tags=f"{probe}-tag", folder_id=parent_id, unfiled="true", missing="true"
+        )
         assert junk == after
 
 

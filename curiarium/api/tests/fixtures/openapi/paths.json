@@ -902,6 +902,18 @@
           }
         },
         {
+          "description": "Only assets whose file is flagged missing (missing_since is set)",
+          "in": "query",
+          "name": "missing",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "Only assets whose file is flagged missing (missing_since is set)",
+            "title": "Missing",
+            "type": "boolean"
+          }
+        },
+        {
           "description": "Exact creator, case-insensitive",
           "in": "query",
           "name": "creator",
@@ -1234,7 +1246,7 @@
   },
   "/assets/counts": {
     "get": {
-      "description": "Library totals for the sidebar: every asset, and the ones at the root.\n\nPure SELECT, deliberately unfiltered by q/tags/creator/folder: the sidebar\nlabels name a place in the tree, so a filtered count would claim something\nother than the root level. Two counts in one session, so the two numbers\ncome from the same read.",
+      "description": "Library totals for the sidebar: every asset, the root rows, the flagged ones.\n\nPure SELECT, deliberately unfiltered by q/tags/creator/folder: each label\nnames a place in the tree or a state of the library, so a filtered count\nwould claim something other than that place or state. `missing` is a state\n(flagged by a scan), not a place, so it obeys the same unfiltered rule.\nThree counts in one session, so the three numbers come from the same read.",
       "operationId": "asset_counts_assets_counts_get",
       "responses": {
         "200": {
@@ -1793,7 +1805,7 @@
   },
   "/creators": {
     "get": {
-      "description": "Distinct non-empty creators, deduped and sorted case-insensitively.\n\nTakes the same scoping filters as `GET /assets` and `GET /tags`, so the\nfacet works in library mode, folder mode, root mode (`unfiled`) and project\nmode. An unknown project is a 404 like every other project route.",
+      "description": "Distinct non-empty creators, deduped and sorted case-insensitively.\n\nTakes the same scoping filters as `GET /assets` and `GET /tags`, so the\nfacet works in library mode, folder mode, root mode (`unfiled`), missing\nmode (`missing`) and project mode. An unknown project is a 404 like every\nother project route. Each facet takes the listing's whole scope on purpose:\nan unscoped facet next to a scoped listing is a lying control, because the\nchip count would describe a different set than the grid.",
       "operationId": "list_creators_creators_get",
       "parameters": [
         {
@@ -1855,6 +1867,18 @@
             "default": false,
             "description": "Only creators on assets at the library root (no folder)",
             "title": "Unfiled",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Only creators on assets whose file is flagged missing",
+          "in": "query",
+          "name": "missing",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "Only creators on assets whose file is flagged missing",
+            "title": "Missing",
             "type": "boolean"
           }
         },
@@ -4257,6 +4281,7 @@
   },
   "/tags": {
     "get": {
+      "description": "Distinct tags under the same scope as `GET /assets`.\n\nAn unscoped facet next to a scoped listing is a lying control: the chip\ncount would describe a different set than the grid it sits beside.",
       "operationId": "list_tags_tags_get",
       "parameters": [
         {
@@ -4318,6 +4343,18 @@
             "default": false,
             "description": "Only tags on assets at the library root (no folder)",
             "title": "Unfiled",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Only tags on assets whose file is flagged missing",
+          "in": "query",
+          "name": "missing",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "Only tags on assets whose file is flagged missing",
+            "title": "Missing",
             "type": "boolean"
           }
         },

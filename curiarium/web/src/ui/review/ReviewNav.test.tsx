@@ -16,7 +16,7 @@ describe("ReviewNav role gating", () => {
     ["admin", true],
     ["viewer", false],
   ])("renders the bundle queue only from contributor up (%s)", (role, visible) => {
-    render(<ReviewNav role={role} counts={{ bundles: 3, imports: null }} />);
+    render(<ReviewNav role={role} counts={{ bundles: 3, imports: null, missing: null }} />);
 
     expect(!!screen.queryByRole("button", { name: /^Bundles to confirm/ })).toBe(visible);
   });
@@ -29,38 +29,38 @@ describe("ReviewNav role gating", () => {
     ["editor", true],
     ["admin", true],
   ])("renders the imports queue from viewer up (%s)", (role, visible) => {
-    render(<ReviewNav role={role} counts={{ bundles: 3, imports: 1 }} />);
+    render(<ReviewNav role={role} counts={{ bundles: 3, imports: 1 , missing: null }} />);
 
     expect(!!screen.queryByRole("button", { name: /^Imports running/ })).toBe(visible);
   });
 
   it("gives a viewer the read-only imports row and not the bundle row", () => {
-    render(<ReviewNav role="viewer" counts={{ bundles: 3, imports: 1 }} />);
+    render(<ReviewNav role="viewer" counts={{ bundles: 3, imports: 1 , missing: null }} />);
 
     expect(screen.getByRole("button", { name: /^Imports running/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Bundles to confirm/ })).toBeNull();
   });
 
   it("gives a contributor both rows", () => {
-    render(<ReviewNav role="contributor" counts={{ bundles: 3, imports: 1 }} />);
+    render(<ReviewNav role="contributor" counts={{ bundles: 3, imports: 1 , missing: null }} />);
 
     expect(screen.getByRole("button", { name: /^Bundles to confirm/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /^Imports running/ })).toBeTruthy();
   });
 
   it("renders nothing while the session's role is unknown", () => {
-    const unknown = render(<ReviewNav role={null} counts={{ bundles: 3, imports: null }} />);
+    const unknown = render(<ReviewNav role={null} counts={{ bundles: 3, imports: null, missing: null }} />);
     expect(unknown.container.innerHTML).toBe("");
     cleanup();
 
-    const absent = render(<ReviewNav role={undefined} counts={{ bundles: 3, imports: null }} />);
+    const absent = render(<ReviewNav role={undefined} counts={{ bundles: 3, imports: null, missing: null }} />);
     expect(absent.container.innerHTML).toBe("");
   });
 });
 
 describe("ReviewNav counts", () => {
   it("shows a dash, not a zero, while the count is unknown", () => {
-    render(<ReviewNav role="editor" counts={{ bundles: null, imports: null }} />);
+    render(<ReviewNav role="editor" counts={{ bundles: null, imports: null, missing: null }} />);
 
     const count = screen.getByTestId("review-count-bundles");
     expect(count.textContent).toBe("\u2013");
@@ -68,7 +68,7 @@ describe("ReviewNav counts", () => {
   });
 
   it("shows a genuine zero for an empty section", () => {
-    render(<ReviewNav role="editor" counts={{ bundles: 0, imports: null }} />);
+    render(<ReviewNav role="editor" counts={{ bundles: 0, imports: null, missing: null }} />);
 
     const count = screen.getByTestId("review-count-bundles");
     expect(count.textContent).toBe("0");
@@ -76,7 +76,7 @@ describe("ReviewNav counts", () => {
   });
 
   it("shows the count once it is known, with a different title", () => {
-    render(<ReviewNav role="editor" counts={{ bundles: 128, imports: null }} />);
+    render(<ReviewNav role="editor" counts={{ bundles: 128, imports: null, missing: null }} />);
 
     const count = screen.getByTestId("review-count-bundles");
     expect(count.textContent).toBe("128");
@@ -84,7 +84,7 @@ describe("ReviewNav counts", () => {
   });
 
   it("uses the singular noun for exactly one row", () => {
-    render(<ReviewNav role="editor" counts={{ bundles: 1, imports: null }} />);
+    render(<ReviewNav role="editor" counts={{ bundles: 1, imports: null, missing: null }} />);
 
     expect(screen.getByTestId("review-count-bundles").getAttribute("title")).toBe(
       "1 bundle awaiting a decision",
@@ -99,7 +99,7 @@ describe("ReviewNav counts", () => {
   });
 
   it("announces the count in the button's name, not only in the badge", () => {
-    const { unmount } = render(<ReviewNav role="editor" counts={{ bundles: 7, imports: null }} />);
+    const { unmount } = render(<ReviewNav role="editor" counts={{ bundles: 7, imports: null, missing: null }} />);
 
     const known = screen.getByRole("button", {
       name: /^Bundles to confirm: 7 bundles awaiting a decision$/,
@@ -108,7 +108,7 @@ describe("ReviewNav counts", () => {
     expect(known.getAttribute("aria-label")).toContain("awaiting a decision");
     unmount();
 
-    render(<ReviewNav role="editor" counts={{ bundles: null, imports: null }} />);
+    render(<ReviewNav role="editor" counts={{ bundles: null, imports: null, missing: null }} />);
 
     expect(
       screen.getByRole("button", { name: /^Bundles to confirm: Count unavailable$/ }),
@@ -118,7 +118,7 @@ describe("ReviewNav counts", () => {
 
 describe("ReviewNav imports count (AC-8)", () => {
   it("shows an en dash for an unknown imports count, never a zero", () => {
-    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: null }} />);
+    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: null, missing: null }} />);
 
     const count = screen.getByTestId("review-count-imports");
     expect(count.textContent).toBe("\u2013");
@@ -126,7 +126,7 @@ describe("ReviewNav imports count (AC-8)", () => {
   });
 
   it("says one import is running", () => {
-    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: 1 }} />);
+    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: 1 , missing: null }} />);
 
     const count = screen.getByTestId("review-count-imports");
     expect(count.textContent).toBe("1");
@@ -134,7 +134,7 @@ describe("ReviewNav imports count (AC-8)", () => {
   });
 
   it("treats a zero as a known idle queue", () => {
-    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: 0 }} />);
+    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: 0 , missing: null }} />);
 
     const count = screen.getByTestId("review-count-imports");
     expect(count.textContent).toBe("0");
@@ -142,7 +142,7 @@ describe("ReviewNav imports count (AC-8)", () => {
   });
 
   it("announces the imports count in the button's name", () => {
-    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: 1 }} />);
+    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: 1 , missing: null }} />);
 
     expect(
       screen.getByRole("button", { name: "Imports running: 1 import running" }),
@@ -152,7 +152,7 @@ describe("ReviewNav imports count (AC-8)", () => {
 
 describe("ReviewNav selection", () => {
   it("marks the row as the current page only for the open queue", () => {
-    render(<ReviewNav role="editor" activeView="review" activeQueue="bundles" counts={{ bundles: 2, imports: null }} />);
+    render(<ReviewNav role="editor" activeView="review" activeQueue="bundles" counts={{ bundles: 2, imports: null, missing: null }} />);
 
     expect(
       screen.getByRole("button", { name: /^Bundles to confirm/ }).getAttribute("aria-current"),
@@ -160,7 +160,7 @@ describe("ReviewNav selection", () => {
   });
 
   it("leaves the row unmarked while the library mode is showing", () => {
-    render(<ReviewNav role="editor" activeView="library" activeQueue="bundles" counts={{ bundles: 2, imports: null }} />);
+    render(<ReviewNav role="editor" activeView="library" activeQueue="bundles" counts={{ bundles: 2, imports: null, missing: null }} />);
 
     expect(
       screen.getByRole("button", { name: /^Bundles to confirm/ }).getAttribute("aria-current"),
@@ -173,7 +173,7 @@ describe("ReviewNav selection", () => {
         role="editor"
         activeView="review"
         activeQueue="imports"
-        counts={{ bundles: 2, imports: 1 }}
+        counts={{ bundles: 2, imports: 1 , missing: null }}
       />,
     );
 
@@ -186,7 +186,7 @@ describe("ReviewNav selection", () => {
   });
 
   it("leaves the row unmarked when no queue is open", () => {
-    render(<ReviewNav role="editor" activeView="review" activeQueue={null} counts={{ bundles: 2, imports: null }} />);
+    render(<ReviewNav role="editor" activeView="review" activeQueue={null} counts={{ bundles: 2, imports: null, missing: null }} />);
 
     expect(
       screen.getByRole("button", { name: /^Bundles to confirm/ }).getAttribute("aria-current"),
@@ -198,7 +198,7 @@ describe("ReviewNav navigation", () => {
   it("opens the bundle queue once on click", () => {
     const onOpenQueue = vi.fn();
     render(
-      <ReviewNav role="editor" counts={{ bundles: 5, imports: 0 }} onOpenQueue={onOpenQueue} />,
+      <ReviewNav role="editor" counts={{ bundles: 5, imports: 0 , missing: null }} onOpenQueue={onOpenQueue} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: /^Bundles to confirm/ }));
@@ -210,7 +210,7 @@ describe("ReviewNav navigation", () => {
   it("opens the imports queue once on click", () => {
     const onOpenQueue = vi.fn();
     render(
-      <ReviewNav role="viewer" counts={{ bundles: null, imports: 1 }} onOpenQueue={onOpenQueue} />,
+      <ReviewNav role="viewer" counts={{ bundles: null, imports: 1 , missing: null }} onOpenQueue={onOpenQueue} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: /^Imports running/ }));
@@ -220,10 +220,93 @@ describe("ReviewNav navigation", () => {
   });
 
   it("heads the group with the word Review", () => {
-    const { container } = render(<ReviewNav role="editor" counts={{ bundles: 5, imports: 0 }} />);
+    const { container } = render(<ReviewNav role="editor" counts={{ bundles: 5, imports: 0 , missing: null }} />);
 
     const heading = container.querySelector(".sidebar-section-heading");
     expect(heading?.textContent).toBe("Review");
     expect(container.querySelector(".sidebar-review")).toBeTruthy();
+  });
+});
+
+// `GET /assets?missing=true` and `GET /library/scan` are both require_read, so
+// the missing queue is a viewer surface: only the rescan it offers is a WRITE.
+describe("ReviewNav missing queue (Mf-1tx3)", () => {
+  it.each<Role>(["viewer", "contributor", "editor", "admin"])(
+    "shows the missing row from viewer up (%s)",
+    role => {
+      render(<ReviewNav role={role} counts={{ bundles: null, imports: null, missing: 2 }} />);
+
+      expect(screen.getByRole("button", { name: /^Missing files/ })).toBeTruthy();
+    },
+  );
+
+  it("gives a viewer the missing row", () => {
+    render(<ReviewNav role="viewer" counts={{ bundles: 3, imports: null, missing: 2 }} />);
+
+    expect(screen.getByRole("button", { name: /^Missing files/ })).toBeTruthy();
+    // The row gate is per queue: the bundle queue still needs CONTRIBUTE.
+    expect(screen.queryByRole("button", { name: /^Bundles to confirm/ })).toBeNull();
+  });
+
+  it("dashes an unknown missing count, never a zero", () => {
+    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: null, missing: null }} />);
+
+    const count = screen.getByTestId("review-count-missing");
+    expect(count.textContent).toBe("\u2013");
+    expect(count.getAttribute("title")).toBe("Count unavailable");
+  });
+
+  it("says how many missing files await a decision", () => {
+    const { unmount } = render(
+      <ReviewNav role="viewer" counts={{ bundles: null, imports: null, missing: 4 }} />,
+    );
+
+    const count = screen.getByTestId("review-count-missing");
+    expect(count.textContent).toBe("4");
+    expect(count.getAttribute("title")).toBe("4 missing files awaiting a decision");
+    unmount();
+
+    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: null, missing: 1 }} />);
+
+    expect(screen.getByTestId("review-count-missing").getAttribute("title")).toBe(
+      "1 missing file awaiting a decision",
+    );
+  });
+
+  it("marks the missing row current only when it is open", () => {
+    render(
+      <ReviewNav
+        role="editor"
+        activeView="review"
+        activeQueue="missing"
+        counts={{ bundles: 2, imports: 1, missing: 4 }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /^Missing files/ }).getAttribute("aria-current"),
+    ).toBe("page");
+    expect(
+      screen.getByRole("button", { name: /^Bundles to confirm/ }).getAttribute("aria-current"),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /^Imports running/ }).getAttribute("aria-current"),
+    ).toBeNull();
+  });
+
+  it("opens the missing queue once on click", () => {
+    const onOpenQueue = vi.fn();
+    render(
+      <ReviewNav
+        role="viewer"
+        counts={{ bundles: null, imports: null, missing: 4 }}
+        onOpenQueue={onOpenQueue}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^Missing files/ }));
+
+    expect(onOpenQueue).toHaveBeenCalledTimes(1);
+    expect(onOpenQueue).toHaveBeenCalledWith("missing");
   });
 });

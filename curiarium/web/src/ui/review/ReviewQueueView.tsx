@@ -11,6 +11,13 @@ type Props = {
   countTitle: string;
   /** `null` until the first successful fetch. */
   lastRefreshedAt?: number | null;
+  /**
+   * Overrides the "Last refreshed" line for a queue that cannot observe when its
+   * list settled (the missing queue's rows belong to `AssetGrid`). A string is
+   * rendered verbatim; `null` renders no line at all. `undefined` keeps the
+   * `lastRefreshedAt` behaviour.
+   */
+  lastRefreshedLabel?: string | null;
   /** Omitted by a queue that polls instead of offering a refresh. */
   onRefresh?: () => void;
   refreshing?: boolean;
@@ -27,6 +34,21 @@ export function formatClock(at: number): string {
 }
 
 /**
+ * The "Last refreshed" line: `null` as the override means no line at all, a
+ * string is that line verbatim, and an absent override falls back to the
+ * timestamp.
+ */
+function refreshedText(
+  at: number | null,
+  override: string | null | undefined,
+): string | null {
+  if (override === null) return null;
+  if (override !== undefined) return override;
+  if (at === null) return "Not refreshed yet";
+  return `Last refreshed ${formatClock(at)}`;
+}
+
+/**
  * The header shell every review queue reuses. Filters, bulk actions and the
  * rows themselves differ per queue, so they arrive through `children`; only
  * what every queue states identically lives in here.
@@ -37,12 +59,15 @@ export default function ReviewQueueView({
   count,
   countTitle,
   lastRefreshedAt = null,
+  lastRefreshedLabel,
   onRefresh,
   refreshing = false,
   notices,
   summary,
   children,
 }: Props) {
+  const refreshed = refreshedText(lastRefreshedAt, lastRefreshedLabel);
+
   return (
     <section className="review-queue" aria-label={title}>
       <header className="review-queue-header">
@@ -60,11 +85,7 @@ export default function ReviewQueueView({
             {refreshing ? "Refreshing…" : "Refresh"}
           </button>
         )}
-        <span className="review-refreshed">
-          {lastRefreshedAt === null
-            ? "Not refreshed yet"
-            : `Last refreshed ${formatClock(lastRefreshedAt)}`}
-        </span>
+        {refreshed !== null && <span className="review-refreshed">{refreshed}</span>}
       </header>
       <p className="review-explanation">{explanation}</p>
       {summary !== undefined && <p className="review-queue-summary">{summary}</p>}

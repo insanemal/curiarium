@@ -32,6 +32,13 @@ type AssetListOptions = {
   folderId?: string | null;
   /** Files mode: show only the library root's assets (mutually exclusive with a folder). */
   unfiled?: boolean;
+  /**
+   * Pinned "missing files" scope. A prop, never a `RefreshOpts` override: it
+   * must be impossible for a toolbar control to drop it, and every request this
+   * hook builds (`refresh`, `loadMore`) reads it from here. `resetFilters`
+   * clears tags+creator only, so it cannot escape.
+   */
+  missingOnly?: boolean;
   projectId?: string | null;
   foldersVersion: number;
   assetsVersion: number;
@@ -56,6 +63,12 @@ export type AssetListApi = {
   setActiveTags: Dispatch<SetStateAction<string[]>>;
   loading: boolean;
   loadingMore: boolean;
+  /**
+   * A retryable first-load failure. The toast alone left the grid
+   * indistinguishable from a genuinely empty listing, so the empty-state copy
+   * must be able to tell them apart. Null once a retry lands.
+   */
+  error: string | null;
   offset: number;
   setOffset: Dispatch<SetStateAction<number>>;
   hasMore: boolean;
@@ -81,6 +94,7 @@ export type AssetListApi = {
 export function useAssetList({
   folderId,
   unfiled = false,
+  missingOnly = false,
   projectId,
   foldersVersion,
   assetsVersion,
@@ -100,6 +114,9 @@ export function useAssetList({
   const [sortDir, setSortDirState] = useState<SortDir>("asc");
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // A listing failure the user can retry in place. Held in state (not just
+  // toasted) so an empty grid never lies about being an empty listing.
+  const [error, setError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [notInProject, setNotInProject] = useState(false);
@@ -124,6 +141,7 @@ export function useAssetList({
 
   const refresh = useStableCallback(async (opts: RefreshOpts = {}) => {
     setLoading(true);
+    setError(null);
     if (!opts.keepLoadedPages) {
       setHasMore(false);
       setOffset(0);
@@ -148,6 +166,7 @@ export function useAssetList({
         tags,
         folderId: targetFolderId,
         unfiled: effectiveUnfiled,
+        missing: missingOnly,
         notInProject: effectiveNotInProject,
         creator: creator ?? undefined,
         sort: serverSortKey(effectiveSortKey) ?? undefined,
@@ -155,12 +174,15 @@ export function useAssetList({
         limit: paging.limit,
         offset: paging.offset,
       }),
+      // The facets must describe the same pinned set as the listing, or the
+      // chips and the creator dropdown lie about the rest of the library.
       listTags({
         q: search,
         folder_id: isProject || effectiveUnfiled ? undefined : targetFolderId,
         unfiled: isProject ? undefined : effectiveUnfiled,
         project_id: projectId ?? undefined,
         not_in_project: isProject ? undefined : effectiveNotInProject,
+        missing: missingOnly,
       }),
       listCreators({
         q: search,
@@ -169,6 +191,7 @@ export function useAssetList({
         unfiled: isProject ? undefined : effectiveUnfiled,
         project_id: projectId ?? undefined,
         not_in_project: isProject ? undefined : effectiveNotInProject,
+        missing: missingOnly,
       }),
     ]);
 
@@ -176,8 +199,14 @@ export function useAssetList({
       setItems(assetsResult.value.items);
       setOffset(assetsResult.value.items.length);
       setHasMore(assetsResult.value.hasMore);
+      setError(null);
     } else {
       handleApiError(assetsResult.reason, "Failed to load assets. Please sign in again or refresh.");
+      // An auth failure signs the operator out, so an inline retry would be
+      // nonsense; every other failure is retryable in place.
+      if (!(assetsResult.reason instanceof UnauthorizedError)) {
+        setError("Failed to load assets.");
+      }
     }
 
     if (tagsResult.status === "fulfilled") {
@@ -207,6 +236,7 @@ export function useAssetList({
         tags: activeTags,
         folderId: folderId || undefined,
         unfiled: isProject ? false : unfiled,
+        missing: missingOnly,
         notInProject,
         creator: activeCreator ?? undefined,
         sort: serverSortKey(sortKey) ?? undefined,
@@ -226,9 +256,10 @@ export function useAssetList({
 
   useEffect(() => {
     // A switch between All files and Unfiled is a new pile, so it refetches from
-    // the first page like a folder change.
+    // the first page like a folder change. Entering or leaving the pinned
+    // missing-files mode is likewise a new pile.
     refresh();
-  }, [folderId, unfiled, projectId, refresh]);
+  }, [folderId, unfiled, missingOnly, projectId, refresh]);
   // `assetsVersion` bumps when another view (upload, folder scan) changed
   // assets. Refetch in place instead of remounting: the ref is seeded with the
   // current version so mounting performs no extra fetch, and comparing values
@@ -307,6 +338,7 @@ export function useAssetList({
     setActiveTags,
     loading,
     loadingMore,
+    error,
     offset,
     setOffset,
     hasMore,

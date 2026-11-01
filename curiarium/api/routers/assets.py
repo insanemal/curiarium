@@ -61,6 +61,7 @@ def list_assets(
     tags: Optional[str] = Query(default=None, description="Comma-separated tags"),
     folder_id: Optional[str] = None,
     unfiled: bool = Query(default=False, description="Only assets at the library root (no folder)"),
+    missing: bool = Query(default=False, description="Only assets whose file is flagged missing (missing_since is set)"),
     creator: Optional[str] = Query(default=None, description="Exact creator, case-insensitive"),
     added_by: Optional[str] = Query(default=None, description="Exact uploader, case-insensitive"),
     sort: Optional[Literal["name", "size", "creator"]] = Query(default=None, description="Optional sort key; omitted keeps the default order"),
@@ -80,6 +81,7 @@ def list_assets(
             creator=creator,
             added_by=added_by,
             unfiled=unfiled,
+            missing=missing,
         )
         stmt = apply_asset_order(stmt, sort, order)
         assets = asset_page(s, stmt, response, limit, offset)
@@ -113,17 +115,21 @@ def asset_delete_preview(
 
 @router.get("/assets/counts", response_model=AssetCountsOut)
 def asset_counts(_: Optional[AuthContext] = Depends(require_read)):
-    """Library totals for the sidebar: every asset, and the ones at the root.
+    """Library totals for the sidebar: every asset, the root rows, the flagged ones.
 
-    Pure SELECT, deliberately unfiltered by q/tags/creator/folder: the sidebar
-    labels name a place in the tree, so a filtered count would claim something
-    other than the root level. Two counts in one session, so the two numbers
-    come from the same read.
+    Pure SELECT, deliberately unfiltered by q/tags/creator/folder: each label
+    names a place in the tree or a state of the library, so a filtered count
+    would claim something other than that place or state. `missing` is a state
+    (flagged by a scan), not a place, so it obeys the same unfiltered rule.
+    Three counts in one session, so the three numbers come from the same read.
     """
     with Session(engine) as s:
         total = s.exec(select(func.count()).select_from(Asset)).one()
         unfiled = s.exec(select(func.count()).select_from(Asset).where(Asset.folder_id.is_(None))).one()
-    return AssetCountsOut(total=total, unfiled=unfiled)
+        missing = s.exec(
+            select(func.count()).select_from(Asset).where(Asset.missing_since.is_not(None))
+        ).one()
+    return AssetCountsOut(total=total, unfiled=unfiled, missing=missing)
 
 
 @router.get("/tags", response_model=List[str])
@@ -132,17 +138,30 @@ def list_tags(
     tags: Optional[str] = Query(default=None, description="Comma-separated tags"),
     folder_id: Optional[str] = None,
     unfiled: bool = Query(default=False, description="Only tags on assets at the library root (no folder)"),
+    missing: bool = Query(default=False, description="Only tags on assets whose file is flagged missing"),
     project_id: Optional[str] = Query(default=None, description="Only tags on this project's assets"),
     not_in_project: bool = Query(default=False, description="Only tags on assets that belong to no project"),
     _: Optional[AuthContext] = Depends(require_read),
 ):
+    """Distinct tags under the same scope as `GET /assets`.
+
+    An unscoped facet next to a scoped listing is a lying control: the chip
+    count would describe a different set than the grid it sits beside.
+    """
     with Session(engine) as s:
         # An unknown project is a 404 here like every other project route, so the
         # chips and the listing fail together instead of silently going empty.
         if project_id:
             project_service.get_project(s, project_id)
         stmt = apply_asset_filters(
-            select(Asset.tags_json), q, tags, folder_id, project_id=project_id, not_in_project=not_in_project, unfiled=unfiled
+            select(Asset.tags_json),
+            q,
+            tags,
+            folder_id,
+            project_id=project_id,
+            not_in_project=not_in_project,
+            unfiled=unfiled,
+            missing=missing,
         )
         rows = list(s.exec(stmt))
 
@@ -169,6 +188,7 @@ def list_creators(
     tags: Optional[str] = Query(default=None, description="Comma-separated tags"),
     folder_id: Optional[str] = None,
     unfiled: bool = Query(default=False, description="Only creators on assets at the library root (no folder)"),
+    missing: bool = Query(default=False, description="Only creators on assets whose file is flagged missing"),
     project_id: Optional[str] = Query(default=None, description="Only creators on this project's assets"),
     not_in_project: bool = Query(default=False, description="Only creators on assets that belong to no project"),
     _: Optional[AuthContext] = Depends(require_read),
@@ -176,14 +196,24 @@ def list_creators(
     """Distinct non-empty creators, deduped and sorted case-insensitively.
 
     Takes the same scoping filters as `GET /assets` and `GET /tags`, so the
-    facet works in library mode, folder mode, root mode (`unfiled`) and project
-    mode. An unknown project is a 404 like every other project route.
+    facet works in library mode, folder mode, root mode (`unfiled`), missing
+    mode (`missing`) and project mode. An unknown project is a 404 like every
+    other project route. Each facet takes the listing's whole scope on purpose:
+    an unscoped facet next to a scoped listing is a lying control, because the
+    chip count would describe a different set than the grid.
     """
     with Session(engine) as s:
         if project_id:
             project_service.get_project(s, project_id)
         stmt = apply_asset_filters(
-            select(Asset.creator), q, tags, folder_id, project_id=project_id, not_in_project=not_in_project, unfiled=unfiled
+            select(Asset.creator),
+            q,
+            tags,
+            folder_id,
+            project_id=project_id,
+            not_in_project=not_in_project,
+            unfiled=unfiled,
+            missing=missing,
         )
         rows = list(s.exec(stmt))
 

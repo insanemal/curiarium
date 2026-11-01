@@ -17,6 +17,10 @@ export function serverSortKey(key: SortKey): "name" | "size" | "creator" | null 
   return SERVER_SORT_KEYS.includes(key) ? (key as "name" | "size" | "creator") : null;
 }
 
+/**
+ * The missing-files pin is deliberately absent from this type: a per-call
+ * override is a droppable pin, and this scope must not be droppable.
+ */
 export type RefreshOpts = {
   tags?: string[];
   search?: string;
@@ -28,6 +32,14 @@ export type RefreshOpts = {
   sortKey?: SortKey;
   sortDir?: SortDir;
 };
+/**
+ * What the last storage scan said about the flag set. `unknown` covers both "no
+ * scan has completed in this session" and "the advisory status read failed",
+ * and it must never be rendered as "everything is on disk": the three states
+ * are three different sentences.
+ */
+export type MissingScanOutcome = "unknown" | "clean" | "failed";
+
 export type GroupBucket = { id: string; title: string; items: Asset[] };
 export type PreviewVariant = "card" | "modal";
 
@@ -95,6 +107,7 @@ export function fetchAssetPage(opts: {
   tags?: string[];
   folderId?: string;
   unfiled?: boolean;
+  missing?: boolean;
   notInProject?: boolean;
   creator?: string;
   sort?: "name" | "size" | "creator";
@@ -120,6 +133,8 @@ export function fetchAssetPage(opts: {
     // Never both: the server rejects an unfiled listing that names a folder.
     folder_id: opts.unfiled ? undefined : opts.folderId,
     unfiled: opts.unfiled,
+    // A project has no missing queue, so `missing` is ignored on that branch.
+    missing: opts.missing,
     not_in_project: opts.notInProject,
     creator: opts.creator,
     sort: opts.sort,

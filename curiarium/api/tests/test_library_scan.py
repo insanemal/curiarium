@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from math import ceil
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -452,6 +453,51 @@ def test_scan_clears_missing_flag_when_file_returns(temp_library: Path) -> None:
     assert restored.id == asset_id
     assert restored.missing_since is None
     assert status.known >= 1
+
+
+def test_a_scan_over_an_absent_root_flags_nothing_and_reports_failures(
+    temp_library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed scan cannot empty the queue: an absent root only counts a failure.
+
+    `scan_storage_root` checks the root before it opens a session, so a run over
+    a missing (or unmounted) root never reaches the missing-flag pass: rows keep
+    whatever stamp the last good scan left on them.
+    """
+    probe = f"absent-root-{uuid4().hex[:12]}"
+    with Session(engine) as session:
+        flagged = Asset(
+            filename=f"{probe}-flagged.stl",
+            mime="model/stl",
+            size=10,
+            name=f"{probe} flagged",
+            storage_path=f"absent/{probe}-flagged.stl",
+            missing_since="2024-01-01T00:00:00+00:00",
+        )
+        present = Asset(
+            filename=f"{probe}-present.stl",
+            mime="model/stl",
+            size=10,
+            name=f"{probe} present",
+            storage_path=f"absent/{probe}-present.stl",
+        )
+        session.add(flagged)
+        session.add(present)
+        session.commit()
+        flagged_id, present_id = flagged.id, present.id
+
+    absent_root = temp_library / "absent"
+    assert not absent_root.exists()
+    monkeypatch.setattr(library_scan, "STORAGE", absent_root)
+
+    status = scan_storage_root()
+
+    assert status.failed >= 1
+    # No walk happened, so nothing was registered and no flag was written.
+    assert status.registered == 0
+    assert status.missing == 0
+    assert _asset_by_id(flagged_id).missing_since == "2024-01-01T00:00:00+00:00"
+    assert _asset_by_id(present_id).missing_since is None
 
 
 def test_scan_does_not_flag_reference_assets_when_only_storage_path_is_absent(

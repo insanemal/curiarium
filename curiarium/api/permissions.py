@@ -260,7 +260,8 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("GET", "/assets"): READ,
     # A pure SELECT that counts what a bulk delete would remove.
     ("GET", "/assets/delete-preview"): READ,
-    # A pure SELECT that counts; the two numbers are the whole library and the root.
+    # A pure SELECT that counts; the three numbers are the whole library, the
+    # library root and the rows a scan flagged as missing.
     ("GET", "/assets/counts"): READ,
     ("GET", "/tags"): READ,
     ("GET", "/creators"): READ,

@@ -1,12 +1,13 @@
 import React from "react";
 
+import type { AssetCounts } from "../../lib/api/assets";
 import type { BundleReport } from "../../lib/api/bundles";
 import type { ReviewQueueKey } from "../views";
 import type { BundleDetectState } from "./useBundleDetect";
 import type { ImportRunsState } from "./useImportRuns";
 
 /** Closed on purpose: every queue the REVIEW group renders has a key here. */
-export type ReviewCounts = { bundles: number | null; imports: number | null };
+export type ReviewCounts = { bundles: number | null; imports: number | null; missing: number | null };
 
 /**
  * How many bundles still need a decision: undismissed and not already a
@@ -34,6 +35,17 @@ export function importsBadgeCount(state: ImportRunsState): number | null {
   return state.run?.status === "running" ? 1 : 0;
 }
 
+/**
+ * How many files the last scan flagged as missing. This costs no request: App
+ * already fetches `/assets/counts` for the sidebar, so the badge and the queue
+ * header read the same one number. `null` means that counts fetch has not
+ * succeeded - it renders as a dash, never `0`.
+ */
+export function missingBadgeCount(assetCounts: AssetCounts | null): number | null {
+  if (assetCounts === null) return null;
+  return assetCounts.missing;
+}
+
 /** `null` is "not known yet", never zero. */
 export function formatReviewCount(count: number | null): string {
   return count === null ? "\u2013" : String(count);
@@ -56,6 +68,7 @@ export function countAwaitingText(count: number | null, noun: string): string {
  */
 export function describeQueueCount(key: ReviewQueueKey, count: number | null): string {
   if (key === "bundles") return countAwaitingText(count, "bundle");
+  if (key === "missing") return countAwaitingText(count, "missing file");
   if (count === null) return "Count unavailable";
   if (count === 0) return "No import currently running";
   if (count === 1) return "1 import running";
@@ -65,10 +78,15 @@ export function describeQueueCount(key: ReviewQueueKey, count: number | null): s
 export function useReviewCounts(
   bundle: BundleDetectState,
   imports: ImportRunsState,
+  assetCounts: AssetCounts | null,
 ): ReviewCounts {
   const bundles = React.useMemo(() => bundleBadgeCount(bundle.report), [bundle.report]);
   const importsCount = importsBadgeCount(imports);
-  // A fresh object on every render would churn the nav even when neither count
-  // changed, so memoise the shape on the two primitives.
-  return React.useMemo(() => ({ bundles, imports: importsCount }), [bundles, importsCount]);
+  const missing = React.useMemo(() => missingBadgeCount(assetCounts), [assetCounts]);
+  // A fresh object on every render would churn the nav even when no count
+  // changed, so memoise the shape on the primitives.
+  return React.useMemo(
+    () => ({ bundles, imports: importsCount, missing }),
+    [bundles, importsCount, missing],
+  );
 }

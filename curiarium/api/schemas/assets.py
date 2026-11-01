@@ -36,15 +36,18 @@ class AssetCreate(BaseModel):
 
 
 class AssetCountsOut(BaseModel):
-  """Two library-wide numbers for the sidebar, never a filtered picture.
+  """Three library-wide numbers for the sidebar, never a filtered picture.
 
   `total` is every asset row; `unfiled` is just the library root, the rows with
-  no folder. Both deliberately ignore the listing's q/tags/creator filters: a
-  filtered count would make the root label claim something other than the root.
+  no folder; `missing` is the rows whose file the last scan flagged as gone.
+  Each names a place or a state of the whole library, and all three deliberately
+  ignore the listing's q/tags/creator filters: a filtered count would make a
+  label claim something other than that place or state.
   """
 
   total: int
   unfiled: int
+  missing: int
 
 
 class PreparedPrintOut(BaseModel):

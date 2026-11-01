@@ -1,19 +1,16 @@
 import TrashCard from "../TrashCard";
-import LibraryScanFailures from "./LibraryScanFailures";
 import SnapshotCard from "./SnapshotCard";
 import StorageCapabilitiesCard from "./StorageCapabilitiesCard";
-import type { LibraryScanState } from "./useLibraryScan";
 import { useStorageCapabilities } from "./useStorageCapabilities";
 import type { StorageSettingsState } from "./useStorageSettings";
 
 type Props = {
   storage: StorageSettingsState;
-  libraryScanState: LibraryScanState;
   onUnauthorized?: () => void;
   onBack: () => void;
 };
 
-export default function StorageSection({ storage, libraryScanState, onUnauthorized, onBack }: Props) {
+export default function StorageSection({ storage, onUnauthorized, onBack }: Props) {
   const {
     template: storageTemplate,
     initial: storageInitial,
@@ -26,12 +23,6 @@ export default function StorageSection({ storage, libraryScanState, onUnauthoriz
     setStatus: setStorageStatus,
     save: saveStorageSettings,
   } = storage;
-  const {
-    scan: libraryScan,
-    busy: libraryScanBusy,
-    error: libraryScanError,
-    run: runLibraryScan,
-  } = libraryScanState;
 
   const storageCapabilities = useStorageCapabilities();
 
@@ -120,34 +111,9 @@ export default function StorageSection({ storage, libraryScanState, onUnauthoriz
         </div>
       </div>
 
-      <div className="rounded-lg border border-panel bg-panel-soft p-4 flex flex-col gap-3">
-        <div>
-          <div className="text-lg font-semibold">Files added from outside Curiarium</div>
-          <p className="text-sm opacity-70">
-            Scan the storage folder and register files you copied in with rsync, cp or another tool.
-            Nothing is moved or deleted: files are registered where they already sit, and folders are created from the directory tree.
-            Files that have disappeared are counted and flagged in the grid, but never removed from the library.
-          </p>
-        </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          <button
-            className="text-sm px-3 py-2 rounded-md border border-panel-strong disabled:opacity-60"
-            disabled={libraryScanBusy || Boolean(libraryScan?.running)}
-            onClick={runLibraryScan}
-          >
-            {libraryScan?.running ? "Scanning..." : "Rescan storage folder"}
-          </button>
-          {libraryScan && (
-            <span className="text-xs opacity-80">
-              {libraryScan.running
-                ? "Scan in progress"
-                : `Last scan: ${libraryScan.registered} new, ${libraryScan.known} known, ${libraryScan.missing} missing, ${libraryScan.failed} failed`}
-            </span>
-          )}
-          {libraryScanError && <span className="text-xs text-red-400">{libraryScanError}</span>}
-        </div>
-        {libraryScan && <LibraryScanFailures failed={libraryScan.failed} errors={libraryScan.errors} />}
-      </div>
+      {/* The storage rescan and its failure report are work on the library,
+          not configuration: they live in REVIEW → Missing files (ADR 0011
+          decision 15). */}
 
       <StorageCapabilitiesCard state={storageCapabilities} />
 

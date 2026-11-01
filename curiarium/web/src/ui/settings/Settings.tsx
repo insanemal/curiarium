@@ -14,7 +14,6 @@ import StorageSection from "./StorageSection";
 import ThemeSection from "./ThemeSection";
 import UsersSection from "./UsersSection";
 import type { Section } from "./types";
-import { useLibraryScan } from "./useLibraryScan";
 import { useMountImportSettings } from "./useMountImportSettings";
 import { useStorageSettings } from "./useStorageSettings";
 
@@ -23,8 +22,6 @@ export type { Section };
 type Props = {
   settings: AppSettings;
   onChange: (next: AppSettings) => void;
-  onAssetsChanged?: () => void;
-  onFoldersChanged?: () => void;
   onUnauthorized?: () => void;
   /** `null` until `/me` answers; admin-only sections stay hidden until then. */
   role?: Role | null;
@@ -35,8 +32,6 @@ type Props = {
 export default function Settings({
   settings,
   onChange,
-  onAssetsChanged,
-  onFoldersChanged,
   onUnauthorized,
   role = null,
   username = null,
@@ -49,8 +44,6 @@ export default function Settings({
   const [makerworldEditing, setMakerworldEditing] = React.useState(!settings.makerworld.cookie);
   const [thingiverseEditing, setThingiverseEditing] = React.useState(!settings.thingiverse.cookie);
   const [networkDraft, setNetworkDraft] = React.useState(settings.network.publicUrl);
-
-  const libraryScan = useLibraryScan({ onAssetsChanged, onFoldersChanged });
 
   React.useEffect(() => {
     if (section !== "imports") return;
@@ -123,7 +116,6 @@ export default function Settings({
     return (
       <StorageSection
         storage={storage}
-        libraryScanState={libraryScan}
         onUnauthorized={onUnauthorized}
         onBack={() => setSection("root")}
       />

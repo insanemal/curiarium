@@ -11,7 +11,9 @@ vi.mock("../lib/api", () => ({
   apiHealth: vi.fn(async () => ({ ok: true, auth_required: true })),
   fileUrl: vi.fn((rel: string) => rel),
   getApiBase: vi.fn(() => "http://localhost:8000"),
-  getAssetCounts: vi.fn(async () => ({ total: 0, unfiled: 0 })),
+  // `missing` is part of AssetCounts: an un-updated literal renders the nav
+  // badge as the string "undefined".
+  getAssetCounts: vi.fn(async () => ({ total: 0, unfiled: 0, missing: 0 })),
   getMe: vi.fn(async () => ({
     id: "u1",
     username: "admin",
@@ -30,6 +32,9 @@ vi.mock("../lib/api", () => ({
 vi.mock("../lib/api/settings", () => ({
   getImportRuns: vi.fn(async () => ({ runs: [], total: 0, limit: 1, offset: 0 })),
   getImportRun: vi.fn(),
+  // App arms `useLibraryScan`; its pair comes from this domain module.
+  getLibraryScanStatus: vi.fn(),
+  startLibraryScan: vi.fn(),
 }));
 
 vi.mock("../lib/settings", () => ({
@@ -191,7 +196,7 @@ beforeEach(() => {
   installMemoryStorage();
   listProjectsMock.mockClear();
   getAssetCountsMock.mockReset();
-  getAssetCountsMock.mockResolvedValue({ total: 0, unfiled: 0 });
+  getAssetCountsMock.mockResolvedValue({ total: 0, unfiled: 0, missing: 0 });
   storeToken("access-token");
 });
 
@@ -294,8 +299,10 @@ describe("App library mode switch", () => {
   // count behind the sidebar row must be refreshed through `onAssetsFiled`.
   it("refreshes the unfiled count after a card is filed, without an assets-version bump", async () => {
     getAssetCountsMock
-      .mockResolvedValueOnce({ total: 5, unfiled: 2 })
-      .mockResolvedValueOnce({ total: 5, unfiled: 1 });
+      // `missing` rides along in every counts payload so the nav badge never
+      // renders "undefined".
+      .mockResolvedValueOnce({ total: 5, unfiled: 2, missing: 0 })
+      .mockResolvedValueOnce({ total: 5, unfiled: 1, missing: 0 });
 
     render(<App />);
 

@@ -9,7 +9,7 @@ vi.mock("../lib/api", () => ({
   apiHealth: vi.fn(async () => ({ ok: true, auth_required: true })),
   fileUrl: vi.fn((rel: string) => rel),
   getApiBase: vi.fn(() => "http://localhost:8000"),
-  getAssetCounts: vi.fn(async () => ({ total: 0, unfiled: 0 })),
+  getAssetCounts: vi.fn(async () => ({ total: 0, unfiled: 0, missing: 0 })),
   getMe: vi.fn(),
   listProjects: vi.fn(async () => []),
   logout: vi.fn(async () => {}),

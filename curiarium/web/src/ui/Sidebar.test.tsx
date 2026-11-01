@@ -839,7 +839,7 @@ describe("Sidebar review navigation", () => {
         role="editor"
         activeView="review"
         activeQueue="bundles"
-        reviewCounts={{ bundles: 7, imports: null }}
+        reviewCounts={{ bundles: 7, imports: null, missing: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -866,7 +866,7 @@ describe("Sidebar review navigation", () => {
         selectedId={null}
         onSelect={vi.fn()}
         role="viewer"
-        reviewCounts={{ bundles: 7, imports: 1 }}
+        reviewCounts={{ bundles: 7, imports: 1, missing: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -880,5 +880,31 @@ describe("Sidebar review navigation", () => {
 
     expect(onOpenQueue).toHaveBeenCalledTimes(1);
     expect(onOpenQueue).toHaveBeenCalledWith("imports");
+  });
+
+  // The missing queue is the same read surface as the imports queue: the listing
+  // and the scan status are READ, so a viewer gets the row in Files mode too.
+  it("shows a viewer the missing row and opens the missing queue", () => {
+    const onOpenQueue = vi.fn();
+
+    render(
+      <Sidebar
+        {...navProps}
+        selectedId={null}
+        onSelect={vi.fn()}
+        role="viewer"
+        reviewCounts={{ bundles: 7, imports: 1, missing: 5 }}
+        onOpenQueue={onOpenQueue}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /^Missing files/ });
+
+    expect(within(row).getByText("5")).toBeTruthy();
+
+    fireEvent.click(row);
+
+    expect(onOpenQueue).toHaveBeenCalledTimes(1);
+    expect(onOpenQueue).toHaveBeenCalledWith("missing");
   });
 });

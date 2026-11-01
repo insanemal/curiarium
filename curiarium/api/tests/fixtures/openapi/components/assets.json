@@ -1,7 +1,11 @@
 {
   "AssetCountsOut": {
-    "description": "Two library-wide numbers for the sidebar, never a filtered picture.\n\n`total` is every asset row; `unfiled` is just the library root, the rows with\nno folder. Both deliberately ignore the listing's q/tags/creator filters: a\nfiltered count would make the root label claim something other than the root.",
+    "description": "Three library-wide numbers for the sidebar, never a filtered picture.\n\n`total` is every asset row; `unfiled` is just the library root, the rows with\nno folder; `missing` is the rows whose file the last scan flagged as gone.\nEach names a place or a state of the whole library, and all three deliberately\nignore the listing's q/tags/creator filters: a filtered count would make a\nlabel claim something other than that place or state.",
     "properties": {
+      "missing": {
+        "title": "Missing",
+        "type": "integer"
+      },
       "total": {
         "title": "Total",
         "type": "integer"
@@ -13,7 +17,8 @@
     },
     "required": [
       "total",
-      "unfiled"
+      "unfiled",
+      "missing"
     ],
     "title": "AssetCountsOut",
     "type": "object"

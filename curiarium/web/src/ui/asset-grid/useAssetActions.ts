@@ -376,6 +376,10 @@ export function useAssetActions({
         status = await getLibraryScanStatus();
       }
       await refresh();
+      // A scan changes the flagged set, so App's counts (sidebar badge, queue
+      // header) must refetch: without this the row leaves the list while the
+      // badge keeps the old number.
+      onAssetsFiled?.();
     } catch (err) {
       if (err instanceof UnauthorizedError) {
         onUnauthorized?.();

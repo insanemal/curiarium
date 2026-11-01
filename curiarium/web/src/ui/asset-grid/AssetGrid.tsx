@@ -20,7 +20,7 @@ import AssetToolbar from "./AssetToolbar";
 import AssetCard from "./AssetCard";
 import type { DetailSection } from "./AssetDetailsEditor";
 import { AssetPreviewModal } from "./preview";
-import { noop } from "./assetGridMeta";
+import { noop, type MissingScanOutcome } from "./assetGridMeta";
 import { useAssetActions } from "./useAssetActions";
 import { useAssetDrop } from "./useAssetDrop";
 import { useAssetList } from "./useAssetList";
@@ -35,6 +35,18 @@ type Props = {
   folderId?: string | null;
   /** Files mode: show only the library root's assets (the Unfiled row). */
   unfiled?: boolean;
+  /**
+   * Pinned missing-files mode: only assets a scan flagged as missing. The scope
+   * lives in `useAssetList`'s closure and is absent from `RefreshOpts`, so no
+   * toolbar control can drop it - the controls may only narrow further.
+   */
+  missingOnly?: boolean;
+  /**
+   * What the last storage scan said ("unknown" | "clean" | "failed"). Only
+   * `clean` may claim that every file on disk is accounted for; the body's
+   * empty-state copy is chosen from it.
+   */
+  missingScan?: MissingScanOutcome;
   /** When set, the grid shows this project's assets and hides all folder chrome. */
   projectId?: string | null;
   /** Display-only context for project mode (the caller renders the heading). */
@@ -78,6 +90,8 @@ export default function AssetGrid({
   canDelete,
   folderId,
   unfiled = false,
+  missingOnly = false,
+  missingScan,
   projectId,
   projectName,
   foldersVersion = 0,
@@ -130,6 +144,7 @@ export default function AssetGrid({
     activeTags,
     loading,
     loadingMore,
+    error,
     offset,
     setOffset,
     hasMore,
@@ -145,6 +160,7 @@ export default function AssetGrid({
   } = useAssetList({
     folderId,
     unfiled,
+    missingOnly,
     projectId,
     foldersVersion,
     assetsVersion,
@@ -242,6 +258,9 @@ export default function AssetGrid({
   const runDelete = useStableCallback(async (targets: Asset[]) => {
     if (targets.length > 1) {
       const failures = await bulkDelete(targets.map(target => target.id));
+      // A partial bulk success still removed rows, so the badge must drop by the
+      // number that actually went: refetch the counts even with failures back.
+      onAssetsFiled?.();
       const failed: AssetDeleteFailure[] = failures.map(failure => ({
         id: failure.id,
         message: failure.error,
@@ -259,6 +278,9 @@ export default function AssetGrid({
     setOffset(Math.max(0, startOffset - dropped));
     try {
       await deleteAsset(asset.id, asset.filename);
+      // The row is really gone, so App's counts must refetch too (this also
+      // fixes a pre-existing sidebar-count staleness after a single delete).
+      onAssetsFiled?.();
       return { failed: [] };
     } catch (err) {
       if (err instanceof UnauthorizedError) {
@@ -268,8 +290,11 @@ export default function AssetGrid({
       }
       if (err instanceof AssetNotFoundError) {
         // Already gone server-side: the row is correctly absent, keep the rewind.
+        // The counts must refetch for the same reason as the success path.
+        onAssetsFiled?.();
         return { failed: [] };
       }
+      // Rollback path: nothing was deleted, so the counts are still accurate.
       setItems(before);
       setOffset(startOffset);
       return { failed: [{ id: asset.id, message: errorMessage(err, "Delete failed.") }] };
@@ -283,6 +308,12 @@ export default function AssetGrid({
   });
 
   const closeDeleteDialog = useStableCallback(() => setDeleteTargets(null));
+
+  // The grid's only in-place retry of a failed listing; stable so the body's
+  // button keeps its identity across renders.
+  const retryAssets = useStableCallback(() => {
+    void refresh();
+  });
 
   // Stable identities so `AssetCard`'s memo keeps skipping untouched cards.
   const openPreview = useStableCallback((asset: Asset | null) => {
@@ -370,7 +401,10 @@ export default function AssetGrid({
     handleDragOver,
     handleDragLeave,
     handleDrop,
-  } = useAssetDrop({ isProject, canContribute, uploader, dropTargetName });
+  // Missing mode hides the folder chrome: a breadcrumb would navigate away and
+  // unmount the queue, and a missing file is not a place to drop a new one, so
+  // the drop hook is told this is project-like (inert drag/drop).
+  } = useAssetDrop({ isProject: isProject || missingOnly, canContribute, uploader, dropTargetName });
 
   // Single source of truth for card props so the virtualized flat grid and the
   // grouped rows render exactly the same cards. All callbacks are stable, so
@@ -427,7 +461,7 @@ export default function AssetGrid({
       <div className="flex flex-col gap-4">
       {/* Deliberately non-sticky: `BulkActionBar` is the single sticky element
           in this column (top-0 z-30), so the two cannot fight over the slot. */}
-      {!isProject && (
+      {!isProject && !missingOnly && (
         <FolderBreadcrumbs
           folders={folders}
           folderId={folderId ?? null}
@@ -455,7 +489,7 @@ export default function AssetGrid({
         onSelectAll={selectAllLoaded}
         onDismissFailures={dismissBulkFailures}
       />
-      {!isProject && canContribute && uploader.modal}
+      {!isProject && !missingOnly && canContribute && uploader.modal}
       <AssetToolbar
         isProject={isProject}
         loading={loading}
@@ -475,7 +509,7 @@ export default function AssetGrid({
         onQueryChange={query => { queryRef.current = query; }}
         onSearch={query => { refresh({ search: query }); }}
       />
-      {!isProject && (
+      {!isProject && !missingOnly && (
         <FolderTiles
           folders={folders}
           folderId={folderId ?? null}
@@ -490,6 +524,8 @@ export default function AssetGrid({
         folderGroups={folderGroups}
         typeGroups={typeGroups}
         unfiled={isUnfiled}
+        missingOnly={missingOnly}
+        missingScan={missingScan}
         collapsedGroups={collapsedGroups}
         expandedGroups={expandedGroups}
         toggleGroup={toggleGroup}
@@ -498,9 +534,13 @@ export default function AssetGrid({
         folderId={folderId}
         subfolders={subfolders}
         loading={loading}
+        error={error}
+        onRetry={retryAssets}
         items={items}
         queryRef={queryRef}
         activeTags={activeTags}
+        activeCreator={activeCreator}
+        notInProject={notInProject}
         hasMore={hasMore}
         loadingMore={loadingMore}
         loadMore={loadMore}

@@ -3,7 +3,7 @@ import { type RefObject } from "react";
 import { type Asset, type Folder } from "../../lib/api";
 import { GRID_GAP_PX } from "../../lib/virtualGrid";
 import type { VirtualRowsResult } from "../useVirtualRows";
-import { GROUP_CARD_CAP, type GroupBucket, type SortKey } from "./assetGridMeta";
+import { GROUP_CARD_CAP, type GroupBucket, type MissingScanOutcome, type SortKey } from "./assetGridMeta";
 
 type AssetGridBodyProps = {
   /** Virtualization result from the root; its refs are attached verbatim. */
@@ -20,12 +20,22 @@ type AssetGridBodyProps = {
   isProject: boolean;
   /** Files mode: the grid is showing the library root only. */
   unfiled: boolean;
+  /** Pinned missing-files mode; only affects the empty-state copy here. */
+  missingOnly?: boolean;
+  /** What the last scan said about the flag set, for the empty-state copy. */
+  missingScan?: MissingScanOutcome;
   folderId?: string | null;
   subfolders: Folder[];
   loading: boolean;
+  /** Retryable first-load failure; null when the listing loaded or was never attempted. */
+  error?: string | null;
+  /** Re-issues the first page (the error panel's "Try again"). */
+  onRetry: () => void;
   items: Asset[];
   queryRef: RefObject<string>;
   activeTags: string[];
+  activeCreator: string | null;
+  notInProject: boolean;
   hasMore: boolean;
   loadingMore: boolean;
   loadMore: () => void;
@@ -49,16 +59,28 @@ export default function AssetGridBody({
   toggleGroupExpanded,
   isProject,
   unfiled,
+  missingOnly,
+  missingScan,
   folderId,
   subfolders,
   loading,
+  error,
+  onRetry,
   items,
   queryRef,
   activeTags,
+  activeCreator,
+  notInProject,
   hasMore,
   loadingMore,
   loadMore,
 }: AssetGridBodyProps) {
+  // Any active filter means an empty list is an empty RESULT, never an empty
+  // set: a search, tag chips, a creator or "not in any project" can all empty
+  // the rows while the queue itself is not empty.
+  const narrowed =
+    Boolean(queryRef.current) || activeTags.length > 0 || activeCreator !== null || notInProject;
+
   return (
     <>
       {/* A folder holding only subfolders must never look broken (#15). Applies
@@ -68,6 +90,53 @@ export default function AssetGridBody({
         <p className="text-sm opacity-70">
           No files directly in this folder — pick a subfolder above.
         </p>
+      )}
+
+      {/* Pinned mode has no toolbar-sourced rows to fall back on, so the queue
+          owns a first-load line: the toolbar's "Loading..." describes the
+          toolbar, not the queue. */}
+      {missingOnly && loading && !items.length && (
+        <p className="text-sm opacity-70" data-missing-loading>Loading missing files…</p>
+      )}
+
+      {/* A failed fetch is not an empty result. Without this the grid looked
+          identical to a genuinely empty one, so the missing empty-states below
+          would claim "No missing files flagged" on top of a failed request. */}
+      {error && !loading && !items.length && (
+        <div className="text-sm" data-grid-error>
+          <p className="font-medium">Could not load the files</p>
+          <p className="opacity-70">{error}</p>
+          <button
+            type="button"
+            className="mt-2 px-3 py-2 rounded-md border border-panel-strong text-sm"
+            onClick={onRetry}
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
+      {/* Flag-truth when the scan status is unknown: an unknown scan is not
+          evidence that nothing is missing, so the "on disk" sentence renders
+          only for `clean`. The repo has already shipped two labels that lied
+          about an empty list; this is not the third. */}
+      {missingOnly && !loading && !items.length && !error && narrowed && (
+        <div className="text-sm opacity-70" data-missing-empty-filter>
+          <p className="font-medium">No missing files match this filter</p>
+          <p>Clear the search and the filters to see the whole queue.</p>
+        </div>
+      )}
+      {missingOnly && !loading && !items.length && !error && !narrowed && (
+        <div className="text-sm opacity-70" data-missing-empty={missingScan ?? "unknown"}>
+          <p className="font-medium">No missing files flagged</p>
+          {missingScan === "clean" ? (
+            <p>Every file an asset points at is on disk.</p>
+          ) : missingScan === "failed" ? (
+            <p>The last scan did not finish, so some missing files may not be listed yet. Run a scan again before trusting an empty queue.</p>
+          ) : (
+            <p>Nothing is flagged as missing yet. A scan is what finds files that disappeared, and no completed scan is known for this session.</p>
+          )}
+        </div>
       )}
 
       {/* The Unfiled row exists to answer "what is still loose?": an empty pile

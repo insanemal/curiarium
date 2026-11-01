@@ -29,6 +29,7 @@ def apply_asset_filters(
     creator: Optional[str] = None,
     added_by: Optional[str] = None,
     unfiled: bool = False,
+    missing: bool = False,
 ):
     # An absent `folder_id` means "no folder filter", so "assets at the library
     # root" needs its own flag. Both at once is a contradiction, not an AND: the
@@ -47,6 +48,13 @@ def apply_asset_filters(
         )
     if unfiled:
         stmt = stmt.where(Asset.folder_id.is_(None))
+    # `missing_since` is a nullable TEXT timestamp, not a boolean: "flagged" is
+    # IS NOT NULL (never is_(True), which compares the column to 1 and matches
+    # nothing). Composes with every other filter - a missing file can sit in a
+    # folder, in a project and carry tags - so it is deliberately not a 400 pair
+    # like unfiled+folder_id.
+    if missing:
+        stmt = stmt.where(Asset.missing_since.is_not(None))
     # Direct children only, not recursive: the child folders are their own levels.
     if folder_id:
         stmt = stmt.where(Asset.folder_id == folder_id)
