@@ -1,7 +1,7 @@
 import { SCAN_EXTS } from "./folderScan";
 import type { FolderScanState } from "./useFolderScan";
 
-export default function FolderScanCard({
+export default function FolderScanPanel({
   scanBusy,
   scanStripRoot,
   setScanStripRoot,
@@ -18,7 +18,7 @@ export default function FolderScanCard({
   scanStatus,
 }: FolderScanState) {
   return (
-    <div className="rounded-lg border border-panel bg-panel-soft p-4 flex flex-col gap-3">
+    <div className="review-panel">
       <div>
         <div className="text-lg font-semibold">Local folder scan</div>
         <p className="text-sm opacity-70">

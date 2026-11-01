@@ -598,9 +598,9 @@ sessions stay valid.
   grants no new action.
 * **Settings reads are admin**, and the client no longer makes a non-admin pay
   for it: the Storage Structure card is hidden from the settings menu and the
-  mount-import card from the Imports section below `admin`, and the reads behind
-  them are never issued (`settings/Settings.tsx` passes `enabled: isAdmin` to
-  `useStorageSettings`/`useMountImportSettings`). The storage section still
+  mount-import card from the Import sources section below `admin`, and the
+  reads behind them are never issued (`settings/Settings.tsx` passes
+  `enabled: isAdmin` to `useStorageSettings`/`useMountImportSettings`). The storage section still
   renders a not-permitted state if reached directly, but the menu does not offer
   it. That is honest: they cannot change it either.
 * **A contributor cannot retag a folder.** `PATCH /folder/{folder_id}` carries
@@ -616,8 +616,8 @@ sessions stay valid.
 * **The web client** maps a 403 to "Your role does not allow this action."
   (`lib/api/http.ts`, `assertOk`) and gates the admin-only surfaces on the role
   `GET /me` reports: the sidebar "Audit log" entry, the Storage Structure
-  settings entry and the mount-import card in the Imports section are hidden
-  below `admin`, and a direct visit to the audit view renders a not-permitted
+  settings entry and the mount-import card in the Import sources section are
+  hidden below `admin`, and a direct visit to the audit view renders a not-permitted
   state instead of the raw 403 (`lib/auth.ts` `roleAtLeast`,
   `ui/SidebarFooter.tsx`, `ui/useSessionRole.ts`, `ui/NotPermitted.tsx`,
   `ui/settings/Settings.tsx`). That is honesty, not enforcement: the API
@@ -635,21 +635,25 @@ sessions stay valid.
   `ui/ProjectLanding.tsx` and `ui/project-attach/useAttachDrop.ts` receive
   both. `ui/UploadQueuePanel.tsx` is rendered by `App` only when
   `canContribute` is set. `ui/Sidebar.tsx` receives `role` and derives both
-  capabilities locally, and `ui/settings/Settings.tsx` (which passes it on to
-  `ui/settings/ImportsSection.tsx`) deliberately keeps a single
-  `canWrite = roleAtLeast(role, "editor")`: its one mutating control is the
-  folder-scan card (`POST /library/scan`), which is still `write`. One threshold
-  in one helper rather than a comparison per surface. `role` is `null` until
-  `/me` answers, so an unknown role has neither capability (fail closed), and a
-  demotion lands on the next `/me` refresh.
+  capabilities locally, and `ui/settings/Settings.tsx` is configuration only:
+  it derives no write capability at all. The one mutating work surface left,
+  the local folder-scan panel, lives in `ui/review/ImportsReviewView.tsx`, which
+  receives `canWrite={canDelete}` from `App`: the panel creates the top-level
+  folder (`POST /folder`, `write`) and uploads the selected files
+  (`POST /upload`, `contribute`), so its write half decides the threshold and
+  it is hidden, not disabled, below `editor`. One threshold in one helper
+  rather than a comparison per surface. `role` is `null` until `/me` answers,
+  so an unknown role has neither capability (fail closed), and a demotion lands
+  on the next `/me` refresh.
   A viewer loses the upload bar, drag-and-drop upload, folder
   create/rename/delete, asset edit/tags/move/delete/add-to-project, per-file
   mutation/re-scan/forget, the bulk write actions, project
-  edit/delete/cover/attach/remove-member, the local folder-scan card and the
-  upload-queue panel. A viewer keeps search, sort and filters, breadcrumbs,
-  subfolder tiles, downloads (including folder ZIP export), preview, the
-  slicer, project browsing, the read-only mount-import run history and the
-  cookie preferences (client-side settings, not API writes).
+  edit/delete/cover/attach/remove-member, the local folder-scan panel (REVIEW →
+  Imports running) and the upload-queue panel. A viewer keeps search, sort and
+  filters, breadcrumbs, subfolder tiles, downloads (including folder ZIP
+  export), preview, the slicer, project browsing, the read-only mount-import run
+  history (REVIEW → Imports running, from `GET /imports/runs`, which is
+  `read`) and the cookie preferences (client-side settings, not API writes).
   A contributor sits between the two, and the UI shows it: they gain the upload
   bar, drag-and-drop upload (grid and sidebar), link/zip/project import, asset
   tag and notes/creator/collection edits, folder create and subfolder create,
@@ -660,17 +664,20 @@ sessions stay valid.
   not a write). They still lose folder rename and move (and therefore folder
   retagging), asset rename, moving an asset between folders, folder delete,
   asset delete, supporting-file delete, prepared-print delete, batch move and
-  batch delete, the local folder-scan card and snapshot actions. The client is
-  still not the boundary: a stale or tampered role cache only hides or shows a
-  button, it cannot change what the API allows.
+  batch delete, the local folder-scan panel (REVIEW → Imports running, because
+  creating its top-level folder is a `write`) and snapshot actions. The client
+  is still not the boundary: a stale or tampered role cache only hides or shows
+  a button, it cannot change what the API allows.
 * **No direct-visit not-permitted state is needed for the contribute or write
   surfaces.** Both capabilities only show or hide controls inside views every
   role may open. There is no client router and no contribute-only or write-only
-  view or route, so there is nothing to visit directly: the only mixed section
-  is Settings → Imports,
-  which hides the scan card while the read-only import-run history and the
-  cookie cards stay. The audit and storage `NotPermitted` states from Mf-5tyz
-  are unchanged.
+  view or route, so there is nothing to visit directly. Settings → Import
+  sources is configuration only (mount-import settings and the cookie cards),
+  so nothing in Settings mixes thresholds any more; the one mixed surface is
+  the REVIEW → Imports running queue, which hides the folder-scan panel below
+  `editor` while the read-only import-run history stays for every role that may
+  read `GET /imports/runs`. The audit and storage `NotPermitted` states from
+  Mf-5tyz are unchanged.
 * **Audit.** Every audited action now writes one row (one per affected asset on
   the batch routes) in the same transaction as the mutation, so an audit write
   failure is a failed mutation - fail-closed, except for the two filesystem-only

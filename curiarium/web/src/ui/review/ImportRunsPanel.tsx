@@ -1,4 +1,4 @@
-import type { ImportRunSummary } from "../../lib/api";
+import type { ImportRunSummary } from "../../lib/api/settings";
 import {
   formatImportRunDuration,
   formatImportRunTime,
@@ -33,14 +33,6 @@ function statusToneClass(run: ImportRunSummary): string {
 function reasonToneClass(run: ImportRunSummary): string {
   if (isImportRunFailure(run)) return "text-red-400";
   return "text-muted";
-}
-
-type IdleLine = { text: string; className: string };
-
-function idleLine(loading: boolean, error: string | null): IdleLine {
-  if (loading) return { text: "Loading import runs...", className: "text-sm" };
-  if (error) return { text: error, className: "text-sm text-red-400" };
-  return { text: "No mount import has run yet.", className: "text-sm" };
 }
 
 function ErrorList({ errors }: { errors: string[] }) {
@@ -89,24 +81,51 @@ function FinishedRun({ run }: { run: ImportRunSummary & { errors: string[] } }) 
   );
 }
 
-export default function ImportRunsCard({ state }: { state: ImportRunsState }) {
+/**
+ * The latest mounted-import run inside the Imports running queue. The queue's
+ * header already carries the title, count and Refresh, so this panel only
+ * states the run itself - and, while nothing is walking, the literal idle line
+ * above the last run that did.
+ */
+export default function ImportRunsPanel({ state }: { state: ImportRunsState }) {
   const { run, loading, error } = state;
-  const idle = idleLine(loading, error);
 
   return (
-    <div className="rounded-lg border border-panel bg-panel-soft p-4 flex flex-col gap-3">
+    <div className="review-panel">
       <div>
-        <div className="text-lg font-semibold">Mount import runs</div>
+        <div className="text-lg font-semibold">Latest run</div>
         <p className="text-sm opacity-70">
           The latest run reported by the API. While a run is walking the mount its counters
-          update live. Only mounted imports are recorded; storage rescans stay in the log.
+          update live.
         </p>
       </div>
       {run && run.status === "running" && <RunningRun run={run} />}
-      {run && run.status !== "running" && <FinishedRun run={run} />}
-      {!run && (
+      {run && run.status !== "running" && (
         <div className="flex flex-col gap-1">
-          <p className={idle.className}>{idle.text}</p>
+          <p className="text-sm font-medium">No import currently running</p>
+          <FinishedRun run={run} />
+        </div>
+      )}
+      {!run && loading && <p className="text-sm">Loading import runs...</p>}
+      {!run && !loading && error && (
+        <div className="flex flex-col gap-1">
+          <p className="text-sm text-red-400">{error}</p>
+          <div>
+            <button
+              type="button"
+              className="review-refresh"
+              disabled={state.refreshing}
+              onClick={() => void state.refresh()}
+            >
+              {state.refreshing ? "Trying…" : "Try again"}
+            </button>
+          </div>
+        </div>
+      )}
+      {!run && !loading && !error && (
+        <div className="flex flex-col gap-1">
+          <p className="text-sm font-medium">No import currently running</p>
+          <p className="text-xs opacity-70">No mount import has run yet.</p>
           <p className="text-xs opacity-70">
             A run is recorded at startup whenever a mount is configured and enabled.
           </p>

@@ -1,11 +1,7 @@
 import type { AppSettings } from "../../lib/settings";
-import FolderScanCard from "./FolderScanCard";
 import ImportCookiesCard from "./ImportCookiesCard";
-import ImportRunsCard from "./ImportRunsCard";
 import MountImportCard from "./MountImportCard";
 import SectionHeader from "./SectionHeader";
-import type { FolderScanState } from "./useFolderScan";
-import type { ImportRunsState } from "./useImportRuns";
 import type { MountImportSettingsState } from "./useMountImportSettings";
 
 export type CookieDraft = {
@@ -20,22 +16,18 @@ type Props = {
   onChange: (next: AppSettings) => void;
   mount: MountImportSettingsState;
   isAdmin: boolean;
-  canWrite: boolean;
-  folderScan: FolderScanState;
-  importRuns: ImportRunsState;
   makerworld: CookieDraft;
   thingiverse: CookieDraft;
   onBack: () => void;
 };
 
+/** Import sources are configuration only: the run history and the folder scan
+ *  are work and live in REVIEW → Imports running. */
 export default function ImportsSection({
   settings,
   onChange,
   mount,
   isAdmin,
-  canWrite,
-  folderScan,
-  importRuns,
   makerworld,
   thingiverse,
   onBack,
@@ -71,20 +63,12 @@ export default function ImportsSection({
   return (
     <div className="flex flex-col gap-4">
       <SectionHeader
-        title="Imports"
-        subtitle="Rate-limit workarounds for public imports, plus local folder scans."
+        title="Import sources"
+        subtitle="Mount-import settings and the optional import-cookie workarounds."
         onBack={onBack}
       />
 
       {isAdmin && <MountImportCard {...mount} />}
-
-      <ImportRunsCard state={importRuns} />
-
-      {/* No direct-visit not-permitted state is needed for this WRITE surface:
-          there is no router and no write-only view, so the only mixed section
-          simply hides the scan card. The read-only runs card and the cookie
-          cards (client-side preferences, not API writes) stay for a viewer. */}
-      {canWrite && <FolderScanCard {...folderScan} />}
 
       <div className="rounded-lg border border-panel bg-panel-soft p-4 flex flex-col gap-2">
         <label className="text-xs flex items-center gap-2">

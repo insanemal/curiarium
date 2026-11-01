@@ -1,8 +1,8 @@
-import { PackageSearch } from "lucide-react";
+import { FolderUp, PackageSearch, type LucideIcon } from "lucide-react";
 
 import { roleAtLeast, type Role } from "../../lib/auth";
 import type { ActiveView, ReviewQueueKey } from "../views";
-import { countAwaitingText, formatReviewCount, type ReviewCounts } from "./useReviewCounts";
+import { describeQueueCount, formatReviewCount, type ReviewCounts } from "./useReviewCounts";
 
 type Props = {
   activeView?: ActiveView;
@@ -15,16 +15,23 @@ type Props = {
   role?: Role | null;
 };
 
-/** One row per queue; later slices add their queue here rather than to the JSX. */
-const QUEUES: { key: ReviewQueueKey; label: string }[] = [
-  { key: "bundles", label: "Bundles to confirm" },
+/**
+ * One row per queue; later slices add their queue here rather than to the JSX.
+ * `minRole` is per row because the queues' own routes differ: creating or
+ * dismissing a bundle is CONTRIBUTE, while `GET /imports/runs` is READ - a
+ * viewer already reads the run history, so the queue must not delete a proven
+ * read surface. A role below a row's threshold simply does not see that row.
+ */
+const QUEUES: { key: ReviewQueueKey; label: string; minRole: Role; icon: LucideIcon }[] = [
+  { key: "bundles", label: "Bundles to confirm", minRole: "contributor", icon: PackageSearch },
+  { key: "imports", label: "Imports running", minRole: "viewer", icon: FolderUp },
 ];
 
 /**
  * The REVIEW group both sidebars render, from one place so the two cannot drift
- * apart. Creating or dismissing a bundle is a CONTRIBUTE write - the API's own
- * threshold - so a viewer gets no row at all, and detection is never fired on
- * their behalf.
+ * apart. When no queue is visible for this role - an unknown role, or one below
+ * every row's threshold - the group and its "Review" heading render nothing at
+ * all.
  */
 export default function ReviewNav({
   activeView = "library",
@@ -33,19 +40,21 @@ export default function ReviewNav({
   onOpenQueue,
   role = null,
 }: Props) {
-  if (!roleAtLeast(role, "contributor")) return null;
+  const visible = QUEUES.filter(queue => roleAtLeast(role, queue.minRole));
+  if (!visible.length) return null;
 
   return (
     <div className="sidebar-review">
       <div className="sidebar-section-heading">
         <span>Review</span>
       </div>
-      {QUEUES.map(queue => {
+      {visible.map(queue => {
         const count = counts?.[queue.key] ?? null;
         const selected = activeView === "review" && activeQueue === queue.key;
         // An `aria-label` replaces the button's contents, so the count has to
         // appear here too or the badge is never announced.
-        const countText = countAwaitingText(count, "bundle");
+        const countText = describeQueueCount(queue.key, count);
+        const Icon = queue.icon;
         return (
           <button
             key={queue.key}
@@ -55,7 +64,7 @@ export default function ReviewNav({
             aria-current={selected ? "page" : undefined}
             onClick={() => onOpenQueue?.(queue.key)}
           >
-            <span className="sidebar-all-icon"><PackageSearch className="h-4 w-4" /></span>
+            <span className="sidebar-all-icon"><Icon className="h-4 w-4" /></span>
             <span className="flex-1 text-left">{queue.label}</span>
             <span className="sidebar-count" data-testid={`review-count-${queue.key}`} title={countText}>
               {formatReviewCount(count)}

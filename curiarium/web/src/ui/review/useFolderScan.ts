@@ -1,5 +1,9 @@
 import React from "react";
-import { UnauthorizedError, createFolder } from "../../lib/api";
+
+// Domain modules, not the `../../lib/api` barrel: `App`'s tests replace that
+// barrel with a fixed object, so a new named import from it would throw.
+import { createFolder } from "../../lib/api/folders";
+import { UnauthorizedError } from "../../lib/api/http";
 import { entriesFromFileList, uploadEntriesToFolder, type UploadEntry } from "../../lib/uploadTree";
 import {
   entriesFromDirectoryHandle,
@@ -9,10 +13,10 @@ import {
   type DirectoryPicker,
   type FileSystemDirectoryHandle,
 } from "./folderScan";
-import type { Section } from "./types";
 
 type Props = {
-  section: Section;
+  /** Whether the queue the panel lives in may write (folder create + upload). */
+  enabled: boolean;
   onAssetsChanged?: () => void;
   onFoldersChanged?: () => void;
   onUnauthorized?: () => void;
@@ -37,12 +41,12 @@ export type FolderScanState = {
 };
 
 /**
- * Local folder scan state. Every value lives here so it survives navigation
- * between settings sections, exactly as it did when the sections were early
- * returns of one component.
+ * Local folder scan state for the imports queue. The queue owns it: the state
+ * lives exactly as long as the view is mounted, so navigating away discards a
+ * selection and the last status line.
  */
 export function useFolderScan({
-  section,
+  enabled,
   onAssetsChanged,
   onFoldersChanged,
   onUnauthorized,
@@ -146,11 +150,11 @@ export function useFolderScan({
   };
 
   React.useEffect(() => {
-    if (section !== "imports") return;
+    if (!enabled) return;
     if (!folderInputRef.current) return;
     folderInputRef.current.setAttribute("webkitdirectory", "");
     folderInputRef.current.setAttribute("directory", "");
-  }, [section]);
+  }, [enabled]);
 
   React.useEffect(() => {
     if (!scanRawEntries.length) {

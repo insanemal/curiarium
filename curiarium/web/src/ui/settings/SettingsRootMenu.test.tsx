@@ -27,7 +27,7 @@ describe("SettingsRootMenu", () => {
     render(<SettingsRootMenu onOpen={vi.fn()} role={role} />);
 
     expect(screen.queryByRole("button", { name: /Storage Structure/ })).toBeNull();
-    expect(screen.getByRole("button", { name: /Imports & Folder Scan/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Import sources/ })).toBeTruthy();
   });
 
   it("fails closed while the role is unknown", () => {

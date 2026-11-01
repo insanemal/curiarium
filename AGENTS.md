@@ -26,7 +26,8 @@ curiarium/api/            FastAPI backend (19 routers, SQLModel, versioned migra
   tests/                  ~1994 tests; conftest pins the environment
 curiarium/web/            React 18 + Vite + Tailwind
   src/ui/asset-grid/      the virtualised grid, cards, preview queue
-  src/ui/settings/        settings sections
+  src/ui/settings/        configuration sections (Settings; no work queues)
+  src/ui/review/          the REVIEW group and its work queues
   src/lib/api/            per-domain HTTP clients behind a barrel
   public/                 generated brand assets (icons, manifest, og-image)
 curiarium/slicer-bridge/  Go protocol handler (curiarium-slicer://, curiarium-engrave://)

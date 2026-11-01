@@ -167,7 +167,7 @@ describe("ProjectSidebar review navigation", () => {
         role="editor"
         activeView="review"
         activeQueue="bundles"
-        reviewCounts={{ bundles: 4 }}
+        reviewCounts={{ bundles: 4, imports: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -181,5 +181,30 @@ describe("ProjectSidebar review navigation", () => {
 
     expect(onOpenQueue).toHaveBeenCalledTimes(1);
     expect(onOpenQueue).toHaveBeenCalledWith("bundles");
+  });
+
+  // AC-7: the same shared group renders the imports row in projects mode, and a
+  // contributor sees both rows there.
+  it("shows a contributor both rows and opens the imports queue", () => {
+    const onOpenQueue = vi.fn();
+    render(
+      <ProjectSidebar
+        projects={projects}
+        selectedId={null}
+        onSelect={vi.fn()}
+        role="contributor"
+        reviewCounts={{ bundles: 4, imports: 1 }}
+        onOpenQueue={onOpenQueue}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /^Bundles to confirm/ })).toBeTruthy();
+    const row = screen.getByRole("button", { name: /^Imports running/ });
+    expect(within(row).getByText("1")).toBeTruthy();
+
+    fireEvent.click(row);
+
+    expect(onOpenQueue).toHaveBeenCalledTimes(1);
+    expect(onOpenQueue).toHaveBeenCalledWith("imports");
   });
 });

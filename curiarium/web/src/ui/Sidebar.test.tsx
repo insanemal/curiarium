@@ -839,7 +839,7 @@ describe("Sidebar review navigation", () => {
         role="editor"
         activeView="review"
         activeQueue="bundles"
-        reviewCounts={{ bundles: 7 }}
+        reviewCounts={{ bundles: 7, imports: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -853,5 +853,32 @@ describe("Sidebar review navigation", () => {
 
     expect(onOpenQueue).toHaveBeenCalledTimes(1);
     expect(onOpenQueue).toHaveBeenCalledWith("bundles");
+  });
+
+  // AC-7: `GET /imports/runs` is require_read, so the files sidebar gives a
+  // viewer the imports row and no bundle row, and opens that queue.
+  it("shows a viewer the imports row and opens the imports queue", () => {
+    const onOpenQueue = vi.fn();
+
+    render(
+      <Sidebar
+        {...navProps}
+        selectedId={null}
+        onSelect={vi.fn()}
+        role="viewer"
+        reviewCounts={{ bundles: 7, imports: 1 }}
+        onOpenQueue={onOpenQueue}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /^Imports running/ });
+
+    expect(within(row).getByText("1")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Bundles to confirm/ })).toBeNull();
+
+    fireEvent.click(row);
+
+    expect(onOpenQueue).toHaveBeenCalledTimes(1);
+    expect(onOpenQueue).toHaveBeenCalledWith("imports");
   });
 });
