@@ -105,15 +105,26 @@ CREATE_SKIPPED = "skipped"
 CREATE_BLOCKED = "blocked"
 CREATE_FAILED = "failed"
 
+# A create-time refusal: the candidate's assets include another bundle's. This is
+# a reason on CREATE_FAILED, never a blocked_reason - `blocked` means database
+# readiness only (Mf-um7x).
+CONTAINS_BUNDLES = "contains_bundles"
+
 
 @dataclass(frozen=True)
 class BundleCandidate:
-    """One directory or zip that looks like a bundle, before any database read."""
+    """One directory or zip that looks like a bundle, before any database read.
+
+    ``confidence`` is internal: it decides whether a candidate may claim a
+    subtree. It is never returned in a report row - the row carries the facts
+    from its own detect call.
+    """
 
     key: str
     snapshot: bundle_detect.BundleSnapshot
     archive_path: Optional[str]
     is_archive: bool
+    confidence: str
 
 
 def _entry_size(entry) -> int:
@@ -238,7 +249,11 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
     before its parent is evaluated, and claiming it removes it from the parent's
     view. A directory can therefore only ever be a bundle in its own right - it
     never inherits a child's models, and a directory that holds nothing but child
-    bundles is not a bundle at all.
+    bundles is not a bundle at all. A LOW candidate whose key is a strict
+    ancestor of an already-claimed bundle is a *container* and is skipped without
+    claiming, so its own files still bubble up to a legitimate ancestor; a HIGH
+    candidate is exempt because its documents sit at depth 0 and it attaches only
+    its own models.
     """
     root = Path(root)
     files_by_dir: Dict[str, List[Tuple[str, int]]] = {}
@@ -260,6 +275,11 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
 
     folded = _subtree(files_by_dir)
     found: List[BundleCandidate] = []
+    # The strict ancestors of every bundle already claimed. A LOW candidate in
+    # this set contains a bundle and is therefore a container, never a bundle -
+    # a guess must never swallow a subtree. It is skipped *without* claiming, so
+    # its own files still bubble up to a legitimate ancestor.
+    claimed_ancestors: set = set()
     # A mutable view of each directory's OWN entries. Claiming a bundle drops its
     # whole branch from every ancestor, so a parent can only ever be a bundle in
     # its own right: it never inherits a child's models, and a container
@@ -275,8 +295,22 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
         facts = _detect_folder(root, snapshot)
         if facts is None:
             continue
-        found.append(BundleCandidate(key=rel_dir, snapshot=snapshot, archive_path=None, is_archive=False))
+        if facts.confidence == bundle_detect.CONFIDENCE_LOW and rel_dir in claimed_ancestors:
+            continue
+        found.append(
+            BundleCandidate(
+                key=rel_dir,
+                snapshot=snapshot,
+                archive_path=None,
+                is_archive=False,
+                confidence=facts.confidence,
+            )
+        )
         _forget_claimed_subtree(work, rel_dir)
+        ancestor = _parent(rel_dir)
+        while ancestor:
+            claimed_ancestors.add(ancestor)
+            ancestor = _parent(ancestor)
 
     # Zip-only candidates: an archive whose extracted twin is not beside it.
     for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
@@ -286,9 +320,33 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
         snapshot = _zip_snapshot(root / rel_path, rel_path)
         if snapshot is None:
             continue
-        if _detect_archive(root / rel_path, snapshot) is None:
+        facts = _detect_archive(root / rel_path, snapshot)
+        if facts is None:
             continue
-        found.append(BundleCandidate(key=rel_path, snapshot=snapshot, archive_path=None, is_archive=True))
+        found.append(
+            BundleCandidate(
+                key=rel_path,
+                snapshot=snapshot,
+                archive_path=None,
+                is_archive=True,
+                confidence=facts.confidence,
+            )
+        )
+
+    # An archive-only bundle is still a bundle: a low folder that strictly
+    # contains one is a container too, and the folder pass cannot see it because
+    # the archive is read after the directory walk.
+    zip_only_keys = [candidate.key for candidate in found if candidate.is_archive]
+    if zip_only_keys:
+        found = [
+            candidate
+            for candidate in found
+            if not (
+                not candidate.is_archive
+                and candidate.confidence == bundle_detect.CONFIDENCE_LOW
+                and any(zip_key.startswith(candidate.key + "/") for zip_key in zip_only_keys)
+            )
+        ]
 
     # A folder candidate's archive is provenance: reported, never a member.
     with_twins: List[BundleCandidate] = []
@@ -303,6 +361,7 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
                 snapshot=candidate.snapshot,
                 archive_path=archive,
                 is_archive=candidate.is_archive,
+                confidence=candidate.confidence,
             )
         )
     with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
@@ -373,6 +432,11 @@ def registered_assets(session: Session, rel_dir: str) -> List[Tuple[str, str, in
         (asset.id, asset.storage_path or "", int(asset.size or 0), asset.mime or "")
         for asset in session.exec(statement)
     ]
+
+
+def _own_paths(key: str, candidate: BundleCandidate) -> set:
+    """The storage paths the candidate's own snapshot names, never a child's."""
+    return {f"{key}/{entry.rel_path}" for entry in candidate.snapshot.entries}
 
 
 def twin_verified(zip_path: Path, folder_entries: Sequence[bundle_detect.BundleEntry]) -> bool:
@@ -559,7 +623,7 @@ def _report_row(
         assets = registered_assets(session, key)
         # Only the candidate's OWN entries decide status and cover: a registered
         # asset below a nested child bundle belongs to that bundle, not to this one.
-        own = {f"{key}/{entry.rel_path}" for entry in candidate.snapshot.entries}
+        own = _own_paths(key, candidate)
         own_assets = [asset for asset in assets if asset[1] in own]
         models = [asset for asset in own_assets if _suffix(asset[1]) in bundle_detect.MODEL_SUFFIXES]
         if key.casefold() not in folders:
@@ -728,6 +792,13 @@ def _create_one(
                 name=existing.name,
                 reason="already_created",
             )
+        if row["confidence"] == bundle_detect.CONFIDENCE_LOW:
+            assets = registered_assets(session, key)
+            own_assets = [asset for asset in assets if asset[1] in _own_paths(key, candidate)]
+            if len(assets) > len(own_assets):
+                # The difference is another bundle's assets: refuse before the
+                # project row, so a refusal can never leave a half-created project.
+                return _result(key, CREATE_FAILED, reason=CONTAINS_BUNDLES)
         try:
             project = project_service.create_project(
                 session,
@@ -753,7 +824,7 @@ def _create_one(
     with Session(engine) as session:
         # The same set the report used: the files this bundle's snapshot names,
         # never a nested child bundle's models under the recursive prefix.
-        own = {f"{key}/{entry.rel_path}" for entry in candidate.snapshot.entries}
+        own = _own_paths(key, candidate)
         model_assets = [
             asset[0]
             for asset in registered_assets(session, key)

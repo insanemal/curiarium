@@ -25,6 +25,7 @@ from sqlmodel import Session, select
 import asset_file_service
 import asset_service
 import audit
+import bundle_detect
 import bundle_service
 import db
 import library_scan
@@ -176,6 +177,24 @@ def generic_bundle(root: Path, name: str) -> Path:
     write_file(bundle / "part.stl")
     write_file(bundle / "cover.jpg", b"j" * 50)
     write_text(bundle / "notes.txt", "print at 0.2mm")
+    return bundle
+
+
+def thingiverse_bundle(root: Path, name: str, thing: int) -> Path:
+    """A high-confidence bundle whose own documents name its own Thingiverse thing.
+
+    The thing id is a parameter because the create pass treats the same title and
+    the same source URL as one project (that is its idempotency contract), so a
+    fixture with two bundles needs two sets of documents.
+    """
+    bundle = root / name
+    title = bundle_detect.display_name(name)
+    write_text(bundle / "README.txt", f"{title}\nCreated by Thingiverse user maker_{thing}\nLicensed under CC BY-NC\n")
+    write_text(
+        bundle / "LICENSE.txt",
+        f"{title} by maker_{thing} on Thingiverse: https://www.thingiverse.com/thing:{thing}\n",
+    )
+    write_file(bundle / "files" / "part.stl", STL_BYTES)
     return bundle
 
 
@@ -501,14 +520,18 @@ def test_a_grandparent_keeps_an_unclaimed_middle_directorys_files(client: TestCl
     write_file(inner / "part.stl", STL_BYTES)
     write_file(inner / "cover.jpg", b"j" * 20)
     write_text(inner / "notes.txt", "a trio in the deepest directory")
-    write_file(isolated_storage / "P" / "Q" / "middle.stl", STL_BYTES)
-    write_file(isolated_storage / "P" / "Q" / "middle.jpg", b"j" * 30)
-    write_text(isolated_storage / "P" / "Q" / "middle.txt", "a trio one level up")
+    middle = isolated_storage / "P" / "Q"
+    write_text(middle / "README.txt", README_TEXT)
+    write_text(middle / "LICENSE.txt", LICENSE_TEXT)
+    write_file(middle / "middle.stl", STL_BYTES)
+    write_file(middle / "middle.jpg", b"j" * 30)
+    write_text(middle / "middle.txt", "a trio one level up")
     headers = auth_header(client)
 
     report = detect(client, headers)
 
     assert [row["key"] for row in report["bundles"]] == ["P/Q", "P/Q/R"], "the middle directory keeps its own files"
+    assert row_for(report, "P/Q")["confidence"] == "high"
     assert row_for(report, "P/Q")["model_count"] == 1, "never the child's model under the recursive prefix"
 
 
@@ -517,8 +540,11 @@ def test_a_grandparent_keeps_the_files_a_middle_directory_did_not_claim(client: 
     write_file(inner / "part.stl", STL_BYTES)
     write_file(inner / "cover.jpg", b"j" * 20)
     write_text(inner / "notes.txt", "a trio in the deepest directory")
-    write_file(isolated_storage / "P" / "Q" / "middle.stl", STL_BYTES)
-    write_file(isolated_storage / "P" / "Q" / "middle.jpg", b"j" * 30)
+    middle = isolated_storage / "P" / "Q"
+    write_file(middle / "middle.stl", STL_BYTES)
+    write_file(middle / "middle.jpg", b"j" * 30)
+    write_text(isolated_storage / "P" / "README.txt", README_TEXT)
+    write_text(isolated_storage / "P" / "LICENSE.txt", LICENSE_TEXT)
     write_text(isolated_storage / "P" / "notes.txt", "the grandparent's own text")
     headers = auth_header(client)
 
@@ -526,7 +552,8 @@ def test_a_grandparent_keeps_the_files_a_middle_directory_did_not_claim(client: 
 
     assert [row["key"] for row in report["bundles"]] == ["P", "P/Q/R"], "claiming P/Q/R must not strip all of P/Q"
     parent = row_for(report, "P")
-    assert parent["model_count"] == 1, "the grandparent qualifies on the middle directory's unclaimed model"
+    assert parent["confidence"] == "high"
+    assert parent["model_count"] == 1, "the grandparent keeps the middle directory's unclaimed model"
     assert parent["image_count"] == 1
 
 
@@ -534,6 +561,8 @@ def test_a_bundle_attaches_only_its_own_files(client: TestClient, isolated_stora
     unsorted_dir = isolated_storage / "Unsorted"
     moai_bundle(unsorted_dir, "111_A")
     moai_bundle(unsorted_dir, "222_B")
+    write_text(unsorted_dir / "README.txt", README_TEXT)
+    write_text(unsorted_dir / "LICENSE.txt", LICENSE_TEXT)
     write_file(unsorted_dir / "loose.stl", STL_BYTES)
     write_file(unsorted_dir / "loose.jpg", b"j" * 60)
     write_text(unsorted_dir / "notes.txt", "a loose trio")
@@ -545,8 +574,8 @@ def test_a_bundle_attaches_only_its_own_files(client: TestClient, isolated_stora
     keys = {row["key"] for row in report["bundles"]}
     assert {"Unsorted", "Unsorted/111_A", "Unsorted/222_B"} == keys
     parent = row_for(report, "Unsorted")
-    assert parent["detector"] == "generic-bundle"
-    assert parent["confidence"] == "low"
+    assert parent["detector"] == "thingiverse-readme"
+    assert parent["confidence"] == "high"
     assert parent["status"] == "ready", "the parent owns a model of its own"
     with Session(engine) as session:
         loose = session.exec(select(Asset).where(Asset.storage_path == "Unsorted/loose.stl")).one()
@@ -557,6 +586,46 @@ def test_a_bundle_attaches_only_its_own_files(client: TestClient, isolated_stora
     assert created["created"] == 1
     project_id = created["results"][0]["project_id"]
     assert project_asset_ids(client, headers, project_id) == [loose_id], "never a child bundle's models"
+
+
+def test_a_low_container_of_low_confidence_children_is_not_a_bundle(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    unsorted_dir = isolated_storage / "Unsorted"
+    generic_bundle(unsorted_dir, "111_A")
+    generic_bundle(unsorted_dir, "222_B")
+    write_file(unsorted_dir / "loose.stl", STL_BYTES)
+    write_file(unsorted_dir / "loose.jpg", b"j" * 60)
+    write_text(unsorted_dir / "notes.txt", "a loose trio")
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert {row["key"] for row in report["bundles"]} == {"Unsorted/111_A", "Unsorted/222_B"}
+    assert "Unsorted" not in {row["key"] for row in report["bundles"]}
+
+
+def test_a_low_container_of_a_zip_only_bundle_is_not_a_bundle(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    inbox = isolated_storage / "Inbox"
+    write_file(inbox / "loose.stl", STL_BYTES)
+    write_file(inbox / "loose.jpg", b"j" * 60)
+    write_text(inbox / "notes.txt", "a loose trio")
+    write_zip(
+        inbox / "Moai.zip",
+        {
+            "README.txt": README_TEXT.encode(),
+            "LICENSE.txt": LICENSE_TEXT.encode(),
+            "images/a.jpg": b"j" * 30,
+            "files/part.stl": STL_BYTES,
+        },
+    )
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == ["Inbox/Moai.zip"]
 
 
 def test_a_parent_attaches_only_its_own_models(client: TestClient, isolated_storage: Path) -> None:
@@ -589,6 +658,45 @@ def test_a_parent_attaches_only_its_own_models(client: TestClient, isolated_stor
     parent_project, child_project = (result["project_id"] for result in created["results"])
     assert len(project_asset_ids(client, headers, parent_project)) == 1
     assert len(project_asset_ids(client, headers, child_project)) == 3
+
+
+def test_the_live_shape_has_no_container_bundle(client: TestClient, isolated_storage: Path) -> None:
+    """The 2026-11-01 report's first row: 'import' as a bundle holding the tree.
+
+    'import' holds its own depth-0 model+image+text trio - which R3 would accept
+    even with the depth bound - plus a residual model-only subdirectory. It
+    contains bundles, so it is a container, not a bundle.
+    """
+    import_dir = isolated_storage / "import"
+    write_file(import_dir / "loose.stl", STL_BYTES)
+    write_file(import_dir / "loose.jpg", b"j" * 40)
+    write_text(import_dir / "notes.txt", "the container's own trio")
+    write_file(import_dir / "residual" / "only.stl", STL_BYTES)
+    thingiverse_bundle(import_dir / "ParentOf", "Parent Of Thing", 222222)
+    moai_bundle(import_dir)
+    thingiverse_bundle(import_dir, "Wall Mount Bracket", 111111)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    keys = {row["key"] for row in report["bundles"]}
+    assert "import" not in keys, "a container is not a bundle"
+    assert "import/ParentOf" not in keys, "a directory that holds only a bundle is not a bundle"
+    assert "import/residual" not in keys, "a model-only directory is not a bundle"
+    moai_row = row_for(report, f"import/{MOAI}")
+    assert moai_row["confidence"] == "high"
+    assert moai_row["model_count"] == 3, "models at depth 1 under files/ are still counted"
+
+    created = create(client, headers, [{"key": row["key"]} for row in report["bundles"]])
+
+    assert created["created"] == len(report["bundles"])
+    assert "import" not in {project["name"] for project in project_listing(client, headers).values()}
+    members: List[str] = []
+    for row, result in zip(report["bundles"], created["results"], strict=True):
+        assert member_count(result["project_id"]) == row["model_count"], "one project, own models only"
+        members.extend(project_asset_ids(client, headers, result["project_id"]))
+    assert len(members) == len(set(members)), "no asset belongs to two bundles"
 
 
 # --- the same contract through the service ---------------------------------
@@ -827,6 +935,73 @@ def test_a_409_from_the_name_index_becomes_a_skip_not_a_500(
     assert created["results"][0]["status"] == "skipped"
     with Session(engine) as session:
         assert session.exec(select(Project)).all() == [], "a refused name creates no row"
+
+
+def test_create_refuses_a_low_candidate_whose_assets_include_another_bundles(
+    isolated_storage: Path,
+) -> None:
+    """The belt: a low candidate that would swallow a subtree is refused, and writes no row."""
+    inbox = isolated_storage / "Inbox"
+    write_file(inbox / "loose.stl", STL_BYTES)
+    write_file(inbox / "loose.jpg", b"j" * 60)
+    write_text(inbox / "notes.txt", "a loose trio")
+    moai_bundle(inbox / "Child")
+    scan()
+    snapshot = bundle_detect.BundleSnapshot(
+        bundle_name="Inbox",
+        rel_dir="Inbox",
+        entries=(
+            bundle_detect.BundleEntry(rel_path="loose.stl", size=len(STL_BYTES)),
+            bundle_detect.BundleEntry(rel_path="loose.jpg", size=60),
+            bundle_detect.BundleEntry(rel_path="notes.txt", size=13),
+        ),
+    )
+    candidate = bundle_service.BundleCandidate(
+        key="Inbox", snapshot=snapshot, archive_path=None, is_archive=False, confidence="low"
+    )
+    row = {
+        "key": "Inbox",
+        "rel_path": "Inbox",
+        "name_suggestion": "Inbox",
+        "creator": None,
+        "licence": None,
+        "licence_url": None,
+        "source_url": None,
+        "description_excerpt": None,
+        "detector": "generic-bundle",
+        "confidence": "low",
+        "cover": {"asset_id": None, "rel_path": "Inbox/loose.jpg", "reason": "largest-image-unregistered"},
+        "status": "ready",
+        "blocked_reason": None,
+        "archive": None,
+    }
+
+    result = bundle_service._create_one(
+        bundle_service.BundleCreateItem(key="Inbox", name_only=True), row, candidate, audit_ctx()
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "contains_bundles"
+    with Session(engine) as session:
+        assert session.exec(select(Project)).all() == [], "a refusal writes no Project row"
+
+
+def test_create_still_creates_an_ordinary_depth_zero_trio(isolated_storage: Path) -> None:
+    """The belt is not a blanket refusal: a genuine low bundle still creates."""
+    generic_bundle(isolated_storage, "Generic Thing")
+    scan()
+    report = bundle_service.build_report()
+    row = row_for(report, "Generic Thing")
+    candidates, _truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    candidate = next(item for item in candidates if item.key == "Generic Thing")
+
+    result = bundle_service._create_one(
+        bundle_service.BundleCreateItem(key="Generic Thing", name_only=True), row, candidate, audit_ctx()
+    )
+
+    assert result["status"] == "created"
+    with Session(engine) as session:
+        assert len(session.exec(select(Project)).all()) == 1
 
 
 # --- the bounded zip reader -------------------------------------------------
