@@ -7,6 +7,7 @@ import type { ConfirmRequest } from "../ConfirmDialog";
 import FileDownloadLink from "../FileDownloadLink";
 import LightBurnPreview from "../LightBurnPreview";
 import TagBadge from "../TagBadge";
+import ArchiveExtractAction from "../archive/ArchiveExtractAction";
 import AssetDetailsEditor, { type DetailSection } from "./AssetDetailsEditor";
 import SupportingFilesPanel from "./SupportingFilesPanel";
 import {
@@ -386,6 +387,17 @@ export function AssetPreviewModal({
             >
               Download
             </FileDownloadLink>
+            {/* `storage_path` is filled in by a scan or an upload but is absent on
+                mount/reference rows, whose file is not the library's own copy: a
+                reference-row `.zip` must show no action rather than a wrong path. */}
+            {canContribute && extOf(asset.filename) === "zip" && asset.storage_path && (
+              <ArchiveExtractAction
+                canContribute={canContribute}
+                path={asset.storage_path}
+                label={asset.filename}
+                variant="detail"
+              />
+            )}
             <button
               className="px-3 py-2 rounded-md border border-panel-strong text-sm"
               onClick={onClose}

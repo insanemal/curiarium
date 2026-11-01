@@ -1,4 +1,93 @@
 {
+  "ArchiveEntriesOut": {
+    "description": "One archive the library already holds, as the entries door lists it.\n\n`path` echoes the request's library-relative path (normalised), so a client can\nshow what it read without re-deriving it.",
+    "properties": {
+      "entries": {
+        "items": {
+          "$ref": "#/components/schemas/ZipEntryOut"
+        },
+        "title": "Entries",
+        "type": "array"
+      },
+      "path": {
+        "title": "Path",
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "entries"
+    ],
+    "title": "ArchiveEntriesOut",
+    "type": "object"
+  },
+  "ArchiveExtractOut": {
+    "description": "What an in-library extract did, or that it had nothing left to do.\n\n`already_present` is the idempotent outcome: every destination existed, so the\nrequest wrote nothing, started no scan and wrote no audit row. `destination`\nis library-relative, the twin directory beside the zip.",
+    "properties": {
+      "already_present": {
+        "title": "Already Present",
+        "type": "boolean"
+      },
+      "bytes": {
+        "title": "Bytes",
+        "type": "integer"
+      },
+      "destination": {
+        "title": "Destination",
+        "type": "string"
+      },
+      "files": {
+        "title": "Files",
+        "type": "integer"
+      },
+      "path": {
+        "title": "Path",
+        "type": "string"
+      },
+      "scan_started": {
+        "title": "Scan Started",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "path",
+      "destination",
+      "files",
+      "bytes",
+      "already_present",
+      "scan_started"
+    ],
+    "title": "ArchiveExtractOut",
+    "type": "object"
+  },
+  "ArchiveExtractRequest": {
+    "description": "An archive already in the library; `entries=None` means every member.",
+    "properties": {
+      "entries": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Entries"
+      },
+      "path": {
+        "title": "Path",
+        "type": "string"
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "title": "ArchiveExtractRequest",
+    "type": "object"
+  },
   "ImportInspectOut": {
     "properties": {
       "filename": {

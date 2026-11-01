@@ -11,6 +11,10 @@
 **Extended:** ticket `Mf-0780` (markers merged per named pair, so detection no
 longer depends on which of the two documents shipped which sentence).
 
+**Extended:** ticket `Mf-1zmd` (an archive already in the library extracts in
+place through `POST /import/archive`; the decision below is unchanged, the door
+is no longer a URL fetch).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -155,6 +159,16 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    extracted entry), its own entry listing and its own error reporting. The
    report's copy names the whole path - import the zip, let the scan run, re-run
    detection - and the bundle is then `ready` on its own.
+
+   **Amended by `Mf-1zmd`.** `POST /import/zip` was the only door when this was
+   written, and it starts from bytes the server just fetched, so an archive that
+   arrived by `rsync` could never be extracted by the product. The door for that
+   case is `POST /import/archive`: `GET /import/archive/entries` lists the
+   archive in the library and the POST extracts it in place into `<parent>/<stem>`
+   - exactly the pair `twin_key` already recognises - and the next scan registers
+   it. The decision stands: creation is still from registered assets, never from
+   an archive, and no detector changed; only the extraction no longer has to
+   come from a URL.
 
 6. **Confidence and creatability are orthogonal.** The report has a `status`
    (`ready` / `blocked`) with a `blocked_reason` (`unresolved_directory`,

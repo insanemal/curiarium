@@ -1,6 +1,7 @@
 import React from "react";
 
 import type { BundleDetectCounts, BundleDetectItem } from "../../lib/api";
+import ArchiveExtractAction from "../archive/ArchiveExtractAction";
 import type { BundleDetectState } from "./useBundleDetect";
 
 type Filter = "all" | "ready" | "blocked" | "low";
@@ -16,7 +17,7 @@ const FILTERS: { id: Filter; label: string }[] = [
 const BLOCKED_REASON_LABELS: Record<string, string> = {
   unresolved_directory: "no matching folder on disk",
   not_scanned: "no model file registered by a scan",
-  archive_only: "zip only - import it, then run a library scan",
+  archive_only: "zip only - extract the archive in place, then the scan registers it",
 };
 
 function headline(counts: BundleDetectCounts): string {
@@ -92,6 +93,7 @@ type RowProps = {
   onToggle: () => void;
   onNameChange: (value: string) => void;
   onUndoDismiss: () => void;
+  onExtracted: () => void;
 };
 
 function BundleRow({
@@ -102,6 +104,7 @@ function BundleRow({
   onToggle,
   onNameChange,
   onUndoDismiss,
+  onExtracted,
 }: RowProps) {
   const archive = archiveLine(row);
 
@@ -149,6 +152,21 @@ function BundleRow({
         >
           Undo dismiss
         </button>
+      )}
+      {/* The zip-only door: this card only mounts behind `ImportsSection`'s
+          `canWrite` gate, which is strictly above the CONTRIBUTE the route
+          requires, so there is no lower-capability caller to hide this from;
+          contributors reach the same action through the asset preview
+          (`asset-grid/preview.tsx`), which does carry the capability. The server
+          stays the enforcement point - the route is `require_contribute`. */}
+      {row.blocked_reason === "archive_only" && row.archive?.rel_path && (
+        <ArchiveExtractAction
+          canContribute
+          path={row.archive.rel_path}
+          label={row.title}
+          variant="row"
+          onExtracted={() => void onExtracted()}
+        />
       )}
     </div>
   );
@@ -299,6 +317,7 @@ export default function BundleDetectCard({ state }: Props) {
               onToggle={() => toggleSelection(row.key)}
               onNameChange={value => setNames(prev => ({ ...prev, [row.key]: value }))}
               onUndoDismiss={() => void undoDismiss(row.key)}
+              onExtracted={() => void state.refresh()}
             />
           ))}
         </>

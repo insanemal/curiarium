@@ -67,12 +67,13 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 52 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 53 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
 |---|---|---|---|---|
 | `asset.create` | `POST /upload`; `POST /import`; `POST /import/project`; `POST /import/zip` (one row per created asset) | the new asset id, so `GET /audit?target=<id>` finds it | `{"via", "name"}` | fail-closed: staged in the same transaction as the insert |
+| `archive.extract` | `POST /import/archive` | the library-relative archive path | `{"destination", "files", "bytes", "scan_started"}` | fail-loud: the files are already published when the row is written |
 | `asset.delete` | `DELETE /asset/{asset_id}`; `POST /assets/batch/delete` (one row per asset) | asset id | `{"filename"}` | fail-closed |
 | `asset.rename` | `POST /asset/{asset_id}/rename`; `POST /asset/{asset_id}/meta` (only when the name changes) | asset id | `{"from", "to"}` names | fail-closed |
 | `asset.move` | `POST /asset/{asset_id}/folder`; `POST /assets/batch/folder` (one row per asset) | asset id | `{"folder_id"}` (new folder, or `null` for the root) | fail-closed |
@@ -223,8 +224,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 98 routes, 39
-of them `GET`; the remaining 59 split into 45 audited keys and 14 exempt keys.
+out of scope by construction: they change nothing. The matrix has 100 routes, 40
+of them `GET`; the remaining 60 split into 46 audited keys and 14 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without

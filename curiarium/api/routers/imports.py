@@ -6,15 +6,20 @@ from zipfile import BadZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+import archive_service
 import asset_service
+import audit
 import seams
 from auth import AuthContext
 from file_utils import build_import_filename, mime_from_content_type
 from import_policy import refuse_paid_or_gated
-from permissions import require_contribute
+from permissions import require_contribute, require_read
 from project_import import import_into_project
 from routers.presenters import import_project_to_out, to_out
 from schemas import (
+    ArchiveEntriesOut,
+    ArchiveExtractOut,
+    ArchiveExtractRequest,
     AssetOut,
     ImportInspectOut,
     ImportProjectOut,
@@ -69,6 +74,27 @@ def inspect_import_link(body: ImportRequest, _: Optional[AuthContext] = Depends(
         mime = mime_from_content_type(resp.headers.get("Content-Type", ""), filename)
     is_zip = Path(filename).suffix.lower() == ".zip"
     return ImportInspectOut(filename=filename, mime=mime, is_zip=is_zip)
+
+
+@router.get("/import/archive/entries", response_model=ArchiveEntriesOut)
+def list_import_archive_entries(path: str, _: Optional[AuthContext] = Depends(require_read)):
+    """List an archive the library already holds; reads only, writes nothing."""
+    return archive_service.entries_out(path)
+
+
+@router.post("/import/archive", response_model=ArchiveExtractOut)
+def import_archive_entries(
+    request: Request,
+    body: ArchiveExtractRequest,
+    context: Optional[AuthContext] = Depends(require_contribute),
+):
+    """Extract an archive already in the library into its twin directory.
+
+    Thin on purpose: the containment, budget, no-clobber and audit decisions live
+    in ``archive_service``, which maps a ``SnapshotPathError`` with
+    ``snapshot_guard.status_for`` itself.
+    """
+    return archive_service.extract_out(body.path, body.entries, audit.context_for(request, context))
 
 
 @router.post("/import/zip/entries", response_model=ImportZipEntriesOut)

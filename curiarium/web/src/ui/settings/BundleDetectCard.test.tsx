@@ -7,11 +7,15 @@ vi.mock("../../lib/api", () => ({
   getBundleReport: vi.fn(),
   createBundles: vi.fn(),
   setBundleDismissed: vi.fn(),
+  listArchiveEntries: vi.fn(),
+  extractArchive: vi.fn(),
 }));
 
 import {
   createBundles,
+  extractArchive,
   getBundleReport,
+  listArchiveEntries,
   setBundleDismissed,
   type BundleDetectItem,
   type BundleReport,
@@ -22,6 +26,8 @@ import { useBundleDetect } from "./useBundleDetect";
 const getBundleReportMock = vi.mocked(getBundleReport);
 const createBundlesMock = vi.mocked(createBundles);
 const setBundleDismissedMock = vi.mocked(setBundleDismissed);
+const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
+const extractArchiveMock = vi.mocked(extractArchive);
 
 function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
   return {
@@ -107,6 +113,23 @@ const legacyVase = makeBundle({
   blocked_reason: "unresolved_directory",
 });
 
+/** A zip-only bundle: nothing but the archive is on disk to register. */
+const moaiZip = makeBundle({
+  key: "Moai_zip",
+  rel_path: "Moai_zip",
+  title: "Moai zip",
+  name_suggestion: "Moai zip",
+  model_count: 0,
+  image_count: 0,
+  text_count: 0,
+  other_count: 1,
+  cover: { asset_id: null, rel_path: null, reason: "largest-image-unregistered" },
+  assets_total: 1,
+  status: "blocked",
+  blocked_reason: "archive_only",
+  archive: { rel_path: "Moai.zip", twin_verified: false },
+});
+
 function makeReport(bundles: BundleDetectItem[]): BundleReport {
   const high = bundles.filter(row => row.confidence === "high").length;
   const low = bundles.filter(row => row.confidence === "low").length;
@@ -149,6 +172,20 @@ beforeEach(() => {
   createBundlesMock.mockResolvedValue({ created: 1, skipped: 0, blocked: 0, failed: 0, results: [] });
   setBundleDismissedMock.mockReset();
   setBundleDismissedMock.mockResolvedValue({ dismissed: [], stale_dismissals: [] });
+  listArchiveEntriesMock.mockReset();
+  listArchiveEntriesMock.mockResolvedValue({
+    path: "Moai.zip",
+    entries: [{ path: "Moai.stl", size: 1024 }],
+  });
+  extractArchiveMock.mockReset();
+  extractArchiveMock.mockResolvedValue({
+    path: "Moai.zip",
+    destination: "Moai_zip/Moai",
+    files: 1,
+    bytes: 1024,
+    already_present: false,
+    scan_started: true,
+  });
 });
 
 afterEach(() => {
@@ -296,6 +333,41 @@ describe("BundleDetectCard", () => {
       await screen.findByText("Already created as project project-7"),
     ).toBeTruthy();
     expect(screen.getByText("1 bundle found - 1 high confidence, 0 low")).toBeTruthy();
+  });
+
+  it("offers in-place extraction on an archive-only row, and nothing on a ready one", async () => {
+    getBundleReportMock.mockReset();
+    getBundleReportMock.mockResolvedValue(makeReport([moaiZip, moai]));
+
+    await renderCard("Moai zip");
+
+    // The old copy told the operator to import the zip again; the door is now
+    // extracting what is already in the library.
+    expect(
+      screen.getByText(
+        "Blocked - zip only - extract the archive in place, then the scan registers it",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Extract Moai zip" })).toBeTruthy();
+    // A ready bundle has nothing to extract, so no control is rendered for it.
+    expect(screen.queryByRole("button", { name: "Extract Moai statue" })).toBeNull();
+  });
+
+  it("refreshes the report after a row's archive is extracted", async () => {
+    getBundleReportMock.mockReset();
+    getBundleReportMock.mockResolvedValue(makeReport([moaiZip]));
+
+    await renderCard("Moai zip");
+
+    fireEvent.click(screen.getByRole("button", { name: "Extract Moai zip" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 1 file" }));
+
+    await waitFor(() =>
+      expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Moai.zip", entries: null }),
+    );
+    // `onExtracted` goes through the hook's `refresh`, so the row re-reads the
+    // report rather than showing a bundle it just extracted.
+    await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(2));
   });
 
   it("says so when nothing was detected", async () => {
