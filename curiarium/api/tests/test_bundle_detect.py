@@ -35,6 +35,15 @@ LICENSE_TEXT = (
 )
 THING_URL = "https://www.thingiverse.com/thing:2493386"
 
+# The two real Thingiverse exports from the ticket. Their markers are shipped in
+# either document, so the tests below swap them and expect one identical bundle.
+CAT_NAME = "2-color_standing_cat_62536"
+CAT_CREATED_BY = "This thing was created by Thingiverse user nervoussystem, and is licensed under cc-nc-sa.\n"
+CAT_TITLE_LINE = "2-color standing cat by nervoussystem on Thingiverse: https://www.thingiverse.com/thing:62536\n"
+CAT_URL = "https://www.thingiverse.com/thing:62536"
+JULIEN_CREATED_BY = "This thing was created by Thingiverse user Julien_DaCosta, and is licensed under cc-nc.\n"
+JULIEN_TITLE_LINE = "Moai statue -No overhang by Julien_DaCosta on Thingiverse: https://www.thingiverse.com/thing:2493386\n"
+
 
 def snapshot(bundle_name: str, files: Mapping[str, int]) -> bundle_detect.BundleSnapshot:
     """A snapshot from a {bundle-relative path: size} mapping."""
@@ -47,6 +56,21 @@ def snapshot(bundle_name: str, files: Mapping[str, int]) -> bundle_detect.Bundle
 
 def r1_docs() -> Dict[str, str]:
     return {"README.txt": README_TEXT, "LICENSE.txt": LICENSE_TEXT}
+
+
+def provenance(facts: bundle_detect.BundleFacts) -> tuple:
+    """The provenance attributes that must not depend on which document held what."""
+    return (
+        facts.detector,
+        facts.confidence,
+        facts.metadata_shape,
+        facts.title,
+        facts.creator,
+        facts.licence,
+        facts.licence_url,
+        facts.source_url,
+        facts.thing_id,
+    )
 
 
 # --- classify_entry ---------------------------------------------------------
@@ -375,3 +399,334 @@ def test_a_readme_that_parses_without_a_licence_is_not_r1() -> None:
 
     assert facts is not None
     assert facts.detector == bundle_detect.DETECTOR_GENERIC, "the LICENSE line is missing its title/URL"
+
+
+# --- the real ticket documents: layout independence -------------------------
+
+
+def test_the_ticket_julien_documents_parse() -> None:
+    assert bundle_detect.parse_thingiverse_readme(JULIEN_CREATED_BY) == ("Julien_DaCosta", "cc-nc")
+    assert bundle_detect.parse_thingiverse_license(JULIEN_TITLE_LINE) == (
+        "Moai statue -No overhang",
+        "Julien_DaCosta",
+        "2493386",
+        "https://www.thingiverse.com/thing:2493386",
+    )
+
+
+def test_the_canonical_root_pair_reads_created_by_and_title_line() -> None:
+    files = {"README.txt": 100, "LICENSE.txt": 100, "files/part.stl": 200, "images/1.jpg": 300}
+    docs = {"README.txt": CAT_CREATED_BY, "LICENSE.txt": CAT_TITLE_LINE}
+
+    facts = bundle_detect.detect_bundle(snapshot(CAT_NAME, files), docs)
+
+    assert facts is not None
+    assert provenance(facts) == (
+        bundle_detect.DETECTOR_THINGIVERSE_README,
+        bundle_detect.CONFIDENCE_HIGH,
+        bundle_detect.SHAPE_ROOT_DOCS,
+        "2-color standing cat",
+        "nervoussystem",
+        "CC BY-NC-SA",
+        "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+        CAT_URL,
+        "62536",
+    )
+    assert facts.description is not None
+    assert facts.description.startswith(CAT_CREATED_BY.strip())
+
+
+def test_the_swapped_root_pair_is_the_same_bundle() -> None:
+    files = {"README.txt": 100, "LICENSE.txt": 100, "files/part.stl": 200, "images/1.jpg": 300}
+    canonical = bundle_detect.detect_bundle(snapshot(CAT_NAME, files), {"README.txt": CAT_CREATED_BY, "LICENSE.txt": CAT_TITLE_LINE})
+    swapped = bundle_detect.detect_bundle(snapshot(CAT_NAME, files), {"README.txt": CAT_TITLE_LINE, "LICENSE.txt": CAT_CREATED_BY})
+
+    assert canonical is not None and swapped is not None
+    assert provenance(swapped) == provenance(canonical)
+    assert (
+        swapped.title,
+        swapped.creator,
+        swapped.licence,
+        swapped.licence_url,
+        swapped.source_url,
+        swapped.thing_id,
+    ) == (
+        "2-color standing cat",
+        "nervoussystem",
+        "CC BY-NC-SA",
+        "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+        CAT_URL,
+        "62536",
+    )
+    assert swapped.description == canonical.description, "the description follows the created-by document"
+
+
+def test_one_root_document_carrying_both_markers_is_high() -> None:
+    files = {"README.txt": 100, "files/part.stl": 200, "images/1.jpg": 300}
+    docs = {"README.txt": CAT_TITLE_LINE + CAT_CREATED_BY}
+
+    facts = bundle_detect.detect_bundle(snapshot(CAT_NAME, files), docs)
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_THINGIVERSE_README
+    assert facts.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert facts.metadata_shape == bundle_detect.SHAPE_ROOT_DOCS
+    assert (facts.title, facts.creator, facts.source_url, facts.thing_id) == (
+        "2-color standing cat",
+        "nervoussystem",
+        CAT_URL,
+        "62536",
+    )
+
+
+def test_a_mid_line_title_does_not_keep_the_preceding_sentence() -> None:
+    files = {"README.txt": 100, "LICENSE.txt": 100, "files/part.stl": 200, "images/1.jpg": 300}
+    docs = {"README.txt": "Notes. " + CAT_TITLE_LINE, "LICENSE.txt": CAT_CREATED_BY}
+
+    facts = bundle_detect.detect_bundle(snapshot(CAT_NAME, files), docs)
+
+    assert facts is not None
+    assert facts.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert facts.title == "2-color standing cat", "the prose sentence before the marker is not the title"
+
+
+def test_the_license_document_alone_can_carry_the_whole_root_pair() -> None:
+    files = {"LICENSE.txt": 100, "files/part.stl": 200, "images/1.jpg": 300}
+    docs = {"LICENSE.txt": CAT_TITLE_LINE + CAT_CREATED_BY}
+
+    facts = bundle_detect.detect_bundle(snapshot(CAT_NAME, files), docs)
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_THINGIVERSE_README
+    assert facts.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert facts.metadata_shape == bundle_detect.SHAPE_ROOT_DOCS
+    assert facts.title == "2-color standing cat"
+
+
+def test_the_swapped_sibling_files_pair_is_the_same_bundle() -> None:
+    files = {"Cat_README": 100, "Cat_LICENSE": 100, "part.stl": 200, "cover.jpg": 300}
+    canonical = bundle_detect.detect_bundle(snapshot("Cat", files), {"Cat_README": CAT_CREATED_BY, "Cat_LICENSE": CAT_TITLE_LINE})
+    swapped = bundle_detect.detect_bundle(snapshot("Cat", files), {"Cat_README": CAT_TITLE_LINE, "Cat_LICENSE": CAT_CREATED_BY})
+
+    assert canonical is not None and swapped is not None
+    assert provenance(swapped) == provenance(canonical)
+    assert swapped.detector == bundle_detect.DETECTOR_THINGIVERSE_SIBLING
+    assert swapped.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert swapped.metadata_shape == bundle_detect.SHAPE_SIBLING_DOCS
+    assert (swapped.title, swapped.creator, swapped.source_url) == ("2-color standing cat", "nervoussystem", CAT_URL)
+    assert canonical.creator == "nervoussystem", "the canonical sibling case still parses"
+
+
+def test_the_swapped_sibling_directories_pair_is_the_same_bundle() -> None:
+    files = {
+        "Cat_README/readme.txt": 100,
+        "Cat_LICENSE/license.txt": 100,
+        "part.stl": 200,
+        "cover.jpg": 300,
+    }
+    docs = {"Cat_README/readme.txt": CAT_TITLE_LINE, "Cat_LICENSE/license.txt": CAT_CREATED_BY}
+    view = snapshot("Cat", files)
+
+    assert bundle_detect.doc_entry_candidates(view)[:2] == (
+        "Cat_README/readme.txt",
+        "Cat_LICENSE/license.txt",
+    )
+    facts = bundle_detect.detect_bundle(view, docs)
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_THINGIVERSE_SIBLING
+    assert facts.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert facts.metadata_shape == bundle_detect.SHAPE_SIBLING_DOCS
+    assert (facts.title, facts.creator, facts.source_url) == ("2-color standing cat", "nervoussystem", CAT_URL)
+
+
+def test_one_sibling_document_carrying_both_markers_is_high() -> None:
+    files = {"Cat_README": 100, "part.stl": 200, "cover.jpg": 300}
+    docs = {"Cat_README": CAT_TITLE_LINE + CAT_CREATED_BY}
+
+    facts = bundle_detect.detect_bundle(snapshot("Cat", files), docs)
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_THINGIVERSE_SIBLING
+    assert facts.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert facts.metadata_shape == bundle_detect.SHAPE_SIBLING_DOCS
+    assert (facts.title, facts.creator, facts.source_url) == (
+        "2-color standing cat",
+        "nervoussystem",
+        CAT_URL,
+    )
+
+
+def test_the_title_line_creator_is_the_fallback_when_no_created_by_exists() -> None:
+    """The fallback path, a new low->high promotion the old name-keyed parser
+    could never produce: no document carries a created-by sentence, so the title
+    line's creator supplies the creator, and the pair therefore has no created-by
+    document to describe the bundle.
+    """
+    files = {"README.txt": 100, "LICENSE.txt": 100, "files/part.stl": 200, "images/1.jpg": 300}
+    docs = {
+        "README.txt": "Licensed under cc-by.\n",
+        "LICENSE.txt": "Gizmo by ada on Thingiverse: https://www.thingiverse.com/thing:7\n",
+    }
+
+    facts = bundle_detect.detect_bundle(snapshot("Gizmo", files), docs)
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_THINGIVERSE_README
+    assert facts.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert facts.metadata_shape == bundle_detect.SHAPE_ROOT_DOCS
+    assert facts.title == "Gizmo"
+    assert facts.creator == "ada", "the title-line creator is the fallback"
+    assert facts.licence == "CC BY"
+    assert facts.licence_url == "https://creativecommons.org/licenses/by/4.0/"
+    assert facts.source_url == "https://www.thingiverse.com/thing:7"
+    assert facts.thing_id == "7"
+    assert facts.description is None, "the fallback has no created-by document, so it must not invent one"
+
+
+INCOMPLETE_PAIR_FILES = {
+    "README.txt": 100,
+    "LICENSE.txt": 100,
+    "Thing_README": 100,
+    "part.stl": 200,
+    "cover.jpg": 300,
+}
+
+
+@pytest.mark.parametrize(
+    "docs",
+    [
+        pytest.param({"README.txt": "This thing was created by Thingiverse user ada.\n"}, id="creator-only"),
+        pytest.param({"README.txt": "Licensed under cc-nc-sa.\n"}, id="token-only"),
+        pytest.param({"LICENSE.txt": CAT_TITLE_LINE}, id="title-line-only"),
+        pytest.param({"README.txt": CAT_CREATED_BY}, id="creator-and-token"),
+        pytest.param(
+            {
+                "README.txt": "This thing was created by Thingiverse user ada, and is shared here.\n",
+                "LICENSE.txt": "Spoon by ada on Thingiverse:\n",
+            },
+            id="creator-and-title-without-url",
+        ),
+        pytest.param(
+            {"README.txt": "Licensed under cc-nc-sa.\n", "Thing_README": CAT_TITLE_LINE},
+            id="no-created-by-token-and-title-in-separate-pairs",
+        ),
+        pytest.param(
+            {"README.txt": CAT_CREATED_BY, "LICENSE.txt": "Spoon by ada on Thingiverse:\n"},
+            id="creator-token-and-title-without-url",
+        ),
+    ],
+)
+def test_an_incomplete_named_pair_stays_low_and_invents_nothing(docs: Mapping[str, str]) -> None:
+    """No pair missing a field is high, and the low row fills no provenance field.
+
+    The title line and the token live in different named pairs in one case: a
+    title line alone carries a creator fallback, so a same-pair token+title line
+    with no created-by sentence is actually complete - see
+    ``test_the_title_line_creator_is_the_fallback_when_no_created_by_exists``.
+    """
+    facts = bundle_detect.detect_bundle(snapshot("Thing", INCOMPLETE_PAIR_FILES), docs)
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_GENERIC
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+    assert (
+        facts.creator,
+        facts.licence,
+        facts.licence_url,
+        facts.source_url,
+        facts.thing_id,
+        facts.description,
+    ) == (None, None, None, None, None, None)
+
+
+def test_a_generic_notes_file_with_both_markers_stays_low() -> None:
+    """Deliberate: merging is scoped to a named pair, so a stray prose file cannot
+    manufacture provenance."""
+    files = {"notes.txt": 100, "part.stl": 200, "cover.jpg": 300}
+    docs = {"notes.txt": CAT_TITLE_LINE + CAT_CREATED_BY}
+
+    facts = bundle_detect.detect_bundle(snapshot("Stray Notes", files), docs)
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_GENERIC
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+    assert (
+        facts.creator,
+        facts.licence,
+        facts.licence_url,
+        facts.source_url,
+        facts.thing_id,
+        facts.description,
+    ) == (None, None, None, None, None, None)
+
+
+def test_a_title_that_contains_by_keeps_it_at_parse_level() -> None:
+    parsed = bundle_detect.parse_thingiverse_license("Spoon by ada by bob on Thingiverse: https://www.thingiverse.com/thing:9")
+
+    assert parsed == ("Spoon by ada", "bob", "9", "https://www.thingiverse.com/thing:9")
+
+
+def test_a_title_that_contains_by_keeps_it_through_detection() -> None:
+    files = {"README.txt": 100, "LICENSE.txt": 100, "part.stl": 200, "cover.jpg": 300}
+    docs = {
+        "README.txt": "This thing was created by Thingiverse user bob, and is licensed under cc-nc.\n",
+        "LICENSE.txt": "Spoon by ada by bob on Thingiverse: https://www.thingiverse.com/thing:9\n",
+    }
+
+    facts = bundle_detect.detect_bundle(snapshot("Spoon", files), docs)
+
+    assert facts is not None
+    assert facts.title == "Spoon by ada"
+    assert facts.creator == "bob"
+
+
+def test_a_bare_dot_in_a_version_is_not_a_sentence_boundary() -> None:
+    parsed = bundle_detect.parse_thingiverse_license("Bracket v1.2 by ada on Thingiverse: https://www.thingiverse.com/thing:12")
+
+    assert parsed is not None
+    assert parsed[0] == "Bracket v1.2"
+
+
+def test_parse_thingiverse_license_drops_a_preceding_sentence() -> None:
+    parsed = bundle_detect.parse_thingiverse_license("Notes. " + CAT_TITLE_LINE)
+
+    assert parsed is not None
+    assert parsed[0] == "2-color standing cat"
+
+
+def test_a_title_containing_a_sentence_boundary_is_a_known_limitation() -> None:
+    """Accepted and documented in the parser docstring/ADR, not a bug to fix.
+
+    A genuine title with ``". "`` loses its leading part because that whitespace
+    is indistinguishable from a sentence of prose sitting before the marker.
+    """
+    parsed = bundle_detect.parse_thingiverse_license("Dr. No Replica by ada on Thingiverse: https://www.thingiverse.com/thing:14")
+
+    assert parsed is not None
+    assert parsed[0] == "No Replica"
+
+
+def test_the_license_line_does_not_need_a_line_start() -> None:
+    parsed = bundle_detect.parse_thingiverse_license("Thanks for downloading.\n" + CAT_TITLE_LINE)
+
+    assert parsed is not None
+    assert parsed[0] == "2-color standing cat"
+
+
+def test_all_four_named_documents_fit_the_candidate_cap() -> None:
+    files = {
+        "README.txt": 100,
+        "LICENSE.txt": 100,
+        "Mixed_README": 100,
+        "Mixed_LICENSE": 100,
+        "part.stl": 200,
+    }
+
+    candidates = bundle_detect.doc_entry_candidates(snapshot("Mixed", files))
+
+    assert bundle_detect.MAX_DOC_CANDIDATES == 4
+    assert candidates == ("README.txt", "LICENSE.txt", "Mixed_README", "Mixed_LICENSE")
+    # At the old cap of three the fourth named document was dropped, which starved
+    # the sibling merge whenever the root pair could not complete.
+    assert "Mixed_LICENSE" not in candidates[:3]

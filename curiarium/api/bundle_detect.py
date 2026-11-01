@@ -10,12 +10,14 @@ disk+DB layer (``bundle_service``) owns every byte this module is handed.
 
 The three rules, strongest first:
 
-* R1 ``thingiverse-readme`` / ``high``: the bundle root holds both ``README.txt``
-  and ``LICENSE.txt`` and both carry Thingiverse's markers - the README says
-  ``created by Thingiverse user <name>`` and ``licensed under <token>``, the
-  LICENSE says ``<title> by <creator> on Thingiverse: <url>``. Title, creator,
-  licence and the source URL come from the documents; the description is the
-  README, whitespace-collapsed.
+* R1 ``thingiverse-readme`` / ``high``: the bundle root holds ``README.txt``
+  and/or ``LICENSE.txt`` - at least one - and the pair carries both of
+  Thingiverse's markers, in whichever document they shipped - one says ``created
+  by Thingiverse user <name>`` and ``licensed under <token>``, the other says
+  ``<title> by <creator> on Thingiverse: <url>``. Which file holds which is
+  never assumed: real exports swap them. Title, creator, licence and the source
+  URL come from whichever document carried them; the description is the
+  document that carried the created-by sentence, whitespace-collapsed.
 * R2 ``thingiverse-sibling-docs`` / ``high``: the same pair shipped beside the
   files as ``<bundle>_README`` / ``<bundle>_LICENSE``, either as two files or as
   two directories each holding one text file (the legacy flattening). Same
@@ -52,7 +54,7 @@ confidence.
 import re
 from dataclasses import dataclass
 from pathlib import PurePath
-from typing import List, Mapping, Optional, Tuple
+from typing import List, Mapping, Optional, Sequence, Tuple
 
 from config import IMPORT_ALLOWED_EXTS
 from import_resolvers import thingiverse_thing_id_from_url
@@ -69,9 +71,13 @@ R3_MODEL_DIRS = frozenset({"files"})
 # not a sibling README.
 BUNDLE_TEXT_EXTS = frozenset({".txt", ".md", ".pdf", ".html", ".htm", ".rtf"})
 # One document is read bounded, both by the number of candidates and by bytes,
-# so a vendor README cannot make a dry-run read a whole disk.
+# so a vendor README cannot make a dry-run read a whole disk. The candidate cap
+# is four because two readable pairs means four named documents
+# (``README.txt``, ``LICENSE.txt``, ``<bundle>_README``, ``<bundle>_LICENSE``):
+# at three the second sibling document is cut and the sibling merge can never
+# complete.
 BUNDLE_DOC_MAX_BYTES = 64 * 1024
-MAX_DOC_CANDIDATES = 3
+MAX_DOC_CANDIDATES = 4
 
 MODEL, IMAGE, TEXT, ARCHIVE, OTHER = "model", "image", "text", "archive", "other"
 
@@ -97,11 +103,18 @@ _README_MARKERS = re.compile(
     r"|licensed\s+under\s+(?P<licence>[^,\n;.]+)",
     re.IGNORECASE,
 )
-# The LICENSE line: "<title> by <creator> on Thingiverse: <url>".
+# The license line: "<title> by <creator> on Thingiverse: <url>".
+# Deliberately unanchored and not MULTILINE: a marker may sit mid-line after a
+# sentence of its own, and the title must not cross a newline. The title group is
+# greedy so the LAST " by " before " on Thingiverse:" wins - a title that itself
+# contains " by " keeps it, and the creator stays the short trailing token.
 _LICENSE_LINE = re.compile(
-    r"^(?P<title>.+?) by (?P<creator>.+?) on Thingiverse:\s*(?P<url>https?://\S+)",
-    re.IGNORECASE | re.MULTILINE,
+    r"(?P<title>.+) by (?P<creator>.+?) on Thingiverse:\s*(?P<url>https?://\S+)",
+    re.IGNORECASE,
 )
+# A sentence boundary needs the whitespace: a bare dot belongs to art, so a title
+# like ``v1.2`` survives where ``Notes. 2-color cat`` is trimmed to the tail.
+_SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
 _LEADING_ORDINAL = re.compile(r"^\d+[_-]+")
 _TRAILING_JUNK = ",;."
 
@@ -183,6 +196,40 @@ class BundleFacts:
     model_entries: Tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _DocMarkers:
+    """The markers one document carries, whichever filename it was shipped as."""
+
+    creator: Optional[str]
+    licence_token: Optional[str]
+    title: Optional[str]
+    line_creator: Optional[str]
+    source_url: Optional[str]
+    thing_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class _PairMarkers:
+    """One named pair's findings, merged; every field was read, never guessed."""
+
+    creator: str
+    licence_token: str
+    title: str
+    source_url: str
+    thing_id: Optional[str]
+    description: Optional[str]
+
+
+_EMPTY_MARKERS = _DocMarkers(
+    creator=None,
+    licence_token=None,
+    title=None,
+    line_creator=None,
+    source_url=None,
+    thing_id=None,
+)
+
+
 def _path_order(rel_path: str) -> Tuple[str, str]:
     """Sort key that never leaks readdir order into a report."""
     return rel_path.casefold(), rel_path
@@ -242,6 +289,19 @@ def _trim_marker_value(value: Optional[str]) -> Optional[str]:
     return cleaned or None
 
 
+def _trim_to_last_sentence(value: Optional[str]) -> Optional[str]:
+    """``value`` from its last sentence boundary on; unchanged when there is none.
+
+    A marker can sit mid-line behind a sentence of its own (``Notes. 2-color
+    standing cat by nervoussystem on Thingiverse: ...``), and that leading
+    sentence is prose, not the title. The boundary needs the whitespace, so
+    ``v1.2`` survives.
+    """
+    if not value:
+        return value
+    return _SENTENCE_BOUNDARY.split(value)[-1].strip() or None
+
+
 def parse_thingiverse_readme(text: str) -> Tuple[Optional[str], Optional[str]]:
     """``(creator, licence_token)`` from a Thingiverse README, one scan.
 
@@ -261,16 +321,22 @@ def parse_thingiverse_readme(text: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def parse_thingiverse_license(text: str) -> Optional[Tuple[str, str, Optional[str], str]]:
-    """``(title, creator, thing_id, url)`` from a Thingiverse LICENSE, or ``None``.
+    """``(title, creator, thing_id, url)`` from a Thingiverse license line, or ``None``.
 
     The thing id is read with the shipped ``import_resolvers`` helper, not with a
     second regex, so the report and the import door cannot disagree about what a
     Thingiverse URL means.
+
+    The title is whatever precedes the last `` by ... on Thingiverse:`` on one
+    line, trimmed at its last ``". "``/``"! "``/``"? "`` sentence boundary.
+    Known limitation, accepted rather than guessed around: a genuine title that
+    contains ``". "`` - ``Dr. No Replica`` - loses its leading part and comes
+    back as ``No Replica``.
     """
     match = _LICENSE_LINE.search(text or "")
     if match is None:
         return None
-    title = _trim_marker_value(match.group("title"))
+    title = _trim_to_last_sentence(_trim_marker_value(match.group("title")))
     creator = _trim_marker_value(match.group("creator"))
     url = match.group("url").rstrip(").,")
     if not title or not creator or not url:
@@ -325,6 +391,18 @@ def _sibling_doc(snapshot: BundleSnapshot, suffix: str) -> Optional[str]:
         if _is_text(entry.rel_path, entry.size):
             return entry.rel_path
     return None
+
+
+def _root_pair_paths(snapshot: BundleSnapshot) -> Tuple[str, ...]:
+    """The root pair's existing documents, README-name first; at least one."""
+    found = (_root_entry(snapshot, _ROOT_README), _root_entry(snapshot, _ROOT_LICENSE))
+    return tuple(path for path in found if path)
+
+
+def _sibling_pair_paths(snapshot: BundleSnapshot) -> Tuple[str, ...]:
+    """The sibling pair's existing documents, README-name first; at least one."""
+    found = (_sibling_doc(snapshot, _SIBLING_README), _sibling_doc(snapshot, _SIBLING_LICENSE))
+    return tuple(path for path in found if path)
 
 
 def generic_doc_candidates(snapshot: BundleSnapshot) -> Tuple[str, ...]:
@@ -415,47 +493,106 @@ def _collapse(text: str) -> str:
     return " ".join((text or "").split())
 
 
-def _parsed_pair(
-    readme_path: Optional[str],
-    licence_path: Optional[str],
-    docs: Mapping[str, str],
-) -> Optional[Tuple[str, str, str, Tuple[str, str, Optional[str], str]]]:
-    """Both documents, parsed; ``None`` unless every marker was found."""
-    if not readme_path or not licence_path:
+def _scan_doc(text: Optional[str]) -> _DocMarkers:
+    """Every marker ``text`` carries, whichever filename it was shipped as.
+
+    The filename is never consulted: the two Thingiverse layouts differ only in
+    which document carries which sentence, so asking the text is the only
+    question both layouts answer the same way.
+    """
+    if not text:
+        return _EMPTY_MARKERS
+    creator, licence_token = parse_thingiverse_readme(text)
+    parsed = parse_thingiverse_license(text)
+    if parsed is None:
+        return _DocMarkers(
+            creator=creator,
+            licence_token=licence_token,
+            title=None,
+            line_creator=None,
+            source_url=None,
+            thing_id=None,
+        )
+    title, line_creator, thing_id, url = parsed
+    return _DocMarkers(
+        creator=creator,
+        licence_token=licence_token,
+        title=title,
+        line_creator=line_creator,
+        source_url=url,
+        thing_id=thing_id,
+    )
+
+
+def _merge_pair(paths: Sequence[str], docs: Mapping[str, str]) -> Optional[_PairMarkers]:
+    """Fold one named pair's documents into facts, or ``None`` if a field is absent.
+
+    ``paths`` is the pair's existing documents in a fixed order (README-name
+    first, LICENSE-name second) and is only a tie-break: every field takes the
+    first non-empty value seen, so no field is preferred because of which file
+    held it. The created-by sentence outranks the title line's creator, and the
+    document that carried it supplies the description; the title-line creator is
+    a fallback only when the pair carries no created-by sentence at all, and that
+    fallback has no created-by document, so it gets no description.
+    """
+    created_by_creator: Optional[str] = None
+    created_by_text: Optional[str] = None
+    fallback_creator: Optional[str] = None
+    licence_token: Optional[str] = None
+    title: Optional[str] = None
+    source_url: Optional[str] = None
+    thing_id: Optional[str] = None
+
+    for path in paths:
+        text = docs.get(path)
+        markers = _scan_doc(text)
+        if created_by_creator is None and markers.creator:
+            created_by_creator = markers.creator
+            created_by_text = text
+        if fallback_creator is None and markers.line_creator:
+            fallback_creator = markers.line_creator
+        if licence_token is None and markers.licence_token:
+            licence_token = markers.licence_token
+        if title is None and markers.title:
+            title = markers.title
+        if source_url is None and markers.source_url:
+            source_url = markers.source_url
+            thing_id = markers.thing_id
+
+    creator = created_by_creator or fallback_creator
+    if not creator or not licence_token or not title or not source_url:
         return None
-    readme_text = docs.get(readme_path)
-    licence_text = docs.get(licence_path)
-    if not readme_text or not licence_text:
-        return None
-    creator, token = parse_thingiverse_readme(readme_text)
-    parsed = parse_thingiverse_license(licence_text)
-    if not creator or not token or parsed is None:
-        return None
-    return readme_text, creator, token, parsed
+    return _PairMarkers(
+        creator=creator,
+        licence_token=licence_token,
+        title=title,
+        source_url=source_url,
+        thing_id=thing_id,
+        description=created_by_text,
+    )
 
 
 def _high_facts(
     detector: str,
     shape: str,
     snapshot: BundleSnapshot,
-    pair: Tuple[str, str, str, Tuple[str, str, Optional[str], str]],
+    pair: _PairMarkers,
     counts: BundleCounts,
     cover: Optional[str],
     models: Tuple[str, ...],
 ) -> BundleFacts:
-    readme_text, creator, token, (title, _licence_creator, thing_id, url) = pair
-    licence, licence_url = licence_from_token(token)
+    licence, licence_url = licence_from_token(pair.licence_token)
     return BundleFacts(
         detector=detector,
         confidence=CONFIDENCE_HIGH,
         metadata_shape=shape,
-        title=title or display_name(snapshot.bundle_name),
-        creator=creator,
+        title=pair.title or display_name(snapshot.bundle_name),
+        creator=pair.creator,
         licence=licence,
         licence_url=licence_url,
-        source_url=url,
-        thing_id=thing_id,
-        description=_collapse(readme_text)[:2000] or None,
+        source_url=pair.source_url,
+        thing_id=pair.thing_id,
+        description=_collapse(pair.description or "")[:2000] or None,
         cover_entry=cover,
         counts=counts,
         model_entries=models,
@@ -495,11 +632,11 @@ def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional
     models = _model_entries(snapshot)
     cover = _cover_entry(snapshot)
 
-    root_pair = _parsed_pair(_root_entry(snapshot, _ROOT_README), _root_entry(snapshot, _ROOT_LICENSE), docs)
+    root_pair = _merge_pair(_root_pair_paths(snapshot), docs)
     if root_pair is not None:
         return _high_facts(DETECTOR_THINGIVERSE_README, SHAPE_ROOT_DOCS, snapshot, root_pair, counts, cover, models)
 
-    sibling_pair = _parsed_pair(_sibling_doc(snapshot, _SIBLING_README), _sibling_doc(snapshot, _SIBLING_LICENSE), docs)
+    sibling_pair = _merge_pair(_sibling_pair_paths(snapshot), docs)
     if sibling_pair is not None:
         return _high_facts(DETECTOR_THINGIVERSE_SIBLING, SHAPE_SIBLING_DOCS, snapshot, sibling_pair, counts, cover, models)
 
