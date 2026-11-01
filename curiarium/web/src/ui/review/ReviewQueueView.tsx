@@ -1,14 +1,14 @@
 import type { ReactNode } from "react";
 
-import { countAwaitingText, formatReviewCount } from "./useReviewCounts";
+import { formatReviewCount } from "./useReviewCounts";
 
 type Props = {
   title: string;
   explanation: string;
   /** Rows that need a decision. `null` = not known yet, rendered as a dash. */
   count: number | null;
-  /** Singular noun for the count's accessible title, e.g. "bundle". */
-  countNoun: string;
+  /** What the count means in words, e.g. "3 bundles awaiting a decision". */
+  countTitle: string;
   /** `null` until the first successful fetch. */
   lastRefreshedAt?: number | null;
   /** Omitted by a queue that polls instead of offering a refresh. */
@@ -35,7 +35,7 @@ export default function ReviewQueueView({
   title,
   explanation,
   count,
-  countNoun,
+  countTitle,
   lastRefreshedAt = null,
   onRefresh,
   refreshing = false,
@@ -47,7 +47,7 @@ export default function ReviewQueueView({
     <section className="review-queue" aria-label={title}>
       <header className="review-queue-header">
         <h1 className="review-queue-title">{title}</h1>
-        <span className="review-queue-count" title={countAwaitingText(count, countNoun)}>
+        <span className="review-queue-count" title={countTitle}>
           {formatReviewCount(count)}
         </span>
         {onRefresh && (

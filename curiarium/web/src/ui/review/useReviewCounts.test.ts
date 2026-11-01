@@ -3,8 +3,55 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, renderHook } from "@testing-library/react";
 
 import type { BundleDetectItem, BundleReport } from "../../lib/api/bundles";
+import type { ImportRunDetail } from "../../lib/api/settings";
 import type { BundleDetectState } from "./useBundleDetect";
-import { bundleBadgeCount, countAwaitingText, formatReviewCount, useReviewCounts } from "./useReviewCounts";
+import type { ImportRunsState } from "./useImportRuns";
+import {
+  bundleBadgeCount,
+  countAwaitingText,
+  describeQueueCount,
+  formatReviewCount,
+  importsBadgeCount,
+  useReviewCounts,
+} from "./useReviewCounts";
+
+function makeRun(overrides: Partial<ImportRunDetail> = {}): ImportRunDetail {
+  return {
+    id: "run-1",
+    status: "succeeded",
+    mode: "copy",
+    root: "/mnt/models",
+    reason: null,
+    started_at: 1_700_000_000,
+    finished_at: 1_700_000_042,
+    registered: 4,
+    known: 2,
+    ignored: 1,
+    failed: 0,
+    rejected: 0,
+    discovered: 7,
+    skipped: 3,
+    errors: [],
+    ...overrides,
+  };
+}
+
+/**
+ * The full state shape, so a test states only what it is about. The default is
+ * "nothing loaded yet": the imports count is unknown, not zero.
+ */
+function importsState(overrides: Partial<ImportRunsState> = {}): ImportRunsState {
+  return {
+    run: null,
+    loading: false,
+    refreshing: false,
+    loaded: false,
+    error: null,
+    lastRefreshedAt: null,
+    refresh: async () => {},
+    ...overrides,
+  };
+}
 
 function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
   return {
@@ -143,19 +190,80 @@ describe("countAwaitingText", () => {
   });
 });
 
+describe("importsBadgeCount (AC-8)", () => {
+  it("returns null before the first successful fetch, even with no run", () => {
+    // `run === null` cannot tell "the first fetch failed" from "no run has ever
+    // happened", so `loaded` is what decides between a dash and a zero.
+    expect(importsBadgeCount(importsState())).toBeNull();
+  });
+
+  it("returns 1 while the newest run is running", () => {
+    expect(
+      importsBadgeCount(
+        importsState({ loaded: true, run: makeRun({ status: "running", finished_at: null }) }),
+      ),
+    ).toBe(1);
+  });
+
+  it("returns 0 for a loaded queue that has never had a run", () => {
+    expect(importsBadgeCount(importsState({ loaded: true, run: null }))).toBe(0);
+  });
+
+  it("returns 0 once the loaded run has succeeded, so a zero means idle", () => {
+    expect(importsBadgeCount(importsState({ loaded: true, run: makeRun() }))).toBe(0);
+  });
+});
+
+describe("describeQueueCount", () => {
+  it("keeps the bundle wording unchanged", () => {
+    expect(describeQueueCount("bundles", null)).toBe("Count unavailable");
+    expect(describeQueueCount("bundles", 0)).toBe("0 bundles awaiting a decision");
+    expect(describeQueueCount("bundles", 1)).toBe("1 bundle awaiting a decision");
+    expect(describeQueueCount("bundles", 12)).toBe("12 bundles awaiting a decision");
+  });
+
+  it("states the imports fact, because imports count a boolean not a queue", () => {
+    expect(describeQueueCount("imports", null)).toBe("Count unavailable");
+    expect(describeQueueCount("imports", 0)).toBe("No import currently running");
+    expect(describeQueueCount("imports", 1)).toBe("1 import running");
+    expect(describeQueueCount("imports", 2)).toBe("2 imports running");
+  });
+});
+
 describe("useReviewCounts", () => {
-  it("keeps the return object identity across a rerender with the same report", () => {
+  it("keeps the return object identity across a rerender with the same counts", () => {
     const report = makeReport([makeBundle()]);
+    type Args = { bundle: BundleDetectState; imports: ImportRunsState };
     const { result, rerender } = renderHook(
-      ({ state }: { state: BundleDetectState }) => useReviewCounts(state),
-      { initialProps: { state: makeState(report) } },
+      ({ bundle, imports }: Args) => useReviewCounts(bundle, imports),
+      { initialProps: { bundle: makeState(report), imports: importsState({ loaded: true }) } },
     );
 
     const initial = result.current;
-    expect(initial.bundles).toBe(1);
+    // Both counts are exercised: the memo must depend on both primitives.
+    expect(initial).toEqual({ bundles: 1, imports: 0 });
 
-    rerender({ state: makeState(report) });
+    // Fresh state objects with the same numbers must not churn the nav.
+    rerender({ bundle: makeState(report), imports: importsState({ loaded: true }) });
 
     expect(result.current).toBe(initial);
+  });
+
+  it("recomputes when the imports run starts running", () => {
+    const report = makeReport([makeBundle()]);
+    type Args = { imports: ImportRunsState };
+    const { result, rerender } = renderHook(
+      ({ imports }: Args) => useReviewCounts(makeState(report), imports),
+      { initialProps: { imports: importsState({ loaded: true }) } },
+    );
+
+    expect(result.current.imports).toBe(0);
+
+    rerender({
+      imports: importsState({ loaded: true, run: makeRun({ status: "running", finished_at: null }) }),
+    });
+
+    expect(result.current.imports).toBe(1);
+    expect(result.current.bundles).toBe(1);
   });
 });

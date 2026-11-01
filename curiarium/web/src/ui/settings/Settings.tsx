@@ -14,8 +14,6 @@ import StorageSection from "./StorageSection";
 import ThemeSection from "./ThemeSection";
 import UsersSection from "./UsersSection";
 import type { Section } from "./types";
-import { useFolderScan } from "./useFolderScan";
-import { useImportRuns } from "./useImportRuns";
 import { useLibraryScan } from "./useLibraryScan";
 import { useMountImportSettings } from "./useMountImportSettings";
 import { useStorageSettings } from "./useStorageSettings";
@@ -28,7 +26,6 @@ type Props = {
   onAssetsChanged?: () => void;
   onFoldersChanged?: () => void;
   onUnauthorized?: () => void;
-  onSelectFolder?: (id: string | null) => void;
   /** `null` until `/me` answers; admin-only sections stay hidden until then. */
   role?: Role | null;
   username?: string | null;
@@ -41,15 +38,11 @@ export default function Settings({
   onAssetsChanged,
   onFoldersChanged,
   onUnauthorized,
-  onSelectFolder,
   role = null,
   username = null,
   kind = null,
 }: Props) {
   const isAdmin = roleAtLeast(role, "admin");
-  // The scan card starts a server-side library write, so it needs the same
-  // threshold the app shell uses; derived here for the same reason (one helper).
-  const canWrite = roleAtLeast(role, "editor");
   const [section, setSection] = React.useState<Section>("root");
   const [makerworldDraft, setMakerworldDraft] = React.useState(settings.makerworld.cookie);
   const [thingiverseDraft, setThingiverseDraft] = React.useState(settings.thingiverse.cookie);
@@ -58,7 +51,6 @@ export default function Settings({
   const [networkDraft, setNetworkDraft] = React.useState(settings.network.publicUrl);
 
   const libraryScan = useLibraryScan({ onAssetsChanged, onFoldersChanged });
-  const importRuns = useImportRuns();
 
   React.useEffect(() => {
     if (section !== "imports") return;
@@ -88,14 +80,6 @@ export default function Settings({
       setThingiverseDraft(settings.thingiverse.cookie || "");
     }
   }, [settings.thingiverse.cookie, thingiverseEditing]);
-
-  const folderScan = useFolderScan({
-    section,
-    onAssetsChanged,
-    onFoldersChanged,
-    onUnauthorized,
-    onSelectFolder,
-  });
 
   const updateNetwork = (patch: Partial<AppSettings["network"]>) => {
     onChange({
@@ -187,9 +171,6 @@ export default function Settings({
         onChange={onChange}
         mount={mount}
         isAdmin={isAdmin}
-        canWrite={canWrite}
-        folderScan={folderScan}
-        importRuns={importRuns}
         makerworld={{
           draft: makerworldDraft,
           editing: makerworldEditing,

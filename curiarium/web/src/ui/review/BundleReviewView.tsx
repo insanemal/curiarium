@@ -19,7 +19,7 @@ import {
 } from "./bundleRows";
 import ReviewQueueView from "./ReviewQueueView";
 import type { BundleDetectState } from "./useBundleDetect";
-import { bundleBadgeCount } from "./useReviewCounts";
+import { bundleBadgeCount, describeQueueCount } from "./useReviewCounts";
 
 const PRIMARY_BUTTON = "text-xs px-2.5 py-1.5 rounded-md bg-accent disabled:opacity-60";
 const SECONDARY_BUTTON =
@@ -482,7 +482,7 @@ export default function BundleReviewView({ state, canContribute }: Props) {
       title="Bundles to confirm"
       explanation="Folders that look like one download each: a Thingiverse README and licence, sibling docs, or a model/image/text mix. Detection writes nothing - creating a project is a separate, explicit step."
       count={bundleBadgeCount(report)}
-      countNoun="bundle"
+      countTitle={describeQueueCount("bundles", bundleBadgeCount(report))}
       // The big count is what still needs a decision; this line carries the
       // whole walk's totals, the way the old Settings card's aggregate did.
       summary={report === null ? undefined : headline(report.counts)}

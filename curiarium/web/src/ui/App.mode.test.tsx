@@ -25,6 +25,13 @@ vi.mock("../lib/api", () => ({
   refreshToken: vi.fn(),
 }));
 
+// The queue's own hook runs when the stand-in view opens it; an empty run list
+// keeps this file's subject (mode state) off the network.
+vi.mock("../lib/api/settings", () => ({
+  getImportRuns: vi.fn(async () => ({ runs: [], total: 0, limit: 1, offset: 0 })),
+  getImportRun: vi.fn(),
+}));
+
 vi.mock("../lib/settings", () => ({
   loadSettings: () => ({
     slicer: { enabled: false, selected: "orca" },
@@ -50,11 +57,13 @@ vi.mock("./Sidebar", async () => {
       unfiledCount,
       unfiled,
       onSelectUnfiled,
+      onOpenQueue,
     }: {
       totalCount?: number | null;
       unfiledCount?: number | null;
       unfiled?: boolean;
       onSelectUnfiled?: () => void;
+      onOpenQueue?: (key: "imports") => void;
     }) =>
       react.createElement(
         "aside",
@@ -63,6 +72,11 @@ vi.mock("./Sidebar", async () => {
         react.createElement("p", { "data-testid": "total-count" }, totalCount == null ? "none" : String(totalCount)),
         react.createElement("p", { "data-testid": "unfiled-count" }, unfiledCount == null ? "none" : String(unfiledCount)),
         react.createElement("button", { type: "button", onClick: onSelectUnfiled }, "Select unfiled"),
+        react.createElement(
+          "button",
+          { type: "button", onClick: () => onOpenQueue?.("imports") },
+          "Open imports queue",
+        ),
       ),
   };
 });
@@ -70,12 +84,23 @@ vi.mock("./Sidebar", async () => {
 vi.mock("./ProjectSidebar", async () => {
   const react = await import("react");
   return {
-    default: ({ onOpenSettings }: { onOpenSettings?: () => void }) =>
+    default: ({
+      onOpenSettings,
+      onOpenQueue,
+    }: {
+      onOpenSettings?: () => void;
+      onOpenQueue?: (key: "imports") => void;
+    }) =>
       react.createElement(
         "aside",
         { "aria-label": "Projects" },
         react.createElement("p", null, "Projects list"),
         react.createElement("button", { type: "button", onClick: onOpenSettings }, "Open settings"),
+        react.createElement(
+          "button",
+          { type: "button", onClick: () => onOpenQueue?.("imports") },
+          "Open imports queue",
+        ),
       ),
   };
 });
@@ -100,14 +125,21 @@ vi.mock("./asset-grid/AssetGrid", async () => {
 });
 vi.mock("./settings/Settings", async () => {
   const react = await import("react");
+  // Settings is configuration only now: it has no scan action and receives no
+  // `onSelectFolder`.
+  return { default: () => react.createElement("div", null, "Settings view") };
+});
+
+// The folder scan is a work surface, so the "scan now hands a folder back to
+// App" premise lives in the imports queue; Settings keeps no such control.
+vi.mock("./review/ImportsReviewView", async () => {
+  const react = await import("react");
   return {
     default: ({ onSelectFolder }: { onSelectFolder?: (id: string | null) => void }) =>
       react.createElement(
         "div",
         null,
-        react.createElement("p", null, "Settings view"),
-        // Stands in for "Scan now"/folder navigation, which hand a folder back
-        // to App while the projects pane may be the active one.
+        react.createElement("p", null, "Imports review view"),
         react.createElement(
           "button",
           { type: "button", onClick: () => onSelectFolder?.("folder-1") },
@@ -232,14 +264,14 @@ describe("App library mode switch", () => {
     expect(await screen.findByText("Settings view")).toBeTruthy();
   });
 
-  it("returns to files mode when Settings selects a folder", async () => {
+  it("returns to files mode when a folder scan in the imports queue selects a folder", async () => {
     window.localStorage.setItem(MODE_STORAGE_KEY, "projects");
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
-    // Settings is a lazy chunk now: its contents only exist once the module
-    // has resolved.
+    // In projects mode the queue is reached from that sidebar, and the scan
+    // action hands a folder back to App while the projects pane is active.
+    fireEvent.click(await screen.findByRole("button", { name: "Open imports queue" }));
     fireEvent.click(await screen.findByRole("button", { name: "Scan now" }));
 
     expect(window.localStorage.getItem(MODE_STORAGE_KEY)).toBe("files");

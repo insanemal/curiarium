@@ -44,7 +44,9 @@ import { useSessionRole } from "./useSessionRole";
 import { OidcExchangeError, exchangeOidcCode } from "../lib/api/auth";
 import type { ActiveView, ReviewQueueKey } from "./views";
 import BundleReviewView from "./review/BundleReviewView";
+import ImportsReviewView from "./review/ImportsReviewView";
 import { useBundleDetect } from "./review/useBundleDetect";
+import { useImportRuns } from "./review/useImportRuns";
 import { useReviewCounts } from "./review/useReviewCounts";
 
 const DEFAULT_REFRESH_SECONDS = 900; // 15 minutes: the access token lifetime
@@ -213,18 +215,28 @@ export default function App() {
   // being shown controls whose requests the server refuses.
   const canContribute = roleAtLeast(role, "contributor");
   const canDelete = roleAtLeast(role, "editor");
+  // Read is its own capability because the routes differ: `GET /imports/runs`
+  // is require_read, so the Imports running queue is a viewer surface, while a
+  // bundle decision is a contribute. Fail closed: `role` null has neither.
+  const canRead = roleAtLeast(role, "viewer");
 
-  // The queue owns its own data. `enabled` includes `reviewOpen` and the active
-  // queue key so one walk happens per entry: the app does not pay a full
-  // storage walk on every load just to paint a badge, and entering the queue is
-  // still exactly one fetch. Later slices add their own queue key and must not
-  // each pay for the bundle walk.
+  // Each queue owns its own data. `enabled` includes `reviewOpen` and the active
+  // queue key so a fetch happens per entry, not per app load: the app does not
+  // pay a whole-library walk or an import-run read just to paint a badge, and
+  // entering a queue is still exactly one fetch.
   const reviewOpen = activeView === "review";
   const bundleReview = useBundleDetect({
     enabled: canContribute && reviewOpen && activeQueue === "bundles",
     onUnauthorized: handleUnauthorized,
   });
-  const reviewCounts = useReviewCounts(bundleReview);
+  // The imports queue is armed by READ, not contribute: `GET /imports/runs` is
+  // require_read, and gating it on a write capability would leave a viewer's
+  // queue on "Loading import runs..." forever.
+  const importsReview = useImportRuns({
+    enabled: canRead && reviewOpen && activeQueue === "imports",
+    onUnauthorized: handleUnauthorized,
+  });
+  const reviewCounts = useReviewCounts(bundleReview, importsReview);
 
   const handleOpenReview = React.useCallback((key: ReviewQueueKey) => {
     setActiveQueue(key);
@@ -638,7 +650,6 @@ export default function App() {
               onAssetsChanged={handleAssetsChanged}
               onFoldersChanged={handleFoldersChanged}
               onUnauthorized={handleUnauthorized}
-              onSelectFolder={handleSelectFolder}
               role={role}
               username={identity.username}
               kind={identity.kind}
@@ -647,6 +658,16 @@ export default function App() {
         )}
         {activeView === "review" && activeQueue === "bundles" && (
           <BundleReviewView state={bundleReview} canContribute={canContribute} />
+        )}
+        {activeView === "review" && activeQueue === "imports" && (
+          <ImportsReviewView
+            state={importsReview}
+            canWrite={canDelete}
+            onAssetsChanged={handleAssetsChanged}
+            onFoldersChanged={handleFoldersChanged}
+            onUnauthorized={handleUnauthorized}
+            onSelectFolder={handleSelectFolder}
+          />
         )}
         {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}
         {activeView === "audit" && roleAtLeast(role, "admin") && (

@@ -426,6 +426,13 @@ html, body, #root { height: 100%; }
     background: var(--mv-panel-soft);
   }
 
+  /* One card inside a queue: the run panel, the folder panel. */
+  .review-panel {
+    @apply flex flex-col gap-2 rounded-lg border p-3;
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-soft);
+  }
+
   /* The bundle queue's dense list and its detail panel (Mf-f3c2). Filter pills
      mirror `.mode-switch-option` so the two selection idioms match. */
   .review-toolbar { @apply flex flex-wrap items-center gap-2; }

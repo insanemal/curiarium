@@ -104,8 +104,8 @@ export default function SettingsRootMenu({ onOpen, role = null, username = null,
         onClick={() => onOpen("imports")}
       >
         <div className="text-xs uppercase tracking-wide text-muted">Imports</div>
-        <div className="text-lg font-semibold">Imports & Folder Scan</div>
-        <div className="text-sm opacity-70">Manage import rate-limit workarounds and scan local folders.</div>
+        <div className="text-lg font-semibold">Import sources</div>
+        <div className="text-sm opacity-70">Set the mounted import path and the optional import-cookie workarounds.</div>
       </button>
       <p className="col-span-full text-xs text-muted" data-testid="app-version">
         Curiarium {__APP_VERSION__}

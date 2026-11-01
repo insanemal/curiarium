@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import ReviewQueueView, { formatClock } from "./ReviewQueueView";
+import { describeQueueCount } from "./useReviewCounts";
 
 /** A fixed instant so the clock's format, not the wall time, is under test. */
 const FIXED_AT = Date.UTC(2026, 0, 2, 14, 5);
@@ -17,7 +18,7 @@ afterEach(() => {
 describe("ReviewQueueView header", () => {
   it("renders the title, the explanation and a dash for an unknown count", () => {
     render(
-      <ReviewQueueView title="Bundles to confirm" explanation="Bundles the detector found." count={null} countNoun="bundle">
+      <ReviewQueueView title="Bundles to confirm" explanation="Bundles the detector found." count={null} countTitle={describeQueueCount("bundles", null)}>
         <p>rows</p>
       </ReviewQueueView>,
     );
@@ -31,7 +32,7 @@ describe("ReviewQueueView header", () => {
 
   it("renders a known count with its noun in the title", () => {
     render(
-      <ReviewQueueView title="Bundles to confirm" explanation="Bundles." count={12} countNoun="bundle">
+      <ReviewQueueView title="Bundles to confirm" explanation="Bundles." count={12} countTitle={describeQueueCount("bundles", 12)}>
         <p>rows</p>
       </ReviewQueueView>,
     );
@@ -46,7 +47,7 @@ describe("ReviewQueueView header", () => {
 
   it("says it has not refreshed before the first fetch", () => {
     render(
-      <ReviewQueueView title="Bundles to confirm" explanation="Bundles." count={0} countNoun="bundle">
+      <ReviewQueueView title="Bundles to confirm" explanation="Bundles." count={0} countTitle={describeQueueCount("bundles", 0)}>
         <p>rows</p>
       </ReviewQueueView>,
     );
@@ -60,7 +61,7 @@ describe("ReviewQueueView header", () => {
         title="Bundles to confirm"
         explanation="Bundles."
         count={0}
-        countNoun="bundle"
+        countTitle={describeQueueCount("bundles", 0)}
         lastRefreshedAt={FIXED_AT}
       >
         <p>rows</p>
@@ -74,7 +75,7 @@ describe("ReviewQueueView header", () => {
 describe("ReviewQueueView refresh control", () => {
   it("renders no refresh button for a queue that does not offer one", () => {
     render(
-      <ReviewQueueView title="Bundles to confirm" explanation="Bundles." count={1} countNoun="bundle">
+      <ReviewQueueView title="Bundles to confirm" explanation="Bundles." count={1} countTitle={describeQueueCount("bundles", 1)}>
         <p>rows</p>
       </ReviewQueueView>,
     );
@@ -85,7 +86,7 @@ describe("ReviewQueueView refresh control", () => {
   it("calls onRefresh once on click", () => {
     const onRefresh = vi.fn();
     render(
-      <ReviewQueueView title="Bundles to confirm" explanation="Bundles." count={1} countNoun="bundle" onRefresh={onRefresh}>
+      <ReviewQueueView title="Bundles to confirm" explanation="Bundles." count={1} countTitle={describeQueueCount("bundles", 1)} onRefresh={onRefresh}>
         <p>rows</p>
       </ReviewQueueView>,
     );
@@ -102,7 +103,7 @@ describe("ReviewQueueView refresh control", () => {
         title="Bundles to confirm"
         explanation="Bundles."
         count={1}
-        countNoun="bundle"
+        countTitle={describeQueueCount("bundles", 1)}
         onRefresh={onRefresh}
         refreshing
       >
@@ -125,7 +126,7 @@ describe("ReviewQueueView body", () => {
         title="Bundles to confirm"
         explanation="Bundles."
         count={2}
-        countNoun="bundle"
+        countTitle={describeQueueCount("bundles", 2)}
         notices={<p className="review-notice">Detection stopped early.</p>}
       >
         <ul>
