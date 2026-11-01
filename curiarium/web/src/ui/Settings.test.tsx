@@ -2,22 +2,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+// The queue owns bundle detection now, so Settings must never reach it.
+// Mocking the domain module keeps a regression observable as "called" rather
+// than a module-resolution failure.
+vi.mock("../lib/api/bundles", () => ({
+  createBundles: vi.fn(),
+  getBundleReport: vi.fn(),
+  setBundleDismissed: vi.fn(),
+}));
+
 // Every network touchpoint of Settings (storage + the embedded TrashCard) is
 // mocked, so the component renders without a backend.
 vi.mock("../lib/api", () => ({
   UnauthorizedError: class UnauthorizedError extends Error {},
-  createBundles: vi.fn(),
   createFolder: vi.fn(),
   createUser: vi.fn(),
-  // The bundle card detects as soon as an editor opens Imports, so the mock
-  // must resolve a real empty report rather than undefined.
-  getBundleReport: vi.fn(async () => ({
-    root: "",
-    truncated: false,
-    counts: { total: 0, high: 0, low: 0, ready: 0, blocked: 0, dismissed: 0, already_created: 0 },
-    bundles: [],
-    stale_dismissals: [],
-  })),
   getMountImportSettings: vi.fn(),
   getLibraryScanStatus: vi.fn(),
   getStorageCapabilities: vi.fn(async () => ({ volumes: [] })),
@@ -30,7 +29,6 @@ vi.mock("../lib/api", () => ({
   resetUserPassword: vi.fn(),
   revokeSession: vi.fn(),
   revokeUserSession: vi.fn(),
-  setBundleDismissed: vi.fn(),
   startLibraryScan: vi.fn(),
   updateMountImportSettings: vi.fn(),
   updateStorageSettings: vi.fn(),
@@ -49,15 +47,17 @@ vi.mock("./settings/MfaSection", async () => {
 
 import Settings from "./settings/Settings";
 import {
-  getBundleReport,
   getMountImportSettings,
   getStorageSettings,
   listSessions,
   updateStorageSettings,
 } from "../lib/api";
+import { createBundles, getBundleReport, setBundleDismissed } from "../lib/api/bundles";
 import type { AppSettings } from "../lib/settings";
 
+const createBundlesMock = vi.mocked(createBundles);
 const getBundleReportMock = vi.mocked(getBundleReport);
+const setBundleDismissedMock = vi.mocked(setBundleDismissed);
 const getMountImportSettingsMock = vi.mocked(getMountImportSettings);
 const getStorageSettingsMock = vi.mocked(getStorageSettings);
 const listSessionsMock = vi.mocked(listSessions);
@@ -138,7 +138,9 @@ describe("Settings storage structure", () => {
 
 describe("Settings imports", () => {
   beforeEach(() => {
-    getBundleReportMock.mockClear();
+    createBundlesMock.mockReset();
+    getBundleReportMock.mockReset();
+    setBundleDismissedMock.mockReset();
     getMountImportSettingsMock.mockReset();
     getMountImportSettingsMock.mockResolvedValue({ enabled: false, copy_files: true, path: null });
   });
@@ -148,7 +150,7 @@ describe("Settings imports", () => {
   });
 
   /** Render Settings and open the Imports section for the given role. */
-  async function renderImports(role: "admin" | "editor" | "viewer") {
+  async function renderImports(role: "admin" | "editor" | "contributor" | "viewer") {
     render(<Settings settings={settings} onChange={() => {}} role={role} />);
     fireEvent.click(await screen.findByRole("button", { name: /Imports & Folder Scan/ }));
     await screen.findByText(/Remember import cookies on this device/);
@@ -177,22 +179,35 @@ describe("Settings imports", () => {
     expect(screen.getByText(/Remember import cookies on this device/)).toBeTruthy();
     expect(screen.queryByText("Local folder scan")).toBeNull();
     expect(screen.queryByText("Vendor bundles")).toBeNull();
+    // No review destination lives inside Settings, for any role.
+    expect(screen.queryByRole("button", { name: /^Bundles to confirm/ })).toBeNull();
     // Detection walks the whole library server-side: a viewer must never fire it.
     expect(getBundleReportMock).not.toHaveBeenCalled();
   });
 
-  it("an editor sees the folder scan card, the bundle card and the read-only cards", async () => {
+  it("an editor sees the folder scan and read-only cards, with no bundle surface at all", async () => {
     await renderImports("editor");
 
     expect(screen.getByText("Mount import runs")).toBeTruthy();
     expect(screen.getByText("Local folder scan")).toBeTruthy();
-    expect(screen.getByText("Vendor bundles")).toBeTruthy();
-    // The card reports the headline as soon as the mocked report resolves.
-    expect(
-      await screen.findByText("0 bundles found - 0 high confidence, 0 low"),
-    ).toBeTruthy();
-    expect(getBundleReportMock).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/Remember import cookies on this device/)).toBeTruthy();
+    expect(screen.queryByText("Vendor bundles")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Bundles to confirm" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Bundles to confirm/ })).toBeNull();
+    expect(getBundleReportMock).not.toHaveBeenCalled();
+    // Positive control: let the section settle, then confirm nothing fetched.
+    await waitFor(() => expect(screen.getByText("Mount import runs")).toBeTruthy());
+    expect(getBundleReportMock).not.toHaveBeenCalled();
+  });
+
+  it("a contributor gets no folder scan and no bundle fetch", async () => {
+    await renderImports("contributor");
+
+    // The folder scan is a WRITE surface (`roleAtLeast(role, "editor")`), while
+    // the bundle queue only needs CONTRIBUTE - a contributor acts there, not here.
+    expect(screen.queryByText("Local folder scan")).toBeNull();
+    expect(screen.getByText("Mount import runs")).toBeTruthy();
+    expect(getBundleReportMock).not.toHaveBeenCalled();
   });
 });
 

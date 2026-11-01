@@ -14,7 +14,6 @@ import StorageSection from "./StorageSection";
 import ThemeSection from "./ThemeSection";
 import UsersSection from "./UsersSection";
 import type { Section } from "./types";
-import { useBundleDetect } from "./useBundleDetect";
 import { useFolderScan } from "./useFolderScan";
 import { useImportRuns } from "./useImportRuns";
 import { useLibraryScan } from "./useLibraryScan";
@@ -97,10 +96,6 @@ export default function Settings({
     onUnauthorized,
     onSelectFolder,
   });
-
-  // Inert until the Imports section is open and the role may write: detection
-  // walks the whole library server-side, so a viewer must never fire it.
-  const bundleDetect = useBundleDetect({ section, enabled: canWrite });
 
   const updateNetwork = (patch: Partial<AppSettings["network"]>) => {
     onChange({
@@ -194,7 +189,6 @@ export default function Settings({
         isAdmin={isAdmin}
         canWrite={canWrite}
         folderScan={folderScan}
-        bundleDetect={bundleDetect}
         importRuns={importRuns}
         makerworld={{
           draft: makerworldDraft,

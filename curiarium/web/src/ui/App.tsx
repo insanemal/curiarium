@@ -42,6 +42,10 @@ import { useSessionRole } from "./useSessionRole";
 // this ticket's touch-set. `ui/deferredFileGrants.test.tsx` sets the same precedent
 // by importing `../lib/api/grants` directly.
 import { OidcExchangeError, exchangeOidcCode } from "../lib/api/auth";
+import type { ActiveView, ReviewQueueKey } from "./views";
+import BundleReviewView from "./review/BundleReviewView";
+import { useBundleDetect } from "./review/useBundleDetect";
+import { useReviewCounts } from "./review/useReviewCounts";
 
 const DEFAULT_REFRESH_SECONDS = 900; // 15 minutes: the access token lifetime
 
@@ -137,7 +141,10 @@ export default function App() {
   // The handoff code is single-use server-side, so the exchange must run once
   // even though React.StrictMode invokes effects twice.
   const ssoHandled = React.useRef<boolean>(false);
-  const [activeView, setActiveView] = React.useState<"library" | "settings" | "audit">("library");
+  const [activeView, setActiveView] = React.useState<ActiveView>("library");
+  // A review destination is `(review, queue)`; the mode-shaped views ignore the
+  // queue. A URL/history model for either is a separate follow-up.
+  const [activeQueue, setActiveQueue] = React.useState<ReviewQueueKey>("bundles");
   const [settings, setSettings] = React.useState<AppSettings>(() => loadSettings());
   const [confirmingLogout, setConfirmingLogout] = React.useState(false);
   // Scroll container for the asset grid's virtualization (see useVirtualRows).
@@ -207,6 +214,23 @@ export default function App() {
   const canContribute = roleAtLeast(role, "contributor");
   const canDelete = roleAtLeast(role, "editor");
 
+  // The queue owns its own data. `enabled` includes `reviewOpen` and the active
+  // queue key so one walk happens per entry: the app does not pay a full
+  // storage walk on every load just to paint a badge, and entering the queue is
+  // still exactly one fetch. Later slices add their own queue key and must not
+  // each pay for the bundle walk.
+  const reviewOpen = activeView === "review";
+  const bundleReview = useBundleDetect({
+    enabled: canContribute && reviewOpen && activeQueue === "bundles",
+    onUnauthorized: handleUnauthorized,
+  });
+  const reviewCounts = useReviewCounts(bundleReview);
+
+  const handleOpenReview = React.useCallback((key: ReviewQueueKey) => {
+    setActiveQueue(key);
+    setActiveView("review");
+  }, []);
+
   const handleFoldersChanged = React.useCallback(() => {
     setFolderVersion(v => v + 1);
   }, []);
@@ -273,7 +297,9 @@ export default function App() {
     saveMode(next);
     setMode(next);
     setVisitedModes(prev => (prev[next] ? prev : { ...prev, [next]: true }));
-    setActiveView("library");
+    // Switching mode must not throw the operator out of the queue: the REVIEW
+    // group is shared by both modes, so a review destination stays open.
+    setActiveView(view => (view === "review" ? view : "library"));
   }, []);
 
   const handleOpenProject = React.useCallback((id: string) => {
@@ -477,6 +503,9 @@ export default function App() {
               onOpenSettings={() => setActiveView("settings")}
               onOpenAudit={() => setActiveView("audit")}
               activeView={activeView}
+              activeQueue={activeQueue}
+              reviewCounts={reviewCounts}
+              onOpenQueue={handleOpenReview}
               role={role}
               username={identity.username}
               kind={identity.kind}
@@ -490,6 +519,9 @@ export default function App() {
               selectedId={openProjectId}
               onSelect={handleOpenProject}
               activeView={activeView}
+              activeQueue={activeQueue}
+              reviewCounts={reviewCounts}
+              onOpenQueue={handleOpenReview}
               onOpenSettings={() => setActiveView("settings")}
               onOpenAudit={() => setActiveView("audit")}
               role={role}
@@ -612,6 +644,9 @@ export default function App() {
               kind={identity.kind}
             />
           </React.Suspense>
+        )}
+        {activeView === "review" && activeQueue === "bundles" && (
+          <BundleReviewView state={bundleReview} canContribute={canContribute} />
         )}
         {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}
         {activeView === "audit" && roleAtLeast(role, "admin") && (

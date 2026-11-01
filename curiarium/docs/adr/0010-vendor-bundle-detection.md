@@ -15,6 +15,10 @@ longer depends on which of the two documents shipped which sentence).
 place through `POST /import/archive`; the decision below is unchanged, the door
 is no longer a URL fetch).
 
+**Extended:** ticket `Mf-f3c2` (the report is confirmed from a REVIEW queue
+rather than a Settings card, and the UI gate is the route's CONTRIBUTE threshold
+instead of editor; every decision below is unchanged - see ADR 0011).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the

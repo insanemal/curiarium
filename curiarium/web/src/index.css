@@ -379,6 +379,10 @@ html, body, #root { height: 100%; }
   .sidebar-editor-actions button.primary { color: var(--mv-accent-contrast); border-color: var(--mv-accent); background: var(--mv-accent); }
   .sidebar-editor-actions button:disabled { @apply cursor-not-allowed opacity-50; }
 
+  /* REVIEW group (Mf-f3c2): the work queues both sidebars share. The group owns
+     a hairline and the footer keeps its own, so the two read as separate blocks. */
+  .sidebar-review { @apply border-t pt-3; border-color: var(--mv-border); }
+
   .sidebar-footer { @apply border-t pt-3; border-color: var(--mv-border); }
   .sidebar-settings {
     @apply flex h-10 w-full items-center gap-2.5 rounded-lg border border-transparent px-3 text-[13px] font-medium transition-colors;
@@ -388,6 +392,158 @@ html, body, #root { height: 100%; }
   .sidebar-settings:hover { color: var(--mv-text); background: var(--mv-panel-soft); }
   .sidebar-settings.is-selected { color: var(--mv-text); background: var(--mv-accent-soft); }
   .sidebar-settings.is-selected svg { color: var(--mv-accent); }
+
+  /* The shell every review queue reuses: title, honest count, refresh and the
+     one-line explanation. Rows and controls belong to each queue. */
+  .review-queue { @apply flex min-h-0 flex-col gap-3; }
+  .review-queue-header { @apply flex flex-wrap items-center gap-2.5; }
+  .review-queue-title { @apply truncate text-[22px] font-semibold tracking-[-0.02em]; }
+
+  .review-queue-count {
+    @apply inline-flex min-w-6 items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-semibold;
+    color: var(--mv-text);
+    background: var(--mv-accent-soft);
+  }
+
+  .review-refresh {
+    @apply inline-flex h-8 items-center rounded-lg border px-2.5 text-[11px] font-semibold transition-colors;
+    color: var(--mv-text);
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-soft);
+  }
+
+  .review-refresh:hover { background: var(--mv-panel); }
+  .review-refresh:disabled { @apply cursor-not-allowed opacity-50; }
+
+  .review-refreshed { @apply text-[11px]; color: var(--mv-text-subtle); }
+  .review-explanation { @apply text-[13px]; max-width: 70ch; color: var(--mv-text-muted); }
+  .review-queue-summary { @apply text-xs; max-width: 70ch; color: var(--mv-text-subtle); }
+
+  .review-notice {
+    @apply rounded-lg border px-3 py-2 text-xs;
+    color: var(--mv-text-muted);
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-soft);
+  }
+
+  /* The bundle queue's dense list and its detail panel (Mf-f3c2). Filter pills
+     mirror `.mode-switch-option` so the two selection idioms match. */
+  .review-toolbar { @apply flex flex-wrap items-center gap-2; }
+
+  .review-filter {
+    @apply inline-flex h-8 items-center rounded-lg border px-2.5 text-[11px] font-semibold transition-colors;
+    color: var(--mv-text-muted);
+    border-color: var(--mv-border-strong);
+    background: transparent;
+  }
+
+  .review-filter:hover { color: var(--mv-text); background: var(--mv-panel-soft); }
+  .review-filter:disabled { @apply cursor-not-allowed opacity-50; }
+
+  .review-filter.is-active {
+    color: var(--mv-text);
+    background: var(--mv-accent-soft);
+    border-color: var(--mv-accent-border);
+  }
+
+  .review-toggle { @apply inline-flex items-center gap-1.5 text-[11px] font-medium; color: var(--mv-text-muted); }
+  .review-toggle input { @apply h-3.5 w-3.5; }
+  .review-summary { @apply ml-auto text-[11px]; color: var(--mv-text-subtle); }
+
+  .review-bulk {
+    @apply flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2;
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-soft);
+  }
+
+  .review-selection { @apply ml-auto text-[11px]; color: var(--mv-text-subtle); }
+
+  .review-layout {
+    @apply grid items-start gap-3;
+    grid-template-columns: minmax(0, 1fr) 22rem;
+  }
+
+  /* Narrow panes stack the detail under the list; a sticky panel in a single
+     column would cover the rows it describes. */
+  @media (max-width: 1180px) {
+    .review-layout { grid-template-columns: minmax(0, 1fr); }
+    .review-detail { position: static; }
+  }
+
+  .review-list { @apply flex min-w-0 flex-col gap-px; }
+
+  .review-row {
+    @apply grid items-center gap-3 rounded-lg border border-transparent px-2.5 py-1.5 text-[12px] transition-colors;
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.4fr) 7.5rem minmax(0, 1fr) 6rem;
+    color: var(--mv-text-muted);
+    cursor: default;
+  }
+
+  .review-row:hover { background: var(--mv-panel-soft); }
+  .review-row.is-selected { background: var(--mv-accent-soft); }
+  .review-row.is-current { color: var(--mv-text); box-shadow: inset 0 0 0 1px var(--mv-accent-border); }
+  .review-row:focus-visible { outline: 2px solid var(--mv-accent); outline-offset: -2px; }
+
+  .review-row-name { @apply flex min-w-0 items-center gap-2 font-medium; color: var(--mv-text); }
+
+  .review-check {
+    @apply grid h-4 w-4 shrink-0 place-items-center rounded border;
+    border-color: var(--mv-border-strong);
+    color: var(--mv-accent-contrast);
+    cursor: pointer;
+  }
+
+  .review-check.is-selected { background: var(--mv-accent); border-color: var(--mv-accent); }
+
+  .review-row-path { @apply truncate font-mono text-[11px]; color: var(--mv-text-subtle); }
+  .review-row-confidence { @apply text-[11px] font-semibold; }
+  .review-row-status { @apply truncate text-[11px]; color: var(--mv-text-muted); }
+  .review-row-state { @apply text-[11px] font-semibold; color: var(--mv-text-subtle); }
+
+  .review-detail {
+    @apply flex flex-col gap-2 rounded-lg border p-3;
+    position: sticky;
+    top: 0;
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-soft);
+  }
+
+  .review-detail-title { @apply text-[15px] font-semibold; }
+
+  .review-detail-facts {
+    @apply flex flex-col gap-1 text-[11px];
+    color: var(--mv-text-muted);
+    word-break: break-word;
+  }
+
+  .review-detail-excerpt { @apply text-[11px] italic; color: var(--mv-text-subtle); }
+
+  .review-detail-field {
+    @apply flex flex-col gap-1 text-[10px] font-semibold uppercase tracking-[0.12em];
+    color: var(--mv-text-subtle);
+  }
+
+  .review-detail-field input {
+    @apply h-8 rounded-lg border px-2 text-xs font-normal normal-case tracking-normal;
+    color: var(--mv-text);
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel);
+  }
+
+  .review-detail-actions { @apply flex flex-wrap items-center gap-2; }
+
+  .review-loading { @apply text-[13px]; color: var(--mv-text-muted); }
+
+  /* Alert tone from the existing palette: a bordered panel at full text
+     strength, since no --mv-* token exists for a danger colour. */
+  .review-error {
+    @apply flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs;
+    color: var(--mv-text);
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-strong);
+  }
+
+  .review-empty { @apply text-[13px]; color: var(--mv-text-muted); }
 
   /* FolderPicker (Mf-08sb): a searchable parent-folder tree that replaces the
      flat location <select>s. Colours come only from the `--mv-*` palette. */

@@ -32,6 +32,7 @@ What is authoritative, what is historical, and what to read when.
 | [0008](adr/0008-mfa-totp-enrolment.md) | TOTP enrolment, recovery codes, the admin MFA policy |
 | [0009](adr/0009-first-run-administrator-setup.md) | First-run administrator setup from the browser: an opt-in window that closes itself at the first enabled admin |
 | [0010](adr/0010-vendor-bundle-detection.md) | Vendor bundles are detected from disk as a dry run and become one project each, with no migration and no stored candidate set |
+| [0011](adr/0011-review-is-a-destination-for-work-queues.md) | Work queues live in a REVIEW destination shared by both modes, with one count coordinator and an unknown count shown as a dash |
 
 ## Historical — kept for provenance, describes an earlier project
 

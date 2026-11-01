@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 import type { Project } from "../lib/api";
 
@@ -153,5 +153,33 @@ describe("ProjectSidebar", () => {
 
     fireEvent.click(rowFor("Solo"));
     expect(onSelect).toHaveBeenCalledWith("p2");
+  });
+});
+
+describe("ProjectSidebar review navigation", () => {
+  it("shows the shared review queue with its count and opens it", () => {
+    const onOpenQueue = vi.fn();
+    render(
+      <ProjectSidebar
+        projects={projects}
+        selectedId={null}
+        onSelect={vi.fn()}
+        role="editor"
+        activeView="review"
+        activeQueue="bundles"
+        reviewCounts={{ bundles: 4 }}
+        onOpenQueue={onOpenQueue}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /^Bundles to confirm/ });
+
+    expect(within(row).getByText("4")).toBeTruthy();
+    expect(row.getAttribute("aria-current")).toBe("page");
+
+    fireEvent.click(row);
+
+    expect(onOpenQueue).toHaveBeenCalledTimes(1);
+    expect(onOpenQueue).toHaveBeenCalledWith("bundles");
   });
 });

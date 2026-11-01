@@ -816,3 +816,42 @@ describe("Sidebar library rows", () => {
     ).toBeNull();
   });
 });
+
+describe("Sidebar review navigation", () => {
+  beforeEach(() => {
+    resetToasts();
+    listFoldersMock.mockReset();
+    listFoldersMock.mockResolvedValue(folders);
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("shows the shared review queue with its count and opens it", () => {
+    const onOpenQueue = vi.fn();
+
+    render(
+      <Sidebar
+        {...navProps}
+        selectedId={null}
+        onSelect={vi.fn()}
+        role="editor"
+        activeView="review"
+        activeQueue="bundles"
+        reviewCounts={{ bundles: 7 }}
+        onOpenQueue={onOpenQueue}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /^Bundles to confirm/ });
+
+    expect(within(row).getByText("7")).toBeTruthy();
+    expect(row.getAttribute("aria-current")).toBe("page");
+
+    fireEvent.click(row);
+
+    expect(onOpenQueue).toHaveBeenCalledTimes(1);
+    expect(onOpenQueue).toHaveBeenCalledWith("bundles");
+  });
+});

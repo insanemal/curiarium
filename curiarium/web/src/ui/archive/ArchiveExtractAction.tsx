@@ -24,7 +24,7 @@ type Props = {
 type Stage = "idle" | "listing" | "confirm" | "extracting" | "done" | "error";
 
 const DETAIL_BUTTON = "px-3 py-2 rounded-md border border-panel-strong text-sm disabled:opacity-60";
-// The shape `BundleDetectCard`'s per-row "Undo dismiss" button already uses.
+// A compact bordered row button, for a dense list row or a settings card.
 const ROW_BUTTON =
   "text-xs px-2 py-1 rounded-md border border-panel-strong self-start disabled:opacity-60";
 

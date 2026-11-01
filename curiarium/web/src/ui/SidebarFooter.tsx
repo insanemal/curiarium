@@ -1,9 +1,10 @@
 import { ScrollText, Settings as SettingsIcon } from "lucide-react";
 
 import { roleAtLeast, type Role } from "../lib/auth";
+import type { ActiveView } from "./views";
 
 type Props = {
-  activeView?: "library" | "settings" | "audit";
+  activeView?: ActiveView;
   onOpenSettings?: () => void;
   onOpenAudit?: () => void;
   /** `null` until `/me` answers; admin-only entries stay hidden until then. */

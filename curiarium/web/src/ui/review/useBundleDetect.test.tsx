@@ -1,22 +1,22 @@
 // @vitest-environment jsdom
+import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 
-vi.mock("../../lib/api", () => ({
-  UnauthorizedError: class UnauthorizedError extends Error {},
+vi.mock("../../lib/api/bundles", () => ({
   getBundleReport: vi.fn(),
   createBundles: vi.fn(),
   setBundleDismissed: vi.fn(),
 }));
 
 import {
-  UnauthorizedError,
   createBundles,
   getBundleReport,
   setBundleDismissed,
   type BundleDetectItem,
   type BundleReport,
-} from "../../lib/api";
+} from "../../lib/api/bundles";
+import { UnauthorizedError } from "../../lib/api/http";
 import { useBundleDetect } from "./useBundleDetect";
 
 const getBundleReportMock = vi.mocked(getBundleReport);
@@ -74,6 +74,15 @@ function makeReport(bundles: BundleDetectItem[] = []): BundleReport {
 
 const report = makeReport([makeBundle()]);
 
+/** A promise whose settlement the test drives, for ordering two responses. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(res => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   getBundleReportMock.mockReset();
   getBundleReportMock.mockResolvedValue(report);
@@ -88,19 +97,19 @@ afterEach(() => {
 });
 
 describe("useBundleDetect", () => {
-  it("fetches once with dismissed rows included when the section opens", async () => {
-    const { result } = renderHook(() => useBundleDetect({ section: "imports", enabled: true }));
+  it("fetches once with the full walk when the queue opens", async () => {
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
 
     await waitFor(() => expect(result.current.report).toEqual(report));
 
     expect(getBundleReportMock).toHaveBeenCalledTimes(1);
-    expect(getBundleReportMock).toHaveBeenCalledWith({ includeDismissed: true });
+    expect(getBundleReportMock).toHaveBeenCalledWith({ includeDismissed: true, limit: 1000 });
     expect(result.current.loading).toBe(false);
     expect(result.current.error).toBeNull();
   });
 
   it("stays inert while the role cannot write", async () => {
-    const { result } = renderHook(() => useBundleDetect({ section: "imports", enabled: false }));
+    const { result } = renderHook(() => useBundleDetect({ enabled: false }));
 
     // Give a request every chance to fire before asserting it never did.
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -109,32 +118,69 @@ describe("useBundleDetect", () => {
     expect(result.current.report).toBeNull();
   });
 
-  it("stays inert in every other settings section", async () => {
-    const { result } = renderHook(() => useBundleDetect({ section: "storage", enabled: true }));
+  it("walks the library once under StrictMode, and the report still lands", async () => {
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }), {
+      wrapper: React.StrictMode,
+    });
 
-    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(result.current.report).toEqual(report));
 
-    expect(getBundleReportMock).not.toHaveBeenCalled();
-  });
-
-  it("fetches again when the section is reopened, and never polls", async () => {
-    const { rerender } = renderHook(
-      ({ section }: { section: "storage" | "imports" }) =>
-        useBundleDetect({ section, enabled: true }),
-      { initialProps: { section: "storage" as "storage" | "imports" } },
-    );
-    expect(getBundleReportMock).not.toHaveBeenCalled();
-
-    rerender({ section: "imports" });
-    await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(1));
-
-    // No timer, no poll: the count stays at one while the section stays open.
-    await new Promise(resolve => setTimeout(resolve, 50));
     expect(getBundleReportMock).toHaveBeenCalledTimes(1);
   });
 
+  it("lets the newest request win, so a superseded response cannot land", async () => {
+    const first = deferred<BundleReport>();
+    const second = deferred<BundleReport>();
+    getBundleReportMock
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const older = makeReport([makeBundle({ key: "Older", title: "Older walk" })]);
+    const newer = makeReport([makeBundle({ key: "Newer", title: "Newer walk" })]);
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(1));
+
+    // A manual refresh starts while the first walk is still on the wire.
+    act(() => {
+      void result.current.refresh();
+    });
+    await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(2));
+
+    // The newer request answers first...
+    await act(async () => {
+      second.resolve(newer);
+    });
+    await waitFor(() => expect(result.current.report).toEqual(newer));
+
+    // ...and the older one's late answer is dropped.
+    await act(async () => {
+      first.resolve(older);
+    });
+
+    expect(result.current.report).toEqual(newer);
+  });
+
+  it("refetches on every re-entry, and never polls", async () => {
+    const { rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useBundleDetect({ enabled }),
+      { initialProps: { enabled: false } },
+    );
+    expect(getBundleReportMock).not.toHaveBeenCalled();
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(1));
+
+    rerender({ enabled: false });
+    rerender({ enabled: true });
+    await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(2));
+
+    // No timer, no poll: the count stays at two while the queue stays open.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(getBundleReportMock).toHaveBeenCalledTimes(2);
+  });
+
   it("creates and then refetches the report", async () => {
-    const { result } = renderHook(() => useBundleDetect({ section: "imports", enabled: true }));
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
     await waitFor(() => expect(result.current.report).toEqual(report));
 
     await act(async () => {
@@ -148,7 +194,7 @@ describe("useBundleDetect", () => {
   });
 
   it("dismisses and then refetches the report", async () => {
-    const { result } = renderHook(() => useBundleDetect({ section: "imports", enabled: true }));
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
     await waitFor(() => expect(result.current.report).toEqual(report));
 
     await act(async () => {
@@ -161,7 +207,7 @@ describe("useBundleDetect", () => {
   });
 
   it("keeps the show-dismissed toggle", async () => {
-    const { result } = renderHook(() => useBundleDetect({ section: "imports", enabled: true }));
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
     expect(result.current.showDismissed).toBe(false);
 
     act(() => {
@@ -174,7 +220,7 @@ describe("useBundleDetect", () => {
   it("turns a failed report into an error and never throws", async () => {
     getBundleReportMock.mockRejectedValue(new Error("boom"));
 
-    const { result } = renderHook(() => useBundleDetect({ section: "imports", enabled: true }));
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
 
     await waitFor(() => expect(result.current.error).toBe("Bundle detection is unavailable."));
     expect(result.current.report).toBeNull();
@@ -184,7 +230,7 @@ describe("useBundleDetect", () => {
   it("turns a failed create into an error that keeps the server's message", async () => {
     createBundlesMock.mockRejectedValue(new Error("A project with that name already exists"));
 
-    const { result } = renderHook(() => useBundleDetect({ section: "imports", enabled: true }));
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
     await waitFor(() => expect(result.current.report).toEqual(report));
 
     await act(async () => {
@@ -201,11 +247,25 @@ describe("useBundleDetect", () => {
     getBundleReportMock.mockRejectedValue(new UnauthorizedError());
     const onUnauthorized = vi.fn();
 
-    const { result } = renderHook(() =>
-      useBundleDetect({ section: "imports", enabled: true, onUnauthorized }),
-    );
+    const { result } = renderHook(() => useBundleDetect({ enabled: true, onUnauthorized }));
 
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1));
     expect(result.current.error).toBe("Bundle detection is unavailable.");
+  });
+
+  it("stamps lastRefreshedAt only on a successful fetch", async () => {
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    expect(result.current.lastRefreshedAt).toBeNull();
+
+    await waitFor(() => expect(result.current.report).toEqual(report));
+    expect(result.current.lastRefreshedAt).toEqual(expect.any(Number));
+    const stamped = result.current.lastRefreshedAt;
+
+    createBundlesMock.mockRejectedValue(new Error("nope"));
+    await act(async () => {
+      await result.current.create([{ key: "Moai statue", name: "Moai" }]);
+    });
+
+    expect(result.current.lastRefreshedAt).toBe(stamped);
   });
 });

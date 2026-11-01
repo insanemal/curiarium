@@ -1,11 +1,9 @@
 import type { AppSettings } from "../../lib/settings";
-import BundleDetectCard from "./BundleDetectCard";
 import FolderScanCard from "./FolderScanCard";
 import ImportCookiesCard from "./ImportCookiesCard";
 import ImportRunsCard from "./ImportRunsCard";
 import MountImportCard from "./MountImportCard";
 import SectionHeader from "./SectionHeader";
-import type { BundleDetectState } from "./useBundleDetect";
 import type { FolderScanState } from "./useFolderScan";
 import type { ImportRunsState } from "./useImportRuns";
 import type { MountImportSettingsState } from "./useMountImportSettings";
@@ -24,7 +22,6 @@ type Props = {
   isAdmin: boolean;
   canWrite: boolean;
   folderScan: FolderScanState;
-  bundleDetect: BundleDetectState;
   importRuns: ImportRunsState;
   makerworld: CookieDraft;
   thingiverse: CookieDraft;
@@ -38,7 +35,6 @@ export default function ImportsSection({
   isAdmin,
   canWrite,
   folderScan,
-  bundleDetect,
   importRuns,
   makerworld,
   thingiverse,
@@ -89,10 +85,6 @@ export default function ImportsSection({
           simply hides the scan card. The read-only runs card and the cookie
           cards (client-side preferences, not API writes) stay for a viewer. */}
       {canWrite && <FolderScanCard {...folderScan} />}
-
-      {/* Same role gate as the folder scan: creating a bundle is a CONTRIBUTE
-          write, and detection itself must never be fired for a viewer. */}
-      {canWrite && <BundleDetectCard state={bundleDetect} />}
 
       <div className="rounded-lg border border-panel bg-panel-soft p-4 flex flex-col gap-2">
         <label className="text-xs flex items-center gap-2">
