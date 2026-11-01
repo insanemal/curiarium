@@ -1503,6 +1503,23 @@ describe("AssetGrid missing assets", () => {
     await waitFor(() => expect(startLibraryScanMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(callsBefore + 1));
   });
+
+  it("reports every status the card Re-scan reads", async () => {
+    startLibraryScanMock.mockResolvedValue(idleScanStatus());
+    getLibraryScanStatusMock.mockResolvedValue(idleScanStatus());
+    const onScanStatus = vi.fn();
+
+    render(<AssetGrid canContribute canDelete theme="dark" onScanStatus={onScanStatus} />);
+
+    await screen.findByText(/File missing/i);
+    fireEvent.click(
+      within(openCardMenu(cardFor(missingAsset.id))).getByRole("menuitem", { name: "Re-scan" }),
+    );
+
+    // The POST's own return value and the status read that follows it.
+    await waitFor(() => expect(onScanStatus).toHaveBeenCalledTimes(2));
+    expect(onScanStatus).toHaveBeenCalledWith(idleScanStatus());
+  });
 });
 
 describe("AssetGrid bulk actions", () => {

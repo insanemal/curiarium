@@ -8,6 +8,7 @@ import {
 
 import {
   type Asset,
+  type LibraryScanStatus,
   UnauthorizedError,
   deletePreparedPrint,
   downloadAsset,
@@ -72,6 +73,12 @@ type AssetActionsOptions = {
    * have changed. Tag/meta edits and failed moves must not call it.
    */
   onAssetsFiled?: () => void;
+  /**
+   * Fires for each status this per-card Re-scan reads. The scan it starts is
+   * invisible to the queue's `useLibraryScan`, so without this the queue header
+   * and empty state keep describing the previous scan.
+   */
+  onScanStatus?: (status: LibraryScanStatus) => void;
 };
 
 export type AssetActionsApi = {
@@ -128,6 +135,7 @@ export function useAssetActions({
   onRequestDelete,
   onAddToProject,
   onAssetsFiled,
+  onScanStatus,
 }: AssetActionsOptions): AssetActionsApi {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
@@ -368,12 +376,20 @@ export function useAssetActions({
     if (rescanning) return;
     setRescanning(true);
     try {
-      await startLibraryScan();
+      const readStatus = async () => {
+        const status = await getLibraryScanStatus();
+        onScanStatus?.(status);
+        return status;
+      };
+      // The POST must land even when nobody is listening: an optional call
+      // would short-circuit its own argument, and the scan would never start.
+      const started = await startLibraryScan();
+      onScanStatus?.(started);
       const deadline = Date.now() + RESCAN_TIMEOUT_MS;
-      let status = await getLibraryScanStatus();
+      let status = await readStatus();
       while (status.running && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, RESCAN_POLL_INTERVAL_MS));
-        status = await getLibraryScanStatus();
+        status = await readStatus();
       }
       await refresh();
       // A scan changes the flagged set, so App's counts (sidebar badge, queue

@@ -90,6 +90,7 @@ function makeState(overrides: Partial<LibraryScanState> = {}): LibraryScanState 
     error: null,
     loaded: true,
     run: vi.fn(async () => {}),
+    adopt: vi.fn(),
     ...overrides,
   };
 }

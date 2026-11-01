@@ -602,6 +602,135 @@ describe("App missing queue coherence (Mf-1tx3)", () => {
     expect(document.body.textContent).not.toMatch(/is on disk/);
     expect(document.body.textContent).not.toMatch(/Every file an asset points at/);
   });
+
+  it("does not call a failed card Re-scan a clean disk", async () => {
+    // The queue's own entry read is clean; the card's Re-scan cannot check
+    // every file, so the previous all-clear must not survive it.
+    getQueueStatusMock.mockResolvedValue(makeStatus({ finished_at: 100, failed: 0, missing: 1 }));
+    let pinnedReads = 0;
+    listAssetsMock.mockImplementation(async params => {
+      if (params?.missing !== true) return { items: [], hasMore: false };
+      pinnedReads += 1;
+      // The file came back, so the refresh after the scan returns no rows.
+      return { items: pinnedReads === 1 ? [missingAsset] : [], hasMore: false };
+    });
+    getAssetCountsMock
+      .mockResolvedValueOnce({ total: 9, unfiled: 0, missing: 1 })
+      .mockResolvedValue({ total: 9, unfiled: 0, missing: 0 });
+    startCardScanMock.mockResolvedValue(makeStatus({ running: true, finished_at: null }));
+    getCardScanStatusMock.mockResolvedValue(
+      makeStatus({
+        finished_at: 200,
+        missing: 0,
+        failed: 2,
+        errors: ["a.stl: boom", "b.stl: boom"],
+      }),
+    );
+
+    await renderApp();
+    await openQueue();
+    await queueReady();
+    await waitFor(() => expect(badgeText()).toBe("1"));
+
+    const card = await findCard(missingAsset.id);
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Re-scan" }));
+
+    await waitFor(() =>
+      expect(document.querySelector(`[data-asset-id="${missingAsset.id}"]`)).toBeNull(),
+    );
+
+    const block = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-missing-empty="failed"]');
+      if (!found) throw new Error("the failed empty-state is not rendered");
+      return found;
+    });
+    expect(block.textContent).toMatch(/did not finish/);
+    expect(document.body.textContent).not.toMatch(/is on disk/);
+    expect(document.body.textContent).not.toMatch(/Every file an asset points at/);
+    expect(document.body.textContent).not.toMatch(/every check passed/);
+    expect(document.body.textContent).toMatch(/could not check every file/);
+  });
+
+  it("does not call a card scan clean while it has not finished", async () => {
+    getQueueStatusMock.mockResolvedValue(makeStatus({ finished_at: 100, failed: 0, missing: 1 }));
+    let pinnedReads = 0;
+    listAssetsMock.mockImplementation(async params => {
+      if (params?.missing !== true) return { items: [], hasMore: false };
+      pinnedReads += 1;
+      return { items: pinnedReads === 1 ? [missingAsset] : [], hasMore: false };
+    });
+    getAssetCountsMock
+      .mockResolvedValueOnce({ total: 9, unfiled: 0, missing: 1 })
+      .mockResolvedValue({ total: 9, unfiled: 0, missing: 0 });
+    startCardScanMock.mockResolvedValue(makeStatus({ running: true, finished_at: null }));
+    getCardScanStatusMock
+      // The card's first read: still walking, so its loop parks in the sleep.
+      .mockResolvedValueOnce(makeStatus({ running: true, finished_at: null }))
+      // The next read: the scan stopped but never recorded a finish.
+      .mockResolvedValue(makeStatus({ running: false, finished_at: null, failed: 0 }));
+
+    await renderApp();
+    await openQueue();
+    await queueReady();
+    await waitFor(() => expect(badgeText()).toBe("1"));
+
+    const card = await findCard(missingAsset.id);
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Re-scan" }));
+      await flush();
+
+      // A scan that has not finished is `unknown`: the clean entry read is stale.
+      expect(document.body.textContent).not.toMatch(/every check passed/);
+      expect(document.body.textContent).toMatch(/No completed scan is known/);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      await flush();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // No `finished_at` is no completed scan at all, so the empty queue stays
+    // unknown rather than becoming the clean entry read again.
+    const block = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-missing-empty="unknown"]');
+      if (!found) throw new Error("the unknown empty-state is not rendered");
+      return found;
+    });
+    expect(block.textContent).toMatch(/Nothing is flagged as missing yet/);
+    expect(document.body.textContent).not.toMatch(/every check passed/);
+    expect(document.body.textContent).not.toMatch(/is on disk/);
+  });
+
+  it("still calls a clean card Re-scan clean", async () => {
+    // The anti-over-correction guard: a card Re-scan that checked every file
+    // must clear the queue's previous "could not check" verdict.
+    getQueueStatusMock.mockResolvedValue(makeStatus({ finished_at: 100, failed: 2, missing: 1 }));
+    listAssetsMock.mockImplementation(async params => ({
+      items: params?.missing === true ? [missingAsset] : [],
+      hasMore: false,
+    }));
+    getAssetCountsMock.mockResolvedValue({ total: 9, unfiled: 0, missing: 1 });
+    startCardScanMock.mockResolvedValue(makeStatus({ running: true, finished_at: null }));
+    getCardScanStatusMock.mockResolvedValue(makeStatus({ finished_at: 200, failed: 0, missing: 1 }));
+
+    await renderApp();
+    await openQueue();
+    await queueReady();
+    await waitFor(() => expect(badgeText()).toBe("1"));
+    expect(await screen.findByText(/could not check every file/)).toBeTruthy();
+
+    const card = await findCard(missingAsset.id);
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Re-scan" }));
+
+    await waitFor(() => expect(document.body.textContent).toMatch(/every check passed/));
+    // The file is still missing, so the row remains and no empty state appears.
+    expect(document.querySelector(`[data-asset-id="${missingAsset.id}"]`)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Every file an asset points at is on disk/);
+  });
 });
 
 describe("App missing queue counts and coordinator (Mf-1tx3)", () => {

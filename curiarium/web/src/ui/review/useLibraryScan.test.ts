@@ -314,6 +314,52 @@ describe("useLibraryScan run", () => {
   });
 });
 
+describe("adopt (a scan the card's Re-scan started)", () => {
+  it("adopts a status the card read, so the outcome follows that scan", async () => {
+    readReturns(finishedStatus);
+
+    const { result } = renderHook(() => useLibraryScan({ enabled: true }));
+    await settle();
+
+    act(() => result.current.adopt(makeStatus({ finished_at: 200, failed: 2 })));
+
+    expect(result.current.scan?.failed).toBe(2);
+    expect(result.current.loaded).toBe(true);
+    expect(scanOutcome(result.current.scan)).toBe("failed");
+  });
+
+  it("does not announce a scan the card started a second time", async () => {
+    readReturns(finishedStatus);
+    const onAssetsChanged = vi.fn();
+    const onFoldersChanged = vi.fn();
+
+    const { result } = renderHook(() =>
+      useLibraryScan({ enabled: true, onAssetsChanged, onFoldersChanged }),
+    );
+    await settle();
+
+    act(() => result.current.adopt(makeStatus({ finished_at: 200 })));
+    await settle();
+
+    // The card path refetches the grid and the counts itself.
+    expect(onFoldersChanged).not.toHaveBeenCalled();
+    expect(onAssetsChanged).not.toHaveBeenCalled();
+  });
+
+  it("does not arm a second poll for a scan the card owns", async () => {
+    readReturns(finishedStatus);
+
+    const { result } = renderHook(() => useLibraryScan({ enabled: true }));
+    await settle();
+    expect(getStatus).toHaveBeenCalledTimes(1);
+
+    act(() => result.current.adopt(runningStatus()));
+    await tick(10_000);
+
+    expect(getStatus).toHaveBeenCalledTimes(1);
+  });
+});
+
 // The rule the queue's empty state depends on: ONLY a clean scan may claim a
 // clean disk, so every "we cannot tell" input has to answer `unknown`.
 describe("scanOutcome (only a clean scan may claim a clean disk)", () => {

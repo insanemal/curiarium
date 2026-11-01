@@ -30,6 +30,13 @@ export type LibraryScanState = {
    *  and a failure is swallowed, so this is the only way to say "we never knew". */
   loaded: boolean;
   run: () => Promise<void>;
+  /**
+   * Accepts a status for a scan somebody else started and polled - the per-card
+   * Re-scan - so the panel and `scanOutcome` describe the scan that produced the
+   * rows on screen instead of the previous one. It does not announce: the card
+   * path refetches the grid and the counts itself.
+   */
+  adopt: (status: LibraryScanStatus) => void;
 };
 
 const POLL_MS = 1500;
@@ -54,6 +61,11 @@ export function scanOutcome(scan: LibraryScanStatus | null): MissingScanOutcome 
  * while a scan is running. That entry read is the point of this hook: the old
  * settings-owned version never fetched an initial status, so the missing-flag
  * set was `unknown` until somebody pressed Rescan.
+ *
+ * A scan the per-card Re-scan starts is invisible to this hook, so the grid
+ * reports its statuses through `adopt`: the panel and the outcome follow that
+ * scan, but the hook neither polls it a second time nor announces a completion
+ * the card path already handled.
  */
 export function useLibraryScan({
   enabled,
@@ -69,6 +81,9 @@ export function useLibraryScan({
   const [pollTick, setPollTick] = React.useState(0);
   // One entry read per activation. See the hook's doc comment.
   const walked = React.useRef(false);
+  // A scan the card's Re-Scan owns: this hook arms no timer for it and does not
+  // announce its completion twice, but the panel and `scanOutcome` follow it.
+  const adopted = React.useRef(false);
   // The baseline for the announcement: seeded on the first successful read,
   // kept across activations so a finished scan announces exactly once.
   const seeded = React.useRef(false);
@@ -97,6 +112,8 @@ export function useLibraryScan({
     if (!enabled) {
       // Leaving the queue only resets the entry guard, so a re-entry refetches.
       walked.current = false;
+      // A re-entry hands ownership back to this hook; a later adopt sets it again.
+      adopted.current = false;
       return;
     }
     // React.StrictMode invokes this effect twice for the same activation; a
@@ -108,7 +125,7 @@ export function useLibraryScan({
   }, [enabled, readStatus]);
 
   React.useEffect(() => {
-    if (!enabled || !scan?.running) return;
+    if (!enabled || adopted.current || !scan?.running) return;
     // Re-arms on every successful read because `scan` gets a new identity, and
     // on `pollTick` when a failed read changed nothing.
     const timer = window.setTimeout(() => void readStatus(), POLL_MS);
@@ -138,6 +155,8 @@ export function useLibraryScan({
     setBusy(true);
     setError(null);
     try {
+      // This scan IS this hook's to poll and to announce.
+      adopted.current = false;
       setScan(await startLibraryScan());
       setLoaded(true);
     } catch (err) {
@@ -153,5 +172,17 @@ export function useLibraryScan({
     }
   }, [onUnauthorized]);
 
-  return { scan, busy, error, loaded, run };
+  const adopt = React.useCallback((next: LibraryScanStatus) => {
+    adopted.current = true;
+    // The card path already announced this completion by refetching the grid
+    // and the counts, so move the baseline BEFORE the state lands: the
+    // announcement effect must not fire both signals a second time.
+    if (!next.running && next.finished_at != null) {
+      announced.current = next.finished_at;
+    }
+    setScan(next);
+    setLoaded(true);
+  }, []);
+
+  return { scan, busy, error, loaded, run, adopt };
 }

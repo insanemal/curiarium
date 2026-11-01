@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-import { type Asset, type BatchMetaChange, UnauthorizedError, deleteAsset } from "../../lib/api";
+import { type Asset, type BatchMetaChange, type LibraryScanStatus, UnauthorizedError, deleteAsset } from "../../lib/api";
 import { AssetNotFoundError } from "../../lib/api/assets";
 import { dropIds } from "../../lib/bulkUi";
 import { chunkRows, colsForWidth } from "../../lib/virtualGrid";
@@ -78,6 +78,11 @@ type Props = {
    * bump `assetsVersion`, so App needs this signal to refresh `/assets/counts`.
    */
   onAssetsFiled?: () => void;
+  /**
+   * Fires for each status the per-card Re-scan reads, so the missing queue's
+   * panel and empty state describe the scan that produced its rows.
+   */
+  onScanStatus?: (status: LibraryScanStatus) => void;
 };
 
 function errorMessage(err: unknown, fallback: string): string {
@@ -108,6 +113,7 @@ export default function AssetGrid({
   onNavigateFolder,
   onProjectsChanged,
   onAssetsFiled,
+  onScanStatus,
 }: Props) {
   const isProject = projectId != null;
   const [previewItem, setPreviewItem] = useState<Asset | null>(null);
@@ -250,6 +256,7 @@ export default function AssetGrid({
     onRequestDelete: setDeleteTargets,
     onAddToProject: openProjectPicker,
     onAssetsFiled,
+    onScanStatus,
   });
 
   // One request per path: a single asset needs its file name confirmed (the

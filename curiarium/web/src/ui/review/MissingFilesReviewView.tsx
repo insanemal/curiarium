@@ -52,7 +52,10 @@ const SCAN_LABELS: Record<MissingScanOutcome, string> = {
  * missing filter. `Reset` clears tags and creator only, for the same reason.
  *
  * `AssetGrid` cannot report when its own list settled, so the header says what
- * the scan knows rather than when a fetch finished.
+ * the scan knows rather than when a fetch finished. A card-initiated Re-scan
+ * reports the statuses it polls back through `state.adopt`, so the header and
+ * the empty state follow the scan that produced the rows rather than the last
+ * scan this hook read itself.
  */
 export default function MissingFilesReviewView({
   state,
@@ -89,6 +92,7 @@ export default function MissingFilesReviewView({
         canDelete={canDelete}
         assetsVersion={assetsVersion}
         onAssetsFiled={onAssetsFiled}
+        onScanStatus={state.adopt}
         onUnauthorized={onUnauthorized}
         slicerSettings={slicerSettings}
         engravingSettings={engravingSettings}
