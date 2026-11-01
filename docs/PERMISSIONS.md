@@ -284,11 +284,11 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | GET    | `/asset/{asset_id}/prepared-print`      | download a prepared print |
 | GET    | `/thumb/{asset_id}.jpg`                 | thumbnail |
 | POST   | `/file-grants`                          | mints a short-lived read-only signed file grant; nothing mutates |
-| GET    | `/assets`                               | list assets |
+| GET    | `/assets`                               | list assets; `missing=true` scopes the listing to the rows a scan flagged (`missing_since IS NOT NULL`), the filter behind REVIEW → Missing files |
 | GET    | `/assets/delete-preview`                | pure SELECT that counts a bulk delete, and reports whether a pre-delete snapshot will be taken |
 | GET    | `/assets/counts`                        | pure SELECT: the whole library, the library-root and the flagged-missing counts the sidebar labels show |
-| GET    | `/tags`                                 | list tags |
-| GET    | `/creators`                             | list the distinct creator facet |
+| GET    | `/tags`                                 | list tags; the same `missing=true` scopes the facet to the queue's own set, so a chip cannot count a different set than the grid beside it |
+| GET    | `/creators`                             | list the distinct creator facet; the same `missing=true` scopes it to the queue's own set, so a chip cannot count a different set than the grid beside it |
 | POST   | `/download/zip`                         | POST-for-download: it builds a temp zip and streams it, nothing is stored |
 | GET    | `/folders`                              | list folders |
 | GET    | `/folder/{folder_id}/delete-preview`    | pure SELECT that counts what a delete would remove |
@@ -624,7 +624,8 @@ sessions stay valid.
   `ui/settings/Settings.tsx`). That is honesty, not enforcement: the API
   remains the control, and every hidden or ungated control is still refused by
   it.
-* **Write surfaces are gated client-side, as two capabilities since Mf-01f0.**
+* **Write surfaces are gated client-side, as three capabilities: `canContribute`
+  and `canDelete` since `Mf-01f0`, and `canPurgeTrash` since `Mf-rz5k`.**
   The `contribute` and `write` thresholds live in one helper,
   `roleAtLeast(role, ...)` (`lib/auth.ts`), and the app shell derives both once
   in `ui/App.tsx` from the same `/me` role cache:
@@ -637,15 +638,21 @@ sessions stay valid.
   both. `ui/UploadQueuePanel.tsx` is rendered by `App` only when
   `canContribute` is set. `ui/Sidebar.tsx` receives `role` and derives both
   capabilities locally, and `ui/settings/Settings.tsx` is configuration only:
-  it derives no write capability at all. The one mutating work surface left,
-  the local folder-scan panel, lives in `ui/review/ImportsReviewView.tsx`, which
-  receives `canWrite={canDelete}` from `App`: the panel creates the top-level
-  folder (`POST /folder`, `write`) and uploads the selected files
-  (`POST /upload`, `contribute`), so its write half decides the threshold and
-  it is hidden, not disabled, below `editor`. One threshold in one helper
-  rather than a comparison per surface. Since `Mf-rz5k` there is a third
-  capability: `canPurgeTrash = roleAtLeast(role, "admin")`, derived in
-  `ui/App.tsx` from the same `/me` role, gating only the Empty trash button and
+  it derives no write capability at all. REVIEW's own mutating surfaces each
+  take the capability of the route they call: the missing queue's per-card
+  Re-scan (`POST /library/scan`, `write`) and Forget
+  (`DELETE /asset/{asset_id}`, `write`) render only when `canDelete`, the
+  bundle queue's create and dismiss are gated per row at `require_contribute`,
+  and Empty trash needs `canPurgeTrash`. The local folder-scan panel in
+  `ui/review/ImportsReviewView.tsx` is the one exception: it receives
+  `canWrite={canDelete}` and is hidden, not disabled, below `editor`, although
+  both of its calls - creating the top-level folder (`POST /folders`) and
+  storing the selected files (`POST /upload`) - are `contribute`. Its gate is
+  one rank stricter than its routes, so it shows nothing the API would deny,
+  while a contributor is not offered a surface whose calls the API would have
+  allowed. One threshold in one helper rather than a comparison per surface.
+  That third capability is `canPurgeTrash = roleAtLeast(role, "admin")`, derived
+  in `ui/App.tsx` from the same `/me` role, gating only the Empty trash button and
   its dialog in REVIEW → Trash, because `GET /trash` is `read` while
   `POST /trash/purge` is `admin` - and MFA-gated by `enforce_admin_mfa` after the
   rank check. It too is hidden, not disabled, so a viewer, a contributor or an
@@ -672,10 +679,10 @@ sessions stay valid.
   not a write). They still lose folder rename and move (and therefore folder
   retagging), asset rename, moving an asset between folders, folder delete,
   asset delete, supporting-file delete, prepared-print delete, batch move and
-  batch delete, the local folder-scan panel (REVIEW → Imports running, because
-  creating its top-level folder is a `write`) and snapshot actions. The client
-  is still not the boundary: a stale or tampered role cache only hides or shows
-  a button, it cannot change what the API allows.
+  batch delete, the local folder-scan panel (REVIEW → Imports running, hidden
+  below `editor` although both of its calls are `contribute`) and snapshot
+  actions. The client is still not the boundary: a stale or tampered role cache
+  only hides or shows a button, it cannot change what the API allows.
 * **No direct-visit not-permitted state is needed for the contribute or write
   surfaces.** Both capabilities only show or hide controls inside views every
   role may open. There is no client router and no contribute-only or write-only

@@ -5,7 +5,11 @@ import { formatReviewCount } from "./useReviewCounts";
 type Props = {
   title: string;
   explanation: string;
-  /** Rows that need a decision. `null` = not known yet, rendered as a dash. */
+  /**
+   * The queue's own number: decisions for bundles, `0` or `1` for imports (`1`
+   * while a run walks), flagged rows for missing files, entries for trash.
+   * `null` = not known yet, rendered as a dash.
+   */
   count: number | null;
   /** What the count means in words, e.g. "3 bundles awaiting a decision". */
   countTitle: string;

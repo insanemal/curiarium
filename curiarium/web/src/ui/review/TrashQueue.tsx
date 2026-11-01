@@ -18,8 +18,8 @@ const SECONDARY_BUTTON =
   "text-xs px-2.5 py-1.5 rounded-md border border-panel-strong disabled:opacity-60";
 
 /**
- * The Trash queue: the card that used to sit at the bottom of Settings →
- * Storage, promoted to a full-width queue (ADR 0011, slice 4).
+ * The Trash queue: the card that used to sit at the bottom of Settings' Storage
+ * Structure section, promoted to a full-width queue (ADR 0011, slice 4).
  *
  * Every fetch and mutation lives in `useTrash`; this view is presentational and
  * its only local state is whether the purge dialog is open.

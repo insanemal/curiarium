@@ -61,8 +61,8 @@ destination model, the count rule, the role threshold and the fetch policy.
    Projects mode and the two sidebars cannot drift apart. Switching mode does
    **not** close an open queue (the group is shared, so the operator's place
    survives); library navigation - selecting a folder or the unfiled pile,
-   opening a project, Settings' "Scan now" - still returns to the library,
-   because those are browsing actions.
+   opening a project, Imports running's "Scan now" - still returns to the
+   library, because those are browsing actions.
 
 3. **A queue is a header, a queue-specific toolbar, and list + detail.** The
    shared part is `ui/review/ReviewQueueView.tsx`: title, count, one-line
@@ -220,21 +220,27 @@ destination model, the count rule, the role threshold and the fetch policy.
     so no control can drop it. `unfiled` is the counter-example that taught this:
     it is a per-call override, and a per-call override is a droppable pin - one
     refresh that leaves it out silently widens the scope. The pin buys the queue
-    the whole of `AssetGrid`: the same virtualised list, selection and bulk bar,
-    keyboard operation, previews and card actions, all of them already proven in
-    the library, under a scope that cannot be escaped. What the toolbar keeps is
-    what only narrows - search, sort, tag chips, the creator facet and "not in
-    any project" - and `Reset` clears tags and creator only. The folder chrome
-    (breadcrumbs, folder tiles, the uploader, drag/drop) is closed in this mode,
-    because a breadcrumb would navigate out of the queue and a missing file is
-    not a place to drop a new one.
+    the whole of `AssetGrid`: the same grid - the flat branch's virtualised
+    list, and the grouped `File type`/`Folder` sorts' 24-card sections with
+    "Show all N", exactly as in the library - plus selection and bulk bar,
+    keyboard operation, previews and card actions, all of them already proven
+    in the library, under a scope that cannot be escaped. What the toolbar
+    keeps is what only narrows - search, sort, tag chips, the creator facet and
+    "not in any project" - and `Reset` clears tags and creator only. The folder
+    chrome (breadcrumbs, folder tiles, the uploader, drag/drop) is closed in
+    this mode, because a breadcrumb would navigate out of the queue and a
+    missing file is not a place to drop a new one.
 
 14. **An empty queue states what is known, not what is hoped.** The empty state
     has three forms, not two, chosen by `scanOutcome` from the advisory status:
     `clean` only when a scan completed and reported no failures, `failed` when it
     reported some, and `unknown` when no scan has completed this session, one is
-    still running, or the advisory status read failed and was swallowed. "Every
-    file an asset points at is on disk." renders for `clean` alone. `unknown`
+    still running, or the advisory status read failed and was swallowed. The
+    status is not only the one the hook read itself: a per-card Re-scan starts
+    its own scan, so it reports every status it polls back through
+    `useLibraryScan.adopt`, and the panel and this outcome follow the scan that
+    actually produced the rows rather than the previous one. "Every file an
+    asset points at is on disk." renders for `clean` alone. `unknown`
     stays flag-truth - "No missing files flagged", "nothing is flagged as
     missing yet" - because an unknown scan is not evidence that the disk is
     whole. `failed` says the last scan did not finish and the list may be
@@ -305,11 +311,15 @@ destination model, the count rule, the role threshold and the fetch policy.
   sources** and holds what configuration actually is: mount-import settings, the
   remember-cookies preference and the two import-cookie workarounds. Run history
   and the local folder scan are work and live in REVIEW → Imports running.
-- A viewer now has a REVIEW group with exactly one row. `GET /imports/runs` is
-  `require_read`, so the run history it could already read from Settings moved
-  with the work instead of disappearing; a contributor sees the same run surface,
-  counters, errors and Refresh, and loses only the folder panel, which creates
-  folders (`write`) and uploads (`contribute`).
+- A viewer's REVIEW group has three rows - Imports running, Missing files and
+  Trash - because each of those queues is gated at its own READ route. `GET
+  /imports/runs` is `require_read`, so the run history it could already read
+  from Settings moved with the work instead of disappearing; a contributor sees
+  the same run surface, counters, errors and Refresh, and loses only the folder
+  panel, which is hidden below `editor` although both of its calls - create the
+  top-level folder (`POST /folders`) and upload the selection (`POST /upload`) -
+  are `contribute`: a client gate one rank stricter than its routes, kept as it
+  is by this ADR rather than lowered to their threshold.
 - Two limitations are accepted and recorded rather than smuggled. While a run is
   walking and the operator navigates away from the queue, the poll continues
   until that run stops - a read the shell would have to re-issue anyway, and the
@@ -361,9 +371,9 @@ destination model, the count rule, the role threshold and the fetch policy.
   counts - and so does a **partial** bulk delete, whose successful removals used
   to leave the sidebar on the old number. That fix reaches back: a plain single
   delete carried the same staleness before this slice.
-- A viewer now has a second REVIEW row, and it is a read surface the old
-  placement hid: `GET /trash` is READ, so the admin-only Settings section was
-  hiding a queue every role may open. REVIEW → Trash renders for a viewer, a
+- Trash is the third of those rows, and it is a read surface the old placement
+  hid: `GET /trash` is READ, so the admin-only Settings section was hiding a
+  queue every role may open. REVIEW → Trash renders for a viewer, a
   contributor and an editor - rows, sizes, total, header count and Refresh - and
   only the Empty trash control is absent.
 - The trash badge costs no request at app load and never polls. `GET /trash`
@@ -385,15 +395,17 @@ destination model, the count rule, the role threshold and the fetch policy.
   No restore control was added and none should appear - restoring is file-level
   and manual by design, which is what the queue's explanation says: "Restoring
   is file-level: move an entry back into the storage folder, then rescan the
-  library." - and a repo-wide grep for "Settings → Storage" now finds only the
-  two test files that assert it is gone.
+  library." - and a grep for "Settings → Storage" under `curiarium/web/src` now
+  finds only the two test files that assert it is gone.
 - Two limitations are inherited and recorded rather than claimed fixed. The
   shared `useAssetList` has no newest-wins request sequence and no
   React.StrictMode guard, so under StrictMode the missing queue issues two list
   fetches; the library behaves the same way and this slice did not touch that
   hook's fetch policy, so a follow-up is owed. The StrictMode claim this ADR does
-  make is narrower than it sounds: it covers `useLibraryScan`'s `walked` ref,
-  which keeps `GET /library/scan` to one read per activation, and nothing else.
+  make is narrower than it sounds: it covers the four queue hooks' own `walked`
+  refs - `useBundleDetect`, `useImportRuns`, `useLibraryScan` and `useTrash` -
+  each of which keeps its own entry read to one per activation. The shared
+  `useAssetList` above is the exception.
   And only the flat branch of the grid is virtualised: the grouped (folder/type)
   branch remains a 24-card cap with a "Show all N" control, preserved as it was
   at HEAD, because retrofitting group virtualisation is a different ticket.
@@ -451,8 +463,10 @@ no API, permission, audit, migration or schema change is involved.
   1000}`, one refetch after a create and one after a dismiss with the badge and the
   view both updating from that single new report, no timer firing while the
   operator sits in the queue, one refetch on re-entry, exactly one walk under
-  `React.StrictMode`, no REVIEW group and no walk at all for a viewer, the queue
-  surviving a Files/Projects switch, and Back to library returning to the library.
+  `React.StrictMode`, no bundle row and no bundle walk at all for a viewer (the
+  imports, missing and trash rows are read surfaces a viewer does have), the
+  queue surviving a Files/Projects switch, and Back to library returning to the
+  library.
   `ui/review/useBundleDetect.test.tsx` pins the same rules at the hook: one walk
   per activation, a superseded response never overwriting a newer one, no polling,
   and one refetch per mutation.
@@ -470,8 +484,9 @@ no API, permission, audit, migration or schema change is involved.
   truncated report whose rows look complete is `null`, a dismissed row and an
   already-created row are each excluded once, a row that is both is not subtracted
   twice, and blocked rows count.
-- `ui/review/ReviewNav.test.tsx` pins the role gate (contributor and above only),
-  the dash for an unknown count, and `aria-current` on exactly the open queue;
+- `ui/review/ReviewNav.test.tsx` pins each row's own role gate - `contributor`
+  for bundles, `viewer` for imports, missing and trash - the dash for an
+  unknown count, and `aria-current` on exactly the open queue;
   `Sidebar.test.tsx` and `ProjectSidebar.test.tsx` each prove the group renders in
   that mode.
 - `ui/Settings.test.tsx` is the removal proof: for an editor, a contributor and a
@@ -500,8 +515,9 @@ no API, permission, audit, migration or schema change is involved.
   1 while a run is running and 0 once it is finished, and the Imports row renders
   for a viewer as well as an editor while no bundle row appears for a viewer.
 - `src/lib/noNativeDialogs.test.ts` and `src/lib/palette.test.ts` stay green: the
-  queue uses `ConfirmDialog`-free interactions, and every new rule comes from the
-  existing `--mv-*` tokens.
+  queues raise no native dialog - the queue-native confirmations are
+  `ConfirmDialog`, and asset deletion keeps its own typed `AssetDeleteDialog` -
+  and every new rule comes from the existing `--mv-*` tokens.
 
 At the time of landing: web 1356 tests in 117 files became 1451 in 122; the API
 suite (2326 passed, 1 skipped), the route count (100) and the schema (14) are
@@ -521,14 +537,21 @@ pin (no status read and no pinned listing before the queue opens, exactly one
 coherence cases - a rescan refetching the grid and the counts once, a Forget
 dropping the badge and the header together, a reappeared file leaving the queue,
 a failed scan never rendering the all-clear - the badge/header equality from one
-fetch, the en dash for an unknown count, and the viewer/editor gates.
+fetch, the en dash for an unknown count, and the viewer/editor gates. After
+integration review it also pins the card-initiated scan: a per-card Re-scan
+reports every status it polls through `onScanStatus` into
+`useLibraryScan.adopt`, so a Re-scan that could not check every file, or that
+has no `finished_at` yet, cannot leave the all-clear on screen, while one that
+completed cleanly still reads clean.
 `ui/review/MissingFilesReviewView.test.tsx` covers the queue states (loading, a
 retryable error with Try again, empty, empty after a filter, scan-failed-empty,
 scan-unknown), `LibraryScanPanel.test.tsx` and `useLibraryScan.test.ts` cover the
-moved panel and its hook, and `ui/AssetGrid.test.tsx` proves every toolbar
-control keeps the pin, that the flat branch stays virtualised and that the
-grouped branch stays a cap, and `ui/Settings.test.tsx` is the removal proof by
-call: no rescan surface and no `GET /library/scan` for any role.
+moved panel and its hook, and the hook's tests now cover `adopt` too: the
+outcome follows the adopted status, it announces nothing a second time, and it
+arms no second poll. `ui/AssetGrid.test.tsx` proves every toolbar control keeps
+the pin, that the flat branch stays virtualised and that the grouped branch
+stays a cap, and `ui/Settings.test.tsx` is the removal proof by call: no rescan
+surface and no `GET /library/scan` for any role.
 `src/lib/palette.test.ts` (WCAG AA) and `src/lib/noNativeDialogs.test.ts` stay
 unmodified and green, and every new rule uses the existing `--mv-*` tokens.
 
@@ -577,8 +600,11 @@ This ADR is superseded if any of the following becomes true:
   addressable rather than local view state;
 - a work queue returns to Settings, or Settings grows a second full-width queue
   surface for anything other than configuration;
-- the badge starts polling, or starts being computed from a source other than the
-  state the open queue shows;
+- a badge fetches or polls on its own account - its own request or timer -
+  instead of being read from the state its queue already holds, or starts being
+  computed from a source other than the state the open queue shows (the imports
+  count riding the running-run poll is not this, and the trash badge reads on
+  entry and never polls);
 - an unknown count starts rendering as `0`, or a truncated report starts
   producing a number;
 - the REVIEW group is rendered differently by the two sidebars, or one mode stops
@@ -590,24 +616,24 @@ This ADR is superseded if any of the following becomes true:
 - bundles become assets and the queue is rewritten onto `AssetGrid`, or the
   queue's list needs virtualisation past its report limit;
 - the imports queue polls while no run is running, stops polling while one is, or
-  fetches the run history for a queue that is not open;
-- an unknown imports count starts rendering as `0`, or a finished run stops being
-  shown under the idle line;
-- the folder-scan panel becomes visible below `editor`, or the run history moves
-  back into Settings;
+  issues an entry fetch for a queue that is not open (a poll that outlives
+  navigation mid-run is the accepted limitation recorded under Consequences,
+  not this);
+- a finished run stops being shown under the idle line;
+- the folder-scan panel becomes visible below `editor` - its gate is one rank
+  stricter than its own `contribute` routes, and is kept as it is;
 - the missing filter becomes client-side filtering of a fetched page, or
   `/assets/counts` goes back to two numbers;
 - the missing pin becomes overridable per call, or moves out of the listing
   hook's closure;
 - an unknown or failed scan status renders the all-clear copy;
 - the grouped branch is claimed as virtualised without being virtualised;
-- the rescan moves back into Settings, or the UI gate for it moves off
-  `POST /library/scan`'s WRITE threshold in either direction;
-- the Trash row disappears below `admin`, or any purge control becomes visible or
-  available below `admin` - in particular if `canPurgeTrash` is replaced by
-  `canDelete`;
-- the trash queue reads at app load, or its badge starts polling instead of
-  waiting for the queue to be opened;
+- the UI gate for the rescan moves off `POST /library/scan`'s WRITE threshold in
+  either direction;
+- the Trash row's gate rises above `viewer`, so it stops being a viewer surface,
+  or any purge control becomes visible or available below `admin` - in
+  particular if `canPurgeTrash` is replaced by `canDelete`;
+- the trash queue reads at app load instead of on entry;
 - the empty sentence renders after a failed read or after a failed purge;
 - a purge result box reports a total failure (`purged: 0` with a non-empty
   `failed[]`) as success, or a partial failure hides the rows that survived;

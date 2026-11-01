@@ -21,10 +21,11 @@ type Props = {
  * is mounted, so leaving the queue discards a selection and the last status
  * line, as it did inside Settings.
  *
- * The folder panel is hidden, not disabled, below `editor`: creating the
- * top-level folder is `POST /folder` (write) and storing the files is
- * `POST /upload` (contribute). A contributor still sees the run, its counters,
- * errors and Refresh - moving the UI broadens no write permission.
+ * The folder panel is hidden, not disabled, below `editor`, which is one rank
+ * stricter than the two `contribute` routes it calls - creating the top-level
+ * folder (`POST /folders`) and storing the files (`POST /upload`). A contributor
+ * still sees the run, its counters, errors and Refresh - moving the UI broadens
+ * no write permission.
  */
 export default function ImportsReviewView({
   state,
