@@ -122,6 +122,8 @@ describe("AssetGrid in project mode", () => {
       q: "",
       project_id: "p1",
       folder_id: undefined,
+      // A project has no folder axis, so the Unfiled pile is files-only too.
+      unfiled: undefined,
       not_in_project: undefined,
     });
   });

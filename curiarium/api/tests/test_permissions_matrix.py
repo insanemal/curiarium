@@ -1,7 +1,7 @@
 """Per-route permission sweeps driven by `permissions.ROUTE_PERMISSIONS`.
 
 Why this file exists: Mf-2nbc enforces a level with a *per-route dependency*, and
-the only thing that keeps 97 hand-written declarations honest is a test that
+the only thing that keeps 98 hand-written declarations honest is a test that
 visits every route at every role. The sweeps below are parametrised from
 `permissions.ROUTE_PERMISSIONS`, so that table is both the documentation and the
 test plan: add a route without classifying it and
@@ -586,6 +586,11 @@ def call_get_assets_delete_preview(
     return client.get("/assets/delete-preview", params={"asset_ids": ids.asset_id}, headers=headers)
 
 
+def call_get_asset_counts(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    # Two unfiltered SELECT counts; no request argument and nothing to stub.
+    return client.get("/assets/counts", headers=headers)
+
+
 def call_tags(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     return client.get("/tags", headers=headers)
 
@@ -1121,6 +1126,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/file-grants"): call_file_grants,
     ("GET", "/assets"): call_assets,
     ("GET", "/assets/delete-preview"): call_get_assets_delete_preview,
+    ("GET", "/assets/counts"): call_get_asset_counts,
     ("GET", "/tags"): call_tags,
     ("GET", "/creators"): call_creators,
     ("POST", "/download/zip"): call_download_zip,
@@ -1226,6 +1232,7 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("POST", "/file-grants"): 200,
     ("GET", "/assets"): 200,
     ("GET", "/assets/delete-preview"): 200,
+    ("GET", "/assets/counts"): 200,
     ("GET", "/tags"): 200,
     ("GET", "/creators"): 200,
     ("POST", "/download/zip"): 200,
@@ -1425,7 +1432,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 97 routes - 11 public / 34 read / 21 contribute / 13 write / 18 admin.
+    """The matrix is pinned at 98 routes - 11 public / 35 read / 21 contribute / 13 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1435,10 +1442,10 @@ def test_the_matrix_is_the_documented_size() -> None:
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 97, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 98, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 34,
+        permissions.READ: 35,
         permissions.CONTRIBUTE: 21,
         permissions.WRITE: 13,
         permissions.ADMIN: 18,

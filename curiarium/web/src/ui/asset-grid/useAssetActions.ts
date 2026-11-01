@@ -66,6 +66,12 @@ type AssetActionsOptions = {
   /** Opens the grid's delete dialog for exactly these targets. */
   onRequestDelete: (assets: Asset[]) => void;
   onAddToProject: (ids: string[]) => void;
+  /**
+   * Fires after a move lands. The grid reconciles moves locally and never bumps
+   * `assetsVersion`, so this is App's only signal that the unfiled count may
+   * have changed. Tag/meta edits and failed moves must not call it.
+   */
+  onAssetsFiled?: () => void;
 };
 
 export type AssetActionsApi = {
@@ -121,6 +127,7 @@ export function useAssetActions({
   activeCreator,
   onRequestDelete,
   onAddToProject,
+  onAssetsFiled,
 }: AssetActionsOptions): AssetActionsApi {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
@@ -277,6 +284,9 @@ export function useAssetActions({
       const updated = await updateAssetFolder(id, folder_id);
       // A move never introduces a tag, so there is nothing to union here.
       reconcileAsset(updated, before, startOffset);
+      // Only a successful move changes which pile a row belongs to; the local
+      // reconcile never bumps `assetsVersion`, so counts need this signal.
+      onAssetsFiled?.();
     } catch (err) {
       if (handleApiError(err, err instanceof Error ? err.message : "Folder update failed. Please try again.")) return;
       setItems(before);

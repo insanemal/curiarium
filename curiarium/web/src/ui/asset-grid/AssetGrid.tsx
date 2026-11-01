@@ -33,12 +33,20 @@ type Props = {
   /** Delete capability: destroy, rename and move. Required, no default. */
   canDelete: boolean;
   folderId?: string | null;
+  /** Files mode: show only the library root's assets (the Unfiled row). */
+  unfiled?: boolean;
   /** When set, the grid shows this project's assets and hides all folder chrome. */
   projectId?: string | null;
   /** Display-only context for project mode (the caller renders the heading). */
   projectName?: string | null;
   foldersVersion?: number;
   assetsVersion?: number;
+  /**
+   * App-owned counts generation. Accepted for parity with `assetsVersion`, but
+   * deliberately triggers no refetch here: a counts bump only means a move was
+   * reconciled locally, and refetching the listing for it would be a new fetch.
+   */
+  countsVersion?: number;
   onUnauthorized?: () => void;
   slicerSettings?: SlicerSettings;
   engravingSettings?: EngravingSettings;
@@ -53,6 +61,11 @@ type Props = {
    * so App can refresh the counts it owns (it bumps `assetsVersion`).
    */
   onProjectsChanged?: () => void;
+  /**
+   * A single-card or bulk move landed. Moves are reconciled locally and never
+   * bump `assetsVersion`, so App needs this signal to refresh `/assets/counts`.
+   */
+  onAssetsFiled?: () => void;
 };
 
 function errorMessage(err: unknown, fallback: string): string {
@@ -64,10 +77,14 @@ export default function AssetGrid({
   canContribute,
   canDelete,
   folderId,
+  unfiled = false,
   projectId,
   projectName,
   foldersVersion = 0,
   assetsVersion = 0,
+  // App passes its counts generation down; the grid itself refetches nothing on
+  // it (see the Props comment). The underscore keeps lint honest about that.
+  countsVersion: _countsVersion,
   onUnauthorized,
   slicerSettings,
   engravingSettings,
@@ -76,6 +93,7 @@ export default function AssetGrid({
   scrollElementRef,
   onNavigateFolder,
   onProjectsChanged,
+  onAssetsFiled,
 }: Props) {
   const isProject = projectId != null;
   const [previewItem, setPreviewItem] = useState<Asset | null>(null);
@@ -116,6 +134,7 @@ export default function AssetGrid({
     setOffset,
     hasMore,
     notInProject,
+    unfiled: isUnfiled,
     queryRef,
     refresh,
     loadMore,
@@ -125,6 +144,7 @@ export default function AssetGrid({
     handleApiError,
   } = useAssetList({
     folderId,
+    unfiled,
     projectId,
     foldersVersion,
     assetsVersion,
@@ -168,6 +188,7 @@ export default function AssetGrid({
     handleApiError,
     onUnauthorized,
     onAddToProject: openProjectPicker,
+    onAssetsFiled,
   });
 
   const {
@@ -212,6 +233,7 @@ export default function AssetGrid({
     activeCreator,
     onRequestDelete: setDeleteTargets,
     onAddToProject: openProjectPicker,
+    onAssetsFiled,
   });
 
   // One request per path: a single asset needs its file name confirmed (the
@@ -467,6 +489,7 @@ export default function AssetGrid({
         sortKey={sortKey}
         folderGroups={folderGroups}
         typeGroups={typeGroups}
+        unfiled={isUnfiled}
         collapsedGroups={collapsedGroups}
         expandedGroups={expandedGroups}
         toggleGroup={toggleGroup}

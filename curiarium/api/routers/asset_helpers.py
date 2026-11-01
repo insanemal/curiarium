@@ -28,7 +28,13 @@ def apply_asset_filters(
     not_in_project: bool = False,
     creator: Optional[str] = None,
     added_by: Optional[str] = None,
+    unfiled: bool = False,
 ):
+    # An absent `folder_id` means "no folder filter", so "assets at the library
+    # root" needs its own flag. Both at once is a contradiction, not an AND: the
+    # caller asked for one folder and for everything outside every folder.
+    if unfiled and folder_id:
+        raise HTTPException(status_code=400, detail="unfiled and folder_id cannot be combined")
     if q:
         qlike = f"%{q}%"
         stmt = stmt.where(
@@ -39,6 +45,9 @@ def apply_asset_filters(
             | (Asset.creator.like(qlike))
             | (Asset.collection.like(qlike))
         )
+    if unfiled:
+        stmt = stmt.where(Asset.folder_id.is_(None))
+    # Direct children only, not recursive: the child folders are their own levels.
     if folder_id:
         stmt = stmt.where(Asset.folder_id == folder_id)
     # An exact creator filter, case-insensitive like the facet's dedupe. A

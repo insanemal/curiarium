@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from metadata_validation import normalise_creator, normalise_name, normalise_notes
 
 __all__ = [
+  "AssetCountsOut",
   "AssetCreate",
   "AssetFolderUpdate",
   "AssetMetaUpdate",
@@ -32,6 +33,18 @@ class AssetCreate(BaseModel):
   title: Optional[str] = None
   notes: Optional[str] = None
   tags: List[str] = []
+
+
+class AssetCountsOut(BaseModel):
+  """Two library-wide numbers for the sidebar, never a filtered picture.
+
+  `total` is every asset row; `unfiled` is just the library root, the rows with
+  no folder. Both deliberately ignore the listing's q/tags/creator filters: a
+  filtered count would make the root label claim something other than the root.
+  """
+
+  total: int
+  unfiled: int
 
 
 class PreparedPrintOut(BaseModel):

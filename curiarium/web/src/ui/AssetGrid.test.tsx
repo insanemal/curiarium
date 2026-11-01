@@ -380,9 +380,11 @@ function rectOf(top: number, height: number): DOMRect {
 
 type HarnessProps = {
   folderId?: string | null;
+  unfiled?: boolean;
   foldersVersion?: number;
   assetsVersion?: number;
   onNavigateFolder?: (id: string | null) => void;
+  onAssetsFiled?: () => void;
 };
 
 /**
@@ -1016,6 +1018,88 @@ describe("files-mode \"not in any project\" filter", () => {
     expect(listTagsMock.mock.calls[0][0]).toEqual(
       expect.objectContaining({ not_in_project: false }),
     );
+  });
+});
+
+describe("files-mode Unfiled pile", () => {
+  beforeEach(() => {
+    resetToasts();
+    listAssetsMock.mockReset();
+    listAssetsMock.mockResolvedValue({ items: assets, hasMore: false });
+    listCreatorsMock.mockReset();
+    listCreatorsMock.mockResolvedValue([]);
+    fileUrlMock.mockClear();
+  });
+
+  afterEach(cleanup);
+
+  it("scopes the grid, the tag chips and the creators to the library root", async () => {
+    render(<AssetGrid canContribute canDelete theme="dark" unfiled />);
+    await screen.findByText("Calibration cube");
+
+    await waitFor(() => expect(listCreatorsMock).toHaveBeenCalled());
+    const params = callQuery(0);
+    expect(params.unfiled).toBe(true);
+    expect(params.folder_id).toBeUndefined();
+    expect(listTagsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ unfiled: true, folder_id: undefined }),
+    );
+    expect(listCreatorsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ unfiled: true, folder_id: undefined }),
+    );
+  });
+
+  it("sends neither an unfiled flag nor a folder id for All files", async () => {
+    render(<AssetGrid canContribute canDelete theme="dark" />);
+    await screen.findByText("Calibration cube");
+
+    await waitFor(() => expect(listCreatorsMock).toHaveBeenCalled());
+    const params = callQuery(0);
+    expect(params.unfiled).not.toBe(true);
+    expect(params.folder_id).toBeUndefined();
+    expect(listTagsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ unfiled: false, folder_id: undefined }),
+    );
+    expect(listCreatorsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ unfiled: false, folder_id: undefined }),
+    );
+  });
+
+  it("says the pile is empty honestly instead of leaving the page blank", async () => {
+    listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+
+    render(<AssetGrid canContribute canDelete theme="dark" unfiled />);
+
+    expect(await screen.findByText("Nothing unfiled")).toBeTruthy();
+    expect(screen.getByText("Every asset is in a folder.")).toBeTruthy();
+  });
+
+  it("does not call an empty filtered result an empty pile", async () => {
+    listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+    // One chip is enough to exercise the tag branch without any asset to tag.
+    listTagsMock.mockResolvedValue(["pla"]);
+
+    render(<AssetGrid canContribute canDelete theme="dark" unfiled />);
+    await screen.findByText("Nothing unfiled");
+
+    // A tag filter that matches nothing is an empty result, not an empty pile.
+    fireEvent.click(await screen.findByRole("button", { name: "pla" }));
+    await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(2));
+    expect(callQuery(1).tags).toEqual(["pla"]);
+    expect(screen.queryByText("Nothing unfiled")).toBeNull();
+    expect(screen.queryByText("Every asset is in a folder.")).toBeNull();
+
+    // The same holds for a search: the pile is only "empty" when nothing narrows it.
+    const searchInput = screen.getByPlaceholderText(
+      "Search title, filename, notes...",
+    ) as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "cube" } });
+    fireEvent.keyDown(searchInput, { key: "Enter" });
+
+    await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(3));
+    expect(callQuery(2).q).toBe("cube");
+    expect(screen.queryByText("Nothing unfiled")).toBeNull();
+    expect(screen.queryByText("Every asset is in a folder.")).toBeNull();
   });
 });
 
@@ -1758,6 +1842,92 @@ describe("AssetGrid bulk actions", () => {
     await waitFor(() => expect(screen.queryByText("Calibration cube")).toBeNull());
     expect(screen.queryByText("Spool holder")).toBeNull();
     expect(listAssetsMock.mock.calls.length).toBe(callsBefore);
+  });
+});
+
+describe("files-updated signal", () => {
+  beforeEach(() => {
+    resetToasts();
+    listAssetsMock.mockReset();
+    listFoldersMock.mockReset();
+    listFoldersMock.mockResolvedValue([{ id: "f1", name: "Folder one", tags: [] }]);
+    batchMoveAssetsMock.mockReset();
+    updateAssetFolderMock.mockReset();
+    fileUrlMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    cleanup();
+  });
+
+  /** The bare asset, with its detail dialog's folder picker open. */
+  async function openMovePicker(onAssetsFiled: () => void) {
+    const bare = { ...assets[0], folder_id: null };
+    updateAssetFolderMock.mockResolvedValue({ ...bare, folder_id: "f1" });
+    listAssetsMock.mockResolvedValue({ items: [bare], hasMore: false });
+
+    renderHarness({ onAssetsFiled });
+    await screen.findByText("Calibration cube");
+    await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
+
+    const dialog = openCardDialog(cardFor("a1"), "Edit details…");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Folder:/ }));
+    return within(dialog).getByRole("treeitem", { name: "Folder one" });
+  }
+
+  it("reports a single-card move only after the server confirms it", async () => {
+    const onAssetsFiled = vi.fn();
+    const target = await openMovePicker(onAssetsFiled);
+
+    fireEvent.click(target);
+
+    await waitFor(() => expect(updateAssetFolderMock).toHaveBeenCalledWith("a1", "f1"));
+    await waitFor(() => expect(onAssetsFiled).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not report a move the server refused", async () => {
+    const onAssetsFiled = vi.fn();
+    updateAssetFolderMock.mockRejectedValue(new Error("nope"));
+    listAssetsMock.mockResolvedValue({ items: [{ ...assets[0], folder_id: null }], hasMore: false });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    renderHarness({ onAssetsFiled });
+    await screen.findByText("Calibration cube");
+    await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
+
+    const dialog = openCardDialog(cardFor("a1"), "Edit details…");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Folder:/ }));
+    fireEvent.click(within(dialog).getByRole("treeitem", { name: "Folder one" }));
+
+    await waitFor(() => expect(consoleError).toHaveBeenCalled());
+    expect(updateAssetFolderMock).toHaveBeenCalledWith("a1", "f1");
+    expect(onAssetsFiled).not.toHaveBeenCalled();
+  });
+
+  it("reports a bulk move once its request lands", async () => {
+    const onAssetsFiled = vi.fn();
+    listAssetsMock.mockResolvedValue({ items: assets, hasMore: false });
+    batchMoveAssetsMock.mockImplementation(async (ids, folderId) => ({
+      updated: assets
+        .filter(item => ids.includes(item.id))
+        .map(item => ({ ...item, folder_id: folderId })),
+      failed: [],
+    }));
+
+    renderHarness({ onAssetsFiled });
+    await screen.findByText("Calibration cube");
+    await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
+
+    for (const box of cardCheckboxes().slice(0, 2)) fireEvent.click(box);
+    const bar = within(screen.getByTestId("bulk-action-bar"));
+    fireEvent.click(bar.getByRole("button", { name: /^Target folder:/ }));
+    const picker = within(screen.getByRole("dialog", { name: "Target folder" }));
+    fireEvent.click(picker.getByRole("treeitem", { name: "Folder one" }));
+    fireEvent.click(bar.getByRole("button", { name: "Move" }));
+
+    await waitFor(() => expect(batchMoveAssetsMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onAssetsFiled).toHaveBeenCalledTimes(1));
   });
 });
 

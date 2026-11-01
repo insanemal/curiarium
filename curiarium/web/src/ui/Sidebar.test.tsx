@@ -40,6 +40,14 @@ import { uploadEntriesToFolder } from "../lib/uploadTree";
 import { resetToasts } from "../lib/toast";
 
 const listFoldersMock = vi.mocked(listFolders);
+/** The two library rows' props; individual tests override what they assert. */
+const navProps = {
+  unfiled: false,
+  totalCount: null,
+  unfiledCount: null,
+  onSelectUnfiled: vi.fn(),
+};
+
 const createFolderMock = vi.mocked(createFolder);
 const updateFolderMock = vi.mocked(updateFolder);
 const deleteFolderMock = vi.mocked(deleteFolder);
@@ -100,6 +108,7 @@ describe("Sidebar folder deletion", () => {
 
     render(
       <Sidebar
+        {...navProps}
         selectedId="f1"
         onSelect={onSelect}
         onFoldersChanged={onFoldersChanged}
@@ -137,6 +146,7 @@ describe("Sidebar folder deletion", () => {
 
     render(
       <Sidebar
+        {...navProps}
         selectedId="f2"
         onSelect={onSelect}
         onFoldersChanged={onFoldersChanged}
@@ -191,7 +201,7 @@ async function renderTree(selectedId: string | null = null) {
   listFoldersMock.mockReset();
   listFoldersMock.mockResolvedValue(treeFolders);
   const onSelect = vi.fn();
-  const view = render(<Sidebar selectedId={selectedId} onSelect={onSelect} />);
+  const view = render(<Sidebar {...navProps} selectedId={selectedId} onSelect={onSelect} />);
   await screen.findByText("Nested");
   return { onSelect, ...view };
 }
@@ -362,7 +372,7 @@ describe("Sidebar error reporting", () => {
 
     render(
       <>
-        <Sidebar selectedId={null} onSelect={vi.fn()} />
+        <Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} />
         <Toaster />
       </>,
     );
@@ -401,7 +411,7 @@ describe("Sidebar write controls by role", () => {
   }
 
   it("a viewer sees no write controls but keeps the read actions", async () => {
-    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="viewer" />);
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="viewer" />);
     await screen.findByText("Keep");
 
     expect(screen.queryByTitle("New folder")).toBeNull();
@@ -414,7 +424,7 @@ describe("Sidebar write controls by role", () => {
   });
 
   it("an editor sees the create, rename and delete controls", async () => {
-    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="editor" />);
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="editor" />);
     await screen.findByText("Keep");
 
     expect(screen.getByTitle("New folder")).toBeTruthy();
@@ -429,7 +439,7 @@ describe("Sidebar write controls by role", () => {
   // The persona the split exists for: creating is a contribute while renaming
   // and destroying are not, so one flag cannot describe this role.
   it("a contributor keeps the create surfaces and loses rename and delete", async () => {
-    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="contributor" />);
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="contributor" />);
     await screen.findByText("Keep");
 
     expect(screen.getByTitle("New folder")).toBeTruthy();
@@ -448,7 +458,7 @@ describe("Sidebar write controls by role", () => {
   });
 
   it("opens the create dialog for a contributor", async () => {
-    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="contributor" />);
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="contributor" />);
     await screen.findByText("Keep");
 
     fireEvent.click(screen.getByTitle("New folder"));
@@ -459,22 +469,22 @@ describe("Sidebar write controls by role", () => {
 
   it("offers the empty state's create button to every role that may contribute", async () => {
     listFoldersMock.mockResolvedValue([]);
-    let { unmount } = render(<Sidebar selectedId={null} onSelect={vi.fn()} role="viewer" />);
+    let { unmount } = render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="viewer" />);
 
     await screen.findByText("No folders yet");
     expect(screen.queryByRole("button", { name: "Create your first folder" })).toBeNull();
 
     unmount();
-    ({ unmount } = render(<Sidebar selectedId={null} onSelect={vi.fn()} role="contributor" />));
+    ({ unmount } = render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="contributor" />));
     expect(await screen.findByRole("button", { name: "Create your first folder" })).toBeTruthy();
 
     unmount();
-    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="editor" />);
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="editor" />);
     expect(await screen.findByRole("button", { name: "Create your first folder" })).toBeTruthy();
   });
 
   it("a viewer's drop on a folder row starts no upload and shows no drop target", async () => {
-    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="viewer" />);
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="viewer" />);
     await screen.findByText("Keep");
 
     const row = treeRow("f1");
@@ -489,7 +499,7 @@ describe("Sidebar write controls by role", () => {
   });
 
   it("an editor's drop on a folder row shows the target and uploads there", async () => {
-    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="editor" />);
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="editor" />);
     await screen.findByText("Keep");
 
     const row = treeRow("f1");
@@ -506,7 +516,7 @@ describe("Sidebar write controls by role", () => {
   // Dropping files creates assets, which is a contribute: the contributor
   // persona must keep the drop target the editor has.
   it("a contributor's drop on a folder row shows the target and uploads there", async () => {
-    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="contributor" />);
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="contributor" />);
     await screen.findByText("Keep");
 
     const row = treeRow("f1");
@@ -552,7 +562,7 @@ describe("Sidebar new folder parent", () => {
   }
 
   it("creates three toolbar folders at the root even while a folder is selected", async () => {
-    render(<Sidebar selectedId="f1" onSelect={vi.fn()} role="editor" />);
+    render(<Sidebar {...navProps} selectedId="f1" onSelect={vi.fn()} role="editor" />);
     await screen.findByText("Keep");
 
     for (const [i, name] of ["One", "Two", "Three"].entries()) {
@@ -571,7 +581,7 @@ describe("Sidebar new folder parent", () => {
   });
 
   it("pre-selects the folder when a subfolder is created from its menu", async () => {
-    render(<Sidebar selectedId="f1" onSelect={vi.fn()} role="editor" />);
+    render(<Sidebar {...navProps} selectedId="f1" onSelect={vi.fn()} role="editor" />);
     await screen.findByText("Keep");
 
     fireEvent.click(within(folderMenu("Keep")).getByText("Subfolder"));
@@ -582,7 +592,7 @@ describe("Sidebar new folder parent", () => {
   });
 
   it("lets an explicit location in the picker override the default", async () => {
-    render(<Sidebar selectedId="f1" onSelect={vi.fn()} role="editor" />);
+    render(<Sidebar {...navProps} selectedId="f1" onSelect={vi.fn()} role="editor" />);
     await screen.findByText("Keep");
 
     fireEvent.click(screen.getByTitle("New folder"));
@@ -600,7 +610,7 @@ describe("Sidebar new folder parent", () => {
   });
 
   it("keeps the Create folder dialog open when Escape closes the picker", async () => {
-    render(<Sidebar selectedId="f1" onSelect={vi.fn()} role="editor" />);
+    render(<Sidebar {...navProps} selectedId="f1" onSelect={vi.fn()} role="editor" />);
     await screen.findByText("Keep");
 
     fireEvent.click(screen.getByTitle("New folder"));
@@ -623,7 +633,7 @@ describe("Sidebar new folder parent", () => {
       { id: "d", name: "Delta", tags: [] },
     ];
     listFoldersMock.mockResolvedValue(nested);
-    render(<Sidebar selectedId={null} onSelect={vi.fn()} role="editor" />);
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="editor" />);
     await screen.findByText("Alpha");
 
     fireEvent.click(within(folderMenu("Alpha")).getByText(/Rename & edit/));
@@ -672,6 +682,7 @@ describe("Sidebar footer navigation", () => {
 
     render(
       <Sidebar
+        {...navProps}
         selectedId={null}
         onSelect={vi.fn()}
         onOpenAudit={onOpenAudit}
@@ -693,6 +704,7 @@ describe("Sidebar footer navigation", () => {
   it("hides the audit entry from a viewer", () => {
     render(
       <Sidebar
+        {...navProps}
         selectedId={null}
         onSelect={vi.fn()}
         onOpenAudit={vi.fn()}
@@ -703,5 +715,104 @@ describe("Sidebar footer navigation", () => {
 
     expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Audit log" })).toBeNull();
+  });
+});
+
+describe("Sidebar library rows", () => {
+  beforeEach(() => {
+    listFoldersMock.mockReset();
+    listFoldersMock.mockResolvedValue(treeFolders);
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("names the two piles honestly and drops the old ROOT badge", async () => {
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} />);
+
+    const allFiles = screen.getByRole("button", { name: "All files" });
+    const unfiled = screen.getByRole("button", { name: "Unfiled" });
+
+    expect(allFiles).not.toBe(unfiled);
+    expect(allFiles.getAttribute("aria-label")).toBe("All files");
+    expect(unfiled.getAttribute("aria-label")).toBe("Unfiled");
+    // The old badge called "everything" the root; nothing may claim ROOT now.
+    expect(screen.queryByText(/ROOT/)).toBeNull();
+  });
+
+  it("selects All files through onSelect(null) and Unfiled through its own handler", () => {
+    const onSelect = vi.fn();
+    const onSelectUnfiled = vi.fn();
+
+    render(
+      <Sidebar
+        {...navProps}
+        selectedId={null}
+        onSelect={onSelect}
+        onSelectUnfiled={onSelectUnfiled}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "All files" }));
+
+    expect(onSelect).toHaveBeenCalledWith(null);
+    expect(onSelectUnfiled).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Unfiled" }));
+
+    expect(onSelectUnfiled).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks exactly one row as the current pile", () => {
+    const { unmount } = render(
+      <Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} />,
+    );
+
+    expect(screen.getByRole("button", { name: "All files" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "Unfiled" }).getAttribute("aria-current")).toBeNull();
+
+    unmount();
+    render(<Sidebar {...navProps} selectedId={null} unfiled onSelect={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "All files" }).getAttribute("aria-current")).toBeNull();
+    expect(screen.getByRole("button", { name: "Unfiled" }).getAttribute("aria-current")).toBe("page");
+  });
+
+  it("leaves both rows unselected while a folder is open", () => {
+    render(<Sidebar {...navProps} selectedId="f1" onSelect={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "All files" }).className).not.toContain("is-selected");
+    expect(screen.getByRole("button", { name: "Unfiled" }).className).not.toContain("is-selected");
+  });
+
+  it("renders each count beside its own row", () => {
+    render(
+      <Sidebar
+        {...navProps}
+        selectedId={null}
+        onSelect={vi.fn()}
+        totalCount={42}
+        unfiledCount={3}
+      />,
+    );
+
+    const allFiles = screen.getByRole("button", { name: "All files" });
+    const unfiled = screen.getByRole("button", { name: "Unfiled" });
+
+    expect(within(allFiles).getByText("42")).toBeTruthy();
+    expect(within(unfiled).getByText("3")).toBeTruthy();
+    expect(within(allFiles).queryByText("3")).toBeNull();
+  });
+
+  it("shows no number at all until the counts arrive", () => {
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} />);
+
+    expect(
+      screen.getByRole("button", { name: "All files" }).querySelector(".sidebar-count"),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Unfiled" }).querySelector(".sidebar-count"),
+    ).toBeNull();
   });
 });
