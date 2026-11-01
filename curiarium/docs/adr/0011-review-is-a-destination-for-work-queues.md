@@ -5,9 +5,9 @@
 **Accepted:** 2026-11-01
 
 **Implementation:** ticket `Mf-f3c2` (slice 1 of the information-architecture
-change `Mf-q7vs`: the bundle queue), ticket `Mf-xe4l` (slice 2: imports running)
-and ticket `Mf-1tx3` (slice 3: missing files). Slice 4 (trash) adopts this shell
-without re-deciding it.
+change `Mf-q7vs`: the bundle queue), ticket `Mf-xe4l` (slice 2: imports running),
+ticket `Mf-1tx3` (slice 3: missing files) and ticket `Mf-rz5k` (slice 4: the
+trash queue).
 
 **Extended:** ADR 0010, whose report is the first tenant of this surface.
 
@@ -74,9 +74,11 @@ destination model, the count rule, the role threshold and the fetch policy.
 
 4. **One count coordinator.** `ui/review/useReviewCounts.ts` derives every review
    badge from state the queue already holds - for bundles, the report from
-   `useBundleDetect` - and returns a `ReviewCounts` shape (`{ bundles: number |
-   null; imports: number | null }`) that each slice extends with its own source.
-   It is a closed type on purpose: a new queue has to be added in one place.
+   `useBundleDetect` - and returns a `ReviewCounts` shape that is now closed over
+   all four queues: `{ bundles, imports, missing, trash }`, each `number | null`
+   with one source per key - the bundle report, `useImportRuns`, the
+   `/assets/counts` read App already performs, and `useTrash`. It is a closed
+   type on purpose: a new queue has to be added in one place.
    There is no second fetch for a badge and no per-badge timer. The rule that
    matters is that a count is `null` - rendered as an en dash - when it has not
    been fetched yet, when the first fetch failed, and when the report is
@@ -87,6 +89,13 @@ destination model, the count rule, the role threshold and the fetch policy.
    repo has twice shipped a label that lied about an empty list (the `ROOT`
    badge and the Unfiled empty state that claimed "Every asset is in a folder"
    under a filter), and a badge is the same class of label.
+
+   The `trash` key is the one badge whose unknown has a price attached. `GET
+   /trash` sizes every entry with a recursive `os.walk`, so the key stays `null`
+   - the same en dash - until the queue's first successful read, and only then
+   becomes the entry count. That is the `–`-until-known rule unchanged; what is
+   new is that resolving the unknown costs a walk, which is why the read waits
+   for the queue to be opened instead of running at app load.
 
    The imports count has to decide an unknown of its own. `run === null` cannot
    distinguish "the first fetch failed" from "no run has ever happened", so
@@ -247,6 +256,49 @@ destination model, the count rule, the role threshold and the fetch policy.
     line and the failure report stay visible to any reader - a viewer reads the
     queue and the last scan's outcome and simply cannot start a walk.
 
+16. **The trash queue is readable; emptying it is not.** `GET /trash` is READ and
+    `POST /trash/purge` is ADMIN, and `authorize()` runs `enforce_admin_mfa`
+    after the rank check, so the purge is MFA-gated as well. The nav row's
+    threshold is its route's threshold (decision 7), so it is
+    `minRole: "viewer"` - `GET /trash` is READ - while the purge gets a third
+    capability of its own,
+    `canPurgeTrash = roleAtLeast(role, "admin")`, derived in `ui/App.tsx` from
+    the same `/me` role. `canDelete` is deliberately not reused: it is
+    `editor`/WRITE, one rank below the purge route, so borrowing it would have
+    offered an admin action to editors. The Empty trash button and its dialog are
+    hidden, not disabled, below `admin` (decisions 7 and 15), and a viewer, a
+    contributor or an editor keeps the queue, its rows, the sizes, the total, the
+    header count and Refresh.
+
+    Two failure channels, not one. `useTrash` keeps `error` (a failed READ) apart
+    from `purgeError` (a failed PURGE); the card funnelled both into one channel,
+    which would let a failed read render as a failed purge and a failed purge
+    leave an empty list that then read as "The trash is empty". So the empty
+    sentence is gated on `!error`, on `trash !== null` and on the last purge not
+    having failed - a `purgeError`, or a `purgeResult` with a non-empty
+    `failed[]`. A total purge failure arrives as HTTP 200 with `purged: 0` and a
+    non-empty `failed[]`, so the result box says "Nothing was removed." rather
+    than "0 entries removed" and never reads as success; a partial purge says
+    "Some entries could not be removed:" above one red line per failure, and the
+    rows that survived stay in the list. A failed purge also keeps the dialog
+    open and states the reason inside it; cancelling turns that same reason into
+    a notice, so a transient failure is neither lost nor repeated as a success.
+    `assertOk` maps every 403 to "Your role does not allow this action.", so the
+    purge's MFA gate surfaces as that message exactly as it did in the card, and
+    the queue does not attempt step-up.
+
+    The confirmation moved to `ConfirmDialog`, and that is a fix rather than a
+    port. The card's hand-rolled overlay declared `role="dialog"`,
+    `aria-modal` and `aria-labelledby` but had no Escape handler and no initial
+    focus, so a keyboard user's focus stayed behind the overlay and the dialog
+    could not be dismissed from the keyboard at all. `ConfirmDialog` has both,
+    and the purge added three things to it: `body?: ReactNode`, rendered without
+    the `<p>` wrapper when it is a node so the reason can be a run of
+    paragraphs; `busyLabel`, so the wait names the purge instead of "Working...";
+    and `confirmDisabled`, which moves autofocus to Cancel when the snapshot
+    refuses the purge, so focus stays inside the dialog instead of landing on a
+    disabled button.
+
 ## Consequences
 
 - Settings is configuration only. Its imports section is relabelled **Import
@@ -295,8 +347,11 @@ destination model, the count rule, the role threshold and the fetch policy.
   library crosses it the queue needs `useVirtualRows`, which this slice does not
   take on.
 - Settings is configuration only down to its Storage section, in the same sense
-  the imports slice established: the path template, the capabilities card, the
-  snapshot card and the trash card. The rescan, its explainer, its "Last scan:
+  the imports slice established: the path template, the capabilities card and the
+  snapshot card. The trash card has left as well - `ui/TrashCard.tsx` became
+  `ui/review/TrashQueue.tsx`, rewritten on the slice-1 shell and owned by
+  `ui/review/useTrash.ts`, and `StorageSection` no longer renders it - and its
+  queue lives in REVIEW → Trash. The rescan, its explainer, its "Last scan:
   N new, N known, N missing, N failed" line and its failure report are work and
   live in REVIEW → Missing files.
 - The missing count adds no request and no timer. It is one number from the
@@ -306,6 +361,32 @@ destination model, the count rule, the role threshold and the fetch policy.
   counts - and so does a **partial** bulk delete, whose successful removals used
   to leave the sidebar on the old number. That fix reaches back: a plain single
   delete carried the same staleness before this slice.
+- A viewer now has a second REVIEW row, and it is a read surface the old
+  placement hid: `GET /trash` is READ, so the admin-only Settings section was
+  hiding a queue every role may open. REVIEW → Trash renders for a viewer, a
+  contributor and an editor - rows, sizes, total, header count and Refresh - and
+  only the Empty trash control is absent.
+- The trash badge costs no request at app load and never polls. `GET /trash`
+  sizes every entry with a recursive `os.walk`, so the count is an en dash until
+  the queue is first opened, then the entry count, refreshed after a purge. It
+  is `ReviewCounts`' required `trash` key, so the nav badge and the queue header
+  read the same state and cannot disagree.
+- A failed read and a failed purge are no longer the same event. `useTrash`
+  keeps `error` and `purgeError` apart, so a failed read cannot render as a
+  failed purge and a failed purge cannot leave an empty list reading as "The
+  trash is empty"; and because a total failure is HTTP 200 with `purged: 0`, the
+  result box says "Nothing was removed." instead of "0 entries removed".
+- The purge confirmation is keyboard-complete. The card's overlay had no Escape
+  handler and no initial focus; `ConfirmDialog` has both, and its
+  `confirmDisabled` moves autofocus to Cancel when the snapshot refuses the
+  purge, so focus never falls behind the overlay.
+- The delete dialogs name the new destination: `ui/AssetDeleteDialog.tsx` and
+  `ui/FolderDeleteDialog.tsx` say REVIEW → Trash instead of Settings → Storage.
+  No restore control was added and none should appear - restoring is file-level
+  and manual by design, which is what the queue's explanation says: "Restoring
+  is file-level: move an entry back into the storage folder, then rescan the
+  library." - and a repo-wide grep for "Settings → Storage" now finds only the
+  two test files that assert it is gone.
 - Two limitations are inherited and recorded rather than claimed fixed. The
   shared `useAssetList` has no newest-wins request sequence and no
   React.StrictMode guard, so under StrictMode the missing queue issues two list
@@ -358,7 +439,9 @@ purely additive - one extra query parameter (`missing`) on `GET /assets` and its
 two facets, and one extra count field on `GET /assets/counts` - so a revert loses
 only the queue and that filter, and no existing caller's request changes shape.
 The only operator-visible loss on a revert is the queue itself, and, for slice 3,
-the ability to ask the API for the flagged rows in one request.
+the ability to ask the API for the flagged rows in one request. Slice 4's trash
+queue is web-only, so a revert restores the Settings card and loses the queue;
+no API, permission, audit, migration or schema change is involved.
 
 ## Verification
 
@@ -455,6 +538,37 @@ route count (100) and the schema (14) are still unchanged: an extra query
 parameter and an extra count field add no route, no mutation, no audit action and
 no migration.
 
+Slice 4 (`Mf-rz5k`) adds its own proofs and no API proof at all - the route count
+(100), the permission matrix, the audit coverage and the schema (14) are
+unchanged, because the trash queue reuses `GET /trash` and `POST /trash/purge` as
+they were. `ui/review/TrashQueue.test.tsx` (16) covers the queue's states and the
+purge result box: a failed first read that renders no empty sentence, a failed
+refresh that keeps the last readable list under one notice, "Nothing was
+removed." for a total failure, "Some entries could not be removed:" for a partial
+one with the rows that survived left in place, a purge failure shown inside the
+still-open dialog and then as a notice, the three snapshot refusals, the dialog's
+initial focus and Escape, the absent restore control, and no purge control or
+dialog at all below `admin`. `ui/review/useTrash.test.ts` (11) pins the fetch
+policy and the two channels at the hook: no read while the queue is never opened,
+one per activation including under `React.StrictMode`, a refetch on re-entry, no
+timer however long the queue stays open, the newest response winning, a 401
+signing out instead of reporting an error, one refetch after a successful purge,
+and a failed purge that sets only `purgeError` and keeps the rows.
+`ui/App.trash.test.tsx` (10) proves the destination end to end: the Trash row in
+both sidebars, the en dash before entry and the header number after it, no read
+at app load, one read per entry including under `React.StrictMode`, the queue
+surviving a Files/Projects switch, and - for an admin alone - a purge that
+refetches exactly once and moves the badge and the header to zero, against a
+viewer who gets the queue, its rows, its sizes and Refresh but no path to a
+purge. `ui/ConfirmDialog.test.tsx`
+grew three cases for `body`, `confirmDisabled` and `busyLabel` - Escape still
+closes, and autofocus lands on Cancel when confirming is refused - while
+`ui/review/ReviewNav.test.tsx` pins the Trash row for all four roles,
+`ui/review/useReviewCounts.test.ts` pins `trashBadgeCount` and the wordings that
+read it, `ui/settings/StorageSection.test.tsx` proves no trash surface is left
+there, and `ui/Settings.test.tsx` is the removal proof by call: no request to
+`lib/api/trash` for a viewer, a contributor, an editor or an admin.
+
 ## Superseding conditions
 
 This ADR is superseded if any of the following becomes true:
@@ -488,4 +602,16 @@ This ADR is superseded if any of the following becomes true:
 - an unknown or failed scan status renders the all-clear copy;
 - the grouped branch is claimed as virtualised without being virtualised;
 - the rescan moves back into Settings, or the UI gate for it moves off
-  `POST /library/scan`'s WRITE threshold in either direction.
+  `POST /library/scan`'s WRITE threshold in either direction;
+- the Trash row disappears below `admin`, or any purge control becomes visible or
+  available below `admin` - in particular if `canPurgeTrash` is replaced by
+  `canDelete`;
+- the trash queue reads at app load, or its badge starts polling instead of
+  waiting for the queue to be opened;
+- the empty sentence renders after a failed read or after a failed purge;
+- a purge result box reports a total failure (`purged: 0` with a non-empty
+  `failed[]`) as success, or a partial failure hides the rows that survived;
+- the delete-confirmation copy points at Settings again instead of
+  REVIEW → Trash;
+- a restore control appears in the trash queue - restoring is manual by design,
+  and the queue must not appear to offer it.

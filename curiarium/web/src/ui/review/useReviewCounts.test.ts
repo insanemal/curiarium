@@ -5,6 +5,7 @@ import { cleanup, renderHook } from "@testing-library/react";
 import type { AssetCounts } from "../../lib/api/assets";
 import type { BundleDetectItem, BundleReport } from "../../lib/api/bundles";
 import type { ImportRunDetail } from "../../lib/api/settings";
+import type { TrashEntry, TrashList } from "../../lib/api/trash";
 import type { BundleDetectState } from "./useBundleDetect";
 import type { ImportRunsState } from "./useImportRuns";
 import {
@@ -14,6 +15,7 @@ import {
   formatReviewCount,
   importsBadgeCount,
   missingBadgeCount,
+  trashBadgeCount,
   useReviewCounts,
 } from "./useReviewCounts";
 
@@ -104,6 +106,18 @@ function makeReport(bundles: BundleDetectItem[] = [], truncated = false): Bundle
     },
     bundles,
     stale_dismissals: [],
+  };
+}
+
+function makeTrashEntry(name: string): TrashEntry {
+  return { path: `.trash/${name}`, name, size: 1024, mtime: "2026-11-01T10:00:00Z" };
+}
+
+/** A trash listing sized like `GET /trash` returns; `null` is "no read yet". */
+function makeTrash(entries: TrashEntry[] = []): TrashList {
+  return {
+    entries,
+    total_size: entries.reduce((sum, entry) => sum + entry.size, 0),
   };
 }
 
@@ -244,6 +258,21 @@ describe("describeQueueCount", () => {
     expect(describeQueueCount("missing", null)).toBe("Count unavailable");
   });
 
+  // A trashed entry awaits nothing, so the missing queue's "awaiting a decision"
+  // wording must not be reused; "The trash is empty" would also lie when a purge
+  // just failed and left entries behind.
+  it("words the trash count as entries held, not decisions outstanding", () => {
+    expect(describeQueueCount("trash", null)).toBe("Count unavailable");
+    expect(describeQueueCount("trash", 0)).toBe("No entries in the trash");
+    expect(describeQueueCount("trash", 1)).toBe("1 entry in the trash");
+    expect(describeQueueCount("trash", 2)).toBe("2 entries in the trash");
+  });
+
+  it("uses the singular for one trashed entry and the plural otherwise", () => {
+    expect(describeQueueCount("trash", 1)).toBe("1 entry in the trash");
+    expect(describeQueueCount("trash", 12)).toBe("12 entries in the trash");
+  });
+
   it("does not fall through to the imports wording", () => {
     // `imports` states a fact for zero, so a missing zero that borrowed that
     // branch would read "No import currently running" - a different queue.
@@ -266,31 +295,54 @@ describe("missingBadgeCount (Mf-1tx3)", () => {
   });
 });
 
+describe("trashBadgeCount", () => {
+  it("returns null when no read has succeeded, never zero", () => {
+    expect(trashBadgeCount(null)).toBeNull();
+  });
+
+  it("returns a genuine zero for a listing with no entries", () => {
+    expect(trashBadgeCount(makeTrash())).toBe(0);
+  });
+
+  it("counts every entry in the listing", () => {
+    expect(trashBadgeCount(makeTrash([makeTrashEntry("a.ply"), makeTrashEntry("b.ply")]))).toBe(2);
+  });
+});
+
 describe("useReviewCounts", () => {
   it("keeps the return object identity across a rerender with the same counts", () => {
     const report = makeReport([makeBundle()]);
     const counts = makeCounts({ missing: 2 });
-    type Args = { bundle: BundleDetectState; imports: ImportRunsState; counts: AssetCounts };
+    type Args = {
+      bundle: BundleDetectState;
+      imports: ImportRunsState;
+      counts: AssetCounts;
+      trash: TrashList;
+    };
     const { result, rerender } = renderHook(
-      ({ bundle, imports, counts }: Args) => useReviewCounts(bundle, imports, counts),
+      ({ bundle, imports, counts, trash }: Args) =>
+        useReviewCounts(bundle, imports, counts, trash),
       {
         initialProps: {
           bundle: makeState(report),
           imports: importsState({ loaded: true }),
           counts,
+          trash: makeTrash([makeTrashEntry("a.ply"), makeTrashEntry("b.ply")]),
         },
       },
     );
 
     const initial = result.current;
-    // Every count is exercised: the memo must depend on all three primitives.
-    expect(initial).toEqual({ bundles: 1, imports: 0, missing: 2 });
+    // Every count is exercised: the memo must depend on all four primitives.
+    expect(initial).toEqual({ bundles: 1, imports: 0, missing: 2, trash: 2 });
 
     // Fresh state objects with the same numbers must not churn the nav.
     rerender({
       bundle: makeState(report),
       imports: importsState({ loaded: true }),
       counts: makeCounts({ missing: 2 }),
+      // A fresh listing object with the same entries must not churn the nav either.
+      trash: makeTrash([makeTrashEntry("a.ply"), makeTrashEntry("b.ply")]),
     });
 
     expect(result.current).toBe(initial);
@@ -300,7 +352,7 @@ describe("useReviewCounts", () => {
     const report = makeReport([makeBundle()]);
     type Args = { imports: ImportRunsState };
     const { result, rerender } = renderHook(
-      ({ imports }: Args) => useReviewCounts(makeState(report), imports, null),
+      ({ imports }: Args) => useReviewCounts(makeState(report), imports, null, null),
       { initialProps: { imports: importsState({ loaded: true }) } },
     );
 
@@ -317,7 +369,7 @@ describe("useReviewCounts", () => {
   it("recomputes the missing count when the asset counts change", () => {
     type Args = { counts: AssetCounts | null };
     const { result, rerender } = renderHook(
-      ({ counts }: Args) => useReviewCounts(makeState(null), importsState(), counts),
+      ({ counts }: Args) => useReviewCounts(makeState(null), importsState(), counts, null),
       { initialProps: { counts: null as AssetCounts | null } },
     );
 
@@ -329,5 +381,22 @@ describe("useReviewCounts", () => {
 
     rerender({ counts: makeCounts({ missing: 0 }) });
     expect(result.current.missing).toBe(0);
+  });
+
+  it("recomputes the trash count once the listing arrives", () => {
+    type Args = { trash: TrashList | null };
+    const { result, rerender } = renderHook(
+      ({ trash }: Args) => useReviewCounts(makeState(null), importsState(), null, trash),
+      { initialProps: { trash: null as TrashList | null } },
+    );
+
+    // The queue has not been opened: a dash, never a zero.
+    expect(result.current.trash).toBeNull();
+
+    rerender({ trash: makeTrash() });
+    expect(result.current.trash).toBe(0);
+
+    rerender({ trash: makeTrash([makeTrashEntry("a.ply")]) });
+    expect(result.current.trash).toBe(1);
   });
 });

@@ -96,6 +96,10 @@ describe("FolderDeleteDialog", () => {
     const path = await dialog().findByText("Parent/Child");
     expect(path.tagName).toBe("CODE");
     expect(dialog().getByText(/first moved to the server/)).toBeTruthy();
+    // The trash queue is surfaced under REVIEW → Trash now, never under the old
+    // storage location the copy used to name.
+    expect(dialog().getByText(/REVIEW → Trash/)).toBeTruthy();
+    expect(dialog().queryByText(/Settings → Storage/)).toBeNull();
     expect(dialog().queryByText(/not linked to a directory on disk/)).toBeNull();
   });
 
@@ -114,6 +118,9 @@ describe("FolderDeleteDialog", () => {
 
     expect(dialog().getByText(/a directory for it does exist in storage/)).toBeTruthy();
     expect(dialog().getByText(/moves that directory into the server/)).toBeTruthy();
+    // Same location line as the linked-directory branch, never the old one.
+    expect(dialog().getByText(/REVIEW → Trash/)).toBeTruthy();
+    expect(dialog().queryByText(/Settings → Storage/)).toBeNull();
     // The bytes really do land in .trash, so the restore caveat applies.
     expect(dialog().getByText(/move the folder back from/)).toBeTruthy();
   });

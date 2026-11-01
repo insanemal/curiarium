@@ -30,8 +30,18 @@ vi.mock("../lib/api/settings", async importOriginal => {
   };
 });
 
-// Every network touchpoint of Settings (storage + the embedded TrashCard) is
-// mocked, so the component renders without a backend.
+// The trash queue lives in REVIEW and its hook imports this domain module, so
+// a Settings regression that reached for trash would fire these spies. The
+// barrel mock below deliberately has no `getTrash`/`purgeTrash`: nothing may
+// reach them through the barrel any more.
+vi.mock("../lib/api/trash", () => ({
+  getTrash: vi.fn(),
+  purgeTrash: vi.fn(),
+}));
+
+// Every network touchpoint of Settings is mocked. Settings keeps the storage
+// template, the capabilities card and the snapshot card, and nothing else: the
+// storage rescan and the trash queue both moved to REVIEW (ADR 0011).
 vi.mock("../lib/api", () => ({
   UnauthorizedError: class UnauthorizedError extends Error {},
   createFolder: vi.fn(),
@@ -39,11 +49,9 @@ vi.mock("../lib/api", () => ({
   getMountImportSettings: vi.fn(),
   getStorageCapabilities: vi.fn(async () => ({ volumes: [] })),
   getStorageSettings: vi.fn(),
-  getTrash: vi.fn(async () => ({ entries: [], total_size: 0 })),
   listSessions: vi.fn(async () => []),
   listUsers: vi.fn(async () => []),
   listUserSessions: vi.fn(),
-  purgeTrash: vi.fn(),
   resetUserPassword: vi.fn(),
   revokeSession: vi.fn(),
   revokeUserSession: vi.fn(),
@@ -77,6 +85,7 @@ import {
   getLibraryScanStatus,
   startLibraryScan,
 } from "../lib/api/settings";
+import { getTrash, purgeTrash } from "../lib/api/trash";
 import type { AppSettings } from "../lib/settings";
 
 const createBundlesMock = vi.mocked(createBundles);
@@ -91,6 +100,8 @@ const getStorageSettingsMock = vi.mocked(getStorageSettings);
 const listSessionsMock = vi.mocked(listSessions);
 const updateMountImportSettingsMock = vi.mocked(updateMountImportSettings);
 const updateStorageSettingsMock = vi.mocked(updateStorageSettings);
+const getTrashMock = vi.mocked(getTrash);
+const purgeTrashMock = vi.mocked(purgeTrash);
 
 const settings: AppSettings = {
   slicer: { enabled: false, selected: "orca" },
@@ -221,6 +232,63 @@ describe("Settings storage scan removal", () => {
     }
 
     expectNoScanSurface();
+  });
+});
+
+// Emptying the trash is work on the library, not configuration: it moved to
+// REVIEW -> Trash (ADR 0011 decisions 9/15/16). `StorageSection` used to own the
+// card, and `settings/Settings.tsx` never mentions trash at all, so the removal
+// proof has to be by call against the domain module `useTrash` imports.
+describe("Settings trash removal", () => {
+  beforeEach(() => {
+    getTrashMock.mockReset();
+    purgeTrashMock.mockReset();
+    getStorageSettingsMock.mockReset();
+    getStorageSettingsMock.mockResolvedValue(storedStorage);
+    getMountImportSettingsMock.mockReset();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  /** No purge or empty-trash wording, and no trash request made. */
+  function expectNoTrashSurface(): void {
+    expect(screen.queryByRole("button", { name: "Empty trash" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Empty trash permanently" })).toBeNull();
+    const text = document.body.textContent || "";
+    expect(text).not.toContain("The trash is empty");
+    // The removal proof is the call, not the DOM: the embedded card used to
+    // fetch the listing on every mount and offer the purge here.
+    expect(getTrashMock).not.toHaveBeenCalled();
+    expect(purgeTrashMock).not.toHaveBeenCalled();
+  }
+
+  it.each<"admin" | "editor" | "contributor" | "viewer">([
+    "admin",
+    "editor",
+    "contributor",
+    "viewer",
+  ])("shows no trash surface and makes no trash request for a %s", async role => {
+    render(<Settings settings={settings} onChange={() => {}} role={role} />);
+
+    if (role === "admin") {
+      fireEvent.click(await screen.findByRole("button", { name: /Storage Structure/ }));
+      // Positive control: the section really mounted, so "no trash surface"
+      // below is a statement about rendered content, not about an empty page.
+      await screen.findByDisplayValue("{folder}/{model}/{filename}");
+    } else {
+      // The storage section is admin-only, so a non-admin cannot reach it at
+      // all. The honest proof for them is the section they CAN open.
+      await screen.findByRole("button", { name: /Import sources/ });
+      expectNoTrashSurface();
+
+      fireEvent.click(screen.getByRole("button", { name: /Import sources/ }));
+      // Positive control: the import section settled.
+      await screen.findByText(/Remember import cookies on this device/);
+    }
+
+    expectNoTrashSurface();
   });
 });
 

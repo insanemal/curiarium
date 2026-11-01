@@ -2,6 +2,6 @@
  *  surface; `settings` is configuration and `audit` is admin-only. */
 export type ActiveView = "library" | "settings" | "audit" | "review";
 
-/** Which review queue is open in the main pane. Slice 4 adds "trash"; nothing
- *  else may be added without a queue view. */
-export type ReviewQueueKey = "bundles" | "imports" | "missing";
+/** Which review queue is open in the main pane. Every key here has a queue
+ *  view; nothing may be added without one. */
+export type ReviewQueueKey = "bundles" | "imports" | "missing" | "trash";

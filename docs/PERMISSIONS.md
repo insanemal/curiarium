@@ -617,7 +617,8 @@ sessions stay valid.
   (`lib/api/http.ts`, `assertOk`) and gates the admin-only surfaces on the role
   `GET /me` reports: the sidebar "Audit log" entry, the Storage Structure
   settings entry and the mount-import card in the Import sources section are
-  hidden below `admin`, and a direct visit to the audit view renders a not-permitted
+  hidden below `admin`, as is the Empty trash control in REVIEW → Trash, and a
+  direct visit to the audit view renders a not-permitted
   state instead of the raw 403 (`lib/auth.ts` `roleAtLeast`,
   `ui/SidebarFooter.tsx`, `ui/useSessionRole.ts`, `ui/NotPermitted.tsx`,
   `ui/settings/Settings.tsx`). That is honesty, not enforcement: the API
@@ -642,9 +643,16 @@ sessions stay valid.
   folder (`POST /folder`, `write`) and uploads the selected files
   (`POST /upload`, `contribute`), so its write half decides the threshold and
   it is hidden, not disabled, below `editor`. One threshold in one helper
-  rather than a comparison per surface. `role` is `null` until `/me` answers,
-  so an unknown role has neither capability (fail closed), and a demotion lands
-  on the next `/me` refresh.
+  rather than a comparison per surface. Since `Mf-rz5k` there is a third
+  capability: `canPurgeTrash = roleAtLeast(role, "admin")`, derived in
+  `ui/App.tsx` from the same `/me` role, gating only the Empty trash button and
+  its dialog in REVIEW → Trash, because `GET /trash` is `read` while
+  `POST /trash/purge` is `admin` - and MFA-gated by `enforce_admin_mfa` after the
+  rank check. It too is hidden, not disabled, so a viewer, a contributor or an
+  editor keeps that read surface - the queue, its rows, the sizes, the total,
+  the header count and Refresh - and simply has no way to empty it. `role` is
+  `null` until `/me` answers, so an unknown role holds none of the three (fail
+  closed), and a demotion lands on the next `/me` refresh.
   A viewer loses the upload bar, drag-and-drop upload, folder
   create/rename/delete, asset edit/tags/move/delete/add-to-project, per-file
   mutation/re-scan/forget, the bulk write actions, project
@@ -673,11 +681,18 @@ sessions stay valid.
   role may open. There is no client router and no contribute-only or write-only
   view or route, so there is nothing to visit directly. Settings → Import
   sources is configuration only (mount-import settings and the cookie cards),
-  so nothing in Settings mixes thresholds any more; the one mixed surface is
-  the REVIEW → Imports running queue, which hides the folder-scan panel below
-  `editor` while the read-only import-run history stays for every role that may
-  read `GET /imports/runs`. The audit and storage `NotPermitted` states from
+  so nothing in Settings mixes thresholds any more; the mixed surfaces are
+  REVIEW → Imports running, which hides the folder-scan panel below `editor`
+  while the read-only import-run history stays for every role that may read
+  `GET /imports/runs`, and REVIEW → Trash, which is readable by every role that
+  may read `GET /trash` while the purge is available to no one below `admin`
+  (and is MFA-gated as well). The audit and storage `NotPermitted` states from
   Mf-5tyz are unchanged.
+* **The delete confirmations name a destination, not a Settings section.**
+  `ui/AssetDeleteDialog.tsx` and `ui/FolderDeleteDialog.tsx` now say REVIEW →
+  Trash where they used to say Settings → Storage, and restoring remains manual:
+  there is no restore control in the UI, only the instruction to move an entry
+  back into the storage folder and rescan the library in REVIEW → Missing files.
 * **Audit.** Every audited action now writes one row (one per affected asset on
   the batch routes) in the same transaction as the mutation, so an audit write
   failure is a failed mutation - fail-closed, except for the two filesystem-only

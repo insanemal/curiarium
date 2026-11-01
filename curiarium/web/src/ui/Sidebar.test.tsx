@@ -839,7 +839,7 @@ describe("Sidebar review navigation", () => {
         role="editor"
         activeView="review"
         activeQueue="bundles"
-        reviewCounts={{ bundles: 7, imports: null, missing: null }}
+        reviewCounts={{ bundles: 7, imports: null, missing: null, trash: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -866,7 +866,7 @@ describe("Sidebar review navigation", () => {
         selectedId={null}
         onSelect={vi.fn()}
         role="viewer"
-        reviewCounts={{ bundles: 7, imports: 1, missing: null }}
+        reviewCounts={{ bundles: 7, imports: 1, missing: null, trash: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -893,7 +893,7 @@ describe("Sidebar review navigation", () => {
         selectedId={null}
         onSelect={vi.fn()}
         role="viewer"
-        reviewCounts={{ bundles: 7, imports: 1, missing: 5 }}
+        reviewCounts={{ bundles: 7, imports: 1, missing: 5, trash: null }}
         onOpenQueue={onOpenQueue}
       />,
     );

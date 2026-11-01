@@ -172,7 +172,7 @@ describe("MissingFilesReviewView queue", () => {
 
     // One wording in the sidebar row and in the queue header, or the same
     // number would be described two ways in two places.
-    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: null, missing: 12 }} />);
+    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: null, missing: 12, trash: null }} />);
     expect(screen.getByTestId("review-count-missing").getAttribute("title")).toBe(
       count?.getAttribute("title"),
     );

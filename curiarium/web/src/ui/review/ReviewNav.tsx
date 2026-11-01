@@ -1,4 +1,4 @@
-import { FileWarning, FolderUp, PackageSearch, type LucideIcon } from "lucide-react";
+import { FileWarning, FolderUp, PackageSearch, Trash2, type LucideIcon } from "lucide-react";
 
 import { roleAtLeast, type Role } from "../../lib/auth";
 import type { ActiveView, ReviewQueueKey } from "../views";
@@ -23,11 +23,16 @@ type Props = {
  * read surface. `GET /assets?missing=true` and `GET /library/scan` are READ too,
  * so a viewer reads the missing queue; only the rescan it offers is a WRITE. A
  * role below a row's threshold simply does not see that row.
+ *
+ * Trash follows the same split: `GET /trash` is require_read, so a viewer reads
+ * the queue, while `POST /trash/purge` is require_admin - so the queue hides its
+ * Empty trash control below admin rather than disabling it.
  */
 const QUEUES: { key: ReviewQueueKey; label: string; minRole: Role; icon: LucideIcon }[] = [
   { key: "bundles", label: "Bundles to confirm", minRole: "contributor", icon: PackageSearch },
   { key: "imports", label: "Imports running", minRole: "viewer", icon: FolderUp },
   { key: "missing", label: "Missing files", minRole: "viewer", icon: FileWarning },
+  { key: "trash", label: "Trash", minRole: "viewer", icon: Trash2 },
 ];
 
 /**
