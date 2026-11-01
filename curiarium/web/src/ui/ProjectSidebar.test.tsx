@@ -167,7 +167,7 @@ describe("ProjectSidebar review navigation", () => {
         role="editor"
         activeView="review"
         activeQueue="bundles"
-        reviewCounts={{ bundles: 4, imports: null }}
+        reviewCounts={{ bundles: 4, imports: null, missing: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -193,7 +193,7 @@ describe("ProjectSidebar review navigation", () => {
         selectedId={null}
         onSelect={vi.fn()}
         role="contributor"
-        reviewCounts={{ bundles: 4, imports: 1 }}
+        reviewCounts={{ bundles: 4, imports: 1, missing: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -206,5 +206,29 @@ describe("ProjectSidebar review navigation", () => {
 
     expect(onOpenQueue).toHaveBeenCalledTimes(1);
     expect(onOpenQueue).toHaveBeenCalledWith("imports");
+  });
+
+  // The same shared group renders in Projects mode, so the missing queue is
+  // reachable from both sidebars.
+  it("shows the missing row in Projects mode and opens that queue", () => {
+    const onOpenQueue = vi.fn();
+    render(
+      <ProjectSidebar
+        projects={projects}
+        selectedId={null}
+        onSelect={vi.fn()}
+        role="viewer"
+        reviewCounts={{ bundles: null, imports: null, missing: 5 }}
+        onOpenQueue={onOpenQueue}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /^Missing files/ });
+    expect(within(row).getByText("5")).toBeTruthy();
+
+    fireEvent.click(row);
+
+    expect(onOpenQueue).toHaveBeenCalledTimes(1);
+    expect(onOpenQueue).toHaveBeenCalledWith("missing");
   });
 });

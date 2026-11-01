@@ -286,7 +286,7 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | POST   | `/file-grants`                          | mints a short-lived read-only signed file grant; nothing mutates |
 | GET    | `/assets`                               | list assets |
 | GET    | `/assets/delete-preview`                | pure SELECT that counts a bulk delete, and reports whether a pre-delete snapshot will be taken |
-| GET    | `/assets/counts`                        | pure SELECT: the whole library and the library-root counts the sidebar labels show |
+| GET    | `/assets/counts`                        | pure SELECT: the whole library, the library-root and the flagged-missing counts the sidebar labels show |
 | GET    | `/tags`                                 | list tags |
 | GET    | `/creators`                             | list the distinct creator facet |
 | POST   | `/download/zip`                         | POST-for-download: it builds a temp zip and streams it, nothing is stored |

@@ -173,6 +173,14 @@ export async function listAssets(params: {
    * with `folder_id`: sending both is a 400, so this client never does.
    */
   unfiled?: boolean;
+  /**
+   * Only assets a scan flagged as missing (`missing_since IS NOT NULL`). The
+   * filter is server-side on purpose: filtering a fetched page would break the
+   * count and the paging window. Composes with every other filter - a missing
+   * file can sit in a folder, in a project and carry tags - so unlike
+   * `unfiled` + `folder_id` this pair is legal.
+   */
+  missing?: boolean;
   /** Only assets that belong to no project (the files-mode "unsorted pile"). */
   not_in_project?: boolean;
   /** Exact creator, case-insensitive; blank is ignored by the server. */
@@ -189,6 +197,7 @@ export async function listAssets(params: {
   // an unfiled listing has no folder id to send.
   if (params.folder_id && !params.unfiled) qs.set("folder_id", params.folder_id);
   if (params.unfiled) qs.set("unfiled", "true");
+  if (params.missing) qs.set("missing", "true");
   if (params.not_in_project) qs.set("not_in_project", "true");
   if (params.creator) qs.set("creator", params.creator);
   if (params.sort) qs.set("sort", params.sort);
@@ -217,12 +226,19 @@ export async function listTags(params: {
   project_id?: string;
   /** Scope the chip set to assets in no project (files-mode "unsorted pile"). */
   not_in_project?: boolean;
+  /**
+   * Only chips found on assets a scan flagged as missing, so the facet describes
+   * the same pinned set as the listing. An unscoped facet next to a scoped
+   * listing is a lying control.
+   */
+  missing?: boolean;
 } = {}): Promise<string[]> {
   const qs = new URLSearchParams();
   if (params.q) qs.set("q", params.q);
   if (params.tags && params.tags.length) qs.set("tags", params.tags.join(","));
   if (params.folder_id && !params.unfiled) qs.set("folder_id", params.folder_id);
   if (params.unfiled) qs.set("unfiled", "true");
+  if (params.missing) qs.set("missing", "true");
   if (params.project_id) qs.set("project_id", params.project_id);
   if (params.not_in_project) qs.set("not_in_project", "true");
   const res = await fetch(`${apiBase()}/tags?${qs.toString()}`, {
@@ -243,12 +259,19 @@ export async function listCreators(params: {
   project_id?: string;
   /** Scope the facet to assets in no project (files-mode "unsorted pile"). */
   not_in_project?: boolean;
+  /**
+   * Only creators found on assets a scan flagged as missing, so the facet
+   * describes the same pinned set as the listing. An unscoped facet next to a
+   * scoped listing is a lying control.
+   */
+  missing?: boolean;
 } = {}): Promise<string[]> {
   const qs = new URLSearchParams();
   if (params.q) qs.set("q", params.q);
   if (params.tags && params.tags.length) qs.set("tags", params.tags.join(","));
   if (params.folder_id && !params.unfiled) qs.set("folder_id", params.folder_id);
   if (params.unfiled) qs.set("unfiled", "true");
+  if (params.missing) qs.set("missing", "true");
   if (params.project_id) qs.set("project_id", params.project_id);
   if (params.not_in_project) qs.set("not_in_project", "true");
   const res = await fetch(`${apiBase()}/creators?${qs.toString()}`, {
@@ -258,8 +281,12 @@ export async function listCreators(params: {
   return res.json();
 }
 
-/** Whole-library counts for the two files-mode rows; deliberately unfiltered. */
-export type AssetCounts = { total: number; unfiled: number };
+/**
+ * Three whole-library numbers; deliberately unfiltered. `missing` is a state an
+ * asset is in, not a place it lives, so it is counted across the whole library
+ * rather than within the current folder/project scope.
+ */
+export type AssetCounts = { total: number; unfiled: number; missing: number };
 
 export async function getAssetCounts(): Promise<AssetCounts> {
   const res = await fetch(apiBase() + "/assets/counts", { headers: authHeaders() });

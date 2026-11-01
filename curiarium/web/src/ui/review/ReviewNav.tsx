@@ -1,4 +1,4 @@
-import { FolderUp, PackageSearch, type LucideIcon } from "lucide-react";
+import { FileWarning, FolderUp, PackageSearch, type LucideIcon } from "lucide-react";
 
 import { roleAtLeast, type Role } from "../../lib/auth";
 import type { ActiveView, ReviewQueueKey } from "../views";
@@ -20,11 +20,14 @@ type Props = {
  * `minRole` is per row because the queues' own routes differ: creating or
  * dismissing a bundle is CONTRIBUTE, while `GET /imports/runs` is READ - a
  * viewer already reads the run history, so the queue must not delete a proven
- * read surface. A role below a row's threshold simply does not see that row.
+ * read surface. `GET /assets?missing=true` and `GET /library/scan` are READ too,
+ * so a viewer reads the missing queue; only the rescan it offers is a WRITE. A
+ * role below a row's threshold simply does not see that row.
  */
 const QUEUES: { key: ReviewQueueKey; label: string; minRole: Role; icon: LucideIcon }[] = [
   { key: "bundles", label: "Bundles to confirm", minRole: "contributor", icon: PackageSearch },
   { key: "imports", label: "Imports running", minRole: "viewer", icon: FolderUp },
+  { key: "missing", label: "Missing files", minRole: "viewer", icon: FileWarning },
 ];
 
 /**

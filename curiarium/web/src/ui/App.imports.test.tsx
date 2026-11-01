@@ -13,7 +13,7 @@ vi.mock("../lib/api", () => ({
   createFolder: vi.fn(),
   fileUrl: vi.fn((rel: string) => rel),
   getApiBase: vi.fn(() => "http://localhost:8000"),
-  getAssetCounts: vi.fn(async () => ({ total: 0, unfiled: 0 })),
+  getAssetCounts: vi.fn(async () => ({ total: 0, unfiled: 0, missing: 0 })),
   getMe: vi.fn(async () => ({
     id: "u1",
     username: "editor",
@@ -32,6 +32,9 @@ vi.mock("../lib/api", () => ({
 vi.mock("../lib/api/settings", () => ({
   getImportRuns: vi.fn(),
   getImportRun: vi.fn(),
+  // App arms `useLibraryScan`; its pair comes from this domain module.
+  getLibraryScanStatus: vi.fn(),
+  startLibraryScan: vi.fn(),
 }));
 
 // `useFolderScan` imports `createFolder` from the domain module (the root folder

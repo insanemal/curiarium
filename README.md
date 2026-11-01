@@ -30,7 +30,7 @@ publishing.
 | | |
 |---|---|
 | **Folders are directories** | A folder *is* a directory under the storage root. Create, rename, move and delete in the UI and the filesystem follows; `DELETE` moves the subtree to trash, never unlinks blind. |
-| **Rescan for files you copied in** | `rsync`/`cp` files into the storage root, press **Rescan storage folder**, and they are registered where they already sit — no import dance, no re-templating. |
+| **Rescan for files you copied in** | `rsync`/`cp` files into the storage root, press **Rescan storage folder** in **REVIEW → Missing files**, and they are registered where they already sit — no import dance, no re-templating. That queue is also where files flagged *missing* are listed. |
 | **Nothing disappears quietly** | A file removed behind the app's back is flagged *missing* (with a date) rather than vanishing from the library. Reference imports whose source is gone are flagged too, never deleted. |
 | **Storage template** | New files land in a configurable layout (`{folder}/{model}/{filename}` by default). Files are only ever moved by an explicit rename or folder move — retagging does not rearrange your disk. |
 

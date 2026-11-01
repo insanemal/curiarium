@@ -70,6 +70,70 @@ describe("ReviewQueueView header", () => {
 
     expect(screen.getByText(/^Last refreshed \d{1,2}:\d{2}(?:\s?[ap]m)?$/i)).toBeTruthy();
   });
+
+  // The missing queue cannot observe when its own list settled: its rows belong
+  // to AssetGrid. It states what the last scan knows instead, verbatim.
+  it("renders the label verbatim instead of a timestamp", () => {
+    render(
+      <ReviewQueueView
+        title="Missing files"
+        explanation="Files an asset points at that are gone."
+        count={0}
+        countTitle={describeQueueCount("missing", 0)}
+        lastRefreshedAt={FIXED_AT}
+        lastRefreshedLabel="Flagged set from the last completed scan"
+      >
+        <p>rows</p>
+      </ReviewQueueView>,
+    );
+
+    expect(screen.getByText("Flagged set from the last completed scan")).toBeTruthy();
+    expect(screen.queryByText(/Last refreshed/)).toBeNull();
+  });
+
+  it("renders no refreshed line at all for null", () => {
+    const { container } = render(
+      <ReviewQueueView
+        title="Missing files"
+        explanation="Files an asset points at that are gone."
+        count={0}
+        countTitle={describeQueueCount("missing", 0)}
+        lastRefreshedAt={FIXED_AT}
+        lastRefreshedLabel={null}
+      >
+        <p>rows</p>
+      </ReviewQueueView>,
+    );
+
+    expect(container.querySelector(".review-refreshed")).toBeNull();
+    expect(screen.queryByText(/Last refreshed/)).toBeNull();
+  });
+
+  it("still shows Not refreshed yet without either prop", () => {
+    const { unmount } = render(
+      <ReviewQueueView title="Bundles to confirm" explanation="Bundles." count={0} countTitle={describeQueueCount("bundles", 0)}>
+        <p>rows</p>
+      </ReviewQueueView>,
+    );
+
+    expect(screen.getByText("Not refreshed yet")).toBeTruthy();
+    unmount();
+
+    // An explicit `null` timestamp is the same "nothing fetched yet" state.
+    render(
+      <ReviewQueueView
+        title="Bundles to confirm"
+        explanation="Bundles."
+        count={0}
+        countTitle={describeQueueCount("bundles", 0)}
+        lastRefreshedAt={null}
+      >
+        <p>rows</p>
+      </ReviewQueueView>,
+    );
+
+    expect(screen.getByText("Not refreshed yet")).toBeTruthy();
+  });
 });
 
 describe("ReviewQueueView refresh control", () => {

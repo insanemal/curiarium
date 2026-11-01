@@ -5,9 +5,9 @@
 **Accepted:** 2026-11-01
 
 **Implementation:** ticket `Mf-f3c2` (slice 1 of the information-architecture
-change `Mf-q7vs`: the bundle queue) and ticket `Mf-xe4l` (slice 2: imports
-running). Slices 3-4 (missing files, trash) adopt this shell without
-re-deciding it.
+change `Mf-q7vs`: the bundle queue), ticket `Mf-xe4l` (slice 2: imports running)
+and ticket `Mf-1tx3` (slice 3: missing files). Slice 4 (trash) adopts this shell
+without re-deciding it.
 
 **Extended:** ADR 0010, whose report is the first tenant of this surface.
 
@@ -190,6 +190,63 @@ destination model, the count rule, the role threshold and the fetch policy.
     history the operator can still read. The queue's count and the sidebar badge
     both come from `describeQueueCount`, so one number cannot be worded two ways.
 
+12. **A queue filters on the server, never on a fetched page.** The missing
+    queue asks `GET /assets` for `missing=true`, which the API applies as
+    `Asset.missing_since IS NOT NULL` - a nullable TEXT timestamp, so the test is
+    `is_not(None)` and never a truthiness check - and its badge reads a third
+    unfiltered number, `missing`, from `GET /assets/counts`. `GET /tags` and
+    `GET /creators` take the same flag, because an unscoped facet beside a scoped
+    listing is a lying control: the chip would count a different set than the
+    grid it sits beside. The filter composes with `folder_id`, `unfiled`, `q`,
+    `tags`, `creator`, `added_by` and `not_in_project` - a missing file can sit
+    in a folder, in a project and carry tags - so unlike `unfiled` with
+    `folder_id` it is not a 400 pair. Filtering a fetched page on the client is
+    forbidden: the count would then describe a set the grid is not showing, and
+    the paging window would only ever search the pages already loaded, which at
+    2,300+ assets and growing is not the library.
+
+13. **A pinned scope is a prop, never a per-call override.** `missingOnly` is an
+    option on `useAssetList` and lives in that hook's closure; it is deliberately
+    absent from `RefreshOpts`, the type every toolbar control refreshes through,
+    so no control can drop it. `unfiled` is the counter-example that taught this:
+    it is a per-call override, and a per-call override is a droppable pin - one
+    refresh that leaves it out silently widens the scope. The pin buys the queue
+    the whole of `AssetGrid`: the same virtualised list, selection and bulk bar,
+    keyboard operation, previews and card actions, all of them already proven in
+    the library, under a scope that cannot be escaped. What the toolbar keeps is
+    what only narrows - search, sort, tag chips, the creator facet and "not in
+    any project" - and `Reset` clears tags and creator only. The folder chrome
+    (breadcrumbs, folder tiles, the uploader, drag/drop) is closed in this mode,
+    because a breadcrumb would navigate out of the queue and a missing file is
+    not a place to drop a new one.
+
+14. **An empty queue states what is known, not what is hoped.** The empty state
+    has three forms, not two, chosen by `scanOutcome` from the advisory status:
+    `clean` only when a scan completed and reported no failures, `failed` when it
+    reported some, and `unknown` when no scan has completed this session, one is
+    still running, or the advisory status read failed and was swallowed. "Every
+    file an asset points at is on disk." renders for `clean` alone. `unknown`
+    stays flag-truth - "No missing files flagged", "nothing is flagged as
+    missing yet" - because an unknown scan is not evidence that the disk is
+    whole. `failed` says the last scan did not finish and the list may be
+    incomplete. An empty list under a search, tag, creator or "not in any
+    project" filter is a fourth case again: an empty *result*, not an empty
+    queue. This repo has already shipped two labels that lied about an empty
+    list (the `ROOT` badge, and the Unfiled empty state that claimed "Every asset
+    is in a folder" under a filter), and this is the rule that stops a third.
+
+15. **The rescan moved, and that broadens who can run it.** The storage rescan
+    left the admin-only Settings section (`Storage`) for this queue, which is
+    gated at `POST /library/scan`'s own WRITE threshold - `editor`. Decision 7
+    above says a row's threshold is its route's threshold, so this is that
+    decision applied rather than a new one, but the effect deserves stating
+    instead of being discovered: a surface that was de facto admin-only is now
+    available to every editor. Nothing's permission changed on the server;
+    `GET /library/scan` was always READ and `POST /library/scan` was always
+    WRITE. The button is hidden, not disabled, below `editor`, while the status
+    line and the failure report stay visible to any reader - a viewer reads the
+    queue and the last scan's outcome and simply cannot start a walk.
+
 ## Consequences
 
 - Settings is configuration only. Its imports section is relabelled **Import
@@ -237,6 +294,34 @@ destination model, the count rule, the role threshold and the fetch policy.
   1000-row ceiling is a rendered-list ceiling, not a virtualised one. If a real
   library crosses it the queue needs `useVirtualRows`, which this slice does not
   take on.
+- Settings is configuration only down to its Storage section, in the same sense
+  the imports slice established: the path template, the capabilities card, the
+  snapshot card and the trash card. The rescan, its explainer, its "Last scan:
+  N new, N known, N missing, N failed" line and its failure report are work and
+  live in REVIEW → Missing files.
+- The missing count adds no request and no timer. It is one number from the
+  `/assets/counts` read App already performs for the sidebar, so the badge and
+  the queue header cannot disagree, and an unknown count is an en dash, never
+  `0`. A Forget, a per-card Re-scan and a completed storage scan each refetch the
+  counts - and so does a **partial** bulk delete, whose successful removals used
+  to leave the sidebar on the old number. That fix reaches back: a plain single
+  delete carried the same staleness before this slice.
+- Two limitations are inherited and recorded rather than claimed fixed. The
+  shared `useAssetList` has no newest-wins request sequence and no
+  React.StrictMode guard, so under StrictMode the missing queue issues two list
+  fetches; the library behaves the same way and this slice did not touch that
+  hook's fetch policy, so a follow-up is owed. The StrictMode claim this ADR does
+  make is narrower than it sounds: it covers `useLibraryScan`'s `walked` ref,
+  which keeps `GET /library/scan` to one read per activation, and nothing else.
+  And only the flat branch of the grid is virtualised: the grouped (folder/type)
+  branch remains a 24-card cap with a "Show all N" control, preserved as it was
+  at HEAD, because retrofitting group virtualisation is a different ticket.
+- An untouched, pre-existing heuristic remains a known sharp edge. A successful
+  walk over a partially mounted storage root can flag present files as missing,
+  because presence falls through to `(root/managed_rel).exists()`, which is
+  false under an unreadable parent. It was not proven sound here and is filed
+  separately; what this slice changes is visibility, since the moved failure
+  report is what makes such a scan visible instead of silent.
 
 ## Alternatives considered
 
@@ -267,9 +352,13 @@ destination model, the count rule, the role threshold and the fetch policy.
 ## Rollback
 
 Revert the commit. There is no migration, no schema change and no stored state to
-unwind: dismissals remain the single `bundle.dismissals` appconfig value, the API
-is unchanged, and the bundle report is still recomputed from disk on every read.
-The only operator-visible loss on a revert is the queue itself.
+unwind: dismissals remain the single `bundle.dismissals` appconfig value, and the
+bundle report is still recomputed from disk on every read. Slice 3's API change is
+purely additive - one extra query parameter (`missing`) on `GET /assets` and its
+two facets, and one extra count field on `GET /assets/counts` - so a revert loses
+only the queue and that filter, and no existing caller's request changes shape.
+The only operator-visible loss on a revert is the queue itself, and, for slice 3,
+the ability to ask the API for the flagged rows in one request.
 
 ## Verification
 
@@ -335,6 +424,37 @@ At the time of landing: web 1356 tests in 117 files became 1451 in 122; the API
 suite (2326 passed, 1 skipped), the route count (100) and the schema (14) are
 unchanged, because this is a web-only change with no migration.
 
+Slice 3 (`Mf-1tx3`) adds its own proofs. In the API suite,
+`test_asset_missing_filter.py` pins the filter and the count: a flagged row is
+listed and an unflagged one is not, a cleared flag leaves the list, `missing`
+composes with every other filter, the count is re-derived from SQL rather than
+trusted, and an offset walk pages with no duplicates or gaps.
+`test_asset_unfiled_filter.py` grew the junk-parameter assertion that keeps the
+counts from describing a filtered picture, and `test_library_scan.py` proves that
+a scan over an absent root changes no flag - a failed scan cannot empty the
+queue. On the web side, `ui/App.missing.test.tsx` pins the entry policy and the
+pin (no status read and no pinned listing before the queue opens, exactly one
+`GET /library/scan` on entry including under `React.StrictMode`), the four
+coherence cases - a rescan refetching the grid and the counts once, a Forget
+dropping the badge and the header together, a reappeared file leaving the queue,
+a failed scan never rendering the all-clear - the badge/header equality from one
+fetch, the en dash for an unknown count, and the viewer/editor gates.
+`ui/review/MissingFilesReviewView.test.tsx` covers the queue states (loading, a
+retryable error with Try again, empty, empty after a filter, scan-failed-empty,
+scan-unknown), `LibraryScanPanel.test.tsx` and `useLibraryScan.test.ts` cover the
+moved panel and its hook, and `ui/AssetGrid.test.tsx` proves every toolbar
+control keeps the pin, that the flat branch stays virtualised and that the
+grouped branch stays a cap, and `ui/Settings.test.tsx` is the removal proof by
+call: no rescan surface and no `GET /library/scan` for any role.
+`src/lib/palette.test.ts` (WCAG AA) and `src/lib/noNativeDialogs.test.ts` stay
+unmodified and green, and every new rule uses the existing `--mv-*` tokens.
+
+The slice landed with the API suite at 2332 passed and 1 skipped (baseline 2326
+and 1) and the web suite at 1621 tests in 129 files (baseline 1533 in 126). The
+route count (100) and the schema (14) are still unchanged: an extra query
+parameter and an extra count field add no route, no mutation, no audit action and
+no migration.
+
 ## Superseding conditions
 
 This ADR is superseded if any of the following becomes true:
@@ -360,4 +480,12 @@ This ADR is superseded if any of the following becomes true:
 - an unknown imports count starts rendering as `0`, or a finished run stops being
   shown under the idle line;
 - the folder-scan panel becomes visible below `editor`, or the run history moves
-  back into Settings.
+  back into Settings;
+- the missing filter becomes client-side filtering of a fetched page, or
+  `/assets/counts` goes back to two numbers;
+- the missing pin becomes overridable per call, or moves out of the listing
+  hook's closure;
+- an unknown or failed scan status renders the all-clear copy;
+- the grouped branch is claimed as virtualised without being virtualised;
+- the rescan moves back into Settings, or the UI gate for it moves off
+  `POST /library/scan`'s WRITE threshold in either direction.

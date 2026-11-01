@@ -125,6 +125,9 @@ describe("AssetGrid in project mode", () => {
       // A project has no folder axis, so the Unfiled pile is files-only too.
       unfiled: undefined,
       not_in_project: undefined,
+      // The facet carries the pinned `missing` scope like the listing does; a
+      // project grid is never in missing mode, so it is false here.
+      missing: false,
     });
   });
 

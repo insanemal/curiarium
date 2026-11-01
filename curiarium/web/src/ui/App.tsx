@@ -45,8 +45,10 @@ import { OidcExchangeError, exchangeOidcCode } from "../lib/api/auth";
 import type { ActiveView, ReviewQueueKey } from "./views";
 import BundleReviewView from "./review/BundleReviewView";
 import ImportsReviewView from "./review/ImportsReviewView";
+import MissingFilesReviewView from "./review/MissingFilesReviewView";
 import { useBundleDetect } from "./review/useBundleDetect";
 import { useImportRuns } from "./review/useImportRuns";
+import { useLibraryScan } from "./review/useLibraryScan";
 import { useReviewCounts } from "./review/useReviewCounts";
 
 const DEFAULT_REFRESH_SECONDS = 900; // 15 minutes: the access token lifetime
@@ -236,7 +238,9 @@ export default function App() {
     enabled: canRead && reviewOpen && activeQueue === "imports",
     onUnauthorized: handleUnauthorized,
   });
-  const reviewCounts = useReviewCounts(bundleReview, importsReview);
+  // The missing badge costs no extra request: it reads the `/assets/counts`
+  // number App already fetches for the sidebar.
+  const reviewCounts = useReviewCounts(bundleReview, importsReview, counts);
 
   const handleOpenReview = React.useCallback((key: ReviewQueueKey) => {
     setActiveQueue(key);
@@ -255,7 +259,20 @@ export default function App() {
     setCountsVersion(v => v + 1);
   }, []);
 
-  // Whole-library counts for the sidebar's two rows. Deliberately unfiltered,
+  // Declared after its callbacks: it registers them for the finish signal, and
+  // a hook argument list cannot read a not-yet-initialised `const`. `GET
+  // /library/scan` is READ, so a viewer may read the queue and the status; only
+  // the rescan button is WRITE and the panel hides it below editor. Entry
+  // fetches once, never on app load, and polls only while a scan is walking.
+  const missingReview = useLibraryScan({
+    enabled: canRead && reviewOpen && activeQueue === "missing",
+    onUnauthorized: handleUnauthorized,
+    onAssetsChanged: handleAssetsChanged,
+    onFoldersChanged: handleFoldersChanged,
+  });
+
+  // Whole-library counts for the sidebar's rows and the review badges: total,
+  // root and flagged-missing. Deliberately unfiltered,
   // and refetched when assets or folders change or a move was reported.
   React.useEffect(() => {
     if (authRequired && !token) return;
@@ -647,8 +664,6 @@ export default function App() {
             <Settings
               settings={settings}
               onChange={setSettings}
-              onAssetsChanged={handleAssetsChanged}
-              onFoldersChanged={handleFoldersChanged}
               onUnauthorized={handleUnauthorized}
               role={role}
               username={identity.username}
@@ -667,6 +682,24 @@ export default function App() {
             onFoldersChanged={handleFoldersChanged}
             onUnauthorized={handleUnauthorized}
             onSelectFolder={handleSelectFolder}
+          />
+        )}
+        {activeView === "review" && activeQueue === "missing" && (
+          <MissingFilesReviewView
+            state={missingReview}
+            canWrite={canDelete}
+            canContribute={canContribute}
+            canDelete={canDelete}
+            missingCount={counts ? counts.missing : null}
+            assetsVersion={assetsVersion}
+            onRefresh={handleAssetsChanged}
+            onAssetsFiled={handleAssetsFiled}
+            onUnauthorized={handleUnauthorized}
+            slicerSettings={settings.slicer}
+            engravingSettings={settings.engraving}
+            previewSettings={settings.previews}
+            theme={resolvedTheme}
+            scrollElementRef={mainScrollRef}
           />
         )}
         {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}

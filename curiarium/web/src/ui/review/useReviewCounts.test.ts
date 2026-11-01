@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, renderHook } from "@testing-library/react";
 
+import type { AssetCounts } from "../../lib/api/assets";
 import type { BundleDetectItem, BundleReport } from "../../lib/api/bundles";
 import type { ImportRunDetail } from "../../lib/api/settings";
 import type { BundleDetectState } from "./useBundleDetect";
@@ -12,6 +13,7 @@ import {
   describeQueueCount,
   formatReviewCount,
   importsBadgeCount,
+  missingBadgeCount,
   useReviewCounts,
 } from "./useReviewCounts";
 
@@ -51,6 +53,11 @@ function importsState(overrides: Partial<ImportRunsState> = {}): ImportRunsState
     refresh: async () => {},
     ...overrides,
   };
+}
+
+/** The whole-library counts App already fetched; only `missing` is ours. */
+function makeCounts(overrides: Partial<AssetCounts> = {}): AssetCounts {
+  return { total: 40, unfiled: 5, missing: 3, ...overrides };
 }
 
 function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
@@ -228,23 +235,63 @@ describe("describeQueueCount", () => {
     expect(describeQueueCount("imports", 1)).toBe("1 import running");
     expect(describeQueueCount("imports", 2)).toBe("2 imports running");
   });
+
+  // The missing queue counts decisions outstanding, like bundles: each flagged
+  // file needs somebody to restore it or forget it.
+  it("words the missing count as decisions outstanding", () => {
+    expect(describeQueueCount("missing", 3)).toBe("3 missing files awaiting a decision");
+    expect(describeQueueCount("missing", 1)).toBe("1 missing file awaiting a decision");
+    expect(describeQueueCount("missing", null)).toBe("Count unavailable");
+  });
+
+  it("does not fall through to the imports wording", () => {
+    // `imports` states a fact for zero, so a missing zero that borrowed that
+    // branch would read "No import currently running" - a different queue.
+    expect(describeQueueCount("missing", 0)).toBe("0 missing files awaiting a decision");
+    expect(describeQueueCount("missing", 0)).not.toBe("No import currently running");
+  });
+});
+
+describe("missingBadgeCount (Mf-1tx3)", () => {
+  it("returns null before the counts fetch lands, never zero", () => {
+    expect(missingBadgeCount(null)).toBeNull();
+  });
+
+  it("returns a genuine zero when the last scan flagged nothing", () => {
+    expect(missingBadgeCount(makeCounts({ missing: 0 }))).toBe(0);
+  });
+
+  it("returns the number of flagged files", () => {
+    expect(missingBadgeCount(makeCounts({ missing: 7 }))).toBe(7);
+  });
 });
 
 describe("useReviewCounts", () => {
   it("keeps the return object identity across a rerender with the same counts", () => {
     const report = makeReport([makeBundle()]);
-    type Args = { bundle: BundleDetectState; imports: ImportRunsState };
+    const counts = makeCounts({ missing: 2 });
+    type Args = { bundle: BundleDetectState; imports: ImportRunsState; counts: AssetCounts };
     const { result, rerender } = renderHook(
-      ({ bundle, imports }: Args) => useReviewCounts(bundle, imports),
-      { initialProps: { bundle: makeState(report), imports: importsState({ loaded: true }) } },
+      ({ bundle, imports, counts }: Args) => useReviewCounts(bundle, imports, counts),
+      {
+        initialProps: {
+          bundle: makeState(report),
+          imports: importsState({ loaded: true }),
+          counts,
+        },
+      },
     );
 
     const initial = result.current;
-    // Both counts are exercised: the memo must depend on both primitives.
-    expect(initial).toEqual({ bundles: 1, imports: 0 });
+    // Every count is exercised: the memo must depend on all three primitives.
+    expect(initial).toEqual({ bundles: 1, imports: 0, missing: 2 });
 
     // Fresh state objects with the same numbers must not churn the nav.
-    rerender({ bundle: makeState(report), imports: importsState({ loaded: true }) });
+    rerender({
+      bundle: makeState(report),
+      imports: importsState({ loaded: true }),
+      counts: makeCounts({ missing: 2 }),
+    });
 
     expect(result.current).toBe(initial);
   });
@@ -253,7 +300,7 @@ describe("useReviewCounts", () => {
     const report = makeReport([makeBundle()]);
     type Args = { imports: ImportRunsState };
     const { result, rerender } = renderHook(
-      ({ imports }: Args) => useReviewCounts(makeState(report), imports),
+      ({ imports }: Args) => useReviewCounts(makeState(report), imports, null),
       { initialProps: { imports: importsState({ loaded: true }) } },
     );
 
@@ -265,5 +312,22 @@ describe("useReviewCounts", () => {
 
     expect(result.current.imports).toBe(1);
     expect(result.current.bundles).toBe(1);
+  });
+
+  it("recomputes the missing count when the asset counts change", () => {
+    type Args = { counts: AssetCounts | null };
+    const { result, rerender } = renderHook(
+      ({ counts }: Args) => useReviewCounts(makeState(null), importsState(), counts),
+      { initialProps: { counts: null as AssetCounts | null } },
+    );
+
+    // No counts fetch has landed: a dash, never a zero.
+    expect(result.current.missing).toBeNull();
+
+    rerender({ counts: makeCounts({ missing: 7 }) });
+    expect(result.current.missing).toBe(7);
+
+    rerender({ counts: makeCounts({ missing: 0 }) });
+    expect(result.current.missing).toBe(0);
   });
 });

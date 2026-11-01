@@ -16,9 +16,18 @@ vi.mock("../lib/api/bundles", () => ({
 // observable: the barrel mock below is a fixed object with no `getImportRuns`,
 // so a regression that reached for the barrel would surface as a swallowed
 // "Import run history is unavailable." while this mock stayed uncalled.
+// The storage scan is the same trap for the same reason: `useLibraryScan` moved
+// to REVIEW -> Missing files and imports its two calls from here, so a Settings
+// regression would fire these spies rather than fail to resolve a module.
 vi.mock("../lib/api/settings", async importOriginal => {
   const actual = await importOriginal<typeof import("../lib/api/settings")>();
-  return { ...actual, getImportRuns: vi.fn(), getImportRun: vi.fn() };
+  return {
+    ...actual,
+    getImportRuns: vi.fn(),
+    getImportRun: vi.fn(),
+    getLibraryScanStatus: vi.fn(),
+    startLibraryScan: vi.fn(),
+  };
 });
 
 // Every network touchpoint of Settings (storage + the embedded TrashCard) is
@@ -28,7 +37,6 @@ vi.mock("../lib/api", () => ({
   createFolder: vi.fn(),
   createUser: vi.fn(),
   getMountImportSettings: vi.fn(),
-  getLibraryScanStatus: vi.fn(),
   getStorageCapabilities: vi.fn(async () => ({ volumes: [] })),
   getStorageSettings: vi.fn(),
   getTrash: vi.fn(async () => ({ entries: [], total_size: 0 })),
@@ -39,7 +47,6 @@ vi.mock("../lib/api", () => ({
   resetUserPassword: vi.fn(),
   revokeSession: vi.fn(),
   revokeUserSession: vi.fn(),
-  startLibraryScan: vi.fn(),
   updateMountImportSettings: vi.fn(),
   updateStorageSettings: vi.fn(),
   updateUser: vi.fn(),
@@ -64,7 +71,12 @@ import {
   updateStorageSettings,
 } from "../lib/api";
 import { createBundles, getBundleReport, setBundleDismissed } from "../lib/api/bundles";
-import { getImportRun, getImportRuns } from "../lib/api/settings";
+import {
+  getImportRun,
+  getImportRuns,
+  getLibraryScanStatus,
+  startLibraryScan,
+} from "../lib/api/settings";
 import type { AppSettings } from "../lib/settings";
 
 const createBundlesMock = vi.mocked(createBundles);
@@ -72,6 +84,8 @@ const getBundleReportMock = vi.mocked(getBundleReport);
 const setBundleDismissedMock = vi.mocked(setBundleDismissed);
 const getImportRunsMock = vi.mocked(getImportRuns);
 const getImportRunMock = vi.mocked(getImportRun);
+const getLibraryScanStatusMock = vi.mocked(getLibraryScanStatus);
+const startLibraryScanMock = vi.mocked(startLibraryScan);
 const getMountImportSettingsMock = vi.mocked(getMountImportSettings);
 const getStorageSettingsMock = vi.mocked(getStorageSettings);
 const listSessionsMock = vi.mocked(listSessions);
@@ -148,6 +162,65 @@ describe("Settings storage structure", () => {
     expect(payload).toEqual({ template: "{folder}/{model}" });
 
     await screen.findByText(/Storage structure saved\. New uploads and imports use this template; existing files are never moved\./);
+  });
+});
+
+// The storage rescan is work on the library, not configuration: it moved to
+// REVIEW -> Missing files (ADR 0011 decision 15). Settings must neither render
+// it nor ask for its status, from any section, for any role.
+describe("Settings storage scan removal", () => {
+  beforeEach(() => {
+    getLibraryScanStatusMock.mockReset();
+    startLibraryScanMock.mockReset();
+    getStorageSettingsMock.mockReset();
+    getStorageSettingsMock.mockResolvedValue(storedStorage);
+    getMountImportSettingsMock.mockReset();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  /** No rescan wording anywhere in the document, and no scan request made. */
+  function expectNoScanSurface(): void {
+    expect(screen.queryByRole("button", { name: /Rescan storage folder/ })).toBeNull();
+    const text = document.body.textContent || "";
+    expect(text).not.toContain("Rescan storage folder");
+    expect(text).not.toContain("Last scan:");
+    expect(text).not.toContain("Files added from outside Curiarium");
+    // The removal proof is the call, not the DOM: Settings used to load the
+    // status and offer the start button on every mount.
+    expect(getLibraryScanStatusMock).not.toHaveBeenCalled();
+    expect(startLibraryScanMock).not.toHaveBeenCalled();
+  }
+
+  it.each<"admin" | "editor" | "contributor" | "viewer">([
+    "admin",
+    "editor",
+    "contributor",
+    "viewer",
+  ])("shows no rescan surface and makes no scan request for a %s", async role => {
+    render(<Settings settings={settings} onChange={() => {}} role={role} />);
+
+    if (role === "admin") {
+      fireEvent.click(await screen.findByRole("button", { name: /Storage Structure/ }));
+      // Positive control: the section really mounted, so "no rescan surface"
+      // below is a statement about rendered content, not about an empty page.
+      await screen.findByDisplayValue("{folder}/{model}/{filename}");
+    } else {
+      // The storage section is admin-only, so a non-admin cannot reach it at
+      // all. The honest proof for them is that the root menu offers no way to
+      // it and the section they CAN open shows no rescan either.
+      await screen.findByRole("button", { name: /Import sources/ });
+      expect(screen.queryByRole("button", { name: /Storage Structure/ })).toBeNull();
+      expectNoScanSurface();
+
+      fireEvent.click(screen.getByRole("button", { name: /Import sources/ }));
+      // Positive control: the import section settled.
+      await screen.findByText(/Remember import cookies on this device/);
+    }
+
+    expectNoScanSurface();
   });
 });
 
