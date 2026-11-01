@@ -167,7 +167,7 @@ describe("ProjectSidebar review navigation", () => {
         role="editor"
         activeView="review"
         activeQueue="bundles"
-        reviewCounts={{ bundles: 4, imports: null, missing: null }}
+        reviewCounts={{ bundles: 4, imports: null, missing: null, trash: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -193,7 +193,7 @@ describe("ProjectSidebar review navigation", () => {
         selectedId={null}
         onSelect={vi.fn()}
         role="contributor"
-        reviewCounts={{ bundles: 4, imports: 1, missing: null }}
+        reviewCounts={{ bundles: 4, imports: 1, missing: null, trash: null }}
         onOpenQueue={onOpenQueue}
       />,
     );
@@ -218,7 +218,7 @@ describe("ProjectSidebar review navigation", () => {
         selectedId={null}
         onSelect={vi.fn()}
         role="viewer"
-        reviewCounts={{ bundles: null, imports: null, missing: 5 }}
+        reviewCounts={{ bundles: null, imports: null, missing: 5, trash: null }}
         onOpenQueue={onOpenQueue}
       />,
     );

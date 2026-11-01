@@ -158,7 +158,7 @@ export default function AssetDeleteDialog({ assets, onDelete, onCancel, onClosed
           <p className="opacity-80">
             The files are first moved to the server&apos;s <code>.trash</code> folder, so
             nothing is freed yet. Bytes are only deleted for good when someone runs
-            <strong> Empty trash</strong> in Settings → Storage.
+            <strong> Empty trash</strong> in REVIEW → Trash.
           </p>
           <p className="opacity-80">
             Restoring is file-level only: move the file back out of <code>.trash</code> by

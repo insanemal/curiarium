@@ -1,12 +1,13 @@
-import type { KeyboardEvent, ReactElement } from "react";
+import type { KeyboardEvent, ReactElement, ReactNode } from "react";
 
 /**
  * A deferred confirmation: the grid stores one of these and renders a single
  * `<ConfirmDialog>` for it, so cards never own dialog state of their own.
+ * `body` may be a node when the caller needs more than one paragraph.
  */
 export type ConfirmRequest = {
   title: string;
-  body?: string;
+  body?: ReactNode;
   confirmLabel?: string;
   danger?: boolean;
   run: () => void | Promise<void>;
@@ -14,11 +15,19 @@ export type ConfirmRequest = {
 
 type Props = {
   title: string;
-  body?: string;
+  body?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
   busy?: boolean;
+  /**
+   * Refuses the confirm button without hiding it, for a destructive action that
+   * is not allowed right now. Focus moves to Cancel in that case: leaving it on
+   * a disabled button would drop the keyboard user out of the dialog.
+   */
+  confirmDisabled?: boolean;
+  /** Shows what the busy state is doing; defaults to "Working...". */
+  busyLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -30,6 +39,8 @@ export default function ConfirmDialog({
   cancelLabel = "Cancel",
   danger = false,
   busy = false,
+  confirmDisabled = false,
+  busyLabel = "Working...",
   onConfirm,
   onCancel,
 }: Props): ReactElement {
@@ -41,6 +52,10 @@ export default function ConfirmDialog({
   const confirmClasses = danger
     ? "bg-red-600 text-white"
     : "bg-accent hover:bg-accent-strong";
+
+  // A caller passes text for the common one-line body and a node when the body
+  // is a run of paragraphs; wrapping a node in a `<p>` would nest paragraphs.
+  const bodyIsText = typeof body === "string" || typeof body === "number";
 
   return (
     <div
@@ -59,7 +74,7 @@ export default function ConfirmDialog({
 
         {body && (
           <div className="px-4 py-3 text-sm">
-            <p>{body}</p>
+            {bodyIsText ? <p>{body}</p> : body}
           </div>
         )}
 
@@ -69,6 +84,7 @@ export default function ConfirmDialog({
             className="px-3 py-2 rounded-md border border-panel-strong text-sm disabled:opacity-60"
             onClick={onCancel}
             disabled={busy}
+            autoFocus={confirmDisabled}
           >
             {cancelLabel}
           </button>
@@ -76,10 +92,10 @@ export default function ConfirmDialog({
             type="button"
             className={`px-3 py-2 rounded-md text-sm disabled:opacity-60 ${confirmClasses}`}
             onClick={onConfirm}
-            disabled={busy}
-            autoFocus
+            disabled={busy || confirmDisabled}
+            autoFocus={!confirmDisabled}
           >
-            {busy ? "Working..." : confirmLabel}
+            {busy ? busyLabel : confirmLabel}
           </button>
         </div>
       </div>

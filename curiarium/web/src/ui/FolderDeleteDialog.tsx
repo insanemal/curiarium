@@ -49,7 +49,7 @@ function DiskNotice({ preview }: DiskNoticeProps): ReactElement {
           The files in <code>{linkedDirectory}</code> are first moved to the
           server&apos;s <code>.trash</code> folder, so nothing is freed yet. Bytes are
           only deleted for good when someone runs <strong>Empty trash</strong> in
-          Settings → Storage.
+          REVIEW → Trash.
         </p>
         <RestoreNote />
       </>
@@ -63,7 +63,7 @@ function DiskNotice({ preview }: DiskNoticeProps): ReactElement {
           exist in storage under a name derived from the folder&apos;s name. Deleting
           moves that directory into the server&apos;s <code>.trash</code> folder first,
           so nothing is freed yet. Bytes are only deleted for good when someone runs{" "}
-          <strong>Empty trash</strong> in Settings → Storage.
+          <strong>Empty trash</strong> in REVIEW → Trash.
         </p>
         <RestoreNote />
       </>

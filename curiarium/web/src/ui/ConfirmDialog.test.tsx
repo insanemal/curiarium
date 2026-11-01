@@ -73,4 +73,44 @@ describe("ConfirmDialog", () => {
     renderDialog();
     expect(screen.getByRole("button", { name: "Confirm" }).className).not.toContain("bg-red-600");
   });
+
+  // The trash queue's empty confirmation carries more than one paragraph, so a
+  // node body must render as-is: wrapping it in a `<p>` would nest paragraphs.
+  it("renders a node body unwrapped", () => {
+    const { container } = renderDialog({
+      body: (
+        <>
+          <p>Trash holds 12 deleted files.</p>
+          <p>Emptying it cannot be undone.</p>
+        </>
+      ),
+    });
+
+    expect(screen.getByText("Trash holds 12 deleted files.")).toBeTruthy();
+    expect(screen.getByText("Emptying it cannot be undone.")).toBeTruthy();
+    expect(container.querySelectorAll("p p")).toHaveLength(0);
+    expect(container.querySelectorAll("p")).toHaveLength(2);
+  });
+
+  it("disables only the confirm button when confirming is refused, and focuses Cancel", () => {
+    renderDialog({ confirmDisabled: true });
+
+    const cancelButton = screen.getByRole("button", { name: "Cancel" });
+    const confirmButton = screen.getByRole("button", { name: "Confirm" }) as HTMLButtonElement;
+
+    expect(confirmButton.disabled).toBe(true);
+    expect((cancelButton as HTMLButtonElement).disabled).toBe(false);
+    // Focus stays inside the dialog: a disabled confirm button cannot hold it.
+    expect(document.activeElement).toBe(cancelButton);
+  });
+
+  it("renders a busy label while working and ignores a confirm click", () => {
+    const { props } = renderDialog({ busy: true, busyLabel: "Emptying\u2026" });
+
+    const working = screen.getByRole("button", { name: "Emptying\u2026" });
+    expect(screen.queryByRole("button", { name: "Working..." })).toBeNull();
+
+    fireEvent.click(working);
+    expect(props.onConfirm).not.toHaveBeenCalled();
+  });
 });

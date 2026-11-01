@@ -46,10 +46,12 @@ import type { ActiveView, ReviewQueueKey } from "./views";
 import BundleReviewView from "./review/BundleReviewView";
 import ImportsReviewView from "./review/ImportsReviewView";
 import MissingFilesReviewView from "./review/MissingFilesReviewView";
+import TrashQueueView from "./review/TrashQueue";
 import { useBundleDetect } from "./review/useBundleDetect";
 import { useImportRuns } from "./review/useImportRuns";
 import { useLibraryScan } from "./review/useLibraryScan";
 import { useReviewCounts } from "./review/useReviewCounts";
+import { useTrash } from "./review/useTrash";
 
 const DEFAULT_REFRESH_SECONDS = 900; // 15 minutes: the access token lifetime
 
@@ -221,6 +223,12 @@ export default function App() {
   // is require_read, so the Imports running queue is a viewer surface, while a
   // bundle decision is a contribute. Fail closed: `role` null has neither.
   const canRead = roleAtLeast(role, "viewer");
+  // `permissions.py` declares `("GET", "/trash"): READ` (line ~278) and
+  // `("POST", "/trash/purge"): ADMIN` (line ~373), so reading the queue and
+  // emptying it are two capabilities. `canDelete` is deliberately NOT reused:
+  // editor/WRITE is one rank below the purge route, and a viewer, contributor or
+  // editor must keep the queue without gaining any path to the purge.
+  const canPurgeTrash = roleAtLeast(role, "admin");
 
   // Each queue owns its own data. `enabled` includes `reviewOpen` and the active
   // queue key so a fetch happens per entry, not per app load: the app does not
@@ -238,9 +246,17 @@ export default function App() {
     enabled: canRead && reviewOpen && activeQueue === "imports",
     onUnauthorized: handleUnauthorized,
   });
+  // `GET /trash` sizes every entry with a recursive `os.walk`, so the queue reads
+  // once per entry and never on app load: the badge is a dash until the queue is
+  // first opened, and nothing polls. `enabled` includes the active queue key so a
+  // closed queue issues no read at all.
+  const trashReview = useTrash({
+    enabled: canRead && reviewOpen && activeQueue === "trash",
+    onUnauthorized: handleUnauthorized,
+  });
   // The missing badge costs no extra request: it reads the `/assets/counts`
   // number App already fetches for the sidebar.
-  const reviewCounts = useReviewCounts(bundleReview, importsReview, counts);
+  const reviewCounts = useReviewCounts(bundleReview, importsReview, counts, trashReview.trash);
 
   const handleOpenReview = React.useCallback((key: ReviewQueueKey) => {
     setActiveQueue(key);
@@ -701,6 +717,9 @@ export default function App() {
             theme={resolvedTheme}
             scrollElementRef={mainScrollRef}
           />
+        )}
+        {activeView === "review" && activeQueue === "trash" && (
+          <TrashQueueView state={trashReview} canPurge={canPurgeTrash} />
         )}
         {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}
         {activeView === "audit" && roleAtLeast(role, "admin") && (

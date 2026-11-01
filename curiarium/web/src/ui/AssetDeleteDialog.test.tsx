@@ -121,7 +121,8 @@ describe("AssetDeleteDialog", () => {
 
     expect(screen.getAllByText(/\.trash/).length).toBeGreaterThan(0);
     expect(screen.getByText(/Empty trash/)).toBeTruthy();
-    expect(screen.getByText(/Settings → Storage/)).toBeTruthy();
+    expect(screen.getByText(/REVIEW → Trash/)).toBeTruthy();
+    expect(screen.queryByText(/Settings → Storage/)).toBeNull();
     expect(screen.getByText(/move the file back out of/)).toBeTruthy();
     expect(screen.getByText(/rescan the storage folder/)).toBeTruthy();
     expect(screen.getByText(/its metadata \(names,/)).toBeTruthy();

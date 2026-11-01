@@ -1,4 +1,3 @@
-import TrashCard from "../TrashCard";
 import SnapshotCard from "./SnapshotCard";
 import StorageCapabilitiesCard from "./StorageCapabilitiesCard";
 import { useStorageCapabilities } from "./useStorageCapabilities";
@@ -112,8 +111,10 @@ export default function StorageSection({ storage, onUnauthorized, onBack }: Prop
       </div>
 
       {/* The storage rescan and its failure report are work on the library,
-          not configuration: they live in REVIEW → Missing files (ADR 0011
-          decision 15). */}
+          not configuration: they live in REVIEW → Missing files, and emptying
+          the trash is work too, so it lives in REVIEW → Trash. Settings is
+          configuration only down to this section (ADR 0011 decisions
+          9/15/16). */}
 
       <StorageCapabilitiesCard state={storageCapabilities} />
 
@@ -122,8 +123,6 @@ export default function StorageSection({ storage, onUnauthorized, onBack }: Prop
         canManage={storage.canManage}
         onUnauthorized={onUnauthorized}
       />
-
-      <TrashCard onUnauthorized={onUnauthorized} />
     </div>
   );
 }

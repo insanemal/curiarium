@@ -18,10 +18,6 @@ vi.mock("./SnapshotCard", async () => {
   const react = await import("react");
   return { default: () => react.createElement("div", { "data-testid": "snapshot-card" }) };
 });
-vi.mock("../TrashCard", async () => {
-  const react = await import("react");
-  return { default: () => react.createElement("div", { "data-testid": "trash-card" }) };
-});
 
 function makeStorage(overrides: Partial<StorageSettingsState> = {}): StorageSettingsState {
   return {
@@ -60,12 +56,21 @@ describe("StorageSection", () => {
     expect(screen.getByText("Props/Workshop/Cable clip/Cable clip.3mf")).toBeTruthy();
   });
 
-  it("renders the capabilities, snapshot and trash cards", () => {
-    renderSection();
+  // The trash card left Settings for REVIEW -> Trash (ADR 0011 decisions 9/15/16):
+  // emptying the trash is work on the library, not configuration. The section
+  // must prove both halves - the configuration cards still compose, and no
+  // trash surface survives here, not even a disabled one.
+  it("renders the capabilities and snapshot cards and no trash surface", () => {
+    const { container } = renderSection();
+    const text = container.textContent ?? "";
 
     expect(screen.getByTestId("capabilities-card")).toBeTruthy();
     expect(screen.getByTestId("snapshot-card")).toBeTruthy();
-    expect(screen.getByTestId("trash-card")).toBeTruthy();
+
+    expect(screen.queryByTestId("trash-card")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Empty trash/ })).toBeNull();
+    expect(text).not.toContain("The trash is empty");
+    expect(text).not.toContain("Empty trash");
   });
 
   // The storage scan is work on the library, not configuration: it lives in
