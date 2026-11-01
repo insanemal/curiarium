@@ -16,7 +16,9 @@ The heuristics pinned here:
 * `display_name` and `twin_key`;
 * the rule order R1 -> R2 -> R3 -> not-a-bundle, the marker-less README falling
   to low confidence, the sibling pair in both its file and directory shapes,
-  and the cover pick including its tie-break.
+  R3's model depth bound (its three accepted and rejected shapes, and R1 still
+  accepting a bundle whose models live under ``files/``), and the cover pick
+  including its tie-break.
 """
 
 from typing import Dict, Mapping
@@ -77,13 +79,55 @@ def test_classify_entry_reads_the_suffix_only(rel_path: str, role: str) -> None:
 
 def test_two_files_sharing_a_stem_are_two_model_entries() -> None:
     """The Mf-tkdp regression: identity is the path, never the stem."""
-    files = {"a/part.stl": 10, "b/part.stl": 20, "cover.jpg": 30, "notes.txt": 40}
+    files = {"files/part.stl": 10, "files/part.3mf": 20, "cover.jpg": 30, "notes.txt": 40}
     facts = bundle_detect.detect_bundle(snapshot("two-stems", files), {})
 
     assert facts is not None
     assert facts.counts.model == 2, "both same-stem files survive classification"
-    assert facts.model_entries == ("a/part.stl", "b/part.stl")
+    assert facts.model_entries == ("files/part.3mf", "files/part.stl")
     assert len(set(facts.model_entries)) == 2
+
+
+def test_r3_accepts_a_model_at_depth_one_under_files() -> None:
+    files = {"files/part.stl": 10, "cover.jpg": 20, "notes.txt": 30}
+
+    facts = bundle_detect.detect_bundle(snapshot("files-shape", files), {})
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_GENERIC
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+
+
+def test_r3_accepts_the_depth_zero_trio_unchanged() -> None:
+    files = {"part.stl": 10, "cover.jpg": 20, "notes.txt": 30}
+
+    facts = bundle_detect.detect_bundle(snapshot("root-trio", files), {})
+
+    assert facts is not None
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+
+
+def test_r3_rejects_a_model_under_an_unknown_directory() -> None:
+    files = {"stl/part.stl": 10, "cover.jpg": 20, "notes.txt": 30}
+
+    assert bundle_detect.detect_bundle(snapshot("stl-shape", files), {}) is None
+
+
+def test_r3_rejects_a_model_below_depth_one() -> None:
+    files = {"files/deep/part.stl": 10, "cover.jpg": 20, "notes.txt": 30}
+
+    assert bundle_detect.detect_bundle(snapshot("deep-shape", files), {}) is None
+
+
+def test_the_depth_bound_does_not_touch_r1() -> None:
+    """A real bundle whose models live at depth 1 under files/ still parses HIGH."""
+    files = {"README.txt": 100, "LICENSE.txt": 100, "files/part.stl": 200, "images/a.jpg": 300}
+
+    facts = bundle_detect.detect_bundle(snapshot("2493386_Moai_statue_-No_overhang", files), r1_docs())
+
+    assert facts is not None
+    assert facts.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert facts.counts.model == 1
 
 
 # --- shared constants -------------------------------------------------------

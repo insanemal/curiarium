@@ -21,8 +21,11 @@ The three rules, strongest first:
   two directories each holding one text file (the legacy flattening). Same
   enrichment as R1.
 * R3 ``generic-bundle`` / ``low``: nothing parses, but the tree still looks like
-  one thing - at least one model, one image and one text file. Name only: every
-  provenance field is ``None``, because a guess is worse than a blank.
+  one thing - at least one model at the bundle's own depth (depth 0, or depth 1
+  under ``R3_MODEL_DIRS``), one image and one text file. Name only: every
+  provenance field is ``None``, because a guess is worse than a blank. The depth
+  bound is what stops an ancestor qualifying on its descendants' models; images
+  and text stay unbounded because neither can supply the trio alone.
 
 Anything else is not a bundle and ``detect_bundle`` returns ``None``. A README
 that exists but lacks the markers is not R1 - both high-confidence rules miss and
@@ -58,6 +61,10 @@ from library_scan import IMAGE_SUFFIXES
 # The model extensions the import door accepts, minus the archive: a `.zip` is a
 # container, never a bundle member.
 MODEL_SUFFIXES = frozenset(IMPORT_ALLOWED_EXTS - {".zip"})
+# R3's model evidence is bounded to the bundle's own depth: a model at the bundle
+# root, or one level down under a known model directory. Without the bound every
+# ancestor of a bundle qualifies on its descendants' models.
+R3_MODEL_DIRS = frozenset({"files"})
 # Prose that can carry provenance. Deliberately short: a `.pdf` is a document,
 # not a sibling README.
 BUNDLE_TEXT_EXTS = frozenset({".txt", ".md", ".pdf", ".html", ".htm", ".rtf"})
@@ -376,6 +383,25 @@ def _cover_entry(snapshot: BundleSnapshot) -> Optional[str]:
     return images[0][0] if images else None
 
 
+def _own_depth_model_count(snapshot: BundleSnapshot) -> int:
+    """Models at the bundle's own depth: depth 0, or depth 1 under ``R3_MODEL_DIRS``.
+
+    R1 and R2 are bounded by construction - their marker documents live at depth
+    0 - but R3 counts roles, so an unbounded model count lets any ancestor of a
+    bundle qualify on its descendants' models. Images and text stay unbounded:
+    neither can supply the trio alone, and a real generic bundle keeps its
+    previews in ``images/``.
+    """
+    count = 0
+    for entry in snapshot.entries:
+        if classify_entry(entry.rel_path, entry.size) != MODEL:
+            continue
+        parts = entry.rel_path.split("/")
+        if len(parts) == 1 or (len(parts) == 2 and parts[0] in R3_MODEL_DIRS):
+            count += 1
+    return count
+
+
 def _model_entries(snapshot: BundleSnapshot) -> Tuple[str, ...]:
     return tuple(
         sorted(
@@ -477,6 +503,6 @@ def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional
     if sibling_pair is not None:
         return _high_facts(DETECTOR_THINGIVERSE_SIBLING, SHAPE_SIBLING_DOCS, snapshot, sibling_pair, counts, cover, models)
 
-    if counts.model >= 1 and counts.image >= 1 and counts.text >= 1:
+    if _own_depth_model_count(snapshot) >= 1 and counts.image >= 1 and counts.text >= 1:
         return _generic_facts(snapshot, counts, cover, models)
     return None

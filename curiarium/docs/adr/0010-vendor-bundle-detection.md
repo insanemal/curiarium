@@ -6,6 +6,8 @@
 
 **Implementation:** ticket `Mf-vwqf`.
 
+**Extended:** ticket `Mf-h0p8` (R3 depth bound, container rule, create-time refusal).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -55,7 +57,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    |---|---|---|---|---|
    | R1 | `thingiverse-readme` | `high` | `root-docs` | the bundle root holds both `README.txt` and `LICENSE.txt`, **and both parse**: the README yields `created by Thingiverse user <name>` and `licensed under <token>`, the LICENSE matches `<title> by <creator> on Thingiverse: <url>` |
    | R2 | `thingiverse-sibling-docs` | `high` | `sibling-docs` | the same pair shipped beside the files as `<bundle>_README` / `<bundle>_LICENSE` - as two files, or as two directories each holding one text file (the legacy flattening) - and both parse |
-   | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model, one image and one text entry |
+   | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model **at the bundle's own depth** (depth 0, or depth 1 under `files/`), one image and one text entry |
 
    `high` therefore means *the vendor told us*, never *there is a `.txt` file*.
    A README that exists but lacks the markers is not R1: both high-confidence
@@ -67,6 +69,18 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    from an explicit token table, and an unknown token is echoed back with **no**
    URL, because a guessed licence link is a legal statement we are not entitled
    to make. The cover is the largest image, ties broken by path.
+
+   The model evidence for R3 is bounded to the bundle's own depth - depth 0, or
+   depth 1 under `R3_MODEL_DIRS` (`{"files"}`) - and images and text stay
+   unbounded. R1 and R2 are bounded by construction, because their marker
+   documents live at depth 0; R3 counts roles, so an unbounded model count makes
+   every ancestor of a bundle a candidate on its descendants' models. Images and
+   text cannot supply the trio alone, and a real generic bundle keeps its
+   previews in `images/`, so bounding them would only lose bundles. `counts`,
+   `model_entries` and the cover stay folded totals, so every number on a row
+   that *is* a bundle is unchanged. A model outside the allowed shape fails
+   closed - the directory is not offered rather than wrongly created - and
+   `R3_MODEL_DIRS` is the one-line place to allow a second model directory.
 
 2. **Classification is suffix-only, and never looks at a stem.**
    `classify_entry` maps an entry to `model` / `image` / `text` / `archive` /
@@ -271,6 +285,37 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     storage-root-relative, so a scoped report and a whole-storage report name
     the same bundle and a create pass can find a row a scoped report showed.
 
+14. **A directory that contains bundles is a container, not a bundle.**
+    Claiming a child before its parent is not enough on its own: `import/` can
+    hold a loose model plus an image and a text file at depth 0, so R3 accepts
+    it on its *own* files even with the depth bound, and one confirmation would
+    make a project named `import` that swallows the library - the exact failure
+    the "never create a project you cannot attach assets to" constraint was
+    written to prevent, inverted. So `iter_bundle_candidates` keeps the strict
+    ancestors of every bundle it claims and skips a **low-confidence** candidate
+    whose key is in that set, *without* claiming it, so the rejected container's
+    own files still bubble up to a legitimate ancestor instead of being
+    stripped. A low folder candidate that strictly contains a zip-only candidate
+    is dropped as well once the archive pass has run. **High-confidence
+    candidates are exempt**, and the exemption is a fact rather than a
+    convenience: their documents sit at depth 0, so they provably attach only
+    their own models - `test_a_parent_attaches_only_its_own_models` pins
+    `assets_total == 13` while the project attaches 1 - and demoting one would
+    silently lose a real bundle to a spurious subfolder. Low confidence is a
+    guess, and a guess must never swallow a subtree, including a subtree made of
+    other low candidates.
+
+    The attach set is unchanged: a created project still attaches exactly the
+    model files its own snapshot names. Independently of detection, `_create_one`
+    refuses a low-confidence candidate whose registered assets under the key
+    outnumber the assets its own snapshot names (`len(assets) > len(own_assets)`
+    - that difference *is* another bundle's assets), returning `failed` with
+    reason `contains_bundles` before `project_service.create_project` runs.
+    Nothing is written and no half-created project can exist, because the guard
+    precedes the project row. It is `failed`, never `blocked`: `blocked` keeps
+    meaning database readiness (Mf-um7x), and a detection mistake must not
+    masquerade as an unresolved `Folder`.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -293,6 +338,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   the confidence badge, the name-only create, the per-row dismiss and the fact
   that a created project is an ordinary project an operator can delete, rename
   or fix.
+* **A container directory is no longer offered, and that removes a capability.**
+  A real "pile" directory that wraps several bundles can no longer become one
+  project; restoring it would need an explicit override, which is a request or
+  schema change and deliberately out of this ADR. A generic bundle whose models
+  live under a directory other than `files/` is likewise no longer offered - it
+  fails closed rather than wrongly created - and `R3_MODEL_DIRS` is where a
+  second known model directory is added.
 * **The detection walk is a synchronous multi-thousand-stat walk on a `READ`
   route.** It is bounded by `MAX_SCAN_ENTRIES`, by the scan's own pruning, by
   the document caps and by `limit`, the client fetches once per card open and
@@ -378,7 +430,11 @@ unchanged.
   never-invent-a-URL rule, `display_name`'s ordinal stripping and dash
   preservation, `twin_key`, the cover pick and its tie-break, and the rule
   precedence - R1 before R2 before R3, and a marker-less README falling to
-  `generic-bundle` / `low` with every enrichment field `None`.
+  `generic-bundle` / `low` with every enrichment field `None`. It also pins R3's
+  depth bound: a `files/` trio is `generic-bundle` / `low`, the depth-0 trio is
+  unchanged, a model under `stl/` is not a bundle and a model below depth 1 is
+  not a bundle - and R1 still parses a bundle whose models live at depth 1 under
+  `files/`.
 - `tests/test_bundle_service.py` drives the whole contract through
   `TestClient(main.app)` against a temporary storage root and database: the Moai
   fixture (README, LICENSE, `images/*.jpg`, `files/*.stl`) reports one bundle,
@@ -398,7 +454,16 @@ unchanged.
   and a stale key is reported; `limit` and `path` bound and scope the report; and
   the bounded zip reader reads a member without extracting, refuses a declared
   oversize member, rejects a traversal entry and answers `None` for a missing
-  member or a bad archive.
+  member or a bad archive. It also proves the container rule: on the replica of
+  the live shape `import/` (with its own depth-0 trio and a residual model-only
+  subdirectory) is not offered, neither is `import/ParentOf` nor the model-only
+  directory, while the Moai bundle under `import/` stays `high` with
+  `model_count == 3`; create-all over the offered rows makes no project named
+  `import`, shares no asset between two projects and gives each project exactly
+  its own model count; a low container of low-confidence children and a low
+  container of a zip-only bundle are both rejected; and a direct `_create_one`
+  call proves the `contains_bundles` refusal writes no `Project` row while an
+  ordinary depth-0 trio still creates.
 - `tests/test_bundles_api.py` covers the HTTP surface as a role sweep: a viewer
   can `GET /bundles/detect` (200) and both POSTs answer 403 with
   `permissions.DENY_DETAIL[CONTRIBUTE]`; the report body matches the pinned
@@ -443,3 +508,10 @@ This ADR is superseded if any of the following becomes true:
 - the dismissal key stops being the relative path, or `stale_dismissals` stops
   being reported;
 - the report stops being bounded by `limit`, `truncated` or `MAX_SCAN_ENTRIES`.
+- R3's model evidence stops being bounded to the bundle's own depth, or the
+  bound widens beyond `R3_MODEL_DIRS`;
+- a directory that contains bundles starts being offered as a bundle again, or a
+  high-confidence candidate starts being demoted for containing one;
+- creation stops refusing a low candidate whose registered assets outnumber its
+  own snapshot's, or that refusal starts reporting `blocked` instead of
+  `failed`.
