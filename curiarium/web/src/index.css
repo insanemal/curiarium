@@ -262,12 +262,6 @@ html, body, #root { height: 100%; }
     background: color-mix(in srgb, var(--mv-text-muted) 9%, transparent);
   }
 
-  .sidebar-root-label {
-    @apply rounded px-1.5 py-0.5 text-[8px] font-bold tracking-widest;
-    color: var(--mv-text-subtle);
-    background: color-mix(in srgb, var(--mv-text-muted) 8%, transparent);
-  }
-
   .sidebar-section-heading {
     @apply mb-1.5 flex items-center justify-between px-2 text-[10px] font-semibold uppercase tracking-[0.14em];
     color: var(--mv-text-subtle);

@@ -30,6 +30,8 @@ import {
 
 type AssetListOptions = {
   folderId?: string | null;
+  /** Files mode: show only the library root's assets (mutually exclusive with a folder). */
+  unfiled?: boolean;
   projectId?: string | null;
   foldersVersion: number;
   assetsVersion: number;
@@ -59,6 +61,8 @@ export type AssetListApi = {
   hasMore: boolean;
   /** Files mode only: the grid is narrowed to assets that belong to no project. */
   notInProject: boolean;
+  /** Files mode only: the pile the loaded page describes (root vs everything). */
+  unfiled: boolean;
   /** Latest typed query; a ref so typing never re-renders the grid. */
   queryRef: MutableRefObject<string>;
   refresh: (opts?: RefreshOpts) => Promise<void>;
@@ -76,6 +80,7 @@ export type AssetListApi = {
  */
 export function useAssetList({
   folderId,
+  unfiled = false,
   projectId,
   foldersVersion,
   assetsVersion,
@@ -98,6 +103,10 @@ export function useAssetList({
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [notInProject, setNotInProject] = useState(false);
+  // The pile the loaded page describes. The prop is the source of truth (App
+  // owns the selector); this mirrors it so `refresh`'s request and the empty
+  // state can never disagree about which pile is on screen.
+  const [unfiledState, setUnfiledState] = useState(unfiled);
   const [pageSize] = useState<number>(() => {
     if (typeof window === "undefined") return ROWS_PER_BATCH;
     return rowsBatchSizeForWidth(window.innerWidth);
@@ -123,7 +132,10 @@ export function useAssetList({
     const tags = opts.tags ?? activeTags;
     const targetFolderId = folderId || undefined;
     // One value for both requests, so the chips can never describe a different
-    // pile than the grid.
+    // pile than the grid. The prop wins (App owns the All files/Unfiled
+    // selector); `RefreshOpts` may override it for a single call.
+    const effectiveUnfiled = isProject ? false : opts.unfiled ?? unfiled;
+    setUnfiledState(effectiveUnfiled);
     const effectiveNotInProject = opts.notInProject ?? notInProject;
     const creator = opts.creator !== undefined ? opts.creator : activeCreator;
     const effectiveSortKey = opts.sortKey ?? sortKey;
@@ -135,6 +147,7 @@ export function useAssetList({
         q: search,
         tags,
         folderId: targetFolderId,
+        unfiled: effectiveUnfiled,
         notInProject: effectiveNotInProject,
         creator: creator ?? undefined,
         sort: serverSortKey(effectiveSortKey) ?? undefined,
@@ -144,14 +157,16 @@ export function useAssetList({
       }),
       listTags({
         q: search,
-        folder_id: isProject ? undefined : targetFolderId,
+        folder_id: isProject || effectiveUnfiled ? undefined : targetFolderId,
+        unfiled: isProject ? undefined : effectiveUnfiled,
         project_id: projectId ?? undefined,
         not_in_project: isProject ? undefined : effectiveNotInProject,
       }),
       listCreators({
         q: search,
         tags,
-        folder_id: isProject ? undefined : targetFolderId,
+        folder_id: isProject || effectiveUnfiled ? undefined : targetFolderId,
+        unfiled: isProject ? undefined : effectiveUnfiled,
         project_id: projectId ?? undefined,
         not_in_project: isProject ? undefined : effectiveNotInProject,
       }),
@@ -191,6 +206,7 @@ export function useAssetList({
         q: queryRef.current,
         tags: activeTags,
         folderId: folderId || undefined,
+        unfiled: isProject ? false : unfiled,
         notInProject,
         creator: activeCreator ?? undefined,
         sort: serverSortKey(sortKey) ?? undefined,
@@ -208,7 +224,11 @@ export function useAssetList({
     }
   });
 
-  useEffect(() => { refresh(); }, [folderId, projectId, refresh]);
+  useEffect(() => {
+    // A switch between All files and Unfiled is a new pile, so it refetches from
+    // the first page like a folder change.
+    refresh();
+  }, [folderId, unfiled, projectId, refresh]);
   // `assetsVersion` bumps when another view (upload, folder scan) changed
   // assets. Refetch in place instead of remounting: the ref is seeded with the
   // current version so mounting performs no extra fetch, and comparing values
@@ -291,6 +311,7 @@ export function useAssetList({
     setOffset,
     hasMore,
     notInProject,
+    unfiled: unfiledState,
     queryRef,
     refresh,
     loadMore,

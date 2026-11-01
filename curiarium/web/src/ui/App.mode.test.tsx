@@ -11,6 +11,7 @@ vi.mock("../lib/api", () => ({
   apiHealth: vi.fn(async () => ({ ok: true, auth_required: true })),
   fileUrl: vi.fn((rel: string) => rel),
   getApiBase: vi.fn(() => "http://localhost:8000"),
+  getAssetCounts: vi.fn(async () => ({ total: 0, unfiled: 0 })),
   getMe: vi.fn(async () => ({
     id: "u1",
     username: "admin",
@@ -39,11 +40,30 @@ vi.mock("../lib/settings", () => ({
   resolveTheme: () => "light",
 }));
 
+// The real Sidebar renders App's counts beside its two rows, so the mock prints
+// them too: that is the only observable of the counts refresh (AC-5).
 vi.mock("./Sidebar", async () => {
   const react = await import("react");
   return {
-    default: () =>
-      react.createElement("aside", { "aria-label": "Files" }, "Files tree"),
+    default: ({
+      totalCount,
+      unfiledCount,
+      unfiled,
+      onSelectUnfiled,
+    }: {
+      totalCount?: number | null;
+      unfiledCount?: number | null;
+      unfiled?: boolean;
+      onSelectUnfiled?: () => void;
+    }) =>
+      react.createElement(
+        "aside",
+        { "aria-label": "Files", "data-unfiled": String(Boolean(unfiled)) },
+        react.createElement("p", null, "Files tree"),
+        react.createElement("p", { "data-testid": "total-count" }, totalCount == null ? "none" : String(totalCount)),
+        react.createElement("p", { "data-testid": "unfiled-count" }, unfiledCount == null ? "none" : String(unfiledCount)),
+        react.createElement("button", { type: "button", onClick: onSelectUnfiled }, "Select unfiled"),
+      ),
   };
 });
 
@@ -65,7 +85,19 @@ vi.mock("./ProjectView", async () => {
   return { default: () => react.createElement("div", null, "Project view") };
 });
 
-vi.mock("./asset-grid/AssetGrid", () => ({ default: () => null }));
+// A real card move reaches App only through `onAssetsFiled`, so the stand-in
+// offers exactly that callback.
+vi.mock("./asset-grid/AssetGrid", async () => {
+  const react = await import("react");
+  return {
+    default: ({ unfiled, onAssetsFiled }: { unfiled?: boolean; onAssetsFiled?: () => void }) =>
+      react.createElement(
+        "div",
+        { "data-testid": "asset-grid", "data-unfiled": String(Boolean(unfiled)) },
+        react.createElement("button", { type: "button", onClick: onAssetsFiled }, "File one asset"),
+      ),
+  };
+});
 vi.mock("./settings/Settings", async () => {
   const react = await import("react");
   return {
@@ -90,11 +122,12 @@ vi.mock("./UploadQueuePanel", () => ({ default: () => null }));
 vi.mock("./Login", () => ({ default: () => null }));
 
 import App, { SettingsLoading } from "./App";
-import { listProjects } from "../lib/api";
+import { getAssetCounts, listProjects } from "../lib/api";
 import { storeToken } from "../lib/auth";
 import { MODE_STORAGE_KEY } from "../lib/mode";
 
 const listProjectsMock = vi.mocked(listProjects);
+const getAssetCountsMock = vi.mocked(getAssetCounts);
 
 /** jsdom may resolve `window.localStorage` to undefined; install a real one. */
 function installMemoryStorage(): void {
@@ -125,6 +158,8 @@ function installMemoryStorage(): void {
 beforeEach(() => {
   installMemoryStorage();
   listProjectsMock.mockClear();
+  getAssetCountsMock.mockReset();
+  getAssetCountsMock.mockResolvedValue({ total: 0, unfiled: 0 });
   storeToken("access-token");
 });
 
@@ -211,4 +246,38 @@ describe("App library mode switch", () => {
     expect(screen.getByRole("complementary", { name: "Files" })).toBeTruthy();
     expect(screen.queryByRole("complementary", { name: "Projects" })).toBeNull();
   });
+
+  it("selects the unfiled pile without a folder, and passes it to both panes", async () => {
+    render(<App />);
+
+    expect((await screen.findByTestId("asset-grid")).dataset.unfiled).toBe("false");
+
+    fireEvent.click(screen.getByRole("button", { name: "Select unfiled" }));
+
+    expect(screen.getByTestId("asset-grid").dataset.unfiled).toBe("true");
+    expect(screen.getByRole("complementary", { name: "Files" }).dataset.unfiled).toBe("true");
+  });
+
+  // AC-5: a move is reconciled locally and never bumps `assetsVersion`, so the
+  // count behind the sidebar row must be refreshed through `onAssetsFiled`.
+  it("refreshes the unfiled count after a card is filed, without an assets-version bump", async () => {
+    getAssetCountsMock
+      .mockResolvedValueOnce({ total: 5, unfiled: 2 })
+      .mockResolvedValueOnce({ total: 5, unfiled: 1 });
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("unfiled-count").textContent).toBe("2"),
+    );
+    expect(screen.getByTestId("total-count").textContent).toBe("5");
+
+    fireEvent.click(screen.getByRole("button", { name: "File one asset" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("unfiled-count").textContent).toBe("1"),
+    );
+    expect(getAssetCountsMock).toHaveBeenCalledTimes(2);
+  });
+
 });

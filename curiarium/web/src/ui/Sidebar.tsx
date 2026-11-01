@@ -6,6 +6,7 @@ import {
   Folder as FolderIcon,
   FolderOpen,
   FolderPlus,
+  Inbox,
   Layers3,
   MoreHorizontal,
   Pencil,
@@ -29,6 +30,13 @@ import SidebarFooter from "./SidebarFooter";
 type Props = {
   selectedId?: string | null;
   onSelect: (id: string | null) => void;
+  /** The library-root view (the "Unfiled" row) is the active one. */
+  unfiled: boolean;
+  /** `/assets/counts`' whole-library total; null until it loads (or on failure). */
+  totalCount: number | null;
+  /** `/assets/counts`' root-level total; null until it loads (or on failure). */
+  unfiledCount: number | null;
+  onSelectUnfiled: () => void;
   onFoldersChanged?: () => void;
   foldersVersion?: number;
   onUnauthorized?: () => void;
@@ -48,6 +56,10 @@ const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 export default function Sidebar({
   selectedId,
   onSelect,
+  unfiled,
+  totalCount,
+  unfiledCount,
+  onSelectUnfiled,
   onFoldersChanged,
   foldersVersion,
   onUnauthorized,
@@ -582,9 +594,13 @@ export default function Sidebar({
       </label>
 
       <nav className="sidebar-navigation" aria-label="Library folders">
+        {/* Two honest piles: "All files" means everything, "Unfiled" means the
+            library root only (folder_id IS NULL), so the root stays reachable. */}
         <button
           type="button"
-          className={`sidebar-all-items ${!selectedId ? "is-selected" : ""} ${dropTargetId === DROP_ALL_ID ? "is-drop-target" : ""}`}
+          className={`sidebar-all-items ${!selectedId && !unfiled ? "is-selected" : ""} ${dropTargetId === DROP_ALL_ID ? "is-drop-target" : ""}`}
+          aria-label="All files"
+          aria-current={!selectedId && !unfiled ? "page" : undefined}
           onClick={() => onSelect(null)}
           onKeyDown={event => {
             if (event.key !== "ArrowDown") return;
@@ -596,7 +612,24 @@ export default function Sidebar({
         >
           <span className="sidebar-all-icon"><Layers3 className="h-4 w-4" /></span>
           <span className="flex-1 text-left">All files</span>
-          <span className="sidebar-root-label">ROOT</span>
+          {totalCount !== null && <span className="sidebar-count">{totalCount}</span>}
+        </button>
+
+        <button
+          type="button"
+          className={`sidebar-all-items ${!selectedId && unfiled ? "is-selected" : ""}`}
+          aria-label="Unfiled"
+          aria-current={!selectedId && unfiled ? "page" : undefined}
+          onClick={onSelectUnfiled}
+          onKeyDown={event => {
+            if (event.key !== "ArrowDown") return;
+            event.preventDefault();
+            focusTreeRow(treeRows[0]?.id ?? null);
+          }}
+        >
+          <span className="sidebar-all-icon"><Inbox className="h-4 w-4" /></span>
+          <span className="flex-1 text-left">Unfiled</span>
+          {unfiledCount !== null && <span className="sidebar-count">{unfiledCount}</span>}
         </button>
 
         <div className="sidebar-section-heading">

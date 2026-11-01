@@ -18,6 +18,8 @@ type AssetGridBodyProps = {
   toggleGroup: (id: string) => void;
   toggleGroupExpanded: (id: string) => void;
   isProject: boolean;
+  /** Files mode: the grid is showing the library root only. */
+  unfiled: boolean;
   folderId?: string | null;
   subfolders: Folder[];
   loading: boolean;
@@ -46,6 +48,7 @@ export default function AssetGridBody({
   toggleGroup,
   toggleGroupExpanded,
   isProject,
+  unfiled,
   folderId,
   subfolders,
   loading,
@@ -65,6 +68,22 @@ export default function AssetGridBody({
         <p className="text-sm opacity-70">
           No files directly in this folder — pick a subfolder above.
         </p>
+      )}
+
+      {/* The Unfiled row exists to answer "what is still loose?": an empty pile
+          is the good outcome, so say so instead of leaving the page blank. But
+          an empty result is not an empty pile: a search or tag filter that
+          matched nothing must not claim every asset is filed while the sidebar
+          count says otherwise. */}
+      {unfiled &&
+        !loading &&
+        !items.length &&
+        !queryRef.current &&
+        activeTags.length === 0 && (
+        <div className="text-sm opacity-70" data-unfiled-empty>
+          <p className="font-medium">Nothing unfiled</p>
+          <p>Every asset is in a folder.</p>
+        </div>
       )}
 
       {/* "Empty" only means empty when no filter is narrowing it: a search or

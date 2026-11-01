@@ -13,9 +13,11 @@ import {
   UnauthorizedError,
   apiHealth,
   getApiBase,
+  getAssetCounts,
   listProjects,
   logout,
   refreshToken,
+  type AssetCounts,
   type HealthInfo,
   type Project,
 } from "../lib/api";
@@ -106,7 +108,14 @@ export default function App() {
   // selection, loaded pages, scroll) survives uploads and mutations.
   const [assetsVersion, setAssetsVersion] = React.useState(0);
   const [folderId, setFolderId] = React.useState<string | null>(null);
+  // Files mode's third pile: the library root only (`folder_id IS NULL`).
+  // Mutually exclusive with `folderId`, and never set alongside it.
+  const [unfiled, setUnfiled] = React.useState(false);
   const [folderVersion, setFolderVersion] = React.useState(0);
+  // Counts generation. A move is reconciled locally and never bumps
+  // `assetsVersion`, so the grid reports it through `handleAssetsFiled`.
+  const [countsVersion, setCountsVersion] = React.useState(0);
+  const [counts, setCounts] = React.useState<AssetCounts | null>(null);
   // Top-level browsing mode, persisted per browser. The two panes are mounted
   // lazily (on first visit) and then kept mounted, so each mode keeps its own
   // selection/search/sidebar state while the other is hidden.
@@ -206,16 +215,59 @@ export default function App() {
     setAssetsVersion(n => n + 1);
   }, []);
 
-  const handleSelectFolder = React.useCallback((id: string | null) => {
-    setFolderId(id);
-    // Selecting a folder is a files-mode action: Settings' "Scan now" and
-    // folder navigation call this while the projects pane may be active, so
-    // the selection has to bring the files pane back into view.
+  const handleAssetsFiled = React.useCallback(() => {
+    setCountsVersion(v => v + 1);
+  }, []);
+
+  // Whole-library counts for the sidebar's two rows. Deliberately unfiltered,
+  // and refetched when assets or folders change or a move was reported.
+  React.useEffect(() => {
+    if (authRequired && !token) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const next = await getAssetCounts();
+        if (!cancelled) setCounts(next);
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof UnauthorizedError) {
+          handleUnauthorized();
+          return;
+        }
+        // A counts failure must not interrupt browsing: the rows simply show
+        // no numbers until the next refetch.
+        console.error(err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authRequired, token, assetsVersion, folderVersion, countsVersion, handleUnauthorized]);
+
+  // Selecting anything (a folder or All files) is a files-mode action: Settings'
+  // "Scan now" and folder navigation call this while the projects pane may be
+  // active, so the selection has to bring the files pane back into view.
+  const showFilesView = React.useCallback(() => {
     saveMode("files");
     setMode("files");
     setVisitedModes(prev => (prev.files ? prev : { ...prev, files: true }));
     setActiveView("library");
   }, []);
+
+  const handleSelectFolder = React.useCallback((id: string | null) => {
+    setFolderId(id);
+    // Any folder (or All files) leaves the Unfiled pile.
+    setUnfiled(false);
+    showFilesView();
+  }, [showFilesView]);
+
+  const handleSelectUnfiled = React.useCallback(() => {
+    // The two views are exclusive, and an unfiled listing must never also carry
+    // a folder id (the server 400s on that pair).
+    setFolderId(null);
+    setUnfiled(true);
+    showFilesView();
+  }, [showFilesView]);
 
   const handleModeChange = React.useCallback((next: LibraryMode) => {
     saveMode(next);
@@ -414,6 +466,10 @@ export default function App() {
             <Sidebar
               selectedId={folderId}
               onSelect={handleSelectFolder}
+              unfiled={unfiled}
+              totalCount={counts?.total ?? null}
+              unfiledCount={counts?.unfiled ?? null}
+              onSelectUnfiled={handleSelectUnfiled}
               onFoldersChanged={handleFoldersChanged}
               foldersVersion={folderVersion}
               onAssetsChanged={handleAssetsChanged}
@@ -505,8 +561,11 @@ export default function App() {
               canContribute={canContribute}
               canDelete={canDelete}
               folderId={folderId}
+              unfiled={unfiled}
               foldersVersion={folderVersion}
               assetsVersion={assetsVersion}
+              countsVersion={countsVersion}
+              onAssetsFiled={handleAssetsFiled}
               onUnauthorized={handleUnauthorized}
               slicerSettings={settings.slicer}
               engravingSettings={settings.engraving}

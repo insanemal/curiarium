@@ -168,6 +168,11 @@ export async function listAssets(params: {
   q?: string;
   tags?: string[];
   folder_id?: string;
+  /**
+   * Only assets at the library root (`folder_id IS NULL`). Mutually exclusive
+   * with `folder_id`: sending both is a 400, so this client never does.
+   */
+  unfiled?: boolean;
   /** Only assets that belong to no project (the files-mode "unsorted pile"). */
   not_in_project?: boolean;
   /** Exact creator, case-insensitive; blank is ignored by the server. */
@@ -180,7 +185,10 @@ export async function listAssets(params: {
   const qs = new URLSearchParams();
   if (params.q) qs.set("q", params.q);
   if (params.tags && params.tags.length) qs.set("tags", params.tags.join(","));
-  if (params.folder_id) qs.set("folder_id", params.folder_id);
+  // `unfiled` and `folder_id` are mutually exclusive (the server 400s on both);
+  // an unfiled listing has no folder id to send.
+  if (params.folder_id && !params.unfiled) qs.set("folder_id", params.folder_id);
+  if (params.unfiled) qs.set("unfiled", "true");
   if (params.not_in_project) qs.set("not_in_project", "true");
   if (params.creator) qs.set("creator", params.creator);
   if (params.sort) qs.set("sort", params.sort);
@@ -203,6 +211,8 @@ export async function listTags(params: {
   q?: string;
   tags?: string[];
   folder_id?: string;
+  /** Only chips for assets at the library root; exclusive with `folder_id`. */
+  unfiled?: boolean;
   /** Scope the chip set to one project's members (project mode). */
   project_id?: string;
   /** Scope the chip set to assets in no project (files-mode "unsorted pile"). */
@@ -211,7 +221,8 @@ export async function listTags(params: {
   const qs = new URLSearchParams();
   if (params.q) qs.set("q", params.q);
   if (params.tags && params.tags.length) qs.set("tags", params.tags.join(","));
-  if (params.folder_id) qs.set("folder_id", params.folder_id);
+  if (params.folder_id && !params.unfiled) qs.set("folder_id", params.folder_id);
+  if (params.unfiled) qs.set("unfiled", "true");
   if (params.project_id) qs.set("project_id", params.project_id);
   if (params.not_in_project) qs.set("not_in_project", "true");
   const res = await fetch(`${apiBase()}/tags?${qs.toString()}`, {
@@ -226,6 +237,8 @@ export async function listCreators(params: {
   q?: string;
   tags?: string[];
   folder_id?: string;
+  /** Only creators of assets at the library root; exclusive with `folder_id`. */
+  unfiled?: boolean;
   /** Scope the facet to one project's members (project mode). */
   project_id?: string;
   /** Scope the facet to assets in no project (files-mode "unsorted pile"). */
@@ -234,13 +247,23 @@ export async function listCreators(params: {
   const qs = new URLSearchParams();
   if (params.q) qs.set("q", params.q);
   if (params.tags && params.tags.length) qs.set("tags", params.tags.join(","));
-  if (params.folder_id) qs.set("folder_id", params.folder_id);
+  if (params.folder_id && !params.unfiled) qs.set("folder_id", params.folder_id);
+  if (params.unfiled) qs.set("unfiled", "true");
   if (params.project_id) qs.set("project_id", params.project_id);
   if (params.not_in_project) qs.set("not_in_project", "true");
   const res = await fetch(`${apiBase()}/creators?${qs.toString()}`, {
     headers: authHeaders(),
   });
   assertOk(res, "Failed to list creators");
+  return res.json();
+}
+
+/** Whole-library counts for the two files-mode rows; deliberately unfiltered. */
+export type AssetCounts = { total: number; unfiled: number };
+
+export async function getAssetCounts(): Promise<AssetCounts> {
+  const res = await fetch(apiBase() + "/assets/counts", { headers: authHeaders() });
+  assertOk(res, "Failed to load asset counts");
   return res.json();
 }
 

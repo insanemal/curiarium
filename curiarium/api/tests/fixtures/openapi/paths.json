@@ -890,6 +890,18 @@
           }
         },
         {
+          "description": "Only assets at the library root (no folder)",
+          "in": "query",
+          "name": "unfiled",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "Only assets at the library root (no folder)",
+            "title": "Unfiled",
+            "type": "boolean"
+          }
+        },
+        {
           "description": "Exact creator, case-insensitive",
           "in": "query",
           "name": "creator",
@@ -1218,6 +1230,30 @@
         }
       ],
       "summary": "Batch Set Tags"
+    }
+  },
+  "/assets/counts": {
+    "get": {
+      "description": "Library totals for the sidebar: every asset, and the ones at the root.\n\nPure SELECT, deliberately unfiltered by q/tags/creator/folder: the sidebar\nlabels name a place in the tree, so a filtered count would claim something\nother than the root level. Two counts in one session, so the two numbers\ncome from the same read.",
+      "operationId": "asset_counts_assets_counts_get",
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetCountsOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Asset Counts"
     }
   },
   "/assets/delete-preview": {
@@ -1757,7 +1793,7 @@
   },
   "/creators": {
     "get": {
-      "description": "Distinct non-empty creators, deduped and sorted case-insensitively.\n\nTakes the same scoping filters as `GET /assets` and `GET /tags`, so the\nfacet works in library mode, folder mode and project mode. An unknown\nproject is a 404 like every other project route.",
+      "description": "Distinct non-empty creators, deduped and sorted case-insensitively.\n\nTakes the same scoping filters as `GET /assets` and `GET /tags`, so the\nfacet works in library mode, folder mode, root mode (`unfiled`) and project\nmode. An unknown project is a 404 like every other project route.",
       "operationId": "list_creators_creators_get",
       "parameters": [
         {
@@ -1808,6 +1844,18 @@
               }
             ],
             "title": "Folder Id"
+          }
+        },
+        {
+          "description": "Only creators on assets at the library root (no folder)",
+          "in": "query",
+          "name": "unfiled",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "Only creators on assets at the library root (no folder)",
+            "title": "Unfiled",
+            "type": "boolean"
           }
         },
         {
@@ -4170,6 +4218,18 @@
               }
             ],
             "title": "Folder Id"
+          }
+        },
+        {
+          "description": "Only tags on assets at the library root (no folder)",
+          "in": "query",
+          "name": "unfiled",
+          "required": false,
+          "schema": {
+            "default": false,
+            "description": "Only tags on assets at the library root (no folder)",
+            "title": "Unfiled",
+            "type": "boolean"
           }
         },
         {

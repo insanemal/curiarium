@@ -43,6 +43,12 @@ type BulkActionsOptions = {
   handleApiError: (err: unknown, message?: string) => boolean;
   onUnauthorized?: () => void;
   onAddToProject: (ids: string[]) => void;
+  /**
+   * Fires after a bulk move lands. The grid reconciles moves locally and never
+   * bumps `assetsVersion`, so this is App's only signal that the unfiled count
+   * may have changed. Tag/meta edits and failed moves must not call it.
+   */
+  onAssetsFiled?: () => void;
 };
 
 export type BulkActionsApi = {
@@ -90,6 +96,7 @@ export function useBulkActions({
   handleApiError,
   onUnauthorized,
   onAddToProject,
+  onAssetsFiled,
 }: BulkActionsOptions): BulkActionsApi {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDownloading, setBulkDownloading] = useState<string | null>(null);
@@ -220,6 +227,9 @@ export function useBulkActions({
         failed: result.failed,
         view: { folderId, activeTags, activeCreator },
       });
+      // The request landed (even if some rows failed), and the local reconcile
+      // never bumps `assetsVersion`: this is the counts refresh signal.
+      onAssetsFiled?.();
     } catch (err) {
       if (err instanceof UnauthorizedError) {
         onUnauthorized?.();

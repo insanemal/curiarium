@@ -1,4 +1,23 @@
 {
+  "AssetCountsOut": {
+    "description": "Two library-wide numbers for the sidebar, never a filtered picture.\n\n`total` is every asset row; `unfiled` is just the library root, the rows with\nno folder. Both deliberately ignore the listing's q/tags/creator filters: a\nfiltered count would make the root label claim something other than the root.",
+    "properties": {
+      "total": {
+        "title": "Total",
+        "type": "integer"
+      },
+      "unfiled": {
+        "title": "Unfiled",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "total",
+      "unfiled"
+    ],
+    "title": "AssetCountsOut",
+    "type": "object"
+  },
   "AssetFolderUpdate": {
     "properties": {
       "folder_id": {

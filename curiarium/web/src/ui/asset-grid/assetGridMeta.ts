@@ -22,6 +22,8 @@ export type RefreshOpts = {
   search?: string;
   keepLoadedPages?: boolean;
   notInProject?: boolean;
+  /** One call's override of the files-mode Unfiled pile. */
+  unfiled?: boolean;
   creator?: string | null;
   sortKey?: SortKey;
   sortDir?: SortDir;
@@ -82,14 +84,17 @@ export function noop(): void {}
 
 /**
  * The one place that decides between the folder-scoped and project-scoped asset
- * listing. A project has no folder axis, so `folderId` is ignored there.
- * `notInProject` is files-only: a project listing is already scoped by membership.
+ * listing. A project has no folder axis, so `folderId` and `unfiled` are ignored
+ * there. `notInProject` is files-only: a project listing is already scoped by
+ * membership. `unfiled` narrows the files listing to the library root and is
+ * mutually exclusive with `folderId`.
  */
 export function fetchAssetPage(opts: {
   projectId?: string | null;
   q?: string;
   tags?: string[];
   folderId?: string;
+  unfiled?: boolean;
   notInProject?: boolean;
   creator?: string;
   sort?: "name" | "size" | "creator";
@@ -112,7 +117,9 @@ export function fetchAssetPage(opts: {
   return listAssets({
     q: opts.q,
     tags: opts.tags,
-    folder_id: opts.folderId,
+    // Never both: the server rejects an unfiled listing that names a folder.
+    folder_id: opts.unfiled ? undefined : opts.folderId,
+    unfiled: opts.unfiled,
     not_in_project: opts.notInProject,
     creator: opts.creator,
     sort: opts.sort,
