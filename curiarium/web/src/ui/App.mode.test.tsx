@@ -161,6 +161,7 @@ import App, { SettingsLoading } from "./App";
 import { getAssetCounts, listProjects } from "../lib/api";
 import { storeToken } from "../lib/auth";
 import { MODE_STORAGE_KEY } from "../lib/mode";
+import type { Project } from "../lib/api/projects";
 
 const listProjectsMock = vi.mocked(listProjects);
 const getAssetCountsMock = vi.mocked(getAssetCounts);
@@ -338,4 +339,49 @@ describe("App library mode switch", () => {
     expect(getAssetCountsMock).toHaveBeenCalledTimes(2);
   });
 
+  // The boot decision arrives as a prop and must be honoured by the FIRST
+  // commit, and never re-decided when the project list lands.
+  it("renders the boot mode on the first commit and keeps it when the list resolves empty", async () => {
+    render(<App initialMode="projects" />);
+
+    // Synchronous on purpose: nothing between render() and these assertions.
+    expect(
+      screen.getByRole("radio", { name: "Projects" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(screen.queryByRole("complementary", { name: "Files" })).toBeNull();
+
+    // The default mock resolves `[]`. An empty library must not flip the mode.
+    await waitFor(() => expect(listProjectsMock).toHaveBeenCalled());
+    expect(
+      screen.getByRole("radio", { name: "Projects" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(screen.queryByRole("complementary", { name: "Files" })).toBeNull();
+  });
+
+  // Anti-flip guard: App must never consult the project list to decide the
+  // mode. Only lib/modeBootstrap decides, once, before the first paint. An
+  // implementation that decided from `listProjects()` in an effect would call
+  // the mock and flip this boot-files render over to projects.
+  it("never consults the project list to decide the mode", async () => {
+    listProjectsMock.mockResolvedValue([
+      { id: "p1", name: "Hydra" },
+      { id: "p2", name: "Basilisk" },
+    ] as unknown as Project[]);
+
+    render(<App initialMode="files" />);
+
+    // Synchronous: the boot mode is already what is committed.
+    expect(screen.getByRole("radio", { name: "Files" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(screen.getByRole("complementary", { name: "Files" })).toBeTruthy();
+    expect(listProjectsMock).not.toHaveBeenCalled();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("radio", { name: "Files" }).getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+    expect(listProjectsMock).not.toHaveBeenCalled();
+  });
 });

@@ -117,7 +117,16 @@ function clearSsoFragment(): void {
   window.history.replaceState(null, "", window.location.pathname + window.location.search);
 }
 
-export default function App() {
+type AppProps = {
+  /**
+   * The boot mode, decided once before the first paint by
+   * `lib/modeBootstrap.ts`. Omitted only by tests that render App directly, in
+   * which case the stored mode is read on mount.
+   */
+  initialMode?: LibraryMode;
+};
+
+export default function App({ initialMode }: AppProps = {}) {
   const [token, setToken] = React.useState<string | null>(() => readToken());
   // Generation counter for "assets changed". The grid consumes it to refetch in
   // place; it no longer remounts the grid, so view state (search, sort,
@@ -135,7 +144,11 @@ export default function App() {
   // Top-level browsing mode, persisted per browser. The two panes are mounted
   // lazily (on first visit) and then kept mounted, so each mode keeps its own
   // selection/search/sidebar state while the other is hidden.
-  const [mode, setMode] = React.useState<LibraryMode>(() => loadMode());
+  // App no longer derives the mode from the project list: the boot decision is
+  // made before first paint by `lib/modeBootstrap.ts` and passed in, so nothing
+  // here may flip it after mount. The stored read is only the direct-render
+  // fallback (tests); it is never consulted when `initialMode` is given.
+  const [mode, setMode] = React.useState<LibraryMode>(() => initialMode ?? loadMode());
   const [visitedModes, setVisitedModes] = React.useState(() => ({
     files: mode === "files",
     projects: mode === "projects",
