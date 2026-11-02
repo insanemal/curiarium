@@ -148,6 +148,11 @@ html, body, #root { height: 100%; }
     border-right: 1px solid var(--mv-border);
   }
 
+  /* Projects mode hides the rail but keeps it mounted. `.library-rail` sets
+     `display: flex` in this layer, which beats preflight's base-layer
+     `[hidden] { display: none }`, so the attribute needs its own rule. */
+  .library-rail[hidden] { display: none; }
+
   /* The one header both modes share: the Files/Projects switch and the Review
      destination on the left, Settings/Audit/identity on the right. It sits
      outside the rail, so it owns its padding and no margins the rail's padding

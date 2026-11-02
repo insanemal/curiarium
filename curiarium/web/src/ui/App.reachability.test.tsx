@@ -57,7 +57,6 @@ vi.mock("../lib/settings", () => ({
 // Both rails are deliberately empty: nothing in this file may be carried by a
 // sidebar, so the header has to be the only carrier of every destination.
 vi.mock("./Sidebar", () => ({ default: () => null }));
-vi.mock("./ProjectSidebar", () => ({ default: () => null }));
 
 // One distinct marker per destination, so a cell can name what rendered without
 // driving the real surface.
@@ -125,6 +124,7 @@ import {
   type LibraryScanStatus,
 } from "../lib/api/settings";
 import { getTrash, type TrashList } from "../lib/api/trash";
+import indexCss from "../index.css?raw";
 import { storeToken, type Role } from "../lib/auth";
 import { MODE_STORAGE_KEY, type LibraryMode } from "../lib/mode";
 import type { ReviewQueueKey } from "./views";
@@ -722,5 +722,31 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
     expect(main.classList.contains("overflow-auto"), "<main> stays the virtualiser's scroller").toBe(
       true,
     );
+  });
+
+  it("ships the rule that makes the hidden rail stop painting", () => {
+    // `.library-rail` sets display:flex in @layer components, which beats
+    // preflight's base-layer [hidden] rule; without this exact rule the rail
+    // keeps painting in Projects mode while jsdom still reports it hidden.
+    expect(indexCss).toMatch(/\.library-rail\[hidden\]\s*\{\s*display:\s*none;\s*\}/);
+  });
+
+  it("hides the rail in Projects mode and keeps <main> the bounded scroller", async () => {
+    const container = await renderApp("projects", "editor");
+    // Derive the working row from the root and the header, never from <main>:
+    // `main.parentElement` compared against a row read off `main` is a value
+    // compared with itself and would pass even if <main> moved out of the row.
+    const root = container.firstElementChild as HTMLElement;
+    const header = root.firstElementChild as HTMLElement;
+    const row = header.nextElementSibling as HTMLElement;
+    const rail = container.querySelector<HTMLElement>(".library-rail");
+    const main = container.querySelector<HTMLElement>("main");
+    if (!rail || !main) throw new Error("App rendered no rail or <main>");
+    expect(rail.hasAttribute("hidden"), "Projects mode hides the Files rail").toBe(true);
+    expect(rail.parentElement, "the rail still lives in the working row").toBe(row);
+    expect(main.parentElement, "<main> still spans the bounded working row").toBe(row);
+    expect(main.classList.contains("min-h-0")).toBe(true);
+    expect(main.classList.contains("flex-1")).toBe(true);
+    expect(main.classList.contains("overflow-auto")).toBe(true);
   });
 });

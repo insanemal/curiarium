@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { useState, type ComponentProps } from "react";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useCallback, useState, type ComponentProps, type ReactElement } from "react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 
 import type { Project } from "../lib/api";
 
@@ -19,6 +27,8 @@ type LandingProps = {
 
 vi.mock("../lib/api", () => ({
   fileUrl: (rel: string) => rel,
+  createProject: vi.fn(),
+  UnauthorizedError: class UnauthorizedError extends Error {},
 }));
 
 // The landing page is its own component: stub it to a marker plus the props it
@@ -47,6 +57,10 @@ vi.mock("./ProjectLanding", () => ({
 }));
 
 import ProjectView from "./ProjectView";
+import { createProject, UnauthorizedError } from "../lib/api";
+import { getToasts, resetToasts } from "../lib/toast";
+
+const createProjectMock = vi.mocked(createProject);
 
 function makeProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -84,6 +98,7 @@ function viewProps(overrides: Partial<Props> = {}): Props {
     selectedProjectId: null,
     onOpenProject: vi.fn(),
     onCloseProject: vi.fn(),
+    onProjectCreated: vi.fn(),
     onProjectUpdated: vi.fn(),
     onProjectDeleted: vi.fn(),
     onAssetsChanged: vi.fn(),
@@ -92,6 +107,71 @@ function viewProps(overrides: Partial<Props> = {}): Props {
     ...overrides,
   };
 }
+
+/**
+ * `ProjectView` under an owner that really mutates its list, so a create,
+ * delete or vanished id re-renders the way `App` does. A bare render with a
+ * spy cannot prove the notice or the focus: nothing would change on screen.
+ */
+function Harness({
+  initial,
+  openId = null,
+  canContribute = true,
+  onCloseProject,
+  onProjectDeleted,
+}: {
+  initial: Project[];
+  openId?: string | null;
+  canContribute?: boolean;
+  /** Parent-side observers, the way `App`'s own handlers would be spied on. */
+  onCloseProject?: () => void;
+  onProjectDeleted?: (id: string) => void;
+}): ReactElement {
+  const [rows, setRows] = useState<Project[]>(initial);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(openId);
+
+  const close = useCallback(() => {
+    onCloseProject?.();
+    setSelectedProjectId(null);
+  }, [onCloseProject]);
+
+  // Delete closes in the same update that drops the row, exactly like
+  // `App.handleProjectDeleted`: the landing that held focus is gone either way.
+  const remove = useCallback(
+    (id: string) => {
+      onProjectDeleted?.(id);
+      setRows(list => list.filter(project => project.id !== id));
+      setSelectedProjectId(null);
+    },
+    [onProjectDeleted],
+  );
+
+  const append = useCallback((project: Project) => {
+    setRows(list => [...list, project]);
+  }, []);
+
+  return (
+    <ProjectView
+      canContribute={canContribute}
+      canDelete
+      projects={rows}
+      selectedProjectId={selectedProjectId}
+      onOpenProject={setSelectedProjectId}
+      onCloseProject={close}
+      onProjectCreated={append}
+      onProjectUpdated={() => undefined}
+      onProjectDeleted={remove}
+      onAssetsChanged={() => undefined}
+      assetsVersion={0}
+      theme="dark"
+    />
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  resetToasts();
+});
 
 afterEach(() => {
   landingState.withDialog = false;
@@ -333,14 +413,312 @@ describe("ProjectView", () => {
     ).toBe(document.activeElement);
   });
 
-  it("closes a project that vanished from the refreshed list", () => {
-    const onCloseProject = vi.fn();
-    render(
+  it("filters the cards by name as the operator types", () => {
+    render(<ProjectView {...viewProps()} />);
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search projects" }), {
+      target: { value: "solo" },
+    });
+
+    expect(screen.getByRole("button", { name: "Open project Solo" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open project Hydra" })).toBeNull();
+    // The count must speak about the list as well as the filter: "1 project"
+    // alone would leave the operator unsure whether a search removed Hydra.
+    expect(screen.getByText("1 of 2 projects")).toBeTruthy();
+  });
+
+  it("matches a description or a creator, case-insensitively", () => {
+    render(<ProjectView {...viewProps()} />);
+    const search = screen.getByRole("searchbox", { name: "Search projects" });
+
+    // Description only: Hydra's description is "A multi-part print".
+    fireEvent.change(search, { target: { value: "multi-part" } });
+    expect(screen.getByRole("button", { name: "Open project Hydra" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open project Solo" })).toBeNull();
+
+    // Creator only: Hydra was made by "Ada", and the stored casing differs.
+    fireEvent.change(search, { target: { value: "ada" } });
+    expect(screen.getByRole("button", { name: "Open project Hydra" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open project Solo" })).toBeNull();
+  });
+
+  it("restores the whole list from the clear button", () => {
+    render(<ProjectView {...viewProps()} />);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search projects" }), {
+      target: { value: "solo" },
+    });
+    expect(screen.queryByRole("button", { name: "Open project Hydra" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear project search" }));
+
+    expect(screen.getByRole("button", { name: "Open project Hydra" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open project Solo" })).toBeTruthy();
+    expect(screen.getByText("2 projects")).toBeTruthy();
+    // An empty list under a full search box would contradict itself.
+    expect(
+      (screen.getByRole("searchbox", { name: "Search projects" }) as HTMLInputElement).value,
+    ).toBe("");
+  });
+
+  it("says a search matched nothing instead of saying the vault is empty", () => {
+    render(<ProjectView {...viewProps()} />);
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search projects" }), {
+      target: { value: "zzz" },
+    });
+
+    expect(screen.getByText("No projects match “zzz”.")).toBeTruthy();
+    // "No projects yet." would tell an operator with two projects that their
+    // vault is empty.
+    expect(screen.queryByText("No projects yet.")).toBeNull();
+  });
+
+  it("re-filters the current list when the list itself changes under a live query", () => {
+    const { rerender } = render(<ProjectView {...viewProps()} />);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search projects" }), {
+      target: { value: "solo" },
+    });
+    expect(screen.getByText("1 of 2 projects")).toBeTruthy();
+
+    // The filter is derived on every render, not a snapshot taken when the
+    // query was typed: a row a refresh added must be filtered too.
+    rerender(
       <ProjectView
-        {...viewProps({ projects: [projects[1]], selectedProjectId: "p1", onCloseProject })}
+        {...viewProps({
+          projects: [
+            ...projects,
+            makeProject({ id: "p3", name: "Solo two", description: null, creator: null }),
+          ],
+        })}
       />,
     );
 
+    expect(screen.getByText("2 of 3 projects")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open project Solo two" })).toBeTruthy();
+  });
+
+  it("hides the create entry from a role that cannot contribute, without losing search or open", () => {
+    const onOpenProject = vi.fn();
+    render(<ProjectView {...viewProps({ canContribute: false, onOpenProject })} />);
+
+    // The gate is the point: offering a control the server would reject makes
+    // the role look broken instead of restricted.
+    expect(screen.queryByRole("button", { name: "New project" })).toBeNull();
+    expect(screen.queryByRole("form", { name: "New project" })).toBeNull();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search projects" }), {
+      target: { value: "solo" },
+    });
+    expect(screen.queryByRole("button", { name: "Open project Hydra" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open project Solo" }));
+    expect(onOpenProject).toHaveBeenCalledWith("p2");
+  });
+
+  it("opens the create form on the name field and holds the submit until a name is typed", () => {
+    render(<ProjectView {...viewProps()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "New project" }));
+
+    expect(screen.getByRole("form", { name: "New project" })).toBeTruthy();
+    const name = screen.getByRole("textbox", { name: "Project name" });
+    // The form appears where the button was, so focus has to follow it in.
+    expect(document.activeElement).toBe(name);
+
+    const submit = () =>
+      screen.getByRole("button", { name: "Create project" }) as HTMLButtonElement;
+    expect(submit().disabled).toBe(true);
+
+    // Whitespace is not a name: the request would be rejected server-side.
+    fireEvent.change(name, { target: { value: "   " } });
+    expect(submit().disabled).toBe(true);
+
+    fireEvent.change(name, { target: { value: "Fresh" } });
+    expect(submit().disabled).toBe(false);
+  });
+
+  it("hands a created project to its parent, closes the form and focuses the new card", async () => {
+    createProjectMock.mockResolvedValueOnce(
+      makeProject({ id: "p3", name: "Fresh", description: null, creator: null }),
+    );
+
+    render(<Harness initial={projects} />);
+    fireEvent.click(screen.getByRole("button", { name: "New project" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+      target: { value: "Fresh" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    // The card can only exist if the row reached the parent's list: this view
+    // never keeps a list of its own.
+    const fresh = await screen.findByRole("button", { name: "Open project Fresh" });
+    expect(createProjectMock).toHaveBeenCalledTimes(1);
+    expect(createProjectMock).toHaveBeenCalledWith({ name: "Fresh" });
+    expect(screen.queryByRole("form", { name: "New project" })).toBeNull();
+    expect(
+      (screen.getByRole("searchbox", { name: "Search projects" }) as HTMLInputElement).value,
+    ).toBe("");
+    // Landing on the card just made, not back at the top of the pane.
+    await waitFor(() => expect(document.activeElement).toBe(fresh));
+  });
+
+  it("clears an active search so a created card is actually painted", async () => {
+    createProjectMock.mockResolvedValueOnce(
+      makeProject({ id: "p3", name: "Fresh", description: null, creator: null }),
+    );
+
+    render(<Harness initial={projects} />);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search projects" }), {
+      target: { value: "solo" },
+    });
+    expect(screen.queryByRole("button", { name: "Open project Hydra" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "New project" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+      target: { value: "Fresh" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    // "Fresh" does not match "solo": without the reset the new card would be
+    // filtered out and the focus target would not exist at all.
+    expect(await screen.findByRole("button", { name: "Open project Fresh" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open project Hydra" })).toBeTruthy();
+  });
+
+  it("treats a 401 from create as a session expiry, not as a form error", async () => {
+    const onUnauthorized = vi.fn();
+    const onProjectCreated = vi.fn();
+    const toastsBefore = getToasts().length;
+    createProjectMock.mockRejectedValueOnce(new UnauthorizedError());
+
+    render(<ProjectView {...viewProps({ onUnauthorized, onProjectCreated })} />);
+    fireEvent.click(screen.getByRole("button", { name: "New project" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+      target: { value: "Fresh" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1));
+    expect(onProjectCreated).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Open project Fresh" })).toBeNull();
+    // An expired session is not the operator's mistake: a "could not create"
+    // toast here would blame them for a re-login.
+    expect(getToasts()).toHaveLength(toastsBefore);
+  });
+
+  it("keeps the typed name and the open form when a create fails for another reason", async () => {
+    createProjectMock.mockRejectedValueOnce(new Error("Project creation failed"));
+
+    render(<ProjectView {...viewProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New project" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+      target: { value: "Fresh" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    await waitFor(() => expect(getToasts()).toHaveLength(1));
+    expect(getToasts()[0].tone).toBe("error");
+    // The server's sentence, not a rewritten one: it names the actual cause.
+    expect(getToasts()[0].message).toBe("Project creation failed");
+    expect(screen.getByRole("form", { name: "New project" })).toBeTruthy();
+    expect(
+      (screen.getByRole("textbox", { name: "Project name" }) as HTMLInputElement).value,
+    ).toBe("Fresh");
+  });
+
+  it("cancels the create form on Escape without sending a request", () => {
+    render(<ProjectView {...viewProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New project" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+      target: { value: "Fresh" },
+    });
+
+    fireEvent.keyDown(screen.getByRole("form", { name: "New project" }), { key: "Escape" });
+
+    expect(screen.queryByRole("form", { name: "New project" })).toBeNull();
+    expect(createProjectMock).not.toHaveBeenCalled();
+
+    // A discarded draft must not reappear: the next create starts clean.
+    fireEvent.click(screen.getByRole("button", { name: "New project" }));
+    expect(
+      (screen.getByRole("textbox", { name: "Project name" }) as HTMLInputElement).value,
+    ).toBe("");
+  });
+
+  it("names the open project in a breadcrumb above the Back control", () => {
+    render(<ProjectView {...viewProps({ selectedProjectId: "p1" })} />);
+
+    const breadcrumb = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(within(breadcrumb).getByText("Projects")).toBeTruthy();
+    // The separator is decoration only, but it still has to be in the trail or
+    // the two crumbs read as one phrase.
+    expect(within(breadcrumb).getByText("/").getAttribute("aria-hidden")).toBe("true");
+    // `aria-current` is what tells a screen reader this crumb is the page.
+    expect(within(breadcrumb).getByText("Hydra").getAttribute("aria-current")).toBe("page");
+
+    // Trail, then the way out, then the page: reversing it would put the escape
+    // hatch above the thing it escapes from.
+    const back = screen.getByRole("button", { name: "Back to projects" });
+    expect(
+      breadcrumb.compareDocumentPosition(back) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      back.compareDocumentPosition(screen.getByTestId("project-landing")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("shows no breadcrumb and no current page on the project index", () => {
+    render(<ProjectView {...viewProps()} />);
+
+    expect(screen.getByRole("heading", { name: "Projects" })).toBeTruthy();
+    expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
+    // `aria-current="page"` with no page open would announce a destination the
+    // operator is not on.
+    expect(document.querySelector('[aria-current="page"]')).toBeNull();
+  });
+
+  it("lands on the index with an announced notice after a delete", () => {
+    const onProjectDeleted = vi.fn();
+    render(<Harness initial={projects} openId="p1" onProjectDeleted={onProjectDeleted} />);
+
+    const landing = landingState.received;
+    if (!landing) throw new Error("landing page did not render");
+    // Delete is the landing page's own path; this view only relays it, and the
+    // owner drops the row and the open id in one update, like App does.
+    act(() => {
+      landing.onProjectDeleted("p1");
+    });
+
+    expect(onProjectDeleted).toHaveBeenCalledTimes(1);
+    expect(onProjectDeleted).toHaveBeenCalledWith("p1");
+    expect(screen.queryByTestId("project-landing")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Projects" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open project Solo" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open project Hydra" })).toBeNull();
+
+    const notice = screen.getByRole("status");
+    // Naming the project is the whole value of the notice: the row it would
+    // otherwise point at is already gone from the list.
+    expect(notice.textContent).toBe("Deleted project “Hydra”.");
+    // The button that was clicked unmounted with the landing, so without this
+    // focus a keyboard user restarts at the top of the document.
+    expect(document.activeElement).toBe(notice);
+  });
+
+  it("closes a project that vanished from the refreshed list, and says so", () => {
+    const onCloseProject = vi.fn();
+    render(
+      <Harness initial={[projects[1]]} openId="p1" onCloseProject={onCloseProject} />,
+    );
+
     expect(onCloseProject).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("project-landing")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Projects" })).toBeTruthy();
+
+    const notice = screen.getByRole("status");
+    // A silent close would look like a crash: the project simply disappeared.
+    expect(notice.textContent).toBe("That project no longer exists.");
+    expect(document.activeElement).toBe(notice);
   });
 });

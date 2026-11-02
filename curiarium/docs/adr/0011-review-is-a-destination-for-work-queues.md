@@ -90,10 +90,13 @@ destination model, the count rule, the role threshold and the fetch policy.
    that resolved key, so a stored `bundles` key can neither render the bundle
    queue nor arm a detection walk for a role that has no bundle row.
 
-   `ProjectSidebar.tsx` is still rendered in Projects mode on purpose. Removing
-   it is the next step of the approved navigation model, not part of this
-   amendment; what this ticket removed from it is the review group and the
-   footer, not the project list.
+   **Amended by `Mf-x1p4` (2026-11-03).** The paragraph above still stands as
+   the `Mf-vinb` record, but its last sentence described a transition that has
+   since happened: `ProjectSidebar.tsx` is gone - `Mf-x1p4` deleted it, along
+   with its test, once Projects mode became the main pane's own experience (a
+   cover grid with search and a contribute-gated inline create, then the
+   landing). The header is therefore the only carrier of the Review destination
+   in **both** modes, and there is no second rail left to drift from it.
 
 3. **A queue is a header, a queue-specific toolbar, and list + detail.** The
    shared part is `ui/review/ReviewQueueView.tsx`: title, count, one-line
@@ -519,8 +522,12 @@ no API, permission, audit, migration or schema change is involved.
 - `ui/review/ReviewNav.test.tsx` pins each row's own role gate - `contributor`
   for bundles, `viewer` for imports, missing and trash - the dash for an
   unknown count, and `aria-current` on exactly the open queue;
-  `Sidebar.test.tsx` and `ProjectSidebar.test.tsx` each prove the group renders in
-  that mode.
+  the group is proven by `WorkspaceHeader.test.tsx` (the Review entry exists
+  exactly once for every role that has a queue, and never for a role that has
+  none) and by `ReviewQueueTabs.test.tsx` (the destination's tab row, its role
+  thresholds and its counts), not by a per-mode sidebar: `Mf-x1p4` removed
+  `ProjectSidebar.tsx` and its test, and `Sidebar.tsx` no longer carries the
+  group.
 - `ui/Settings.test.tsx` is the removal proof: for an editor, a contributor and a
   viewer, opening Imports and Import sources renders no bundle surface and no run
   surface, and makes no request to `GET /bundles/detect` or `GET /imports/runs` -

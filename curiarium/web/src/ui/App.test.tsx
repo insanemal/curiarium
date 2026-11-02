@@ -57,7 +57,6 @@ vi.mock("../lib/settings", () => ({
 
 vi.mock("./Sidebar", () => ({ default: () => null }));
 vi.mock("./ModeSwitch", () => ({ default: () => null }));
-vi.mock("./ProjectSidebar", () => ({ default: () => null }));
 vi.mock("./ProjectView", () => ({ default: () => null }));
 vi.mock("./asset-grid/AssetGrid", () => ({ default: () => null }));
 vi.mock("./settings/Settings", () => ({ default: () => null }));

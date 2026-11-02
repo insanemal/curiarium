@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 //
-// Acceptance test for `Mf-8a4e`: the four project surfaces that render a
+// Acceptance test for `Mf-8a4e`: the project surfaces that render a
 // browser-loaded `fileUrl()` (`ProjectLanding`'s hero cover, gallery thumbs and
-// gallery anchors, its member-row thumbs, `ProjectView`'s card covers,
-// `ProjectSidebar`'s row covers and `ImagePickerDialog`'s insert thumbs) must
-// keep their grants warm. ADR 0005 decision 10: a grant lives 60 s, so a
-// surface with no keeper goes blank a minute after mount.
+// gallery anchors, its member-row thumbs, `ProjectView`'s card covers and
+// `ImagePickerDialog`'s insert thumbs) must keep their grants warm. ADR 0005
+// decision 10: a grant lives 60 s, so a surface with no keeper goes blank a
+// minute after mount.
 //
 // The grant machinery is the real thing — `mintFileGrants` from
 // `../lib/api/grants` installs itself as the minter on import, exactly as it
@@ -31,7 +31,6 @@ import {
 
 import ImagePickerDialog from "./project-editor/ImagePickerDialog";
 import ProjectLanding from "./ProjectLanding";
-import ProjectSidebar from "./ProjectSidebar";
 import ProjectView from "./ProjectView";
 
 /** The server's `FILE_GRANT_TTL_SECONDS`; a grant is dead after this long. */
@@ -281,6 +280,7 @@ function viewProps(overrides: Partial<ViewProps> = {}): ViewProps {
     selectedProjectId: null,
     onOpenProject: vi.fn(),
     onCloseProject: vi.fn(),
+    onProjectCreated: vi.fn(),
     onProjectUpdated: vi.fn(),
     onProjectDeleted: vi.fn(),
     onAssetsChanged: vi.fn(),
@@ -295,10 +295,6 @@ function cardImage(projectName: string): HTMLImageElement {
   return requireImage(card.querySelector("img"));
 }
 
-function sidebarRowImage(projectName: string): HTMLImageElement {
-  const row = screen.getByText(projectName).closest("[data-project-row]");
-  return requireImage(row?.querySelector("img") ?? null);
-}
 
 const PICKER_IMAGES: Asset[] = [
   makeAsset({
@@ -519,40 +515,6 @@ describe("project file grants", () => {
     expect(minted).not.toContain("/thumb/p3.jpg");
   });
 
-  it("the ProjectSidebar renews all row covers in exactly one batch and keeps each silent src", async () => {
-    const projects = COVER_PROJECTS;
-    const view = render(
-      <ProjectSidebar projects={projects} selectedId={null} onSelect={vi.fn()} />,
-    );
-    await flush();
-
-    const baseline = mintRequests.length;
-    const mountSrc = imgSrc(sidebarRowImage("Hydra"));
-    const mountSrcs = COVER_PROJECTS.map(project => imgSrc(sidebarRowImage(project.name)));
-
-    await advance(61_000);
-
-    const renewal = mintRequests.slice(baseline);
-    expect(
-      renewal.length,
-      "ProjectSidebar (Mf-8a4e): one list-level keeper must renew all three row covers in exactly one POST /file-grants batch; none was sent",
-    ).toBe(1);
-    expect([...renewal[0]].sort()).toEqual([...COVER_RELS].sort());
-    expect(grantedFileUrl("/thumb/p1.jpg")).not.toBeNull();
-
-    // Silent: every mounted row keeps the src it painted with.
-    expect(COVER_PROJECTS.map(project => imgSrc(sidebarRowImage(project.name)))).toEqual(
-      mountSrcs,
-    );
-
-    // (d) a re-render paints the refreshed grant.
-    view.rerender(<ProjectSidebar projects={projects} selectedId={null} onSelect={vi.fn()} />);
-    await flush();
-    const rerenderedSig = sigOf(imgSrc(sidebarRowImage("Hydra")));
-    expect(rerenderedSig).not.toBeNull();
-    expect(rerenderedSig).not.toBe(sigOf(mountSrc));
-  });
-
   it("the ImagePickerDialog renews every thumb, including a thumb_url:null image that falls back to asset.url", async () => {
     const view = render(
       <ImagePickerDialog images={PICKER_IMAGES} onInsert={vi.fn()} onClose={vi.fn()} />,
@@ -589,30 +551,28 @@ describe("project file grants", () => {
     expect(rerenderedSig).not.toBe(sigOf(mountSrcs[0]));
   });
 
-  it("a failed mint leaves ProjectSidebar with the plain unsigned URL, no gate and no throw, and a remount signs it", async () => {
+  it("a failed mint leaves the ProjectView card grid with the plain unsigned URL, no gate and no throw, and a remount signs it", async () => {
     failMint = true;
-    const projects = COVER_PROJECTS;
-    const first = render(
-      <ProjectSidebar projects={projects} selectedId={null} onSelect={vi.fn()} />,
-    );
+    const props = viewProps();
+    const first = render(<ProjectView {...props} />);
     await flush();
 
-    const unsignedSrc = imgSrc(sidebarRowImage("Hydra"));
+    const unsignedSrc = imgSrc(cardImage("Hydra"));
     expect(unsignedSrc).toContain("/thumb/p1.jpg");
     expect(sigOf(unsignedSrc)).toBeNull();
     // ADR 0005 decision 10: a failed first mint leaves the plain URL; only the
-    // two preview dialogs gate. Nothing may replace the row with a placeholder.
+    // two preview dialogs gate. Nothing may replace a card with a placeholder.
     expect(screen.queryByText(/Preparing/i)).toBeNull();
-    expect(screen.getByRole("complementary", { name: "Projects" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open project Hydra" })).toBeTruthy();
 
     failMint = false;
     first.unmount();
-    render(<ProjectSidebar projects={projects} selectedId={null} onSelect={vi.fn()} />);
+    render(<ProjectView {...props} />);
     await flush();
 
     expect(
-      sigOf(imgSrc(sidebarRowImage("Hydra"))),
-      "ProjectSidebar (Mf-8a4e): after the mint recovers, a remount must paint a signed cover",
+      sigOf(imgSrc(cardImage("Hydra"))),
+      "ProjectView card grid (Mf-8a4e): after the mint recovers, a remount must paint a signed cover",
     ).not.toBeNull();
   });
 

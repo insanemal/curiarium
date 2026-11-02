@@ -295,8 +295,8 @@ Residual risks, stated plainly:
 - **Project surfaces now adopt the keeper; the cold-cache first paint is what
   remains.** `Mf-8a4e` closes the gap decision 10 left on the project side.
   `ProjectLanding` (hero cover, gallery thumbnails, gallery `target="_blank"`
-  file anchors, member-row thumbs), `ProjectView`'s card grid,
-  `ProjectSidebar`'s rows and `ImagePickerDialog`'s insert thumbs all keep
+  file anchors, member-row thumbs), `ProjectView`'s card grid and
+  `ImagePickerDialog`'s insert thumbs all keep
   their grants warm now: one silent `useFileGrants` per surface for the
   `<img>`s — a re-mint never repaints a mounted image — and
   `useLiveFileGrants` scoped to the per-item gallery anchor, because an
@@ -315,10 +315,21 @@ Residual risks, stated plainly:
   /file-grants` per ~55-second window. That is accepted over ~1000 per-row
   keepers (one timer each, the same request count) and over virtualising the
   member list (out of scope). (b) A hidden pane keeps minting: `App` keeps
-  `ProjectView` and `ProjectSidebar` mounted behind `hidden` after the first
-  visit (`visitedModes.projects`), so their covers keep re-minting while the
-  projects mode is hidden — about two POSTs per 55-second window, accepted
-  because a visibility-aware fix would touch `App.tsx` and is out of scope.
+  `ProjectView` mounted behind `hidden` after the first
+  visit (`visitedModes.projects`), so the card grid's covers keep re-minting
+  while the projects mode is hidden — about two POSTs per 55-second window,
+  accepted because a visibility-aware fix would touch `App.tsx` and is out of
+  scope. (The original text named a second, Projects-sidebar keeper here;
+  `Mf-x1p4` removed that sidebar - see the amendment below.)
+  **Amended by `Mf-x1p4` (2026-11-03):** the Projects sidebar is gone. Projects
+  mode is now the main pane alone, so the card grid's single silent
+  `useFileGrants` is the one keeper for every cover the index paints, and it
+  unmounts with the grid the moment a landing opens — so limit (b) now covers
+  one surface, not two, and the ~two POSTs it names drop to the grid's one
+  (the suite pins the whole grid renewing in exactly one batch). The
+  cold-cache first paint and the "a hidden pane keeps minting" reasoning are
+  unchanged for `ProjectView`, which `App` still keeps mounted behind `hidden`
+  after the first visit.
 - **An async handoff.** Both OS handoffs now `await` a mint before navigating.
   A mint that fails (401, 400, offline) leaves the plain URL, exactly as a
   grant-less render would, and the OS handler sees a 401 rather than a token.
@@ -393,9 +404,10 @@ MV-SEC-007 on the error-log side. `Mf-1vxh` added the client re-mint
 every deferred interaction to the fetch-time grant, so a page left idle for more
 than 60 seconds goes back to unsigned file URLs and 401s. `Mf-8a4e` extended
 that re-mint to the project surfaces (`ProjectLanding`'s hero cover, gallery
-thumbnails, gallery anchors and member-row thumbs, `ProjectView`'s card grid,
-`ProjectSidebar`'s rows and `ImagePickerDialog`'s insert thumbs); reverting it
-returns those four surfaces to the fetch-time-only grant, so a project view left
+thumbnails, gallery anchors and member-row thumbs, `ProjectView`'s card grid
+and `ImagePickerDialog`'s insert thumbs); reverting it returns those surfaces
+to the fetch-time-only grant (`Mf-x1p4` has since removed `ProjectSidebar`, so
+the card grid is the only Projects-mode list left), so a project view left
 open for more than 60 seconds shows blank covers and thumbnails and its gallery
 links 401. None of the three commits touches the database, the migrations or the
 wire format.
@@ -450,17 +462,18 @@ Web:
   `FILE_GRANT_TTL_SECONDS` against the real grant machinery (only `fetch` is
   stubbed) and pins the renewal of every project render site: the
   `ProjectLanding` hero cover, gallery thumbnail, gallery anchor and
-  member-row thumb, the `ProjectView` card grid, the `ProjectSidebar` rows and
-  the `ImagePickerDialog` thumbs each send a further `POST /file-grants` batch
+  member-row thumb, the `ProjectView` card grid and the `ImagePickerDialog`
+  thumbs each send a further `POST /file-grants` batch
   containing their rel, hold a non-null grant past the TTL, keep a silent
   `<img>` `src` byte-identical across the renewal, and paint a fresh non-null
-  `sig` on the next render. It also pins one renewal batch for the whole grid
-  and one for the whole sidebar, a gallery `<img>` whose `src` does not move
+  `sig` on the next render. It also pins one renewal batch for the whole grid,
+  a gallery `<img>` whose `src` does not move
   while its anchor's live `href` does, no other project's cover minted while a
   landing is open, and the failed-mint degradation: a `POST /file-grants`
-  answered 500 leaves `ProjectSidebar` and `ProjectLanding` on the plain
+  answered 500 leaves `ProjectView`'s card grid and `ProjectLanding` on the plain
   unsigned URL with no throw, no gate and no placeholder, signed again once
-  the mint recovers and the surface remounts.
+  the mint recovers and the surface remounts. (`Mf-x1p4` deleted
+  `ProjectSidebar` and its tests; the card grid carries the whole-index keeper.)
 - `web/src/lib/fileGrantRenderSites.test.ts` — a node-env source scan that
   fails when any non-test file under `web/src` calls `fileUrl()` without
   importing `useFileGrants` or `useLiveFileGrants`, reporting every offending

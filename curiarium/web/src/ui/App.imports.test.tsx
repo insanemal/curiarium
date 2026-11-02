@@ -97,11 +97,6 @@ vi.mock("./Sidebar", async () => {
   };
 });
 
-vi.mock("./ProjectSidebar", async () => {
-  const react = await import("react");
-  return { default: () => react.createElement("aside", { "aria-label": "Projects" }) };
-});
-
 vi.mock("./ProjectView", async () => {
   const react = await import("react");
   return { default: () => react.createElement("div", null, "Project view") };
@@ -460,7 +455,8 @@ describe("App imports folder scan (AC-4)", () => {
     // ...and the upload hands the new folder back to App, which shows files mode.
     await waitFor(() => expect(window.localStorage.getItem(MODE_STORAGE_KEY)).toBe("files"));
     expect(screen.getByRole("complementary", { name: "Files" })).toBeTruthy();
-    expect(screen.queryByRole("complementary", { name: "Projects" })).toBeNull();
+    // The upload returned to files mode, so the projects pane is hidden.
+    expect(screen.getByText("Project view").closest("[hidden]")).toBeTruthy();
   });
 });
 

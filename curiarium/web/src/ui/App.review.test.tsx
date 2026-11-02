@@ -63,11 +63,6 @@ vi.mock("./Sidebar", async () => {
   return { default: () => react.createElement("aside", { "aria-label": "Files" }) };
 });
 
-vi.mock("./ProjectSidebar", async () => {
-  const react = await import("react");
-  return { default: () => react.createElement("aside", { "aria-label": "Projects" }) };
-});
-
 vi.mock("./ProjectView", async () => {
   const react = await import("react");
   return { default: () => react.createElement("div", null, "Project view") };
@@ -406,5 +401,39 @@ describe("App review destination", () => {
     );
     expect(screen.getByText("Asset grid")).toBeTruthy();
     expect(screen.queryAllByRole("tablist")).toHaveLength(0);
+  });
+
+  it("leaving the Review destination lands on the header's Review entry, not <body>", async () => {
+    await renderApp();
+    fireEvent.click(openQueueButton());
+    await screen.findByRole("listbox", { name: "Bundles to confirm" });
+
+    // A queue tab holds focus inside the destination, the way a keyboard user
+    // arrives here with the arrow keys.
+    screen.getByRole("tab", { name: /^Bundles/ }).focus();
+
+    // "Back to library" lives inside the destination, so the click unmounts the
+    // very control that was clicked: without App's effect focus falls to
+    // <body> and a keyboard user restarts at the top of the document.
+    fireEvent.click(screen.getByRole("button", { name: "Back to library" }));
+
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Review" }));
+  });
+
+  it("does not steal focus from a header control that stays mounted", async () => {
+    await renderApp();
+    fireEvent.click(openQueueButton());
+    await screen.findByRole("listbox", { name: "Bundles to confirm" });
+
+    const settings = screen.getByRole("button", { name: "Settings" });
+    // jsdom's fireEvent.click does not move focus the way a browser does, so
+    // the keyboard state is set up explicitly rather than implied by the click.
+    settings.focus();
+    fireEvent.click(settings);
+
+    expect(await screen.findByText("Settings view")).toBeTruthy();
+    // The button is still mounted and still holds focus; a refocus that ran on
+    // every departure from Review would yank focus out of the operator's hands.
+    expect(document.activeElement).toBe(settings);
   });
 });

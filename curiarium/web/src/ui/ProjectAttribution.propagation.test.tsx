@@ -14,6 +14,7 @@ import type { Project } from "../lib/api";
 vi.mock("../lib/api", () => ({
   UnauthorizedError: class UnauthorizedError extends Error {},
   addProjectAssets: vi.fn(),
+  createProject: vi.fn(),
   deleteProject: vi.fn(),
   downloadAsset: vi.fn(),
   downloadZip: vi.fn(),
@@ -76,6 +77,7 @@ function Harness({ initial }: { initial: Project[] }) {
       onProjectUpdated={project =>
         setProjects(list => list.map(item => (item.id === project.id ? project : item)))
       }
+      onProjectCreated={project => setProjects(list => [...list, project])}
       onProjectDeleted={id => setProjects(list => list.filter(item => item.id !== id))}
       onAssetsChanged={() => undefined}
       assetsVersion={0}

@@ -46,10 +46,6 @@ vi.mock("./ModeSwitch", async () => {
   };
 });
 
-// The rails carry no Settings, Audit or identity any more: the header does,
-// once, outside both panes. Nothing in this file asserts the projects rail.
-vi.mock("./ProjectSidebar", () => ({ default: () => null }));
-
 type HeaderProps = {
   mode: "files" | "projects";
   onModeChange: (mode: "files" | "projects") => void;

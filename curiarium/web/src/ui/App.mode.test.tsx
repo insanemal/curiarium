@@ -94,21 +94,24 @@ vi.mock("./Sidebar", async () => {
   };
 });
 
-vi.mock("./ProjectSidebar", async () => {
-  const react = await import("react");
-  return {
-    default: () =>
-      react.createElement(
-        "aside",
-        { "aria-label": "Projects" },
-        react.createElement("p", null, "Projects list"),
-      ),
-  };
-});
-
 vi.mock("./ProjectView", async () => {
   const react = await import("react");
-  return { default: () => react.createElement("div", null, "Project view") };
+  // A stateful stand-in: the lazy-mount contract is "a visited pane stays
+  // mounted (only hidden)", so the pane must own state that a switch preserves.
+  function ProjectViewStandIn() {
+    const [query, setQuery] = react.useState("");
+    return react.createElement(
+      "div",
+      { "data-testid": "project-view" },
+      react.createElement("p", null, "Project view"),
+      react.createElement("input", {
+        "aria-label": "Project search stand-in",
+        value: query,
+        onChange: (event: { target: { value: string } }) => setQuery(event.target.value),
+      }),
+    );
+  }
+  return { default: ProjectViewStandIn };
 });
 
 // A real card move reaches App only through `onAssetsFiled`, so the stand-in
@@ -207,8 +210,9 @@ describe("App library mode switch", () => {
     render(<App />);
 
     await waitFor(() => expect(listProjectsMock).toHaveBeenCalled());
-    expect(screen.getByRole("complementary", { name: "Projects" })).toBeTruthy();
+    // Projects mode hides the Files rail outright, so it is not a landmark.
     expect(screen.queryByRole("complementary", { name: "Files" })).toBeNull();
+    expect(screen.getByTestId("project-view")).toBeTruthy();
     // The files pane has never been visited, so it is not mounted at all.
     expect(screen.queryByText("Files tree")).toBeNull();
   });
@@ -219,18 +223,29 @@ describe("App library mode switch", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Projects" }));
 
     expect(window.localStorage.getItem(MODE_STORAGE_KEY)).toBe("projects");
-    expect(screen.getByRole("complementary", { name: "Projects" })).toBeTruthy();
     expect(screen.queryByRole("complementary", { name: "Files" })).toBeNull();
     // Still mounted, just hidden: its selection/search state survives.
-    expect(screen.getByText("Files tree")).toBeTruthy();
+    expect(screen.getByText("Files tree").closest("[hidden]")).toBeTruthy();
     await waitFor(() => expect(listProjectsMock).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText("Project search stand-in"), {
+      target: { value: "hydra" },
+    });
 
     fireEvent.click(screen.getByRole("radio", { name: "Files" }));
 
     expect(window.localStorage.getItem(MODE_STORAGE_KEY)).toBe("files");
     expect(screen.getByRole("complementary", { name: "Files" })).toBeTruthy();
-    expect(screen.queryByRole("complementary", { name: "Projects" })).toBeNull();
-    expect(screen.getByText("Projects list")).toBeTruthy();
+    expect(screen.getByTestId("project-view").closest("[hidden]")).toBeTruthy();
+    // The pane stayed mounted, so its own state came back with it.
+    expect((screen.getByLabelText("Project search stand-in") as HTMLInputElement).value).toBe(
+      "hydra",
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "Projects" }));
+
+    expect((screen.getByLabelText("Project search stand-in") as HTMLInputElement).value).toBe(
+      "hydra",
+    );
   });
 
   it("renders a visible fallback while the lazy Settings chunk loads", () => {
@@ -263,7 +278,8 @@ describe("App library mode switch", () => {
     // the header sits outside both panes, so there is exactly one entry point
     // and projects mode cannot strand it.
     expect(await screen.findAllByRole("button", { name: "Settings" })).toHaveLength(1);
-    expect(screen.getByRole("complementary", { name: "Projects" })).toBeTruthy();
+    // the premise: we are in projects mode, whose pane does not need a rail.
+    expect(screen.getByTestId("project-view")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     expect(await screen.findByText("Settings view")).toBeTruthy();
@@ -283,7 +299,8 @@ describe("App library mode switch", () => {
 
     expect(window.localStorage.getItem(MODE_STORAGE_KEY)).toBe("files");
     expect(screen.getByRole("complementary", { name: "Files" })).toBeTruthy();
-    expect(screen.queryByRole("complementary", { name: "Projects" })).toBeNull();
+    // files mode is showing, so the projects pane is mounted but hidden.
+    expect(screen.getByTestId("project-view").closest("[hidden]")).toBeTruthy();
   });
 
   it("selects the unfiled pile without a folder, and passes it to both panes", async () => {

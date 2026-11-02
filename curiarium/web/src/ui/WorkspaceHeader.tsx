@@ -1,3 +1,5 @@
+import type { Ref } from "react";
+
 import type { Role } from "../lib/auth";
 import type { LibraryMode } from "../lib/mode";
 import ModeSwitch from "./ModeSwitch";
@@ -11,6 +13,8 @@ type Props = {
   activeView?: ActiveView;
   /** Opens whichever queue the role may see; App resolves the key. */
   onOpenReview?: () => void;
+  /** Focus lands here when leaving Review; see App's review-leave effect. */
+  reviewButtonRef?: Ref<HTMLButtonElement>;
   onOpenSettings?: () => void;
   onOpenAudit?: () => void;
   /** `null` until `/me` answers; an unknown role has no Review destination. */
@@ -35,6 +39,7 @@ export default function WorkspaceHeader({
   onModeChange,
   activeView = "library",
   onOpenReview,
+  reviewButtonRef,
   onOpenSettings,
   onOpenAudit,
   role = null,
@@ -49,6 +54,7 @@ export default function WorkspaceHeader({
         <ModeSwitch mode={mode} onChange={onModeChange} />
         {reviewReachable && (
           <button
+            ref={reviewButtonRef}
             type="button"
             className={`workspace-dest ${reviewSelected ? "is-selected" : ""}`}
             aria-current={reviewSelected ? "true" : undefined}

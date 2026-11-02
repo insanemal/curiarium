@@ -2,7 +2,6 @@ import React from "react";
 import UploadBar from "./UploadBar";
 import AssetGrid from "./asset-grid/AssetGrid";
 import Sidebar from "./Sidebar";
-import ProjectSidebar from "./ProjectSidebar";
 import ProjectView from "./ProjectView";
 import WorkspaceHeader from "./WorkspaceHeader";
 import Login from "./Login";
@@ -157,6 +156,9 @@ export default function App() {
   const [confirmingLogout, setConfirmingLogout] = React.useState(false);
   // Scroll container for the asset grid's virtualization (see useVirtualRows).
   const mainScrollRef = React.useRef<HTMLElement | null>(null);
+  // The header's Review entry: the landing target when leaving Review unmounts
+  // the control that was clicked.
+  const reviewButtonRef = React.useRef<HTMLButtonElement | null>(null);
   // Access token value the post-reload refresh was already fired for. The
   // refresh token is single-use server-side, so the one-shot must not fire
   // twice for the same access token (React.StrictMode runs effects twice).
@@ -178,6 +180,21 @@ export default function App() {
     root.classList.toggle("theme-purple", resolvedTheme === "purple");
     root.classList.toggle("theme-blue", resolvedTheme === "blue");
   }, [resolvedTheme]);
+  // Leaving the Review destination unmounts the control that was clicked
+  // ("Back to library"), so the browser drops focus to <body> and a keyboard
+  // user restarts at the top of the document. Land on the header's Review entry
+  // instead - but only when nothing still-connected owns focus, so a click on a
+  // header control that stays mounted (Settings, Audit, the mode switch) is
+  // never stolen.
+  const previousView = React.useRef<ActiveView>(activeView);
+  React.useEffect(() => {
+    const previous = previousView.current;
+    previousView.current = activeView;
+    if (previous !== "review" || activeView === "review") return;
+    const active = document.activeElement as HTMLElement | null;
+    if (active && active !== document.body && active.isConnected) return;
+    reviewButtonRef.current?.focus();
+  }, [activeView]);
   React.useEffect(() => { (async ()=> setHealth(await apiHealth()))(); }, [settings.network.publicUrl]);
   React.useEffect(() => {
     saveSettings(settings);
@@ -388,6 +405,14 @@ export default function App() {
     setProjects(list => (list ? list.map(item => (item.id === project.id ? project : item)) : list));
   }, []);
 
+  // The card grid appends the row the server just returned instead of
+  // refetching, matching ProjectPickerDialog's precedent: an appended row keeps
+  // the created card focusable immediately. It can disagree with the server's
+  // name ordering until the next refetch (`assetsVersion`), which is accepted.
+  const handleProjectCreated = React.useCallback((project: Project) => {
+    setProjects(list => (list ? [...list, project] : [project]));
+  }, []);
+
   // One handler for all three effects of a delete, so React batches them into a
   // single render: the open project is already closed on the render where its
   // row disappears, and the version bump refetches counts.
@@ -544,6 +569,7 @@ export default function App() {
         onModeChange={handleModeChange}
         activeView={activeView}
         onOpenReview={handleOpenReviewDestination}
+        reviewButtonRef={reviewButtonRef}
         onOpenSettings={() => setActiveView("settings")}
         onOpenAudit={() => setActiveView("audit")}
         role={role}
@@ -551,36 +577,25 @@ export default function App() {
         kind={identity.kind}
       />
       <div className="flex min-h-0 flex-1">
-        <div className="library-rail">
-          {/* `hidden` (the attribute, not a class) keeps the inactive pane mounted
-              so its state survives mode switches. The shared <main> scroller may
-              reset its scroll position on the switch; that is not part of the AC. */}
-          <div hidden={mode !== "files"} className="min-h-0 flex-1">
-            {visitedModes.files && (
-              <Sidebar
-                selectedId={folderId}
-                onSelect={handleSelectFolder}
-                unfiled={unfiled}
-                totalCount={counts?.total ?? null}
-                unfiledCount={counts?.unfiled ?? null}
-                onSelectUnfiled={handleSelectUnfiled}
-                onFoldersChanged={handleFoldersChanged}
-                foldersVersion={folderVersion}
-                onAssetsChanged={handleAssetsChanged}
-                onUnauthorized={handleUnauthorized}
-                role={role}
-              />
-            )}
-          </div>
-          <div hidden={mode !== "projects"} className="min-h-0 flex-1">
-            {visitedModes.projects && (
-              <ProjectSidebar
-                projects={projects}
-                selectedId={openProjectId}
-                onSelect={handleOpenProject}
-              />
-            )}
-          </div>
+        {/* The rail is a Files-only surface: it stays mounted so the folder tree
+            keeps its search and selection across a mode switch, and Projects mode
+            hides it (`.library-rail[hidden]` in index.css) so <main> owns the width. */}
+        <div className="library-rail" hidden={mode !== "files"}>
+          {visitedModes.files && (
+            <Sidebar
+              selectedId={folderId}
+              onSelect={handleSelectFolder}
+              unfiled={unfiled}
+              totalCount={counts?.total ?? null}
+              unfiledCount={counts?.unfiled ?? null}
+              onSelectUnfiled={handleSelectUnfiled}
+              onFoldersChanged={handleFoldersChanged}
+              foldersVersion={folderVersion}
+              onAssetsChanged={handleAssetsChanged}
+              onUnauthorized={handleUnauthorized}
+              role={role}
+            />
+          )}
         </div>
         {/* The asset grid's virtualizer compensates row-height changes itself (see useVirtualRows), so native scroll anchoring must not apply a second adjustment. */}
         <main ref={mainScrollRef} className="min-h-0 flex-1 p-4 overflow-auto" style={{ overflowAnchor: "none" }}>
@@ -669,6 +684,7 @@ export default function App() {
                 selectedProjectId={openProjectId}
                 onOpenProject={handleOpenProject}
                 onCloseProject={handleCloseProject}
+                onProjectCreated={handleProjectCreated}
                 onProjectUpdated={handleProjectUpdated}
                 onProjectDeleted={handleProjectDeleted}
                 onAssetsChanged={handleAssetsChanged}

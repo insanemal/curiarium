@@ -120,11 +120,6 @@ vi.mock("./Sidebar", async () => {
   return { default: () => react.createElement("aside", { "aria-label": "Files" }) };
 });
 
-vi.mock("./ProjectSidebar", async () => {
-  const react = await import("react");
-  return { default: () => react.createElement("aside", { "aria-label": "Projects" }) };
-});
-
 vi.mock("./ProjectView", async () => {
   const react = await import("react");
   return { default: () => react.createElement("div", null, "Project view") };
