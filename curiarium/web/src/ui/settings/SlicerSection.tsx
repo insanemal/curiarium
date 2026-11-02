@@ -29,16 +29,16 @@ export default function SlicerSection({ settings, onChange, onBack }: Props) {
       <div className="rounded-lg border border-panel bg-panel-soft p-4 flex flex-col gap-4">
         <p className="text-xs opacity-70">
           Requires the Slicer Bridge helper to be installed on each client to register
-          the curiarium-slicer:// protocol. Download the installer from{" "}
+          the curiarium-slicer:// protocol. Build and install it from the{" "}
           <a
             className="underline"
-            href="https://github.com/VincentCinque/MakersVault/releases/latest"
+            href="https://github.com/insanemal/curiarium/tree/main/curiarium/slicer-bridge#readme"
             target="_blank"
             rel="noreferrer"
           >
-            Curiarium releases
+            Curiarium Bridge README
           </a>
-          . On Linux, mark the download as executable if prompted.
+          . If the Curiarium server is on your LAN, add its address to allowed_hosts in the bridge config.
         </p>
         <label className="flex items-center gap-2 text-sm">
           <input

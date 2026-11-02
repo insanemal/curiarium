@@ -651,3 +651,30 @@ func TestDownloadPinsEachRedirectHopSeparately(t *testing.T) {
 		t.Fatalf("lookups = %v, expected [one.example two.example]", lookups)
 	}
 }
+
+func TestDownloadAllowsListedPrivateHost(t *testing.T) {
+	server := newRoutingServer(map[string]route{"/model.stl": {body: "solid"}})
+	defer server.close()
+
+	network := newFakeNetwork()
+	network.pin("model.local", "10.0.10.200", server)
+	d := network.downloader()
+	d.allowedHosts = map[string]bool{"model.local": true}
+	if err := d.download(context.Background(), network.url("model.local", server, "/model.stl"), targetPath(t)); err != nil {
+		t.Fatalf("listed host refused: %v", err)
+	}
+}
+
+func TestDownloadStillRefusesUnlistedPrivateHost(t *testing.T) {
+	server := newRoutingServer(map[string]route{"/model.stl": {body: "never"}})
+	defer server.close()
+
+	network := newFakeNetwork()
+	network.pin("model.local", "10.0.10.200", server)
+	d := network.downloader()
+	d.allowedHosts = map[string]bool{"other.local": true}
+	err := downloadError(t, d, network.url("model.local", server, "/model.stl"), targetPath(t))
+	if !strings.Contains(err.Error(), "local addresses are not allowed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
