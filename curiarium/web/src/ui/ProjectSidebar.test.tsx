@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import type { Project } from "../lib/api";
 
@@ -74,43 +74,6 @@ describe("ProjectSidebar", () => {
     expect(screen.getByText("Projects group files from any folder.")).toBeTruthy();
   });
 
-  it("keeps Settings and Audit reachable through the shared footer", () => {
-    const onOpenSettings = vi.fn();
-    const onOpenAudit = vi.fn();
-    render(
-      <ProjectSidebar
-        projects={projects}
-        selectedId={null}
-        onSelect={vi.fn()}
-        onOpenSettings={onOpenSettings}
-        onOpenAudit={onOpenAudit}
-        role="admin"
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Audit log" }));
-
-    expect(onOpenSettings).toHaveBeenCalledTimes(1);
-    expect(onOpenAudit).toHaveBeenCalledTimes(1);
-  });
-
-  it("hides the audit entry from a viewer", () => {
-    render(
-      <ProjectSidebar
-        projects={projects}
-        selectedId={null}
-        onSelect={vi.fn()}
-        onOpenSettings={vi.fn()}
-        onOpenAudit={vi.fn()}
-        role="viewer"
-      />,
-    );
-
-    expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Audit log" })).toBeNull();
-  });
-
   it("moves focus with the arrow keys without opening anything", () => {
     const onSelect = vi.fn();
     render(<ProjectSidebar projects={projects} selectedId={null} onSelect={onSelect} />);
@@ -153,82 +116,5 @@ describe("ProjectSidebar", () => {
 
     fireEvent.click(rowFor("Solo"));
     expect(onSelect).toHaveBeenCalledWith("p2");
-  });
-});
-
-describe("ProjectSidebar review navigation", () => {
-  it("shows the shared review queue with its count and opens it", () => {
-    const onOpenQueue = vi.fn();
-    render(
-      <ProjectSidebar
-        projects={projects}
-        selectedId={null}
-        onSelect={vi.fn()}
-        role="editor"
-        activeView="review"
-        activeQueue="bundles"
-        reviewCounts={{ bundles: 4, imports: null, missing: null, trash: null }}
-        onOpenQueue={onOpenQueue}
-      />,
-    );
-
-    const row = screen.getByRole("button", { name: /^Bundles to confirm/ });
-
-    expect(within(row).getByText("4")).toBeTruthy();
-    expect(row.getAttribute("aria-current")).toBe("page");
-
-    fireEvent.click(row);
-
-    expect(onOpenQueue).toHaveBeenCalledTimes(1);
-    expect(onOpenQueue).toHaveBeenCalledWith("bundles");
-  });
-
-  // AC-7: the same shared group renders the imports row in projects mode, and a
-  // contributor sees both rows there.
-  it("shows a contributor both rows and opens the imports queue", () => {
-    const onOpenQueue = vi.fn();
-    render(
-      <ProjectSidebar
-        projects={projects}
-        selectedId={null}
-        onSelect={vi.fn()}
-        role="contributor"
-        reviewCounts={{ bundles: 4, imports: 1, missing: null, trash: null }}
-        onOpenQueue={onOpenQueue}
-      />,
-    );
-
-    expect(screen.getByRole("button", { name: /^Bundles to confirm/ })).toBeTruthy();
-    const row = screen.getByRole("button", { name: /^Imports running/ });
-    expect(within(row).getByText("1")).toBeTruthy();
-
-    fireEvent.click(row);
-
-    expect(onOpenQueue).toHaveBeenCalledTimes(1);
-    expect(onOpenQueue).toHaveBeenCalledWith("imports");
-  });
-
-  // The same shared group renders in Projects mode, so the missing queue is
-  // reachable from both sidebars.
-  it("shows the missing row in Projects mode and opens that queue", () => {
-    const onOpenQueue = vi.fn();
-    render(
-      <ProjectSidebar
-        projects={projects}
-        selectedId={null}
-        onSelect={vi.fn()}
-        role="viewer"
-        reviewCounts={{ bundles: null, imports: null, missing: 5, trash: null }}
-        onOpenQueue={onOpenQueue}
-      />,
-    );
-
-    const row = screen.getByRole("button", { name: /^Missing files/ });
-    expect(within(row).getByText("5")).toBeTruthy();
-
-    fireEvent.click(row);
-
-    expect(onOpenQueue).toHaveBeenCalledTimes(1);
-    expect(onOpenQueue).toHaveBeenCalledWith("missing");
   });
 });

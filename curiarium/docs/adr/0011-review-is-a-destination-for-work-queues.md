@@ -6,8 +6,13 @@
 
 **Implementation:** ticket `Mf-f3c2` (slice 1 of the information-architecture
 change `Mf-q7vs`: the bundle queue), ticket `Mf-xe4l` (slice 2: imports running),
-ticket `Mf-1tx3` (slice 3: missing files) and ticket `Mf-rz5k` (slice 4: the
-trash queue).
+ticket `Mf-1tx3` (slice 3: missing files), ticket `Mf-rz5k` (slice 4: the
+trash queue) and ticket `Mf-vinb` (the Review group moves into one shared
+header).
+
+**Amended:** 2026-11-02 - ticket `Mf-vinb` supersedes decision 2: the REVIEW
+group is no longer rendered by both sidebars, it is a tablist inside the Review
+destination reached from a single shared header.
 
 **Extended:** ADR 0010, whose report is the first tenant of this surface.
 
@@ -63,6 +68,32 @@ destination model, the count rule, the role threshold and the fetch policy.
    survives); library navigation - selecting a folder or the unfiled pile,
    opening a project, Imports running's "Scan now" - still returns to the
    library, because those are browsing actions.
+
+   **Superseded by `Mf-vinb` (2026-11-02).** The paragraph above is the decision
+   as accepted, kept as its history; the two sidebar copies it describes are
+   gone. `App.tsx` now renders a single `ui/WorkspaceHeader.tsx` **outside both
+   mode panes**, and that header's **Review** entry is the group's only entry
+   point. Queue selection is a `role="tablist"` inside the destination
+   (`ui/review/ReviewQueueTabs.tsx`, with its rows in the pure table
+   `ui/review/queues.ts`), one `role="tab"` per queue the role may see, in one
+   `role="tabpanel"`; the two sidebars render no part of the group and take no
+   review props at all, so they can no longer drift apart - neither of them
+   carries it. What the group *does* is unchanged, deliberately and
+   verbatim: the report is fetched on entry and only on entry (decision 6), each
+   row keeps its own route's `minRole` threshold (decision 7), and an unknown
+   count is still an en dash and never a zero (decisions 4 and 5). Switching
+   mode still does not close an open queue - the destination is shared and the
+   header sits above both panes - and library navigation still returns to the
+   library. One new guard keeps threshold and fetch bound to the same value: the
+   queue a destination opens is resolved against the role on every render
+   (`resolveQueue`), and both the view guards and the four fetch predicates read
+   that resolved key, so a stored `bundles` key can neither render the bundle
+   queue nor arm a detection walk for a role that has no bundle row.
+
+   `ProjectSidebar.tsx` is still rendered in Projects mode on purpose. Removing
+   it is the next step of the approved navigation model, not part of this
+   amendment; what this ticket removed from it is the review group and the
+   footer, not the project list.
 
 3. **A queue is a header, a queue-specific toolbar, and list + detail.** The
    shared part is `ui/review/ReviewQueueView.tsx`: title, count, one-line
@@ -141,14 +172,15 @@ destination model, the count rule, the role threshold and the fetch policy.
    at all - the settings card's deliberate "detection must never be fired for a
    viewer" invariant is preserved.
 
-   The threshold is per row (`minRole` on `QUEUES` in `ui/review/ReviewNav.tsx`),
-   not one gate on the group, because the queues' routes differ. `GET
+   The threshold is per row (`minRole` on `QUEUES` in `ui/review/queues.ts`,
+   the table `ReviewNav.tsx` used to own), not one gate on the group, because
+   the queues' routes differ. `GET
    /imports/runs` is `require_read`, and a viewer already reads the run history
    from Settings today; a group-wide contributor gate would have deleted a
    proven read surface in order to tidy a menu. So "Imports running" is
    `minRole: "viewer"` and "Bundles to confirm" stays `"contributor"`, and a
    role below every row (or an unknown `null` role) renders no group and no
-   "Review" heading at all. Moving the UI broadens no write permission: every
+   Review entry at all. Moving the UI broadens no write permission: every
    control is additionally gated on the caller's capability, the folder-scan
    panel is hidden, not disabled, below `editor`, and the server remains the
    enforcement point.

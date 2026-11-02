@@ -2,9 +2,9 @@ import React from "react";
 import UploadBar from "./UploadBar";
 import AssetGrid from "./asset-grid/AssetGrid";
 import Sidebar from "./Sidebar";
-import ModeSwitch from "./ModeSwitch";
 import ProjectSidebar from "./ProjectSidebar";
 import ProjectView from "./ProjectView";
+import WorkspaceHeader from "./WorkspaceHeader";
 import Login from "./Login";
 import AuditLog from "./AuditLog";
 import NotPermitted from "./NotPermitted";
@@ -51,6 +51,8 @@ import { useBundleDetect } from "./review/useBundleDetect";
 import { useImportRuns } from "./review/useImportRuns";
 import { useLibraryScan } from "./review/useLibraryScan";
 import { useReviewCounts } from "./review/useReviewCounts";
+import { resolveQueue } from "./review/queues";
+import ReviewQueueTabs from "./review/ReviewQueueTabs";
 import { useTrash } from "./review/useTrash";
 
 const DEFAULT_REFRESH_SECONDS = 900; // 15 minutes: the access token lifetime
@@ -230,20 +232,23 @@ export default function App() {
   // editor must keep the queue without gaining any path to the purge.
   const canPurgeTrash = roleAtLeast(role, "admin");
 
-  // Each queue owns its own data. `enabled` includes `reviewOpen` and the active
-  // queue key so a fetch happens per entry, not per app load: the app does not
-  // pay a whole-library walk or an import-run read just to paint a badge, and
-  // entering a queue is still exactly one fetch.
+  // Each queue owns its own data. `enabled` includes `reviewOpen` and the
+  // resolved queue key so a fetch happens per entry, not per app load: the app
+  // does not pay a whole-library walk or an import-run read just to paint a
+  // badge, and entering a queue is still exactly one fetch. Every guard and
+  // every fetch reads the same derived key, never the stored one: a viewer's
+  // stored `bundles` must neither render the bundle queue nor arm its walk.
+  const resolvedQueue = resolveQueue(role, activeQueue);
   const reviewOpen = activeView === "review";
   const bundleReview = useBundleDetect({
-    enabled: canContribute && reviewOpen && activeQueue === "bundles",
+    enabled: canContribute && reviewOpen && resolvedQueue === "bundles",
     onUnauthorized: handleUnauthorized,
   });
   // The imports queue is armed by READ, not contribute: `GET /imports/runs` is
   // require_read, and gating it on a write capability would leave a viewer's
   // queue on "Loading import runs..." forever.
   const importsReview = useImportRuns({
-    enabled: canRead && reviewOpen && activeQueue === "imports",
+    enabled: canRead && reviewOpen && resolvedQueue === "imports",
     onUnauthorized: handleUnauthorized,
   });
   // `GET /trash` sizes every entry with a recursive `os.walk`, so the queue reads
@@ -251,7 +256,7 @@ export default function App() {
   // first opened, and nothing polls. `enabled` includes the active queue key so a
   // closed queue issues no read at all.
   const trashReview = useTrash({
-    enabled: canRead && reviewOpen && activeQueue === "trash",
+    enabled: canRead && reviewOpen && resolvedQueue === "trash",
     onUnauthorized: handleUnauthorized,
   });
   // The missing badge costs no extra request: it reads the `/assets/counts`
@@ -262,6 +267,13 @@ export default function App() {
     setActiveQueue(key);
     setActiveView("review");
   }, []);
+
+  // The header's Review entry opens the destination, not a queue: the row that
+  // is already resolved stays the one open, and a role with no visible queue
+  // has no entry to click.
+  const handleOpenReviewDestination = React.useCallback(() => {
+    if (resolvedQueue) setActiveView("review");
+  }, [resolvedQueue]);
 
   const handleFoldersChanged = React.useCallback(() => {
     setFolderVersion(v => v + 1);
@@ -281,7 +293,7 @@ export default function App() {
   // the rescan button is WRITE and the panel hides it below editor. Entry
   // fetches once, never on app load, and polls only while a scan is walking.
   const missingReview = useLibraryScan({
-    enabled: canRead && reviewOpen && activeQueue === "missing",
+    enabled: canRead && reviewOpen && resolvedQueue === "missing",
     onUnauthorized: handleUnauthorized,
     onAssetsChanged: handleAssetsChanged,
     onFoldersChanged: handleFoldersChanged,
@@ -526,206 +538,224 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen flex">
-      <div className="library-rail">
-        <ModeSwitch mode={mode} onChange={handleModeChange} />
-        {/* `hidden` (the attribute, not a class) keeps the inactive pane mounted
-            so its state survives mode switches. The shared <main> scroller may
-            reset its scroll position on the switch; that is not part of the AC. */}
-        <div hidden={mode !== "files"} className="min-h-0 flex-1">
-          {visitedModes.files && (
-            <Sidebar
-              selectedId={folderId}
-              onSelect={handleSelectFolder}
-              unfiled={unfiled}
-              totalCount={counts?.total ?? null}
-              unfiledCount={counts?.unfiled ?? null}
-              onSelectUnfiled={handleSelectUnfiled}
-              onFoldersChanged={handleFoldersChanged}
-              foldersVersion={folderVersion}
-              onAssetsChanged={handleAssetsChanged}
-              onUnauthorized={handleUnauthorized}
-              onOpenSettings={() => setActiveView("settings")}
-              onOpenAudit={() => setActiveView("audit")}
-              activeView={activeView}
-              activeQueue={activeQueue}
-              reviewCounts={reviewCounts}
-              onOpenQueue={handleOpenReview}
-              role={role}
-              username={identity.username}
-              kind={identity.kind}
-            />
-          )}
-        </div>
-        <div hidden={mode !== "projects"} className="min-h-0 flex-1">
-          {visitedModes.projects && (
-            <ProjectSidebar
-              projects={projects}
-              selectedId={openProjectId}
-              onSelect={handleOpenProject}
-              activeView={activeView}
-              activeQueue={activeQueue}
-              reviewCounts={reviewCounts}
-              onOpenQueue={handleOpenReview}
-              onOpenSettings={() => setActiveView("settings")}
-              onOpenAudit={() => setActiveView("audit")}
-              role={role}
-              username={identity.username}
-              kind={identity.kind}
-            />
-          )}
-        </div>
-      </div>
-      {/* The asset grid's virtualizer compensates row-height changes itself (see useVirtualRows), so native scroll anchoring must not apply a second adjustment. */}
-      <main ref={mainScrollRef} className="flex-1 p-4 overflow-auto" style={{ overflowAnchor: "none" }}>
-        {apiUp === false && (
-          <div className="mb-3 p-2 rounded-md bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-100 flex flex-wrap items-center gap-2">
-            <span>API unreachable at {getApiBase()}. Ensure the API container is running and reachable.</span>
-            {!!settings.network.publicUrl && (
-              <button
-                className="px-2 py-1 rounded-md border border-red-400/70 text-xs font-medium"
-                onClick={resetSavedProxyUrl}
-                type="button"
-              >
-                Reset saved proxy URL
-              </button>
-            )}
-          </div>
-        )}
-        <header className="flex items-center justify-between mb-4 gap-4 flex-wrap">
-          {activeView === "library" && (
-            <img
-              src={logoForTheme(resolvedTheme)}
-              alt="Curiarium"
-              className="h-40 w-auto max-w-[520px]"
-            />
-          )}
-          <div className="flex flex-wrap items-center gap-3">
-            {/* Uploads always land in a files folder, so projects mode hides the bar. */}
-            {activeView === "library" && mode === "files" && (
-              <UploadBar
-                canContribute={canContribute}
-                folderId={folderId}
-                makerworldCookie={settings.makerworld.cookie}
-                thingiverseCookie={settings.thingiverse.cookie}
-                onUploaded={handleAssetsChanged}
+    <div className="h-screen flex flex-col">
+      <WorkspaceHeader
+        mode={mode}
+        onModeChange={handleModeChange}
+        activeView={activeView}
+        onOpenReview={handleOpenReviewDestination}
+        onOpenSettings={() => setActiveView("settings")}
+        onOpenAudit={() => setActiveView("audit")}
+        role={role}
+        username={identity.username}
+        kind={identity.kind}
+      />
+      <div className="flex min-h-0 flex-1">
+        <div className="library-rail">
+          {/* `hidden` (the attribute, not a class) keeps the inactive pane mounted
+              so its state survives mode switches. The shared <main> scroller may
+              reset its scroll position on the switch; that is not part of the AC. */}
+          <div hidden={mode !== "files"} className="min-h-0 flex-1">
+            {visitedModes.files && (
+              <Sidebar
+                selectedId={folderId}
+                onSelect={handleSelectFolder}
+                unfiled={unfiled}
+                totalCount={counts?.total ?? null}
+                unfiledCount={counts?.unfiled ?? null}
+                onSelectUnfiled={handleSelectUnfiled}
+                onFoldersChanged={handleFoldersChanged}
+                foldersVersion={folderVersion}
+                onAssetsChanged={handleAssetsChanged}
                 onUnauthorized={handleUnauthorized}
-                onProjectImported={handleProjectImported}
+                role={role}
               />
             )}
-            {activeView !== "library" && (
-              <button
-                className="px-3 py-2 rounded-md border border-panel-strong text-sm"
-                onClick={() => setActiveView("library")}
-              >
-                Back to library
-              </button>
+          </div>
+          <div hidden={mode !== "projects"} className="min-h-0 flex-1">
+            {visitedModes.projects && (
+              <ProjectSidebar
+                projects={projects}
+                selectedId={openProjectId}
+                onSelect={handleOpenProject}
+              />
             )}
-            <button
-              onClick={() => setConfirmingLogout(true)}
-              className="px-3 py-2 rounded-md border border-panel-strong text-sm"
-            >
-              Log out
-            </button>
           </div>
-        </header>
-        {/* Same lazy-mount rule as the rail: each mode's grid is created on
-            first visit and then stays mounted (only hidden), so search, sort,
-            selection and loaded pages survive a mode switch. */}
-        {activeView === "library" && visitedModes.files && (
-          <div hidden={mode !== "files"}>
-            <AssetGrid
-              canContribute={canContribute}
-              canDelete={canDelete}
-              folderId={folderId}
-              unfiled={unfiled}
-              foldersVersion={folderVersion}
-              assetsVersion={assetsVersion}
-              countsVersion={countsVersion}
-              onAssetsFiled={handleAssetsFiled}
-              onUnauthorized={handleUnauthorized}
-              slicerSettings={settings.slicer}
-              engravingSettings={settings.engraving}
-              previewSettings={settings.previews}
-              theme={resolvedTheme}
-              scrollElementRef={mainScrollRef}
-              onNavigateFolder={handleSelectFolder}
-              onProjectsChanged={handleAssetsChanged}
-            />
-          </div>
-        )}
-        {activeView === "library" && visitedModes.projects && (
-          <div hidden={mode !== "projects"}>
-            <ProjectView
-              canContribute={canContribute}
-              canDelete={canDelete}
-              projects={projects}
-              selectedProjectId={openProjectId}
-              onOpenProject={handleOpenProject}
-              onCloseProject={handleCloseProject}
-              onProjectUpdated={handleProjectUpdated}
-              onProjectDeleted={handleProjectDeleted}
-              onAssetsChanged={handleAssetsChanged}
-              assetsVersion={assetsVersion}
-              onUnauthorized={handleUnauthorized}
-              slicerSettings={settings.slicer}
-              engravingSettings={settings.engraving}
-              previewSettings={settings.previews}
-              theme={resolvedTheme}
-            />
-          </div>
-        )}
-        {activeView === "settings" && (
-          <React.Suspense fallback={<SettingsLoading />}>
-            <Settings
-              settings={settings}
-              onChange={setSettings}
-              onUnauthorized={handleUnauthorized}
-              role={role}
-              username={identity.username}
-              kind={identity.kind}
-            />
-          </React.Suspense>
-        )}
-        {activeView === "review" && activeQueue === "bundles" && (
-          <BundleReviewView state={bundleReview} canContribute={canContribute} />
-        )}
-        {activeView === "review" && activeQueue === "imports" && (
-          <ImportsReviewView
-            state={importsReview}
-            canWrite={canDelete}
-            onAssetsChanged={handleAssetsChanged}
-            onFoldersChanged={handleFoldersChanged}
-            onUnauthorized={handleUnauthorized}
-            onSelectFolder={handleSelectFolder}
-          />
-        )}
-        {activeView === "review" && activeQueue === "missing" && (
-          <MissingFilesReviewView
-            state={missingReview}
-            canWrite={canDelete}
-            canContribute={canContribute}
-            canDelete={canDelete}
-            missingCount={counts ? counts.missing : null}
-            assetsVersion={assetsVersion}
-            onRefresh={handleAssetsChanged}
-            onAssetsFiled={handleAssetsFiled}
-            onUnauthorized={handleUnauthorized}
-            slicerSettings={settings.slicer}
-            engravingSettings={settings.engraving}
-            previewSettings={settings.previews}
-            theme={resolvedTheme}
-            scrollElementRef={mainScrollRef}
-          />
-        )}
-        {activeView === "review" && activeQueue === "trash" && (
-          <TrashQueueView state={trashReview} canPurge={canPurgeTrash} />
-        )}
-        {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}
-        {activeView === "audit" && roleAtLeast(role, "admin") && (
-          <AuditLog onUnauthorized={handleUnauthorized} />
-        )}
-      </main>
+        </div>
+        {/* The asset grid's virtualizer compensates row-height changes itself (see useVirtualRows), so native scroll anchoring must not apply a second adjustment. */}
+        <main ref={mainScrollRef} className="min-h-0 flex-1 p-4 overflow-auto" style={{ overflowAnchor: "none" }}>
+          {apiUp === false && (
+            <div className="mb-3 p-2 rounded-md bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-100 flex flex-wrap items-center gap-2">
+              <span>API unreachable at {getApiBase()}. Ensure the API container is running and reachable.</span>
+              {!!settings.network.publicUrl && (
+                <button
+                  className="px-2 py-1 rounded-md border border-red-400/70 text-xs font-medium"
+                  onClick={resetSavedProxyUrl}
+                  type="button"
+                >
+                  Reset saved proxy URL
+                </button>
+              )}
+            </div>
+          )}
+          <header className="flex items-center justify-between mb-4 gap-4 flex-wrap">
+            {activeView === "library" && (
+              <img
+                src={logoForTheme(resolvedTheme)}
+                alt="Curiarium"
+                className="h-40 w-auto max-w-[520px]"
+              />
+            )}
+            <div className="flex flex-wrap items-center gap-3">
+              {/* Uploads always land in a files folder, so projects mode hides the bar. */}
+              {activeView === "library" && mode === "files" && (
+                <UploadBar
+                  canContribute={canContribute}
+                  folderId={folderId}
+                  makerworldCookie={settings.makerworld.cookie}
+                  thingiverseCookie={settings.thingiverse.cookie}
+                  onUploaded={handleAssetsChanged}
+                  onUnauthorized={handleUnauthorized}
+                  onProjectImported={handleProjectImported}
+                />
+              )}
+              {activeView !== "library" && (
+                <button
+                  className="px-3 py-2 rounded-md border border-panel-strong text-sm"
+                  onClick={() => setActiveView("library")}
+                >
+                  Back to library
+                </button>
+              )}
+              <button
+                onClick={() => setConfirmingLogout(true)}
+                className="px-3 py-2 rounded-md border border-panel-strong text-sm"
+              >
+                Log out
+              </button>
+            </div>
+          </header>
+          {/* Same lazy-mount rule as the rail: each mode's grid is created on
+              first visit and then stays mounted (only hidden), so search, sort,
+              selection and loaded pages survive a mode switch. */}
+          {activeView === "library" && visitedModes.files && (
+            <div hidden={mode !== "files"}>
+              <AssetGrid
+                canContribute={canContribute}
+                canDelete={canDelete}
+                folderId={folderId}
+                unfiled={unfiled}
+                foldersVersion={folderVersion}
+                assetsVersion={assetsVersion}
+                countsVersion={countsVersion}
+                onAssetsFiled={handleAssetsFiled}
+                onUnauthorized={handleUnauthorized}
+                slicerSettings={settings.slicer}
+                engravingSettings={settings.engraving}
+                previewSettings={settings.previews}
+                theme={resolvedTheme}
+                scrollElementRef={mainScrollRef}
+                onNavigateFolder={handleSelectFolder}
+                onProjectsChanged={handleAssetsChanged}
+              />
+            </div>
+          )}
+          {activeView === "library" && visitedModes.projects && (
+            <div hidden={mode !== "projects"}>
+              <ProjectView
+                canContribute={canContribute}
+                canDelete={canDelete}
+                projects={projects}
+                selectedProjectId={openProjectId}
+                onOpenProject={handleOpenProject}
+                onCloseProject={handleCloseProject}
+                onProjectUpdated={handleProjectUpdated}
+                onProjectDeleted={handleProjectDeleted}
+                onAssetsChanged={handleAssetsChanged}
+                assetsVersion={assetsVersion}
+                onUnauthorized={handleUnauthorized}
+                slicerSettings={settings.slicer}
+                engravingSettings={settings.engraving}
+                previewSettings={settings.previews}
+                theme={resolvedTheme}
+              />
+            </div>
+          )}
+          {activeView === "settings" && (
+            <React.Suspense fallback={<SettingsLoading />}>
+              <Settings
+                settings={settings}
+                onChange={setSettings}
+                onUnauthorized={handleUnauthorized}
+                role={role}
+                username={identity.username}
+                kind={identity.kind}
+              />
+            </React.Suspense>
+          )}
+          {activeView === "review" && (
+            <>
+              <ReviewQueueTabs
+                activeQueue={resolvedQueue}
+                counts={reviewCounts}
+                onSelect={handleOpenReview}
+                role={role}
+              />
+              {/* One tabpanel for whichever queue the role may actually open: a
+                  stored key the role cannot see is resolved away, so the panel
+                  and the selected tab always name the same queue - the row reads
+                  the resolved key too, because a tablist with no selected tab
+                  would leave the panel labelled by an unselected one. */}
+              {resolvedQueue !== null && (
+                <div
+                  role="tabpanel"
+                  id={`review-tabpanel-${resolvedQueue}`}
+                  aria-labelledby={`review-tab-${resolvedQueue}`}
+                >
+                  {resolvedQueue === "bundles" && (
+                    <BundleReviewView state={bundleReview} canContribute={canContribute} />
+                  )}
+                  {resolvedQueue === "imports" && (
+                    <ImportsReviewView
+                      state={importsReview}
+                      canWrite={canDelete}
+                      onAssetsChanged={handleAssetsChanged}
+                      onFoldersChanged={handleFoldersChanged}
+                      onUnauthorized={handleUnauthorized}
+                      onSelectFolder={handleSelectFolder}
+                    />
+                  )}
+                  {resolvedQueue === "missing" && (
+                    <MissingFilesReviewView
+                      state={missingReview}
+                      canWrite={canDelete}
+                      canContribute={canContribute}
+                      canDelete={canDelete}
+                      missingCount={counts ? counts.missing : null}
+                      assetsVersion={assetsVersion}
+                      onRefresh={handleAssetsChanged}
+                      onAssetsFiled={handleAssetsFiled}
+                      onUnauthorized={handleUnauthorized}
+                      slicerSettings={settings.slicer}
+                      engravingSettings={settings.engraving}
+                      previewSettings={settings.previews}
+                      theme={resolvedTheme}
+                      scrollElementRef={mainScrollRef}
+                    />
+                  )}
+                  {resolvedQueue === "trash" && (
+                    <TrashQueueView state={trashReview} canPurge={canPurgeTrash} />
+                  )}
+                </div>
+              )}
+            </>
+          )}
+          {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}
+          {activeView === "audit" && roleAtLeast(role, "admin") && (
+            <AuditLog onUnauthorized={handleUnauthorized} />
+          )}
+        </main>
+      </div>
       {confirmingLogout && (
         <ConfirmDialog
           title="Log out?"

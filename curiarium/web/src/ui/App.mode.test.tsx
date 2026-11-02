@@ -27,14 +27,28 @@ vi.mock("../lib/api", () => ({
   refreshToken: vi.fn(),
 }));
 
-// The queue's own hook runs when the stand-in view opens it; an empty run list
-// keeps this file's subject (mode state) off the network.
+// The queue's own hook runs when the queue opens it; an empty run list keeps
+// this file's subject (mode state) off the network.
 vi.mock("../lib/api/settings", () => ({
   getImportRuns: vi.fn(async () => ({ runs: [], total: 0, limit: 1, offset: 0 })),
   getImportRun: vi.fn(),
   // App arms `useLibraryScan`; its pair comes from this domain module.
   getLibraryScanStatus: vi.fn(),
   startLibraryScan: vi.fn(),
+}));
+
+// Entering Review opens the stored queue first (a bundle decision for an
+// admin), so the walk has to answer without touching the network.
+vi.mock("../lib/api/bundles", () => ({
+  getBundleReport: vi.fn(async () => ({
+    root: "",
+    truncated: false,
+    counts: { total: 0, high: 0, low: 0, ready: 0, blocked: 0, dismissed: 0, already_created: 0 },
+    bundles: [],
+    stale_dismissals: [],
+  })),
+  createBundles: vi.fn(),
+  setBundleDismissed: vi.fn(),
 }));
 
 vi.mock("../lib/settings", () => ({
@@ -53,7 +67,8 @@ vi.mock("../lib/settings", () => ({
 }));
 
 // The real Sidebar renders App's counts beside its two rows, so the mock prints
-// them too: that is the only observable of the counts refresh (AC-5).
+// them too: that is the only observable of the counts refresh (AC-5). The
+// review entry lives in the header, so nothing here needs a queue opener.
 vi.mock("./Sidebar", async () => {
   const react = await import("react");
   return {
@@ -62,13 +77,11 @@ vi.mock("./Sidebar", async () => {
       unfiledCount,
       unfiled,
       onSelectUnfiled,
-      onOpenQueue,
     }: {
       totalCount?: number | null;
       unfiledCount?: number | null;
       unfiled?: boolean;
       onSelectUnfiled?: () => void;
-      onOpenQueue?: (key: "imports") => void;
     }) =>
       react.createElement(
         "aside",
@@ -77,11 +90,6 @@ vi.mock("./Sidebar", async () => {
         react.createElement("p", { "data-testid": "total-count" }, totalCount == null ? "none" : String(totalCount)),
         react.createElement("p", { "data-testid": "unfiled-count" }, unfiledCount == null ? "none" : String(unfiledCount)),
         react.createElement("button", { type: "button", onClick: onSelectUnfiled }, "Select unfiled"),
-        react.createElement(
-          "button",
-          { type: "button", onClick: () => onOpenQueue?.("imports") },
-          "Open imports queue",
-        ),
       ),
   };
 });
@@ -89,23 +97,11 @@ vi.mock("./Sidebar", async () => {
 vi.mock("./ProjectSidebar", async () => {
   const react = await import("react");
   return {
-    default: ({
-      onOpenSettings,
-      onOpenQueue,
-    }: {
-      onOpenSettings?: () => void;
-      onOpenQueue?: (key: "imports") => void;
-    }) =>
+    default: () =>
       react.createElement(
         "aside",
         { "aria-label": "Projects" },
         react.createElement("p", null, "Projects list"),
-        react.createElement("button", { type: "button", onClick: onOpenSettings }, "Open settings"),
-        react.createElement(
-          "button",
-          { type: "button", onClick: () => onOpenQueue?.("imports") },
-          "Open imports queue",
-        ),
       ),
   };
 });
@@ -253,7 +249,7 @@ describe("App library mode switch", () => {
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
 
     expect(await screen.findByText("Settings view")).toBeTruthy();
     expect(screen.queryByText("Loading settings…")).toBeNull();
@@ -264,7 +260,11 @@ describe("App library mode switch", () => {
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    // the header sits outside both panes, so there is exactly one entry point
+    // and projects mode cannot strand it.
+    expect(await screen.findAllByRole("button", { name: "Settings" })).toHaveLength(1);
+    expect(screen.getByRole("complementary", { name: "Projects" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     expect(await screen.findByText("Settings view")).toBeTruthy();
   });
@@ -274,9 +274,11 @@ describe("App library mode switch", () => {
 
     render(<App />);
 
-    // In projects mode the queue is reached from that sidebar, and the scan
-    // action hands a folder back to App while the projects pane is active.
-    fireEvent.click(await screen.findByRole("button", { name: "Open imports queue" }));
+    // The queue is reached from the shared header, so it opens in projects mode
+    // too; the scan action then hands a folder back to App.
+    fireEvent.click(await screen.findByRole("button", { name: "Review" }));
+    fireEvent.click(await screen.findByRole("tab", { name: /^Imports running/ }));
+    expect(await screen.findByText("Imports review view")).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "Scan now" }));
 
     expect(window.localStorage.getItem(MODE_STORAGE_KEY)).toBe("files");

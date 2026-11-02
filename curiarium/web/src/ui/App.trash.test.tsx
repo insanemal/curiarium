@@ -34,6 +34,30 @@ vi.mock("../lib/api/trash", () => ({
   purgeTrash: vi.fn(),
 }));
 
+// A contributor or above enters Review on the bundle queue first, so
+// `useBundleDetect` arms there. The report is empty on purpose: this file
+// asserts trash reads only, and no queue assertion may shift because a
+// neighbour fetched.
+vi.mock("../lib/api/bundles", () => ({
+  getBundleReport: vi.fn(async () => ({
+    root: "",
+    truncated: false,
+    counts: {
+      total: 0,
+      high: 0,
+      low: 0,
+      ready: 0,
+      blocked: 0,
+      dismissed: 0,
+      already_created: 0,
+    },
+    bundles: [],
+    stale_dismissals: [],
+  })),
+  createBundles: vi.fn(),
+  setBundleDismissed: vi.fn(),
+}));
+
 // The two hooks App arms on load read their own domain modules.
 vi.mock("../lib/api/settings", () => ({
   getImportRuns: vi.fn(async () => ({ runs: [], total: 0, limit: 1, offset: 0 })),
@@ -57,54 +81,17 @@ vi.mock("../lib/settings", () => ({
   resolveTheme: () => "light",
 }));
 
-type NavProps = {
-  role?: Role | null;
-  activeView?: ActiveView;
-  activeQueue?: ReviewQueueKey | null;
-  reviewCounts?: ReviewCounts;
-  onOpenQueue?: (key: ReviewQueueKey) => void;
-};
-
-/**
- * The real `ReviewNav` is what proves App hands the trash count and the opener
- * to both sidebars; the rest of each sidebar is replaced, not the group.
- */
+// The review entry point lives in the header, so each rail only has to mount the
+// pane the mode assertions look for. Every prop App passes is accepted and
+// ignored: nothing in this file asserts the rails' contents.
 vi.mock("./Sidebar", async () => {
   const react = await import("react");
-  const { default: ReviewNav } = await import("./review/ReviewNav");
-  return {
-    default: ({ role, activeView, activeQueue, reviewCounts, onOpenQueue }: NavProps) =>
-      react.createElement(
-        "aside",
-        { "aria-label": "Files" },
-        react.createElement(ReviewNav, {
-          role,
-          activeView,
-          activeQueue: activeQueue ?? null,
-          counts: reviewCounts,
-          onOpenQueue,
-        }),
-      ),
-  };
+  return { default: () => react.createElement("aside", { "aria-label": "Files" }) };
 });
 
 vi.mock("./ProjectSidebar", async () => {
   const react = await import("react");
-  const { default: ReviewNav } = await import("./review/ReviewNav");
-  return {
-    default: ({ role, activeView, activeQueue, reviewCounts, onOpenQueue }: NavProps) =>
-      react.createElement(
-        "aside",
-        { "aria-label": "Projects" },
-        react.createElement(ReviewNav, {
-          role,
-          activeView,
-          activeQueue: activeQueue ?? null,
-          counts: reviewCounts,
-          onOpenQueue,
-        }),
-      ),
-  };
+  return { default: () => react.createElement("aside", { "aria-label": "Projects" }) };
 });
 
 vi.mock("./ProjectView", async () => {
@@ -128,10 +115,8 @@ vi.mock("./Login", () => ({ default: () => null }));
 import App from "./App";
 import { getMe } from "../lib/api";
 import { getTrash, purgeTrash, type TrashList, type TrashPurgeResult } from "../lib/api/trash";
-import { storeToken, type Role } from "../lib/auth";
-import type { ReviewCounts } from "./review/useReviewCounts";
+import { storeToken } from "../lib/auth";
 import { describeQueueCount } from "./review/useReviewCounts";
-import type { ActiveView, ReviewQueueKey } from "./views";
 
 const getTrashMock = vi.mocked(getTrash);
 const purgeTrashMock = vi.mocked(purgeTrash);
@@ -185,12 +170,18 @@ function installMemoryStorage(): void {
   Object.defineProperty(window, "localStorage", { value: storage, configurable: true });
 }
 
-function openQueueButton(): HTMLElement {
-  return screen.getAllByRole("button", { name: /^Trash:/ })[0];
+function openReviewButton(): HTMLElement {
+  return screen.getByRole("button", { name: "Review" });
+}
+
+function trashTab(): HTMLElement {
+  return screen.getByRole("tab", { name: /^Trash/ });
 }
 
 function badgeText(): string {
-  return screen.getAllByTestId("review-count-trash")[0].textContent ?? "";
+  // The tab's text also carries its label, so read only the count span.
+  const tab = screen.getByTestId("review-count-trash");
+  return tab.querySelector(".sidebar-count")?.textContent ?? "";
 }
 
 function headerCount(): HTMLElement {
@@ -199,16 +190,21 @@ function headerCount(): HTMLElement {
   return element as HTMLElement;
 }
 
-/** The nav exists only once `/me` answers, so this waits for the role. */
+/** The Review entry exists only once `/me` answers, so this waits for the role. */
 async function renderApp(): Promise<void> {
   render(<App />);
-  await waitFor(() =>
-    expect(screen.getAllByRole("button", { name: /^Trash:/ }).length).toBeGreaterThan(0),
-  );
+  await screen.findByRole("button", { name: "Review" });
 }
 
+/**
+ * Opening the trash is two steps now: the header's Review entry, which lands on
+ * the resolved queue (bundles for a contributor or above, imports for a
+ * viewer), then the Trash tab. Re-entry lands on whichever queue was last
+ * selected, so the tab click is a no-op re-selection rather than a second read.
+ */
 async function openTrashQueue(): Promise<void> {
-  fireEvent.click(openQueueButton());
+  fireEvent.click(openReviewButton());
+  fireEvent.click(await screen.findByRole("tab", { name: /^Trash/ }));
   await screen.findByRole("heading", { name: "Trash" });
 }
 
@@ -240,26 +236,40 @@ afterEach(() => {
 });
 
 describe("App trash destination (ADR 0011 slice 4)", () => {
-  it("renders the Trash row in both sidebars", async () => {
+  it("shows one Trash tab in one tablist, whichever mode is showing", async () => {
     await renderApp();
+    await openTrashQueue();
 
-    // Files mode: the files sidebar's row.
-    expect(screen.getByRole("button", { name: /^Trash:/ })).toBeTruthy();
+    // One entry point now, not one per rail: the tab row is rendered inside the
+    // destination, so there is exactly one tablist and exactly one Trash tab.
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(screen.getAllByRole("tab", { name: /^Trash/ })).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("radio", { name: "Projects" }));
 
-    // Projects mode: its own sidebar renders the same shared row, and both
-    // sidebars are now mounted (the inactive one is hidden, not unmounted).
-    expect(screen.getByRole("button", { name: /^Trash:/ })).toBeTruthy();
-    expect(screen.getAllByTestId("review-count-trash").length).toBe(2);
+    // The header is outside both panes, so the switch cannot duplicate the row
+    // or move the selection off the queue that is open.
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(screen.getAllByRole("tab", { name: /^Trash/ })).toHaveLength(1);
+    expect(trashTab().getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("heading", { name: "Trash" })).toBeTruthy();
   });
 
-  it("shows an en dash before the queue is opened and the same number in the header afterwards", async () => {
+  it("shows an en dash before the trash is read and the same number in the header afterwards", async () => {
     await renderApp();
 
-    // `GET /trash` walks the whole storage tree, so the count is unknown - a
-    // dash, never a zero that would claim an empty trash.
+    // Counts belong to the queues inside Review, so before entry there is no
+    // trash tab to carry one - and no badge elsewhere claiming an empty trash.
+    expect(screen.queryAllByTestId("review-count-trash")).toHaveLength(0);
+    expect(getTrashMock).not.toHaveBeenCalled();
+
+    // Entering Review lands on the bundle queue; the trash tab is rendered but
+    // unfetched, and `GET /trash` walks the whole storage tree, so its count is
+    // unknown - a dash, never a zero that would claim an empty trash.
+    fireEvent.click(openReviewButton());
+    const tab = await screen.findByRole("tab", { name: /^Trash/ });
     expect(badgeText()).toBe("\u2013");
+    expect(tab.getAttribute("title")).toBe("Count unavailable");
     expect(getTrashMock).not.toHaveBeenCalled();
 
     await openTrashQueue();
@@ -270,9 +280,7 @@ describe("App trash destination (ADR 0011 slice 4)", () => {
     // One wording function feeds both surfaces, so they cannot describe the
     // same number two ways.
     expect(headerCount().getAttribute("title")).toBe(describeQueueCount("trash", 2));
-    expect(screen.getAllByTestId("review-count-trash")[0].getAttribute("title")).toBe(
-      describeQueueCount("trash", 2),
-    );
+    expect(trashTab().getAttribute("title")).toBe(describeQueueCount("trash", 2));
   });
 
   it("does not read the trash on app load", async () => {
@@ -378,9 +386,7 @@ describe("App trash destination (ADR 0011 slice 4)", () => {
         <App />
       </React.StrictMode>,
     );
-    await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: /^Trash:/ }).length).toBeGreaterThan(0),
-    );
+    await screen.findByRole("button", { name: "Review" });
 
     await openTrashQueue();
 

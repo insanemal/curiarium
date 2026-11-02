@@ -139,8 +139,8 @@ html, body, #root { height: 100%; }
   .border-accent-soft { border-color: var(--mv-accent-border); }
   .text-accent { color: var(--mv-accent); }
 
-  /* Column that hosts the mode switch above whichever sidebar is active. The
-     mode switch inherits the sidebar's panel/background so there is no seam. */
+  /* Column that hosts whichever sidebar is active. The rail and its shell share
+     one panel background so there is no seam. */
   .library-rail {
     @apply flex h-full w-[19rem] min-w-[19rem] flex-col;
     background:
@@ -148,8 +148,18 @@ html, body, #root { height: 100%; }
     border-right: 1px solid var(--mv-border);
   }
 
+  /* The one header both modes share: the Files/Projects switch and the Review
+     destination on the left, Settings/Audit/identity on the right. It sits
+     outside the rail, so it owns its padding and no margins the rail's padding
+     used to absorb. */
+  .workspace-header {
+    @apply flex shrink-0 flex-wrap items-center justify-between gap-3 px-3.5 py-2;
+    border-bottom: 1px solid var(--mv-border);
+    background: var(--mv-panel-strong);
+  }
+
   .mode-switch {
-    @apply m-3 mb-0 flex shrink-0 items-center gap-1 rounded-lg border p-1;
+    @apply flex shrink-0 items-center gap-1 rounded-lg border p-1;
     border-color: var(--mv-border-strong);
     background: color-mix(in srgb, var(--mv-panel-soft) 82%, transparent);
   }
@@ -379,19 +389,41 @@ html, body, #root { height: 100%; }
   .sidebar-editor-actions button.primary { color: var(--mv-accent-contrast); border-color: var(--mv-accent); background: var(--mv-accent); }
   .sidebar-editor-actions button:disabled { @apply cursor-not-allowed opacity-50; }
 
-  /* REVIEW group (Mf-f3c2): the work queues both sidebars share. The group owns
-     a hairline and the footer keeps its own, so the two read as separate blocks. */
-  .sidebar-review { @apply border-t pt-3; border-color: var(--mv-border); }
+  /* Settings, Audit and the signed-in identity: the header owns one copy, in
+     both modes, so a destination cannot be reachable from one mode only. */
+  .workspace-utilities { @apply flex flex-wrap items-center gap-1.5; }
 
-  .sidebar-footer { @apply border-t pt-3; border-color: var(--mv-border); }
-  .sidebar-settings {
-    @apply flex h-10 w-full items-center gap-2.5 rounded-lg border border-transparent px-3 text-[13px] font-medium transition-colors;
+  .workspace-dest {
+    @apply inline-flex h-8 shrink-0 items-center gap-2 rounded-lg border border-transparent px-2.5 text-[12px] font-medium transition-colors;
     color: var(--mv-text-muted);
   }
 
-  .sidebar-settings:hover { color: var(--mv-text); background: var(--mv-panel-soft); }
-  .sidebar-settings.is-selected { color: var(--mv-text); background: var(--mv-accent-soft); }
-  .sidebar-settings.is-selected svg { color: var(--mv-accent); }
+  .workspace-dest:hover { color: var(--mv-text); background: var(--mv-panel-soft); }
+  .workspace-dest.is-selected { color: var(--mv-text); background: var(--mv-accent-soft); }
+  .workspace-dest.is-selected svg { color: var(--mv-accent); }
+
+  /* The Review destination's queue selector. The row is a tablist, so the
+     selected tab is the `aria-selected` one; `border-b` closes the row against
+     the queue it switches. */
+  .review-tabs {
+    @apply mb-3 flex flex-wrap items-center gap-1 border-b pb-2;
+    border-color: var(--mv-border);
+  }
+
+  .review-tab {
+    @apply inline-flex h-8 items-center gap-2 rounded-lg border px-2.5 text-[11px] font-semibold transition-colors;
+    color: var(--mv-text-muted);
+    border-color: var(--mv-border-strong);
+    background: transparent;
+  }
+
+  .review-tab:hover { color: var(--mv-text); background: var(--mv-panel-soft); }
+
+  .review-tab[aria-selected="true"] {
+    color: var(--mv-text);
+    background: var(--mv-accent-soft);
+    border-color: var(--mv-accent-border);
+  }
 
   /* The shell every review queue reuses: title, honest count, refresh and the
      one-line explanation. Rows and controls belong to each queue. */

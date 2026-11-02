@@ -57,6 +57,29 @@ vi.mock("../lib/api", () => ({
   uploadAssetFile: vi.fn(),
 }));
 
+// An editor's Review entry resolves to the bundle queue, so `useBundleDetect`
+// arms on entry. The report is empty on purpose: this file asserts the missing
+// queue only, and no assertion may shift because a neighbour fetched.
+vi.mock("../lib/api/bundles", () => ({
+  getBundleReport: vi.fn(async () => ({
+    root: "",
+    truncated: false,
+    counts: {
+      total: 0,
+      high: 0,
+      low: 0,
+      ready: 0,
+      blocked: 0,
+      dismissed: 0,
+      already_created: 0,
+    },
+    bundles: [],
+    stale_dismissals: [],
+  })),
+  createBundles: vi.fn(),
+  setBundleDismissed: vi.fn(),
+}));
+
 // The queue's hook imports its pair from the DOMAIN module, while the card's
 // Re-scan reaches the same routes through the barrel above. Both are stubbed:
 // they are two mock instances for one pair of endpoints.
@@ -89,54 +112,17 @@ vi.mock("../lib/settings", async importOriginal => {
   };
 });
 
-type NavProps = {
-  role?: Role | null;
-  activeView?: ActiveView;
-  activeQueue?: ReviewQueueKey | null;
-  reviewCounts?: ReviewCounts;
-  onOpenQueue?: (key: ReviewQueueKey) => void;
-};
-
-/**
- * The real `ReviewNav` is what proves App hands the missing count and the
- * opener to both sidebars; the rest of each sidebar is replaced, not the group.
- */
+// The review entry point lives in the header, so each rail only has to mount the
+// pane the mode assertions look for. Every prop App passes is accepted and
+// ignored: nothing in this file asserts the rails' contents.
 vi.mock("./Sidebar", async () => {
   const react = await import("react");
-  const { default: ReviewNav } = await import("./review/ReviewNav");
-  return {
-    default: ({ role, activeView, activeQueue, reviewCounts, onOpenQueue }: NavProps) =>
-      react.createElement(
-        "aside",
-        { "aria-label": "Files" },
-        react.createElement(ReviewNav, {
-          role,
-          activeView,
-          activeQueue: activeQueue ?? null,
-          counts: reviewCounts,
-          onOpenQueue,
-        }),
-      ),
-  };
+  return { default: () => react.createElement("aside", { "aria-label": "Files" }) };
 });
 
 vi.mock("./ProjectSidebar", async () => {
   const react = await import("react");
-  const { default: ReviewNav } = await import("./review/ReviewNav");
-  return {
-    default: ({ role, activeView, activeQueue, reviewCounts, onOpenQueue }: NavProps) =>
-      react.createElement(
-        "aside",
-        { "aria-label": "Projects" },
-        react.createElement(ReviewNav, {
-          role,
-          activeView,
-          activeQueue: activeQueue ?? null,
-          counts: reviewCounts,
-          onOpenQueue,
-        }),
-      ),
-  };
+  return { default: () => react.createElement("aside", { "aria-label": "Projects" }) };
 });
 
 vi.mock("./ProjectView", async () => {
@@ -174,9 +160,7 @@ import {
 } from "../lib/api/settings";
 import { storeToken, type Role } from "../lib/auth";
 import { MODE_STORAGE_KEY } from "../lib/mode";
-import type { ReviewCounts } from "./review/useReviewCounts";
 import { describeQueueCount } from "./review/useReviewCounts";
-import type { ActiveView, ReviewQueueKey } from "./views";
 
 const getAssetCountsMock = vi.mocked(getAssetCounts);
 const getMeMock = vi.mocked(getMe);
@@ -251,20 +235,28 @@ function installMemoryStorage(): void {
   Object.defineProperty(window, "localStorage", { value: storage, configurable: true });
 }
 
-/** The nav exists only once `/me` answers, so this waits for the role. */
+/** The Review entry exists only once `/me` answers, so this waits for the role. */
 async function renderApp(): Promise<void> {
   render(<App />);
-  await waitFor(() =>
-    expect(screen.getAllByRole("button", { name: /^Missing files/ }).length).toBeGreaterThan(0),
-  );
+  await screen.findByRole("button", { name: "Review" });
 }
 
-function queueRow(): HTMLElement {
-  return screen.getAllByRole("button", { name: /^Missing files/ })[0];
+function openReviewButton(): HTMLElement {
+  return screen.getByRole("button", { name: "Review" });
 }
 
+function missingTab(): HTMLElement {
+  return screen.getByRole("tab", { name: /^Missing files/ });
+}
+
+/**
+ * Opening the missing queue is two steps now: the header's Review entry, which
+ * lands on the resolved queue (bundles for an editor, imports for a viewer),
+ * then the Missing files tab.
+ */
 async function openQueue(): Promise<void> {
-  fireEvent.click(queueRow());
+  fireEvent.click(openReviewButton());
+  fireEvent.click(await screen.findByRole("tab", { name: /^Missing files/ }));
   await screen.findByRole("heading", { name: "Missing files" });
 }
 
@@ -274,13 +266,13 @@ async function queueReady(): Promise<void> {
 }
 
 function badge(): HTMLElement {
-  const element = screen.getAllByTestId("review-count-missing")[0];
-  if (!element) throw new Error("No missing-files badge");
-  return element;
+  // The tab carries the wording and the count; `title` lives on the tab itself.
+  return screen.getByTestId("review-count-missing");
 }
 
 function badgeText(): string {
-  return badge().textContent ?? "";
+  // The tab's text also carries its label, so read only the count span.
+  return badge().querySelector(".sidebar-count")?.textContent ?? "";
 }
 
 function headerCount(): HTMLElement {
@@ -380,14 +372,21 @@ afterEach(() => {
 describe("App missing queue entry policy and pin (Mf-1tx3)", () => {
   it("does not read the scan status or pin the listing before the queue is opened", async () => {
     await renderApp();
-    await waitFor(() => expect(badgeText()).toBe("1"));
     await settle(30);
 
-    // Payment on entry, not on app load: no status read, no pinned listing.
+    // The count lives on the queue's own tab, so nothing carries a badge before
+    // Review is entered - and the entry is not paid for at app load either.
+    expect(screen.queryAllByTestId("review-count-missing")).toHaveLength(0);
     expect(getQueueStatusMock).not.toHaveBeenCalled();
     expect(pinnedCalls()).toHaveLength(0);
-    // An unfailed counts read is a number, not a dash.
-    expect(badgeText()).toBe("1");
+
+    // Entering Review lands on the bundle queue; the missing tab's number comes
+    // from the counts read app load already paid for, and an unfailed counts
+    // read is a number, not a dash.
+    fireEvent.click(openReviewButton());
+    await waitFor(() => expect(badgeText()).toBe("1"));
+    expect(getQueueStatusMock).not.toHaveBeenCalled();
+    expect(pinnedCalls()).toHaveLength(0);
   });
 
   it("opens the queue with exactly one scan-status read and pins the listing", async () => {
@@ -418,9 +417,7 @@ describe("App missing queue entry policy and pin (Mf-1tx3)", () => {
         <App />
       </React.StrictMode>,
     );
-    await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: /^Missing files/ }).length).toBeGreaterThan(0),
-    );
+    await screen.findByRole("button", { name: "Review" });
 
     await openQueue();
     await queueReady();
@@ -437,13 +434,19 @@ describe("App missing queue entry policy and pin (Mf-1tx3)", () => {
     await openQueue();
     await queueReady();
 
+    // One tab row, rendered inside the destination, before the switch...
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+
     fireEvent.click(screen.getByRole("radio", { name: "Projects" }));
 
     expect(window.localStorage.getItem(MODE_STORAGE_KEY)).toBe("projects");
-    // The REVIEW group is shared by both modes, so the queue stays open...
+    // ...and still exactly one after it: the header is outside both panes, so
+    // the switch cannot duplicate the row or move the selection.
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(missingTab().getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("heading", { name: "Missing files" })).toBeTruthy();
     await settle(30);
-    // ...and the mode switch must not re-enter the queue's hook.
+    // The switch must not re-enter the queue's hook either.
     expect(getQueueStatusMock).toHaveBeenCalledTimes(1);
   });
 });
@@ -837,11 +840,17 @@ describe("App missing queue roles (Mf-1tx3)", () => {
     getMeMock.mockResolvedValue(me("viewer"));
 
     await renderApp();
-    await openQueue();
+
+    // A viewer has no bundle tab, so their Review entry resolves to the first
+    // queue they may see - imports. The missing queue is one tab away.
+    fireEvent.click(openReviewButton());
+    await waitFor(() => expect(screen.getByRole("tabpanel").id).toBe("review-tabpanel-imports"));
+    fireEvent.click(await screen.findByRole("tab", { name: /^Missing files/ }));
+    await screen.findByRole("heading", { name: "Missing files" });
     await queueReady();
 
-    // The row and the queue are READ surfaces: a viewer keeps both.
-    expect(screen.getAllByRole("button", { name: /^Missing files/ }).length).toBeGreaterThan(0);
+    // The tab and the queue are READ surfaces: a viewer keeps both.
+    expect(missingTab().getAttribute("aria-selected")).toBe("true");
     const card = await findCard(missingAsset.id);
     expect(within(card).getByText("File missing")).toBeTruthy();
 

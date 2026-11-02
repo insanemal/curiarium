@@ -2,30 +2,13 @@ import { useRef, type KeyboardEvent } from "react";
 import { Layers3 } from "lucide-react";
 
 import { fileUrl, type Project } from "../lib/api";
-import type { Role } from "../lib/auth";
 import { useFileGrants } from "../lib/useFileGrants";
-import ReviewNav from "./review/ReviewNav";
-import type { ReviewCounts } from "./review/useReviewCounts";
-import SidebarFooter from "./SidebarFooter";
-import type { ActiveView, ReviewQueueKey } from "./views";
 
 type Props = {
   /** `null` while the project list is loading. */
   projects: Project[] | null;
   selectedId: string | null;
   onSelect: (id: string) => void;
-  activeView?: ActiveView;
-  onOpenSettings?: () => void;
-  onOpenAudit?: () => void;
-  role?: Role | null;
-  username?: string | null;
-  kind?: string | null;
-  /** Bundles awaiting a decision; omitted means "not known yet", shown as a dash. */
-  reviewCounts?: ReviewCounts;
-  /** Which review queue is open, so exactly one REVIEW row is current. */
-  activeQueue?: ReviewQueueKey | null;
-  /** Routes a REVIEW row click to the main pane. */
-  onOpenQueue?: (key: ReviewQueueKey) => void;
 };
 
 /**
@@ -36,15 +19,6 @@ export default function ProjectSidebar({
   projects,
   selectedId,
   onSelect,
-  activeView = "library",
-  onOpenSettings,
-  onOpenAudit,
-  role = null,
-  username = null,
-  kind = null,
-  reviewCounts,
-  activeQueue,
-  onOpenQueue,
 }: Props) {
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -157,23 +131,6 @@ export default function ProjectSidebar({
           })}
         </div>
       </nav>
-
-      <ReviewNav
-        activeView={activeView}
-        activeQueue={activeQueue ?? null}
-        counts={reviewCounts}
-        onOpenQueue={onOpenQueue}
-        role={role ?? null}
-      />
-
-      <SidebarFooter
-        username={username}
-        kind={kind}
-        activeView={activeView}
-        onOpenSettings={onOpenSettings}
-        onOpenAudit={onOpenAudit}
-        role={role}
-      />
     </aside>
   );
 }

@@ -25,10 +25,6 @@ import TagInput from "./TagInput";
 import { useUpload } from "./useUpload";
 import FolderDeleteDialog from "./FolderDeleteDialog";
 import FolderPicker from "./FolderPicker";
-import ReviewNav from "./review/ReviewNav";
-import type { ReviewCounts } from "./review/useReviewCounts";
-import SidebarFooter from "./SidebarFooter";
-import type { ActiveView, ReviewQueueKey } from "./views";
 
 type Props = {
   selectedId?: string | null;
@@ -43,19 +39,8 @@ type Props = {
   onFoldersChanged?: () => void;
   foldersVersion?: number;
   onUnauthorized?: () => void;
-  onOpenSettings?: () => void;
-  onOpenAudit?: () => void;
-  activeView?: ActiveView;
   onAssetsChanged?: () => void;
   role?: Role | null;
-  username?: string | null;
-  kind?: string | null;
-  /** Bundles awaiting a decision; omitted means "not known yet", shown as a dash. */
-  reviewCounts?: ReviewCounts;
-  /** Which review queue is open, so exactly one REVIEW row is current. */
-  activeQueue?: ReviewQueueKey | null;
-  /** Routes a REVIEW row click to the main pane. */
-  onOpenQueue?: (key: ReviewQueueKey) => void;
 };
 
 const DROP_ALL_ID = "__all";
@@ -72,16 +57,8 @@ export default function Sidebar({
   onFoldersChanged,
   foldersVersion,
   onUnauthorized,
-  onOpenSettings,
-  onOpenAudit,
-  activeView = "library",
   onAssetsChanged,
   role = null,
-  username = null,
-  kind = null,
-  reviewCounts,
-  activeQueue,
-  onOpenQueue,
 }: Props) {
   // Derived here rather than passed in so the threshold stays in `roleAtLeast`:
   // `role` is null until `/me` answers, and an unknown role has neither
@@ -752,22 +729,6 @@ export default function Sidebar({
         </div>
       )}
 
-      <ReviewNav
-        activeView={activeView}
-        activeQueue={activeQueue ?? null}
-        counts={reviewCounts}
-        onOpenQueue={onOpenQueue}
-        role={role ?? null}
-      />
-
-      <SidebarFooter
-        activeView={activeView}
-        onOpenSettings={onOpenSettings}
-        onOpenAudit={onOpenAudit}
-        role={role}
-        username={username}
-        kind={kind}
-      />
       {pendingDelete && (
         <FolderDeleteDialog
           folder={pendingDelete}

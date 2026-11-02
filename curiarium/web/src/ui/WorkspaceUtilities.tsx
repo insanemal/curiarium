@@ -16,11 +16,13 @@ type Props = {
 };
 
 /**
- * Settings/Audit entry points shared by both sidebars, so those destinations
- * stay reachable regardless of the library mode. Admin-only gating lives here
- * only, so the two sidebars cannot drift apart.
+ * Settings, Audit and the signed-in identity, rendered once by
+ * `WorkspaceHeader` rather than once per sidebar: the header sits outside both
+ * mode panes, so each of these has exactly one entry point in Files mode and in
+ * Projects mode, and the two modes cannot drift apart. Admin-only gating lives
+ * here only.
  */
-export default function SidebarFooter({
+export default function WorkspaceUtilities({
   activeView = "library",
   onOpenSettings,
   onOpenAudit,
@@ -31,7 +33,7 @@ export default function SidebarFooter({
   const howSignedIn =
     kind === "oidc" ? "single sign-on" : kind === "break-glass" ? "break-glass admin" : kind === "password" ? "password" : null;
   return (
-    <div className="sidebar-footer flex flex-col gap-1">
+    <div className="workspace-utilities">
       {(username || role) && (
         <div
           className="flex items-center justify-between gap-2 px-1 pb-1 text-[11px] leading-tight opacity-80"
@@ -53,8 +55,9 @@ export default function SidebarFooter({
       <button
         type="button"
         onClick={onOpenSettings}
-        className={`sidebar-settings ${activeView === "settings" ? "is-selected" : ""}`}
+        className={`workspace-dest ${activeView === "settings" ? "is-selected" : ""}`}
         aria-label="Settings"
+        aria-current={activeView === "settings" ? "true" : undefined}
       >
         <SettingsIcon className="h-4 w-4" />
         <span>Settings</span>
@@ -63,8 +66,9 @@ export default function SidebarFooter({
         <button
           type="button"
           onClick={onOpenAudit}
-          className={`sidebar-settings ${activeView === "audit" ? "is-selected" : ""}`}
+          className={`workspace-dest ${activeView === "audit" ? "is-selected" : ""}`}
           aria-label="Audit log"
+          aria-current={activeView === "audit" ? "true" : undefined}
         >
           <ScrollText className="h-4 w-4" />
           <span>Audit log</span>

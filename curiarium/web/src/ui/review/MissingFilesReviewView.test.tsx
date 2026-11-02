@@ -60,7 +60,7 @@ vi.mock("../LightBurnPreview", () => ({
 import { listAssets, listCreators, listTags } from "../../lib/api";
 import type { LibraryScanStatus } from "../../lib/api/settings";
 import MissingFilesReviewView from "./MissingFilesReviewView";
-import ReviewNav from "./ReviewNav";
+import ReviewQueueTabs from "./ReviewQueueTabs";
 import { describeQueueCount } from "./useReviewCounts";
 import type { LibraryScanState } from "./useLibraryScan";
 
@@ -173,7 +173,7 @@ describe("MissingFilesReviewView queue", () => {
 
     // One wording in the sidebar row and in the queue header, or the same
     // number would be described two ways in two places.
-    render(<ReviewNav role="viewer" counts={{ bundles: null, imports: null, missing: 12, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: 12, trash: null }} />);
     expect(screen.getByTestId("review-count-missing").getAttribute("title")).toBe(
       count?.getAttribute("title"),
     );

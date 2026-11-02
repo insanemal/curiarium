@@ -46,27 +46,52 @@ vi.mock("./ModeSwitch", async () => {
   };
 });
 
-// The projects pane carries the real footer, so the role reaches the nav the
-// same way it does in the app; the extra button stands in for a direct visit
-// to a hidden view (a demotion while it is open, or a future call site).
-vi.mock("./ProjectSidebar", async () => {
+// The rails carry no Settings, Audit or identity any more: the header does,
+// once, outside both panes. Nothing in this file asserts the projects rail.
+vi.mock("./ProjectSidebar", () => ({ default: () => null }));
+
+type HeaderProps = {
+  mode: "files" | "projects";
+  onModeChange: (mode: "files" | "projects") => void;
+  activeView?: "library" | "settings" | "audit" | "review";
+  onOpenSettings?: () => void;
+  onOpenAudit?: () => void;
+  role?: "admin" | "editor" | "contributor" | "viewer" | null;
+  username?: string | null;
+  kind?: string | null;
+};
+
+// The header renders the real utilities, so the audit gating is proven through
+// the component the app ships; the extra button stands in for a direct visit to
+// a hidden view (a demotion while it is open, or a future call site).
+vi.mock("./WorkspaceHeader", async () => {
   const react = await import("react");
-  const { default: SidebarFooter } = await import("./SidebarFooter");
+  const { default: ModeSwitch } = await import("./ModeSwitch");
+  const { default: WorkspaceUtilities } = await import("./WorkspaceUtilities");
   return {
     default: ({
-      role,
+      mode,
+      onModeChange,
+      activeView,
       onOpenSettings,
       onOpenAudit,
-    }: {
-      role?: "admin" | "editor" | "contributor" | "viewer" | null;
-      onOpenSettings?: () => void;
-      onOpenAudit?: () => void;
-    }) =>
+      role,
+      username,
+      kind,
+    }: HeaderProps) =>
       react.createElement(
-        "aside",
-        { "aria-label": "Projects" },
+        "div",
+        null,
+        react.createElement(ModeSwitch, { mode, onChange: onModeChange }),
         react.createElement("button", { type: "button", onClick: onOpenAudit }, "Open audit"),
-        react.createElement(SidebarFooter, { role, onOpenSettings, onOpenAudit }),
+        react.createElement(WorkspaceUtilities, {
+          activeView,
+          onOpenSettings,
+          onOpenAudit,
+          role,
+          username,
+          kind,
+        }),
       ),
   };
 });
@@ -177,9 +202,16 @@ describe("App role-gated navigation", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(getMeMock).toHaveBeenCalled());
+    // `signed-in-role` is the positive signal that `/me` landed: before that
+    // the utilities also hide the entry, so absence alone would prove nothing.
+    await waitFor(() => expect(screen.getByTestId("signed-in-role").textContent).toBe("viewer"));
+    expect(screen.getAllByRole("button", { name: "Settings" })).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Audit log" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch to files" }));
+
+    expect(screen.getAllByRole("button", { name: "Settings" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Audit log" })).toBeNull();
   });
 
   it("shows the audit entry to an admin and opens the page", async () => {
@@ -187,8 +219,15 @@ describe("App role-gated navigation", () => {
 
     render(<App />);
 
-    const audit = await screen.findByRole("button", { name: "Audit log" });
-    fireEvent.click(audit);
+    await waitFor(() => expect(screen.getByTestId("signed-in-role").textContent).toBe("admin"));
+    expect(screen.getAllByRole("button", { name: "Settings" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Audit log" })).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch to files" }));
+
+    expect(screen.getAllByRole("button", { name: "Settings" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Audit log" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Audit log" }));
 
     await screen.findByText("Audit view");
     expect(screen.queryByText("Administrator access required.")).toBeNull();

@@ -31,6 +31,15 @@ vi.mock("../lib/api/bundles", () => ({
   setBundleDismissed: vi.fn(),
 }));
 
+// A viewer's Review entry resolves to the imports queue, so its run read has to
+// answer without touching the network.
+vi.mock("../lib/api/settings", () => ({
+  getImportRuns: vi.fn(async () => ({ runs: [], total: 0, limit: 1, offset: 0 })),
+  getImportRun: vi.fn(),
+  getLibraryScanStatus: vi.fn(),
+  startLibraryScan: vi.fn(),
+}));
+
 vi.mock("../lib/settings", () => ({
   loadSettings: () => ({
     slicer: { enabled: false, selected: "orca" },
@@ -46,54 +55,17 @@ vi.mock("../lib/settings", () => ({
   resolveTheme: () => "light",
 }));
 
-type NavProps = {
-  role?: Role | null;
-  activeView?: ActiveView;
-  activeQueue?: ReviewQueueKey | null;
-  reviewCounts?: ReviewCounts;
-  onOpenQueue?: (key: ReviewQueueKey) => void;
-};
-
-/**
- * The real `ReviewNav` is what proves App passes the counts and the opener
- * through both sidebars; the rest of each sidebar is replaced, not the group.
- */
+// The review entry point lives in the header now, so each rail only has to
+// mount the pane the mode assertions look for. App's props are accepted and
+// ignored: nothing in this file asserts the rails' contents.
 vi.mock("./Sidebar", async () => {
   const react = await import("react");
-  const { default: ReviewNav } = await import("./review/ReviewNav");
-  return {
-    default: ({ role, activeView, activeQueue, reviewCounts, onOpenQueue }: NavProps) =>
-      react.createElement(
-        "aside",
-        { "aria-label": "Files" },
-        react.createElement(ReviewNav, {
-          role,
-          activeView,
-          activeQueue: activeQueue ?? null,
-          counts: reviewCounts,
-          onOpenQueue,
-        }),
-      ),
-  };
+  return { default: () => react.createElement("aside", { "aria-label": "Files" }) };
 });
 
 vi.mock("./ProjectSidebar", async () => {
   const react = await import("react");
-  const { default: ReviewNav } = await import("./review/ReviewNav");
-  return {
-    default: ({ role, activeView, activeQueue, reviewCounts, onOpenQueue }: NavProps) =>
-      react.createElement(
-        "aside",
-        { "aria-label": "Projects" },
-        react.createElement(ReviewNav, {
-          role,
-          activeView,
-          activeQueue: activeQueue ?? null,
-          counts: reviewCounts,
-          onOpenQueue,
-        }),
-      ),
-  };
+  return { default: () => react.createElement("aside", { "aria-label": "Projects" }) };
 });
 
 vi.mock("./ProjectView", async () => {
@@ -123,10 +95,8 @@ import {
   type BundleDetectItem,
   type BundleReport,
 } from "../lib/api/bundles";
-import { storeToken, type Role } from "../lib/auth";
+import { storeToken } from "../lib/auth";
 import { MODE_STORAGE_KEY } from "../lib/mode";
-import type { ReviewCounts } from "./review/useReviewCounts";
-import type { ActiveView, ReviewQueueKey } from "./views";
 
 const getBundleReportMock = vi.mocked(getBundleReport);
 const createBundlesMock = vi.mocked(createBundles);
@@ -224,18 +194,19 @@ const DISMISSED_REPORT = makeReport([
   makeBundle({ key: "Old", title: "Old bundle", dismissed: true }),
 ]);
 
-/** The nav exists only once `/me` answers, so this waits for the role. */
+/** The header's Review entry exists only once `/me` answers, so this waits for the role. */
 async function renderApp(): Promise<void> {
   render(<App />);
-  await waitFor(() => expect(screen.getAllByRole("button", { name: /^Bundles to confirm/ }).length).toBeGreaterThan(0));
+  await screen.findByRole("button", { name: "Review" });
 }
 
 function openQueueButton(): HTMLElement {
-  return screen.getAllByRole("button", { name: /^Bundles to confirm/ })[0];
+  return screen.getByRole("button", { name: "Review" });
 }
 
 function badgeText(): string {
-  return screen.getAllByTestId("review-count-bundles")[0].textContent ?? "";
+  // The tab's text also carries its label, so read only the count span.
+  return screen.getByTestId("review-count-bundles").querySelector(".sidebar-count")?.textContent ?? "";
 }
 
 /** Resolves after real timers have had a chance to fire anything they hold. */
@@ -265,12 +236,14 @@ afterEach(() => {
 });
 
 describe("App review destination", () => {
-  it("does not walk the library before the queue is opened", async () => {
+  it("does not walk the library before Review is entered", async () => {
     await renderApp();
     await settle(30);
 
     expect(getBundleReportMock).not.toHaveBeenCalled();
-    expect(badgeText()).toBe("\u2013");
+    // The count belongs to the queue tab inside Review, so the library has no
+    // badge to paint until the destination is entered.
+    expect(screen.queryAllByTestId("review-count-bundles")).toHaveLength(0);
   });
 
   it("opens the queue with exactly one full-report fetch and paints the badge from it", async () => {
@@ -279,6 +252,7 @@ describe("App review destination", () => {
     fireEvent.click(openQueueButton());
 
     expect(await screen.findByRole("heading", { name: "Bundles to confirm" })).toBeTruthy();
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
     await screen.findByRole("listbox", { name: "Bundles to confirm" });
     expect(getBundleReportMock).toHaveBeenCalledTimes(1);
     expect(getBundleReportMock).toHaveBeenCalledWith({ includeDismissed: true, limit: 1000 });
@@ -344,7 +318,7 @@ describe("App review destination", () => {
     await waitFor(() => expect(badgeText()).toBe("0"));
   });
 
-  it("gives a viewer no queue row and never walks the library", async () => {
+  it("gives a viewer no bundle tab and never walks the library", async () => {
     vi.mocked(getMe).mockResolvedValueOnce({
       id: "u1",
       username: "viewer",
@@ -353,13 +327,20 @@ describe("App review destination", () => {
       disabled: false,
       kind: "local",
     });
-    render(<App />);
+    await renderApp();
 
-    // No positive signal exists for an absent row, so let /me and any deferred
-    // work settle before asserting the row and the walk never happened.
-    await settle(30);
+    // The stored queue is still `bundles` - App's default - and the viewer has
+    // no bundle tab, so `resolveQueue` redirects the entry to the first queue
+    // they may see. Entering Review must therefore never arm the bundle walk.
+    fireEvent.click(openQueueButton());
 
-    expect(screen.queryByRole("button", { name: /^Bundles to confirm/ })).toBeNull();
+    await waitFor(() => expect(screen.getByRole("tabpanel").id).toBe("review-tabpanel-imports"));
+    expect(screen.queryByTestId("review-count-bundles")).toBeNull();
+    // the imports tab controls the panel that actually rendered.
+    expect(
+      screen.getByRole("tab", { name: /^Imports running/ }).getAttribute("aria-controls"),
+    ).toBe("review-tabpanel-imports");
+    expect(screen.queryByRole("listbox", { name: "Bundles to confirm" })).toBeNull();
     expect(getBundleReportMock).not.toHaveBeenCalled();
   });
 
@@ -369,9 +350,7 @@ describe("App review destination", () => {
         <App />
       </React.StrictMode>,
     );
-    await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: /^Bundles to confirm/ }).length).toBeGreaterThan(0),
-    );
+    await screen.findByRole("button", { name: "Review" });
 
     fireEvent.click(openQueueButton());
     await screen.findByRole("listbox", { name: "Bundles to confirm" });
@@ -404,6 +383,8 @@ describe("App review destination", () => {
 
     expect(window.localStorage.getItem(MODE_STORAGE_KEY)).toBe("projects");
     expect(screen.getByRole("heading", { name: "Bundles to confirm" })).toBeTruthy();
+    // the header is rendered once, outside both panes: the queue keeps one row.
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(getBundleReportMock).toHaveBeenCalledTimes(1);
   });
 
@@ -418,5 +399,6 @@ describe("App review destination", () => {
       expect(screen.queryByRole("heading", { name: "Bundles to confirm" })).toBeNull(),
     );
     expect(screen.getByText("Asset grid")).toBeTruthy();
+    expect(screen.queryAllByRole("tablist")).toHaveLength(0);
   });
 });
