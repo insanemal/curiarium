@@ -1,4 +1,4 @@
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, type KeyboardEvent, type ReactElement } from "react";
 import { Layers3 } from "lucide-react";
 
 import { fileUrl, type Project } from "../lib/api";
@@ -9,6 +9,7 @@ import type {
   ResolvedTheme,
   SlicerSettings,
 } from "../lib/settings";
+import { useFileGrants } from "../lib/useFileGrants";
 import LicenceChip from "./LicenceChip";
 import ProjectLanding from "./ProjectLanding";
 
@@ -49,6 +50,63 @@ function coverFor(project: Project, className: string) {
 /** The card's own pill: the source host as plain text (no link inside a button). */
 const SOURCE_CHIP =
   "inline-flex min-w-0 items-center rounded-full border border-panel-strong bg-panel-soft px-2.5 py-0.5 text-xs font-medium text-muted";
+
+type ProjectCardGridProps = {
+  projects: Project[];
+  onOpenProject: (id: string) => void;
+};
+
+/**
+ * The project card grid, split out so its grant keeper is mounted exactly while
+ * the grid is on screen: one silent `useFileGrants` over every cover thumb,
+ * because each card paints an `<img src>` that must not repaint on a re-mint
+ * (ADR 0005 decision 10). Opening a project unmounts the grid, so a landing
+ * never mints another project's cover.
+ */
+function ProjectCardGrid({ projects, onOpenProject }: ProjectCardGridProps): ReactElement {
+  useFileGrants(projects.map(project => project.cover_thumb_url));
+  return (
+    <div
+      className="grid gap-4"
+      style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}
+    >
+      {projects.map(project => (
+        <button
+          key={project.id}
+          type="button"
+          data-project-card={project.id}
+          aria-label={`Open project ${project.name}`}
+          onClick={() => onOpenProject(project.id)}
+          className="flex flex-col overflow-hidden rounded-lg border border-panel bg-panel-soft text-left transition-colors hover:bg-panel-strong"
+        >
+          {coverFor(project, "h-32 w-full object-cover")}
+          <span className="flex min-w-0 flex-col gap-1 p-3">
+            <span className="truncate font-medium">{project.name}</span>
+            {project.description && (
+              <span className="line-clamp-1 text-sm text-muted">{project.description}</span>
+            )}
+            <span className="text-xs opacity-70">
+              {project.asset_count} file{project.asset_count === 1 ? "" : "s"}
+            </span>
+            {project.creator && (
+              <span className="text-xs text-muted">By {project.creator}</span>
+            )}
+            {/* Provenance row: text only, because the whole card is one
+                button and an anchor inside it would be invalid HTML. */}
+            <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
+              <LicenceChip licence={project.licence} licenceUrl={project.licence_url} />
+              {project.source_url && (
+                <span data-source-chip="true" title={project.source_url} className={SOURCE_CHIP}>
+                  <span className="truncate">{sourceChipLabel(project.source_url)}</span>
+                </span>
+              )}
+            </span>
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /**
  * Projects pane: the project card grid, and the project landing page once a
@@ -164,49 +222,7 @@ export default function ProjectView({
           <p>Projects are collections of files from any folder.</p>
         </div>
       ) : (
-        <div
-          className="grid gap-4"
-          style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}
-        >
-          {projects.map(project => (
-            <button
-              key={project.id}
-              type="button"
-              data-project-card={project.id}
-              aria-label={`Open project ${project.name}`}
-              onClick={() => onOpenProject(project.id)}
-              className="flex flex-col overflow-hidden rounded-lg border border-panel bg-panel-soft text-left transition-colors hover:bg-panel-strong"
-            >
-              {coverFor(project, "h-32 w-full object-cover")}
-              <span className="flex min-w-0 flex-col gap-1 p-3">
-                <span className="truncate font-medium">{project.name}</span>
-                {project.description && (
-                  <span className="line-clamp-1 text-sm text-muted">{project.description}</span>
-                )}
-                <span className="text-xs opacity-70">
-                  {project.asset_count} file{project.asset_count === 1 ? "" : "s"}
-                </span>
-                {project.creator && (
-                  <span className="text-xs text-muted">By {project.creator}</span>
-                )}
-                {/* Provenance row: text only, because the whole card is one
-                    button and an anchor inside it would be invalid HTML. */}
-                <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
-                  <LicenceChip licence={project.licence} licenceUrl={project.licence_url} />
-                  {project.source_url && (
-                    <span
-                      data-source-chip="true"
-                      title={project.source_url}
-                      className={SOURCE_CHIP}
-                    >
-                      <span className="truncate">{sourceChipLabel(project.source_url)}</span>
-                    </span>
-                  )}
-                </span>
-              </span>
-            </button>
-          ))}
-        </div>
+        <ProjectCardGrid projects={projects} onOpenProject={onOpenProject} />
       )}
     </div>
   );

@@ -10,7 +10,7 @@ import-cookie decision (MV-SEC-017) and its `localStorage` risk acceptance
 (MV-SEC-008) still stand.
 
 **Implementation:** ticket `M3-7bb7`; error-log closure in `Mf-c80i`;
-deferred-interaction re-mint in `Mf-1vxh`.
+deferred-interaction re-mint in `Mf-1vxh`; project-surface re-mint in `Mf-8a4e`.
 
 **Path note (2026-10-30):** The paths quoted below are accurate as written on
 2026-10-29 and are left unchanged; one of them has since moved. Batch 15 landed
@@ -292,17 +292,33 @@ Residual risks, stated plainly:
   extended. `evictGrant(rel)` stays the invalidation seam for a URL that
   expired before it could be refreshed; nothing calls it automatically
   outside `useGrantedFileUrl`'s own timer.
-- **Surfaces the re-mint does not cover yet.** Decision 10 covers the asset
-  grid, the two preview dialogs and the three download links — the deferred
-  interactions `Mf-1vxh` names. A file URL rendered by `ProjectLanding`'s
-  gallery and hero cover, `ProjectSidebar`, `ProjectView` or
-  `ImagePickerDialog` still resolves through `fileUrl` at render with no
-  refresh, so a page left idle for more than a minute can still show an
-  unsigned thumbnail there and get a 401. The harm there is not only a blank
-  image: `ProjectLanding` wraps each gallery thumbnail in a `target="_blank"`
-  anchor to the full file, so clicking one of those stale links navigates to a
-  URL that 401s. Each is a one-line adoption of `useFileGrants`; they are named
-  here so the gap is tracked rather than rediscovered.
+- **Project surfaces now adopt the keeper; the cold-cache first paint is what
+  remains.** `Mf-8a4e` closes the gap decision 10 left on the project side.
+  `ProjectLanding` (hero cover, gallery thumbnails, gallery `target="_blank"`
+  file anchors, member-row thumbs), `ProjectView`'s card grid,
+  `ProjectSidebar`'s rows and `ImagePickerDialog`'s insert thumbs all keep
+  their grants warm now: one silent `useFileGrants` per surface for the
+  `<img>`s — a re-mint never repaints a mounted image — and
+  `useLiveFileGrants` scoped to the per-item gallery anchor, because an
+  `<a href>` holds the URL string itself and is the one node that must repaint
+  (decision 10). The thumb a surface renders and the rel its keeper holds are
+  the same `thumb_url || url` expression, so a thumb-less image is granted
+  too. A failed mint degrades exactly as it always has: `primeGrants` never
+  rejects, the silent `<img>` paints the plain joined URL, the browser's
+  unsigned `GET` 401s and the alt/broken-image affordance shows — no
+  exception, no placeholder and no render loop — and a grant this mount once
+  held and then lost is retried ten seconds after the renewal failed. The
+  residual gap is the cold-cache first paint described above, plus two limits
+  the adoption accepts. (a) One keeper carries a whole list: `ProjectLanding`'s
+  member list is `MEMBER_PAGE_SIZE` = 1000 plus load-more pages and is not
+  virtualised, so one hook can hold ~1000 rels, which is ~20 batched `POST
+  /file-grants` per ~55-second window. That is accepted over ~1000 per-row
+  keepers (one timer each, the same request count) and over virtualising the
+  member list (out of scope). (b) A hidden pane keeps minting: `App` keeps
+  `ProjectView` and `ProjectSidebar` mounted behind `hidden` after the first
+  visit (`visitedModes.projects`), so their covers keep re-minting while the
+  projects mode is hidden — about two POSTs per 55-second window, accepted
+  because a visibility-aware fix would touch `App.tsx` and is out of scope.
 - **An async handoff.** Both OS handoffs now `await` a mint before navigating.
   A mint that fails (401, 400, offline) leaves the plain URL, exactly as a
   grant-less render would, and the OS handler sees a 401 rather than a token.
@@ -363,11 +379,11 @@ access log and uvicorn's access log, and drops the canary from the smoke test.
 
 Rolling back re-opens MV-SEC-007 and returns the access-log leak, so a rollback
 must re-open the finding and name a new owner rather than assume the exposure
-went away. Beyond the two later commits named below, there is nothing else to
+went away. Beyond the three later commits named below, there is nothing else to
 unwind: no migration runs, no row is written, and a grant that outlives the
 rollback (at most 60 seconds) is simply never checked again.
 
-Two later commits are part of the shipped design and are not undone by that
+Three later commits are part of the shipped design and are not undone by that
 revert, so a full rollback names them too. `Mf-c80i` silenced the nginx error
 log (`error_log /dev/null;`, the `$upstream_addr`/`$upstream_status` access
 fields and the dead-upstream canary); reverting it restores request-time error
@@ -375,8 +391,14 @@ text and the request line that carries the query with it, which re-opens
 MV-SEC-007 on the error-log side. `Mf-1vxh` added the client re-mint
 (`useFileGrants`, `FileDownloadLink` and their call sites); reverting it returns
 every deferred interaction to the fetch-time grant, so a page left idle for more
-than 60 seconds goes back to unsigned file URLs and 401s. Neither commit touches
-the database, the migrations or the wire format.
+than 60 seconds goes back to unsigned file URLs and 401s. `Mf-8a4e` extended
+that re-mint to the project surfaces (`ProjectLanding`'s hero cover, gallery
+thumbnails, gallery anchors and member-row thumbs, `ProjectView`'s card grid,
+`ProjectSidebar`'s rows and `ImagePickerDialog`'s insert thumbs); reverting it
+returns those four surfaces to the fetch-time-only grant, so a project view left
+open for more than 60 seconds shows blank covers and thumbnails and its gallery
+links 401. None of the three commits touches the database, the migrations or the
+wire format.
 
 ## Verification
 
@@ -424,6 +446,31 @@ Web:
   failed-mint settle, the ten-second retry that heals a renewal which failed
   across an expiry, the per-rels-key gate (a swapped asset is not painted
   unsigned), and that two consumers of one rel coalesce into one mint.
+- `web/src/ui/projectFileGrants.test.tsx` — advances the fake clock past
+  `FILE_GRANT_TTL_SECONDS` against the real grant machinery (only `fetch` is
+  stubbed) and pins the renewal of every project render site: the
+  `ProjectLanding` hero cover, gallery thumbnail, gallery anchor and
+  member-row thumb, the `ProjectView` card grid, the `ProjectSidebar` rows and
+  the `ImagePickerDialog` thumbs each send a further `POST /file-grants` batch
+  containing their rel, hold a non-null grant past the TTL, keep a silent
+  `<img>` `src` byte-identical across the renewal, and paint a fresh non-null
+  `sig` on the next render. It also pins one renewal batch for the whole grid
+  and one for the whole sidebar, a gallery `<img>` whose `src` does not move
+  while its anchor's live `href` does, no other project's cover minted while a
+  landing is open, and the failed-mint degradation: a `POST /file-grants`
+  answered 500 leaves `ProjectSidebar` and `ProjectLanding` on the plain
+  unsigned URL with no throw, no gate and no placeholder, signed again once
+  the mint recovers and the surface remounts.
+- `web/src/lib/fileGrantRenderSites.test.ts` — a node-env source scan that
+  fails when any non-test file under `web/src` calls `fileUrl()` without
+  importing `useFileGrants` or `useLiveFileGrants`, reporting every offending
+  `file:line` in one run. It skips the `mediaUrls.ts` definition and
+  allowlists two callers with their reasons: `useAssetActions.ts` (the OS
+  handoff, which primes at click time) and `downloads.ts` (a real `fetch` with
+  `authHeaders()`). Honest limitation: it is file-level, not a linter — a bare
+  `fileUrl()` added inside a file that already imports a keeper passes — so
+  review is the backstop, and `projectFileGrants.test.tsx` is the behavioural
+  half.
 
 Ops:
 

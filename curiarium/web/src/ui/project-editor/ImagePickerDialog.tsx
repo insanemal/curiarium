@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 
 import { fileUrl, type Asset } from "../../lib/api";
 import { isImageAsset } from "../../lib/assetKinds";
+import { useFileGrants } from "../../lib/useFileGrants";
 
 const FOCUS_VISIBLE =
   "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2";
@@ -26,6 +27,11 @@ export default function ImagePickerDialog({ images, onInsert, onClose }: Props):
   // The editor passes the project's image members, but filtering here keeps the
   // dialog honest if a caller forwards every member instead.
   const insertable = images.filter(isImageAsset);
+
+  // Silent keeper over the same `thumb_url || url` expression each thumb's
+  // `<img src>` reads: a re-mint must not repaint a mounted thumb (ADR 0005
+  // decision 10).
+  useFileGrants(insertable.map(asset => asset.thumb_url || asset.url));
 
   useEffect(() => {
     const target =
