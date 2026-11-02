@@ -4,6 +4,7 @@ import AssetGrid from "./asset-grid/AssetGrid";
 import Sidebar from "./Sidebar";
 import ProjectView from "./ProjectView";
 import WorkspaceHeader from "./WorkspaceHeader";
+import FolderDrawer from "./FolderDrawer";
 import Login from "./Login";
 import AuditLog from "./AuditLog";
 import NotPermitted from "./NotPermitted";
@@ -53,8 +54,12 @@ import { useReviewCounts } from "./review/useReviewCounts";
 import { resolveQueue } from "./review/queues";
 import ReviewQueueTabs from "./review/ReviewQueueTabs";
 import { useTrash } from "./review/useTrash";
+import { useNarrowLayout } from "./useNarrowLayout";
 
 const DEFAULT_REFRESH_SECONDS = 900; // 15 minutes: the access token lifetime
+
+/** The rail's DOM id: the narrow header's toggle points `aria-controls` at it. */
+const DRAWER_ID = "library-folders";
 
 // Settings is not needed to render the library, so it is fetched on demand and
 // lands in its own chunk.
@@ -149,6 +154,11 @@ export default function App() {
   // even though React.StrictMode invokes effects twice.
   const ssoHandled = React.useRef<boolean>(false);
   const [activeView, setActiveView] = React.useState<ActiveView>("library");
+  // Narrow-ness is decided once, here, and passed to both consumers (the
+  // header's toggle and the rail): a CSS-only drawer cannot gate `role="dialog"`,
+  // `aria-modal` or whether an off-screen rail stays focusable.
+  const narrow = useNarrowLayout();
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
   // A review destination is `(review, queue)`; the mode-shaped views ignore the
   // queue. A URL/history model for either is a separate follow-up.
   const [activeQueue, setActiveQueue] = React.useState<ReviewQueueKey>("bundles");
@@ -156,6 +166,12 @@ export default function App() {
   const [confirmingLogout, setConfirmingLogout] = React.useState(false);
   // Scroll container for the asset grid's virtualization (see useVirtualRows).
   const mainScrollRef = React.useRef<HTMLElement | null>(null);
+  // The folder drawer (narrow only): the rail's open state mirrored into a ref
+  // for the click handlers, the toggle that opens it, and the ... disclosure's
+  // trigger that takes focus back when a header destination unmounts.
+  const drawerOpenRef = React.useRef(false);
+  const drawerToggleRef = React.useRef<HTMLButtonElement | null>(null);
+  const menuTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   // The header's Review entry: the landing target when leaving Review unmounts
   // the control that was clicked.
   const reviewButtonRef = React.useRef<HTMLButtonElement | null>(null);
@@ -193,8 +209,15 @@ export default function App() {
     if (previous !== "review" || activeView === "review") return;
     const active = document.activeElement as HTMLElement | null;
     if (active && active !== document.body && active.isConnected) return;
-    reviewButtonRef.current?.focus();
+    // At narrow the Review entry lives inside the closed ... disclosure, so
+    // there is no Review button to land on: the disclosure's trigger takes it.
+    (reviewButtonRef.current ?? menuTriggerRef.current)?.focus();
   }, [activeView]);
+  // The drawer-only wrappers read the ref rather than the state, so the value
+  // the sheet was rendered with decides whether focus returns to the toggle.
+  React.useEffect(() => {
+    drawerOpenRef.current = drawerOpen;
+  }, [drawerOpen]);
   React.useEffect(() => { (async ()=> setHealth(await apiHealth()))(); }, [settings.network.publicUrl]);
   React.useEffect(() => {
     saveSettings(settings);
@@ -366,6 +389,43 @@ export default function App() {
     setUnfiled(true);
     showFilesView();
   }, [showFilesView]);
+
+  /** Closing the sheet always hands focus back to the control that opened it. */
+  const closeDrawer = React.useCallback(() => {
+    setDrawerOpen(false);
+    drawerToggleRef.current?.focus();
+  }, []);
+
+  const handleToggleDrawer = React.useCallback(() => {
+    setDrawerOpen(current => !current);
+  }, []);
+
+  // Drawer-only wrappers: closing the sheet belongs to the sheet, so it cannot
+  // live in `handleSelectFolder` - that handler also serves the grid's
+  // breadcrumbs and both review views, where closing would steal focus from the
+  // crumb that was just clicked. The ref is read BEFORE the selection, so only
+  // a selection made while the sheet was actually open closes it.
+  const selectFromDrawer = React.useCallback(
+    (id: string | null) => {
+      const wasOpen = drawerOpenRef.current;
+      handleSelectFolder(id);
+      if (wasOpen) closeDrawer();
+    },
+    [handleSelectFolder, closeDrawer],
+  );
+
+  const unfiledFromDrawer = React.useCallback(() => {
+    const wasOpen = drawerOpenRef.current;
+    handleSelectUnfiled();
+    if (wasOpen) closeDrawer();
+  }, [handleSelectUnfiled, closeDrawer]);
+
+  // A mode or view change closes the sheet WITHOUT touching focus: the control
+  // the operator activated keeps it. A width change deliberately does not reset
+  // `drawerOpen`, so a narrow -> wide -> narrow cycle cannot re-steal focus.
+  React.useEffect(() => {
+    setDrawerOpen(false);
+  }, [mode, activeView]);
 
   const handleModeChange = React.useCallback((next: LibraryMode) => {
     saveMode(next);
@@ -575,20 +635,33 @@ export default function App() {
         role={role}
         username={identity.username}
         kind={identity.kind}
+        narrow={narrow}
+        drawerOpen={drawerOpen}
+        onToggleDrawer={handleToggleDrawer}
+        drawerId={DRAWER_ID}
+        drawerToggleRef={drawerToggleRef}
+        menuTriggerRef={menuTriggerRef}
       />
       <div className="flex min-h-0 flex-1">
-        {/* The rail is a Files-only surface: it stays mounted so the folder tree
-            keeps its search and selection across a mode switch, and Projects mode
-            hides it (`.library-rail[hidden]` in index.css) so <main> owns the width. */}
-        <div className="library-rail" hidden={mode !== "files"}>
+        {/* One stable rail node at every width; below the breakpoint it is the
+            folder sheet (role=dialog, focus trap, Escape). The `visitedModes.files`
+            guard keeps its lazy mount: the tree is created on the first visit and
+            then only hidden, so its search and selection survive a mode switch. */}
+        <FolderDrawer
+          id={DRAWER_ID}
+          mode={mode}
+          narrow={narrow}
+          open={drawerOpen}
+          onClose={closeDrawer}
+        >
           {visitedModes.files && (
             <Sidebar
               selectedId={folderId}
-              onSelect={handleSelectFolder}
+              onSelect={selectFromDrawer}
               unfiled={unfiled}
               totalCount={counts?.total ?? null}
               unfiledCount={counts?.unfiled ?? null}
-              onSelectUnfiled={handleSelectUnfiled}
+              onSelectUnfiled={unfiledFromDrawer}
               onFoldersChanged={handleFoldersChanged}
               foldersVersion={folderVersion}
               onAssetsChanged={handleAssetsChanged}
@@ -596,7 +669,7 @@ export default function App() {
               role={role}
             />
           )}
-        </div>
+        </FolderDrawer>
         {/* The asset grid's virtualizer compensates row-height changes itself (see useVirtualRows), so native scroll anchoring must not apply a second adjustment. */}
         <main ref={mainScrollRef} className="min-h-0 flex-1 p-4 overflow-auto" style={{ overflowAnchor: "none" }}>
           {apiUp === false && (
@@ -771,6 +844,14 @@ export default function App() {
             <AuditLog onUnauthorized={handleUnauthorized} />
           )}
         </main>
+        {/* App's conditional children are only ever APPENDED after <main> in
+            this array. React reconciles an unkeyed children array by index, so a
+            child inserted before <main> (a scrim between the rail and it) takes
+            a slot in front of it and can remount <main>; `useVirtualRows`'
+            scroll listener is keyed on the stable ref object and would never
+            re-subscribe to the new node, so virtualisation would die silently
+            with every test still green. */}
+        {narrow && drawerOpen && <div className="folder-drawer-scrim" aria-hidden="true" />}
       </div>
       {confirmingLogout && (
         <ConfirmDialog

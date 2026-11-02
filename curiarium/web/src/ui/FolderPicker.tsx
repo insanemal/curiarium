@@ -10,6 +10,7 @@ import {
 import { Check, ChevronDown, ChevronRight, Folder as FolderIcon, Search } from "lucide-react";
 
 import type { Folder } from "../lib/api";
+import { wrapTab } from "../lib/focusTrap";
 import {
   ROOT_GROUP,
   childrenIndex,
@@ -471,36 +472,14 @@ function FolderPickerDialog({
     select(activeMatch.id);
   }
 
-  function tabbables(): HTMLElement[] {
-    const panel = panelRef.current;
-    if (!panel) return [];
-    return Array.from(panel.querySelectorAll<HTMLElement>(TABBABLE_SELECTOR)).filter(element =>
-      element.matches(":not([disabled])"),
-    );
-  }
-
   /** Manual wrap: focus must never leave the panel, even though it is nested. */
   function trapTab(event: KeyboardEvent<HTMLDivElement>): void {
-    const items = tabbables();
-    if (items.length === 0) {
+    const panel = panelRef.current;
+    if (!panel) {
       event.preventDefault();
       return;
     }
-    const first = items[0];
-    const last = items[items.length - 1];
-    const active = document.activeElement;
-    const insidePanel = panelRef.current?.contains(active) ?? false;
-    if (event.shiftKey) {
-      if (!insidePanel || active === first) {
-        event.preventDefault();
-        last.focus();
-      }
-      return;
-    }
-    if (!insidePanel || active === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    wrapTab(panel, TABBABLE_SELECTOR, event);
   }
 
   function handleBrowseKeyDown(event: KeyboardEvent<HTMLDivElement>): void {

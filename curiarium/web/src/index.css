@@ -407,6 +407,39 @@ html, body, #root { height: 100%; }
   .workspace-dest.is-selected { color: var(--mv-text); background: var(--mv-accent-soft); }
   .workspace-dest.is-selected svg { color: var(--mv-accent); }
 
+  /* Narrow-only header controls (Mf-eybe). The drawer toggle opens the folder
+     sheet; the `...` trigger is a plain disclosure, so it owes no menu
+     semantics. Both are hidden at wide by simply not being rendered there. */
+  .workspace-drawer-toggle {
+    @apply inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[12px] font-medium transition-colors;
+    color: var(--mv-text-muted);
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-soft);
+  }
+
+  .workspace-drawer-toggle:hover { color: var(--mv-text); background: var(--mv-panel); }
+  .workspace-drawer-toggle[aria-expanded="true"] {
+    color: var(--mv-text);
+    border-color: var(--mv-accent-border);
+    background: var(--mv-accent-soft);
+  }
+
+  .workspace-menu { @apply relative flex items-center; }
+
+  .workspace-menu-trigger {
+    @apply inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded-lg border border-transparent px-2.5 text-[12px] font-medium transition-colors;
+    color: var(--mv-text-muted);
+  }
+
+  .workspace-menu-trigger:hover { color: var(--mv-text); background: var(--mv-panel-soft); }
+  .workspace-menu-trigger[aria-expanded="true"] { color: var(--mv-text); background: var(--mv-accent-soft); }
+
+  .workspace-menu-panel {
+    @apply absolute end-0 top-full z-50 mt-1 flex min-w-[12rem] flex-col gap-1 rounded-lg border p-1 shadow-xl;
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-strong);
+  }
+
   /* The Review destination's queue selector. The row is a tablist, so the
      selected tab is the `aria-selected` one; `border-b` closes the row against
      the queue it switches. */
@@ -512,6 +545,28 @@ html, body, #root { height: 100%; }
   @media (max-width: 1180px) {
     .review-layout { grid-template-columns: minmax(0, 1fr); }
     .review-detail { position: static; }
+
+    /* Below the breakpoint the rail leaves the flex row and becomes a
+       full-height sheet over the grid, leaving <main> the full width (a layout
+       outcome a browser has to confirm); the virtualiser keeps its scroller,
+       which AC-8 pins in jsdom. The scrim is a sibling appended after <main>,
+       never a wrapper around it. z-index 40/50 sits above BulkActionBar's 30
+       and matches the picker scrim's 50, argued from the cascade. */
+    .library-rail {
+      position: fixed;
+      inset-block: 0;
+      inset-inline-start: 0;
+      z-index: 50;
+      width: min(19rem, 92vw);
+      min-width: 0;
+    }
+
+    .folder-drawer-scrim {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      background: color-mix(in srgb, var(--mv-panel-overlay) 72%, transparent);
+    }
   }
 
   .review-list { @apply flex min-w-0 flex-col gap-px; }

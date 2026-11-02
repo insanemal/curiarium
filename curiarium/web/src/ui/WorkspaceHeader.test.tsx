@@ -124,3 +124,66 @@ describe("WorkspaceHeader utilities", () => {
     expect(onOpenAudit).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("WorkspaceHeader narrow arrangement", () => {
+  it("reflects the drawer state on the Folders toggle", () => {
+    const onToggleDrawer = vi.fn();
+    const { rerender } = render(
+      <WorkspaceHeader
+        narrow
+        mode="files"
+        onModeChange={vi.fn()}
+        drawerOpen={false}
+        onToggleDrawer={onToggleDrawer}
+        drawerId="library-folders"
+        role="viewer"
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: "Folders" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe("library-folders");
+
+    fireEvent.click(toggle);
+    expect(onToggleDrawer).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <WorkspaceHeader
+        narrow
+        mode="files"
+        onModeChange={vi.fn()}
+        drawerOpen
+        onToggleDrawer={onToggleDrawer}
+        drawerId="library-folders"
+        role="viewer"
+      />,
+    );
+
+    // The attribute is the drawer's own state reflected back, not a constant.
+    expect(screen.getByRole("button", { name: "Folders" }).getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+  });
+
+  it("offers the drawer toggle only where a folder rail exists", () => {
+    const { unmount } = render(
+      <WorkspaceHeader narrow mode="files" onModeChange={vi.fn()} activeView="settings" />,
+    );
+    expect(screen.queryByRole("button", { name: "Folders" })).toBeNull();
+    unmount();
+
+    render(<WorkspaceHeader narrow mode="projects" onModeChange={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Folders" })).toBeNull();
+  });
+
+  it("keeps the wide arrangement free of the narrow controls", () => {
+    render(<WorkspaceHeader mode="files" onModeChange={vi.fn()} role="admin" />);
+
+    expect(screen.queryByRole("button", { name: "Folders" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "More destinations" })).toBeNull();
+    // Wide keeps its destinations inline, exactly as before the drawer existed.
+    expect(screen.getByRole("button", { name: "Review" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Audit log" })).toBeTruthy();
+  });
+});
