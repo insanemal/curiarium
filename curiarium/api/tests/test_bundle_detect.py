@@ -16,9 +16,10 @@ The heuristics pinned here:
 * `display_name` and `twin_key`;
 * the rule order R1 -> R2 -> R3 -> not-a-bundle, the marker-less README falling
   to low confidence, the sibling pair in both its file and directory shapes,
-  R3's model depth bound (its three accepted and rejected shapes, and R1 still
-  accepting a bundle whose models live under ``files/``), and the cover pick
-  including its tie-break.
+  R3's model depth bound (the depth-0, named-directory and single-subdirectory
+  shapes it accepts, the depth-2 and multi-subdirectory shapes it refuses, and
+  R1 still accepting a bundle whose models live under ``files/``), and the cover
+  pick including its tie-break.
 """
 
 from typing import Dict, Mapping
@@ -131,10 +132,88 @@ def test_r3_accepts_the_depth_zero_trio_unchanged() -> None:
     assert facts.confidence == bundle_detect.CONFIDENCE_LOW
 
 
-def test_r3_rejects_a_model_under_an_unknown_directory() -> None:
+def test_r3_accepts_a_model_under_one_conventional_directory() -> None:
+    """``STL/`` is the shape Cinderwing3D's "Dragon Rose Valentine" ships in."""
     files = {"stl/part.stl": 10, "cover.jpg": 20, "notes.txt": 30}
 
-    assert bundle_detect.detect_bundle(snapshot("stl-shape", files), {}) is None
+    facts = bundle_detect.detect_bundle(snapshot("stl-shape", files), {})
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_GENERIC
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+
+
+def test_r3_accepts_the_single_subdirectory_shape() -> None:
+    """LittleTup's model layout, with a synthetic root trio.
+
+    The real directory carries no image and no text, so the trio here is made up
+    to isolate the depth rule; only ``articulated-dragon-claws/`` is real.
+    """
+    files = {"articulated-dragon-claws/part.stl": 10, "cover.jpg": 20, "notes.txt": 30}
+
+    facts = bundle_detect.detect_bundle(snapshot("articulated-dragon-claws", files), {})
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_GENERIC
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+    assert facts.counts.model == 1
+    assert facts.model_entries == ("articulated-dragon-claws/part.stl",)
+
+
+def test_r3_accepts_a_wrapped_subdirectory_beside_loose_images_and_text() -> None:
+    """The wrapped vendor zip: cardinality counts MODEL-bearing subdirs only."""
+    files = {"01_Wizard/part.stl": 10, "images/a.jpg": 20, "README.txt": 30}
+
+    facts = bundle_detect.detect_bundle(snapshot("01_Fates End - Wizard Tower", files), {})
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_GENERIC
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+
+
+def test_r3_rejects_a_pile_of_model_subdirectories() -> None:
+    """OutOfMarbles/Rocket/Stagetop: several model folders is a pile, not a bundle."""
+    files = {
+        "bucket-lift/x.stl": 10,
+        "triple-twister-module/y.stl": 20,
+        "cover.jpg": 30,
+        "notes.txt": 40,
+    }
+
+    assert bundle_detect.detect_bundle(snapshot("OutOfMarbles", files), {}) is None
+
+
+def test_r3_rejects_a_model_below_the_single_subdirectory() -> None:
+    """The depth bound survives the cardinality rule: two levels down is refused."""
+    files = {"A/B/part.stl": 10, "cover.jpg": 20, "notes.txt": 30}
+
+    assert bundle_detect.detect_bundle(snapshot("two-levels", files), {}) is None
+
+
+def test_r3_still_requires_the_whole_trio_under_one_subdirectory() -> None:
+    """The single-subdirectory rule widens model evidence only, not the trio."""
+    model_and_image = {"part-folder/part.stl": 10, "cover.jpg": 20}
+    model_and_text = {"part-folder/part.stl": 10, "notes.txt": 30}
+    no_model = {"cover.jpg": 20, "notes.txt": 30}
+
+    assert bundle_detect.detect_bundle(snapshot("no-text", model_and_image), {}) is None
+    assert bundle_detect.detect_bundle(snapshot("no-image", model_and_text), {}) is None
+    assert bundle_detect.detect_bundle(snapshot("no-model", no_model), {}) is None
+
+
+def test_r3_counts_only_depth_one_model_prefixes_by_design() -> None:
+    """A chosen blind spot, not an accident: only depth-1 prefixes are counted.
+
+    The depth-2 pile under ``b/`` is invisible to cardinality, exactly as a
+    depth-2 pile under ``files/`` has always been. Pinned so a future "fix" does
+    not silently turn this into a deeper walk.
+    """
+    files = {"a/x.stl": 10, "b/deep/y.stl": 20, "cover.jpg": 30, "notes.txt": 40}
+
+    facts = bundle_detect.detect_bundle(snapshot("blind-spot", files), {})
+
+    assert facts is not None
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
 
 
 def test_r3_rejects_a_model_below_depth_one() -> None:

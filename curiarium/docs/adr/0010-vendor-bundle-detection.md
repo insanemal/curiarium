@@ -68,7 +68,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    |---|---|---|---|---|
    | R1 | `thingiverse-readme` | `high` | `root-docs` | the bundle root holds `README.txt` and/or `LICENSE.txt` - **at least one** of the two - and between them the pair carries both of Thingiverse's markers **in whichever document they were shipped**: `created by Thingiverse user <name>` with `licensed under <token>` on one side, `<title> by <creator> on Thingiverse: <url>` on the other |
    | R2 | `thingiverse-sibling-docs` | `high` | `sibling-docs` | the same pair shipped beside the files as `<bundle>_README` / `<bundle>_LICENSE` - as two files, or as two directories each holding one text file (the legacy flattening) - at least one of them present, and both markers present in whichever of the two documents holds them |
-   | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model **at the bundle's own depth** (depth 0, or depth 1 under `files/`), one image and one text entry |
+   | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model **at the bundle's own depth** - depth 0, depth 1 under `files/`, or depth 1 under exactly one model-bearing subdirectory - plus one image and one text entry |
 
    `high` therefore means *the vendor told us*, never *there is a `.txt` file*.
    A README that exists but lacks the markers is not R1: both high-confidence
@@ -83,17 +83,40 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    created-by sentence, and it is `None` when nothing did. The cover is the
    largest image, ties broken by path.
 
-   The model evidence for R3 is bounded to the bundle's own depth - depth 0, or
-   depth 1 under `R3_MODEL_DIRS` (`{"files"}`) - and images and text stay
-   unbounded. R1 and R2 are bounded by construction, because their marker
-   documents live at depth 0; R3 counts roles, so an unbounded model count makes
-   every ancestor of a bundle a candidate on its descendants' models. Images and
-   text cannot supply the trio alone, and a real generic bundle keeps its
-   previews in `images/`, so bounding them would only lose bundles. `counts`,
-   `model_entries` and the cover stay folded totals, so every number on a row
-   that *is* a bundle is unchanged. A model outside the allowed shape fails
-   closed - the directory is not offered rather than wrongly created - and
-   `R3_MODEL_DIRS` is the one-line place to allow a second model directory.
+   The model evidence for R3 is bounded to the bundle's own depth, in one of
+   three shapes: a model at depth 0; a model at depth 1 under the named
+   `R3_MODEL_DIRS` (`{"files"}`); or every depth-1 model under exactly one
+   model-bearing subdirectory of any name - the "one folder in, models out"
+   shape (`STL/`, a wrapped vendor zip's own directory). Two or more *unnamed*
+   model-bearing subdirectories, with no model at depth 0 and none under
+   `files/`, is a pile of things rather than a bundle - `files/a.stl` beside
+   `other/b.stl` still counts, because the named allowance is applied first -
+   and depth 2 or deeper is still refused. Cardinality, not a longer name list,
+   is the bound: a conventional-name table only ever helps names someone thought
+   of, while the count of unnamed model-bearing subdirectories separates one
+   shipped thing from a pile. Measured on the owner's staging tree (131 directories + 208
+   zips), the shipped rule offers 115 candidates (97 directories + 18 archives)
+   and this rule offers 121 (+6 archives, 0 directories, 0 removals, 0 newly
+   offered containers). The six are five Fates End towers (`01_Wizard`,
+   `02_Fighter`, `04_Rogue`, `06_Ranger`, `10_Monk`) and `Articulated Flexi -
+   Cinderwing3D - Pumpkinurtle`, each `<wrapper>/*.stl` plus 3-4 previews and
+   one vendor `.txt`. Conventional-name widening alone (`stl/`, `models/`, ...)
+   gains literally zero, so it was not adopted as a separate rule - the
+   single-model-directory rule subsumes it. A depth-2 allowance is refused on
+   `All Pokemon.zip`: 2 models out of 607 unrelated top-level folders and 2096
+   images would be offered as ONE bundle. The three single-subdir directories in
+   the corpus (`LittleTup`, `Taffi`, `GavinIsABot`) still fail R3, because each
+   has zero images and zero text - the depth bound is not what excludes them.
+   R1 and R2 are bounded by construction, because their marker documents live at
+   depth 0; R3 counts roles, so an unbounded model count makes every ancestor of
+   a bundle a candidate on its descendants' models. Images and text cannot
+   supply the trio alone, and a real generic bundle keeps its previews in
+   `images/`, so bounding them would only lose bundles. `counts`, `model_entries`
+   and the cover stay folded totals, so every number on a row that *is* a bundle
+   is unchanged. A model outside the allowed shapes fails closed - the directory
+   is not offered rather than wrongly created - and `R3_MODEL_DIRS` is now only
+   the named allowance: widening further means changing the cardinality rule,
+   not adding a name.
 
 2. **Classification is suffix-only, and never looks at a stem.**
    `classify_entry` maps an entry to `model` / `image` / `text` / `archive` /
@@ -429,9 +452,10 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   A real "pile" directory that wraps several bundles can no longer become one
   project; restoring it would need an explicit override, which is a request or
   schema change and deliberately out of this ADR. A generic bundle whose models
-  live under a directory other than `files/` is likewise no longer offered - it
-  fails closed rather than wrongly created - and `R3_MODEL_DIRS` is where a
-  second known model directory is added.
+  live two levels down, or under more than one model-bearing directory, is
+  likewise no longer offered - it fails closed rather than wrongly created;
+  a single model-bearing directory of any name is offered by the cardinality
+  rule above.
 * **A title containing a sentence boundary loses its leading part.** `Dr. No
   Replica` is reported as `No Replica`, because the trim that keeps a preceding
   sentence of prose out of the title is the same trim that eats the title. It is
@@ -631,7 +655,10 @@ This ADR is superseded if any of the following becomes true:
   being reported;
 - the report stops being bounded by `limit`, `truncated` or `MAX_SCAN_ENTRIES`.
 - R3's model evidence stops being bounded to the bundle's own depth, or the
-  bound widens beyond `R3_MODEL_DIRS`;
+  bound widens past the three allowed shapes - depth 0, depth 1 under the named
+  `R3_MODEL_DIRS`, or depth 1 under exactly one model-bearing subdirectory - or
+  a candidate with two or more unnamed model-bearing subdirectories, and no
+  depth-0 or named-directory model, starts qualifying on them;
 - a directory that contains bundles starts being offered as a bundle again, or a
   high-confidence candidate starts being demoted for containing one;
 - creation stops refusing a low candidate whose registered assets outnumber its

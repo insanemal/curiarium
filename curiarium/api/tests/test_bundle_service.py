@@ -636,6 +636,124 @@ def test_a_low_container_of_a_zip_only_bundle_is_not_a_bundle(
     assert [row["key"] for row in report["bundles"]] == ["Inbox/Moai.zip"]
 
 
+def test_a_wrapped_vendor_zip_is_offered_at_low_and_stays_archive_only(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """Fates End ships each tower as one wrapper directory inside the archive."""
+    write_zip(
+        isolated_storage / "01_Fates End - Wizard Tower.zip",
+        {
+            "01_Wizard/part-a.stl": STL_BYTES,
+            "01_Wizard/part-b.stl": STL_BYTES,
+            "01_Wizard/preview.jpg": b"j" * 200,
+            "01_Wizard/notes.txt": b"print at 0.2mm",
+        },
+    )
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    row = row_for(report, "01_Fates End - Wizard Tower.zip")
+    assert row["detector"] == "generic-bundle"
+    assert row["confidence"] == "low"
+    assert row["model_count"] == 2
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+    assert create(client, headers, [{"key": row["key"]}])["blocked"] == 1
+    assert project_listing(client, headers) == {}
+
+
+def test_a_single_model_directory_bundle_is_offered_and_creates(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """LittleTup's model layout, with a synthetic root trio.
+
+    The real directory carries no image and no text, so the preview and the notes
+    are made up to isolate the depth rule; only ``articulated-dragon-claws/`` is
+    real.
+    """
+    bundle = isolated_storage / "LittleTup"
+    model_paths = [f"LittleTup/articulated-dragon-claws/claw-{index}.stl" for index in range(3)]
+    for index in range(3):
+        write_file(bundle / "articulated-dragon-claws" / f"claw-{index}.stl", STL_BYTES)
+    write_file(bundle / "preview.jpg", b"j" * 100)
+    write_text(bundle / "notes.txt", "supports everywhere")
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    row = row_for(report, "LittleTup")
+    assert row["detector"] == "generic-bundle"
+    assert row["confidence"] == "low"
+    assert row["model_count"] == 3
+
+    created = create(client, headers, [{"key": "LittleTup", "name_only": True}])
+
+    assert created["created"] == 1
+    with Session(engine) as session:
+        expected = {
+            asset.id for asset in session.exec(select(Asset).where(Asset.storage_path.in_(model_paths))).all()
+        }
+    assert set(project_asset_ids(client, headers, created["results"][0]["project_id"])) == expected
+
+
+def test_a_low_bundle_holding_a_bundle_is_refused_even_with_the_new_shape(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """Under the old rule Wrapper was one merged bundle; the containment skip is intended."""
+    wrapper = isolated_storage / "Wrapper"
+    write_file(wrapper / "a.stl", STL_BYTES)
+    write_file(wrapper / "cover.jpg", b"j" * 50)
+    write_text(wrapper / "notes.txt", "the wrapper's own trio")
+    inner = wrapper / "Inner"
+    write_file(inner / "02_Fighter" / "part.stl", STL_BYTES)
+    write_file(inner / "inner.jpg", b"j" * 40)
+    write_text(inner / "inner.txt", "the inner bundle's own text")
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == ["Wrapper/Inner"]
+
+
+def test_a_new_shape_folder_containing_a_zip_only_bundle_is_not_a_bundle(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The post-pass strip must fire for a folder whose evidence is the new shape."""
+    inbox = isolated_storage / "Inbox"
+    write_file(inbox / "wrap" / "a.stl", STL_BYTES)
+    write_file(inbox / "cover.jpg", b"j" * 50)
+    write_text(inbox / "notes.txt", "the folder's own image and text")
+    write_zip(
+        inbox / "Vendor.zip",
+        {"part.stl": STL_BYTES, "cover.jpg": b"j" * 20, "notes.txt": b"the zip's own trio"},
+    )
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == ["Inbox/Vendor.zip"]
+
+
+def test_the_named_files_allowance_survives_a_second_model_subdirectory(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """Pin the allowance so a future simplification to pure cardinality is caught."""
+    bundle = isolated_storage / "Named Allowance"
+    write_file(bundle / "files" / "a.stl", STL_BYTES)
+    write_file(bundle / "other" / "b.stl", STL_BYTES)
+    write_file(bundle / "cover.jpg", b"j" * 50)
+    write_text(bundle / "notes.txt", "a trio beside two model folders")
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    row = row_for(report, "Named Allowance")
+    assert row["confidence"] == "low"
+    assert row["model_count"] == 2
+
+
 def test_a_parent_attaches_only_its_own_models(client: TestClient, isolated_storage: Path) -> None:
     title = "Wall Mount Bracket"
     parent = isolated_storage / "Parent Thing"

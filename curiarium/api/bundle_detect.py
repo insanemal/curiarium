@@ -23,11 +23,15 @@ The three rules, strongest first:
   two directories each holding one text file (the legacy flattening). Same
   enrichment as R1.
 * R3 ``generic-bundle`` / ``low``: nothing parses, but the tree still looks like
-  one thing - at least one model at the bundle's own depth (depth 0, or depth 1
-  under ``R3_MODEL_DIRS``), one image and one text file. Name only: every
-  provenance field is ``None``, because a guess is worse than a blank. The depth
-  bound is what stops an ancestor qualifying on its descendants' models; images
-  and text stay unbounded because neither can supply the trio alone.
+  one thing - at least one model at the bundle's own depth, one image and one
+  text file. The model evidence may be at depth 0, at depth 1 under the named
+  ``R3_MODEL_DIRS`` (``files/``), or at depth 1 under exactly ONE model-bearing
+  subdirectory of any name (the "one folder in, models out" shape). Two or more
+  unnamed model-bearing subdirectories, with no model at the root and none under
+  the named directory, is a pile of things rather than a bundle. Name only:
+  every provenance field is ``None``, because a guess is worse than a blank. The
+  depth bound is what stops an ancestor qualifying on its descendants' models;
+  images and text stay unbounded because neither can supply the trio alone.
 
 Anything else is not a bundle and ``detect_bundle`` returns ``None``. A README
 that exists but lacks the markers is not R1 - both high-confidence rules miss and
@@ -54,7 +58,7 @@ confidence.
 import re
 from dataclasses import dataclass
 from pathlib import PurePath
-from typing import List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from config import IMPORT_ALLOWED_EXTS
 from import_resolvers import thingiverse_thing_id_from_url
@@ -64,8 +68,13 @@ from library_scan import IMAGE_SUFFIXES
 # container, never a bundle member.
 MODEL_SUFFIXES = frozenset(IMPORT_ALLOWED_EXTS - {".zip"})
 # R3's model evidence is bounded to the bundle's own depth: a model at the bundle
-# root, or one level down under a known model directory. Without the bound every
-# ancestor of a bundle qualifies on its descendants' models.
+# root, one level down under this NAMED model directory, or one level down under
+# exactly one model-bearing subdirectory of any name. This constant is only the
+# named allowance - the single unnamed subdirectory is allowed by cardinality,
+# while two or more unnamed model-bearing subdirectories, with no model at the
+# root and none under this name, is a pile of things rather than a bundle.
+# Without the bound every ancestor of a bundle qualifies on its descendants'
+# models.
 R3_MODEL_DIRS = frozenset({"files"})
 # Prose that can carry provenance. Deliberately short: a `.pdf` is a document,
 # not a sibling README.
@@ -462,22 +471,40 @@ def _cover_entry(snapshot: BundleSnapshot) -> Optional[str]:
 
 
 def _own_depth_model_count(snapshot: BundleSnapshot) -> int:
-    """Models at the bundle's own depth: depth 0, or depth 1 under ``R3_MODEL_DIRS``.
+    """Models at the bundle's own depth, in one of R3's three allowed shapes.
+
+    A model counts when it is at depth 0, when it is at depth 1 under the named
+    ``R3_MODEL_DIRS`` (``files/``), or when every depth-1 model lives under a
+    single model-bearing subdirectory of any name - the "one folder in, models
+    out" shape (``STL/``, a vendor wrapper, a wrapped zip's own directory).
 
     R1 and R2 are bounded by construction - their marker documents live at depth
     0 - but R3 counts roles, so an unbounded model count lets any ancestor of a
     bundle qualify on its descendants' models. Images and text stay unbounded:
     neither can supply the trio alone, and a real generic bundle keeps its
-    previews in ``images/``.
+    previews in ``images/``. Cardinality, not a longer name list, is the bound: a
+    conventional-name table only ever helps names someone thought of, while two
+    or more unnamed model-bearing subdirectories with nothing at depth 0 or
+    under the named directory really is a pile of things rather than a bundle.
     """
-    count = 0
+    own = 0
+    unnamed: Dict[str, int] = {}
     for entry in snapshot.entries:
         if classify_entry(entry.rel_path, entry.size) != MODEL:
             continue
         parts = entry.rel_path.split("/")
-        if len(parts) == 1 or (len(parts) == 2 and parts[0] in R3_MODEL_DIRS):
-            count += 1
-    return count
+        if len(parts) == 1:
+            own += 1
+        elif len(parts) == 2:
+            if parts[0] in R3_MODEL_DIRS:
+                own += 1
+            else:
+                unnamed[parts[0]] = unnamed.get(parts[0], 0) + 1
+    if own:
+        return own
+    if len(unnamed) == 1:
+        return next(iter(unnamed.values()))
+    return 0
 
 
 def _model_entries(snapshot: BundleSnapshot) -> Tuple[str, ...]:
