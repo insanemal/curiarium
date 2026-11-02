@@ -3,6 +3,7 @@ import { Layers3 } from "lucide-react";
 
 import { fileUrl, type Project } from "../lib/api";
 import type { Role } from "../lib/auth";
+import { useFileGrants } from "../lib/useFileGrants";
 import ReviewNav from "./review/ReviewNav";
 import type { ReviewCounts } from "./review/useReviewCounts";
 import SidebarFooter from "./SidebarFooter";
@@ -46,6 +47,11 @@ export default function ProjectSidebar({
   onOpenQueue,
 }: Props) {
   const listRef = useRef<HTMLDivElement | null>(null);
+
+  // One list-level keeper for every row cover: silent, because each row paints
+  // an `<img src>` that must not repaint on a re-mint (ADR 0005 decision 10).
+  // A row's own hook would cost one timer per project for the same requests.
+  useFileGrants(projects?.map(project => project.cover_thumb_url) ?? []);
 
   const rowElements = () =>
     Array.from(listRef.current?.querySelectorAll<HTMLElement>("[data-project-row]") ?? []);

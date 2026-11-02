@@ -7,6 +7,7 @@ import {
   type ChangeEvent,
   type KeyboardEvent,
   type ReactElement,
+  type ReactNode,
 } from "react";
 import {
   Clock,
@@ -55,6 +56,7 @@ import {
   type SlicerSettings,
 } from "../lib/settings";
 import { notifyError, notifyInfo } from "../lib/toast";
+import { useFileGrants, useLiveFileGrants } from "../lib/useFileGrants";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
 import LicenceChip from "./LicenceChip";
 import AttachFilesControl from "./project-attach/AttachFilesControl";
@@ -153,6 +155,28 @@ const BUTTON_ICON = `inline-flex items-center justify-center rounded-md border b
 const INPUT_BASE = `w-full min-w-0 rounded-md border border-panel-strong bg-panel px-3 py-2 text-sm ${FOCUS_VISIBLE}`;
 const CHIP = `inline-flex items-center gap-1 rounded-full border border-panel-strong bg-panel-soft px-2.5 py-0.5 text-xs font-medium ${FOCUS_VISIBLE}`;
 const EYEBROW = "text-xs font-semibold uppercase tracking-[0.14em] text-subtle";
+
+/**
+ * The gallery thumbnail's `target="_blank"` file link keeps its own grant warm,
+ * live: an `<a href>` holds the URL string itself, so a re-mint may repaint it.
+ * The thumbnail arrives as `children`, so its element identity is stable and it
+ * keeps the src the page's silent keeper painted (ADR 0005 decision 10). A
+ * top-level live hook would instead repaint every gallery `<img>` on schedule
+ * and re-download the bytes of each thumb-less image.
+ */
+function GalleryLink({ rel, children }: { rel: string; children: ReactNode }): ReactElement {
+  useLiveFileGrants([rel]);
+  return (
+    <a
+      href={fileUrl(rel)}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`block rounded-md ${FOCUS_VISIBLE}`}
+    >
+      {children}
+    </a>
+  );
+}
 
 const MEMBER_PAGE_SIZE = 1000;
 const PICKER_PAGE_SIZE = 100;
@@ -274,13 +298,31 @@ export default function ProjectLanding({
 
   // Cover chain: the API's cover thumb, else the first image/3MF member's
   // thumb, else the generated placeholder below.
-  const coverUrl = useMemo(() => {
-    if (project.cover_thumb_url) return fileUrl(project.cover_thumb_url);
+  const coverRel = useMemo(() => {
+    if (project.cover_thumb_url) return project.cover_thumb_url;
     const fallback = members.find(
       member => (isImageAsset(member) || is3mfAsset(member)) && member.thumb_url,
     );
-    return fallback?.thumb_url ? fileUrl(fallback.thumb_url) : null;
+    return fallback?.thumb_url ?? null;
   }, [project.cover_thumb_url, members]);
+
+  const coverUrl = coverRel ? fileUrl(coverRel) : null;
+
+  // One silent keeper for every `<img src>` this page paints: the hero cover,
+  // each gallery thumbnail (through the same `thumb_url || url` expression the
+  // `<img>` reads, so the rendered rel is always the granted one) and each
+  // member row's thumb. Silent because a re-mint must not repaint a mounted
+  // `<img>` (ADR 0005 decision 10); the gallery anchors have their own live
+  // keeper in `GalleryLink`.
+  const paintedRels = useMemo(
+    () => [
+      coverRel,
+      ...galleryMembers.map(asset => asset.thumb_url || asset.url),
+      ...members.map(member => member.thumb_url),
+    ],
+    [coverRel, galleryMembers, members],
+  );
+  useFileGrants(paintedRels);
 
   // The tag union is read-only here and derived from the members this page
   // already loaded, so the chips cost no extra request.
@@ -797,19 +839,14 @@ export default function ProjectLanding({
               {galleryMembers.map(asset => (
                 <div key={asset.id} className="w-24 shrink-0">
                   <div className="relative">
-                    <a
-                      href={fileUrl(asset.url)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={`block rounded-md ${FOCUS_VISIBLE}`}
-                    >
+                    <GalleryLink rel={asset.url}>
                       <img
                         src={fileUrl(asset.thumb_url || asset.url)}
                         alt={asset.name}
                         loading="lazy"
                         className="h-24 w-24 rounded-md border border-panel object-cover"
                       />
-                    </a>
+                    </GalleryLink>
                     {asset.id === project.cover_asset_id && (
                       <span className="absolute left-1 top-1 rounded bg-accent px-1.5 py-0.5 text-[10px] font-semibold">
                         Cover
