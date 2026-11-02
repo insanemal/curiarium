@@ -10,6 +10,7 @@ What is authoritative, what is historical, and what to read when.
 | [architecture/CONFIGURATION.md](architecture/CONFIGURATION.md) | Every environment variable: default, owner, effect |
 | [architecture/REVERSE_PROXY.md](architecture/REVERSE_PROXY.md) | Exposing one hostname, header and body-size requirements |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Local toolchains, the gates, migration rules |
+| [guides/truenas.md](guides/truenas.md) | Installing on TrueNAS as a Docker Compose custom app: datasets, permissions, `.env`, ZFS snapshots |
 | [adr/](adr/) | Decisions with their rationale — read these before changing a design |
 | [../docs/PERMISSIONS.md](../docs/PERMISSIONS.md) | The role matrix, per route |
 | [../docs/AUDIT.md](../docs/AUDIT.md) | Which actions are audited and why some are exempt |

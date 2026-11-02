@@ -76,7 +76,7 @@ By default the bridge refuses to download from loopback, private (10.x,
 server on your LAN therefore needs to be listed explicitly:
 
 ```json
-{ "allowed_hosts": ["10.0.10.200", "truenas.local"] }
+{ "allowed_hosts": ["192.168.1.50", "curiarium.local"] }
 ```
 
 Only the listed hosts are trusted; everything else stays blocked. Use the

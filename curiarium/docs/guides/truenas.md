@@ -26,19 +26,19 @@ Most of these steps use the TrueNAS web interface. If you prefer the command lin
 
 1. Create a dataset called `curiarium` with the parent path `tank/configs`, giving `tank/configs/curiarium`. Set the preset to `Generic`.
 
-   ![Add dataset curiarium](docs/images/add_dataset_curiarium.png)
+   ![Add dataset curiarium](../../../docs/images/truenas/dataset-add-curiarium.png)
 
 2. Add a dataset called `storage` under the `curiarium` dataset from step 1. Set the preset to `Apps`.
 
-   ![Add dataset storage with the Apps preset](docs/images/add_dataset_storage_preset_apps.png)
+   ![Add dataset storage with the Apps preset](../../../docs/images/truenas/dataset-add-storage-apps-preset.png)
 
 3. Add a dataset called `data` under the `curiarium` dataset from step 1. Set the preset to `Generic`.
 
-   ![Add dataset data with the Generic preset](docs/images/add_dataset_storage_preset_generic.png)
+   ![Add dataset data with the Generic preset](../../../docs/images/truenas/dataset-add-data-generic-preset.png)
 
 4. Open the Permissions tab for the `data` dataset and select `Edit`.
 
-   ![Change dataset permissions](docs/images/change_dataset_permissions.png)
+   ![Change dataset permissions](../../../docs/images/truenas/dataset-data-permissions.png)
 
 5. Set the following permissions:
 
@@ -51,7 +51,7 @@ Most of these steps use the TrueNAS web interface. If you prefer the command lin
 
 6. Select `Save`.
 
-   ![Edited permissions](docs/images/permissions_edited.png)
+   ![Edited permissions](../../../docs/images/truenas/dataset-data-permissions-edited.png)
 
 These permissions are only the starting state. When the API container starts, its entrypoint runs `chown 568:568` on `storage` and `data` (the default `CHOWN_MODE=minimal`). After the first start, both datasets are owned by `apps:apps`. The mode on `data` stays `750`, so only `apps` can read it.
 
@@ -104,6 +104,11 @@ PUBLIC_URL=https://curiarium.example.com
 # CORS_ORIGINS=http://curiarium.example.com:5173,http://IP:5173
 VITE_API_URL=
 AUTH_MODE=auto
+# Browser first-run setup: creates the first administrator under a server-enforced
+# password policy, then closes itself. Set to 0 (or remove) once that account exists.
+AUTH_FIRST_RUN_SETUP=1
+# Break-glass, for headless or automated installs. Inert from the moment an
+# enabled administrator exists, so leaving it set is harmless.
 AUTH_USERNAME=admin
 AUTH_PASSWORD=change-me-to-something-strong
 AUTH_SECRET=$(openssl rand -hex 32)
@@ -128,15 +133,15 @@ Most of these steps use the TrueNAS web interface. If you prefer the command lin
 
 1. Select `Discover Apps`.
 
-   ![Discover Apps](docs/images/install_step_1.png)
+   ![Discover Apps](../../../docs/images/truenas/install-discover-apps.png)
 
 2. Select `More Options`.
 
-   ![More Options](docs/images/install_step_2.png)
+   ![More Options](../../../docs/images/truenas/install-more-options.png)
 
 3. Select `Install via YAML`.
 
-   ![Install via YAML](docs/images/install_step_3.png)
+   ![Install via YAML](../../../docs/images/truenas/install-via-yaml.png)
 
 4. In the name field, enter `curiarium`. Paste the following into the `Custom Config` field:
 
@@ -258,13 +263,19 @@ curiarium:
 
 ## Verify
 
-Curiarium appears in the TrueNAS Applications list with the status `Running`, and the Application Info panel has a `Web UI` button.
+Curiarium appears in the TrueNAS Applications list with the status `Running`, and its Application Info panel shows both containers up.
 
-![Curiarium in the TrueNAS Applications list](docs/images/truenas_applications_webui_portal.png)
+![Curiarium running, with the api and web containers up](../../../docs/images/truenas/truenas-app-running.png)
 
-Select `Web UI`, or browse to `http://<truenas-host>:5173/`. Sign in with `AUTH_USERNAME` and `AUTH_PASSWORD` from the `.env` file. A new library is empty. The sidebar shows the signed-in user and an `ADMIN` badge.
+The Application Info panel also has a `Web UI` button.
 
-![Curiarium library after signing in](docs/images/main_login.png)
+![Curiarium in the TrueNAS Applications list](../../../docs/images/truenas/truenas-app-webui-portal.png)
+
+Select `Web UI`, or browse to `http://<truenas-host>:5173/`. With `AUTH_FIRST_RUN_SETUP=1` the first visit offers the one-time setup that creates your administrator — pick a strong password there, because the server enforces its own policy and closes the window the moment that account exists. Without the flag, sign in with `AUTH_USERNAME` and `AUTH_PASSWORD` from the `.env` file.
+
+A new library is empty. The sidebar shows the signed-in user and an `ADMIN` badge.
+
+![Curiarium library after signing in](../../../docs/images/truenas/curiarium-first-login.png)
 
 From the command line, check that the web container answers. Run this on another machine on your network, not on the TrueNAS host, because `localhost` on the host does not reach the app. Replace `<truenas-ip>` with the address of your TrueNAS host:
 
