@@ -206,6 +206,14 @@ Both are named volumes in the deploy manifest; point them anywhere with
 `FILE_STORAGE` and `DB_URL`. Putting the **database on a network filesystem is not
 supported** — SQLite wants a local disk, and the container relies on WAL.
 
+## Guides
+
+Step-by-step walkthroughs for specific platforms. More guides live in
+[curiarium/docs/guides/](curiarium/docs/guides/).
+
+- [Installing on TrueNAS](curiarium/docs/guides/truenas.md) — Docker Compose custom app:
+  datasets, permissions, `.env`, first-run setup and ZFS snapshots.
+
 ## Configuration
 
 Everything lives in `.env`; the full inventory with owners and defaults is in
