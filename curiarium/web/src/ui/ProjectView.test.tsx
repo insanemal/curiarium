@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useCallback, useState, type ComponentProps, type ReactElement } from "react";
+import {
+  createRef,
+  useCallback,
+  useState,
+  type ComponentProps,
+  type ReactElement,
+  type RefObject,
+} from "react";
 import {
   act,
   cleanup,
@@ -23,6 +30,7 @@ type LandingProps = {
   onProjectDeleted: (id: string) => void;
   onAssetsChanged: () => void;
   onUnauthorized?: () => void;
+  scrollElementRef?: RefObject<HTMLElement | null>;
 };
 
 vi.mock("../lib/api", () => ({
@@ -104,6 +112,7 @@ function viewProps(overrides: Partial<Props> = {}): Props {
     onAssetsChanged: vi.fn(),
     assetsVersion: 0,
     theme: "dark",
+    scrollElementRef: createRef<HTMLElement>(),
     ...overrides,
   };
 }
@@ -180,6 +189,17 @@ afterEach(() => {
 });
 
 describe("ProjectView", () => {
+  it("forwards the scroll container ref to the landing grid", () => {
+    const scrollElementRef = createRef<HTMLElement>();
+    render(
+      <ProjectView
+        {...viewProps({ selectedProjectId: "p1", scrollElementRef })}
+      />,
+    );
+
+    expect(landingState.received?.scrollElementRef).toBe(scrollElementRef);
+  });
+
   it("shows a loading line while the project list is null", () => {
     render(<ProjectView {...viewProps({ projects: null })} />);
     expect(screen.getByText("Loading projects…")).toBeTruthy();

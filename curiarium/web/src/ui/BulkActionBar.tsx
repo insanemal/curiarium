@@ -26,6 +26,11 @@ export type BulkActionBarProps = {
   onEditMeta: () => void;
   /** Opens the project picker for the whole selection. */
   onAddToProject: () => void;
+  /**
+   * Project mode only: contributor-level membership removal. Unlinking drops a
+   * join row, never the file, so this must never be wired to a delete route.
+   */
+  onRemoveFromProject?: () => void;
   onDownload: () => void;
   onDelete: () => void;
   onClear: () => void;
@@ -68,6 +73,7 @@ export default function BulkActionBar({
   onRemoveTags,
   onEditMeta,
   onAddToProject,
+  onRemoveFromProject,
   onDownload,
   onDelete,
   onClear,
@@ -184,6 +190,18 @@ export default function BulkActionBar({
         >
           Download zip
         </button>
+
+        {onRemoveFromProject && (
+          // Neutral on purpose: removing a project membership is not a delete.
+          <button
+            type="button"
+            onClick={onRemoveFromProject}
+            disabled={disabled}
+            className="px-3 py-1 rounded-md border border-panel-strong disabled:opacity-60"
+          >
+            Remove from project
+          </button>
+        )}
 
         {canDelete && (
           <button

@@ -197,6 +197,37 @@ describe("BulkActionBar", () => {
     renderBar({ requestError: "Bulk delete failed." });
     expect(screen.getByRole("alert").textContent).toBe("Bulk delete failed.");
   });
+
+  it("hides the Delete button from a role without the destroy capability", () => {
+    renderBar({ canDelete: false });
+
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
+  it("offers Remove from project only when the project-mode prop is passed", () => {
+    const without = renderBar();
+    expect(screen.queryByRole("button", { name: "Remove from project" })).toBeNull();
+    without.unmount();
+
+    const { props } = renderBar({ onRemoveFromProject: vi.fn() });
+    const button = screen.getByRole("button", { name: "Remove from project" });
+    // Unlinking a membership must never read as a delete.
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeTruthy();
+    expect(button.textContent).not.toMatch(/delete/i);
+
+    fireEvent.click(button);
+    expect(props.onRemoveFromProject).toHaveBeenCalledTimes(1);
+  });
+
+  it("styles Remove from project as a neutral action, never as danger", () => {
+    renderBar({ onRemoveFromProject: vi.fn() });
+
+    const button = screen.getByRole("button", { name: "Remove from project" });
+    expect(button.className).not.toContain("text-red-700");
+    expect(button.className).not.toContain("border-red-300");
+    // The destroy control keeps its own danger styling.
+    expect(screen.getByRole("button", { name: "Delete" }).className).toContain("text-red-700");
+  });
 });
 
 describe("BulkActionBar role capability", () => {

@@ -1,5 +1,6 @@
 import React from "react";
 
+import type { Asset } from "../../lib/api";
 import { useFileGrants } from "../../lib/useFileGrants";
 import TagBadge from "../TagBadge";
 import CardMenu, { type CardMenuItem, type CardMenuSection } from "./CardMenu";
@@ -7,6 +8,14 @@ import { ENGRAVING_EXTS, MODEL_EXTS, extOf } from "./assetGridMeta";
 import { cardFacts } from "./cardFacts";
 import { PreparedPrintSummary, renderPreviewContent } from "./preview";
 import type { AssetCardProps } from "./assetCardProps";
+
+type Props = AssetCardProps & {
+  /**
+   * Project mode only: contributor-level membership removal. Never a destroy
+   * capability, so it is absent in Files mode by construction.
+   */
+  onRemoveFromProject?: (asset: Asset) => void;
+};
 
 const AssetCard = React.memo(function AssetCard({
   item,
@@ -19,6 +28,7 @@ const AssetCard = React.memo(function AssetCard({
   downloading,
   onDelete,
   onAddToProject,
+  onRemoveFromProject,
   selected,
   onToggleSelected,
   slicerEnabled,
@@ -35,7 +45,7 @@ const AssetCard = React.memo(function AssetCard({
   rescanning,
   onClearPreparedPrint,
   preparedClearing,
-}: AssetCardProps) {
+}: Props) {
   // The card's own <img>/model preview re-reads the grant cache on every render,
   // so the cache has to stay warm while the card is mounted: a card that
   // re-renders after expiry (a selection toggle) would otherwise swap a working
@@ -96,6 +106,15 @@ const AssetCard = React.memo(function AssetCard({
     onSelect: () => onOpenDetails(item, "files"),
   });
   sections.push({ items: editItems });
+
+  if (onRemoveFromProject) {
+    // Its own labelled group, never the danger group and never the slot Delete
+    // occupies in Files mode: unlinking a membership must not read as a delete.
+    sections.push({
+      label: "Project",
+      items: [{ label: "Remove from project", onSelect: () => onRemoveFromProject(item) }],
+    });
+  }
 
   const destructiveItems: CardMenuItem[] = [];
   if (item.prepared_print && canDelete && item.prepared_print.removable) {

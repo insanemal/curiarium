@@ -767,6 +767,7 @@ export default function App() {
                 engravingSettings={settings.engraving}
                 previewSettings={settings.previews}
                 theme={resolvedTheme}
+                scrollElementRef={mainScrollRef}
               />
             </div>
           )}

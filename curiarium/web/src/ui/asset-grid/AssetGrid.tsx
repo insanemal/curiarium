@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-import { type Asset, type BatchMetaChange, type LibraryScanStatus, UnauthorizedError, deleteAsset } from "../../lib/api";
+import { type Asset, type BatchFailure, type BatchMetaChange, type LibraryScanStatus, UnauthorizedError, deleteAsset, removeProjectAssets } from "../../lib/api";
 import { AssetNotFoundError } from "../../lib/api/assets";
-import { dropIds } from "../../lib/bulkUi";
+import { dropIds, failureLines } from "../../lib/bulkUi";
 import { chunkRows, colsForWidth } from "../../lib/virtualGrid";
 import { previewQueue } from "../../lib/previewQueue";
 import { EngravingSettings, PreviewSettings, ResolvedTheme, SlicerSettings, engraverLabelFor, slicerLabelFor } from "../../lib/settings";
+import { notifyError } from "../../lib/toast";
 import { useStableCallback } from "../../lib/useStableCallback";
 import AssetDeleteDialog, { type AssetDeleteFailure } from "../AssetDeleteDialog";
 import BulkActionBar from "../BulkActionBar";
@@ -117,12 +118,24 @@ export default function AssetGrid({
   onScanStatus,
 }: Props) {
   const isProject = projectId != null;
+  // Project membership is not asset ownership: removing a member drops a join
+  // row, never the file. `DELETE /project/{id}/assets` is a CONTRIBUTE route
+  // while `DELETE /asset/{id}` is WRITE, so in project mode no child may hold
+  // the destroy capability at any role. Nothing below may hand raw `canDelete`
+  // to a project-mode child.
+  const canDeleteAssets = canDelete && !isProject;
   const [previewItem, setPreviewItem] = useState<Asset | null>(null);
   const [previewSection, setPreviewSection] = useState<DetailSection | null>(null);
   // The assets the user asked to delete, or null when the dialog is closed. The
   // parent stays the only owner of the request so the grid's optimistic update
   // and selection retention keep a single path.
   const [deleteTargets, setDeleteTargets] = useState<Asset[] | null>(null);
+  // Unlink state is deliberately separate from the delete dialog's: removing a
+  // membership is a contribute write, not a destroy, so it reports through the
+  // bar like a bulk tag edit instead of the stepped delete dialog.
+  const [unlinkBusy, setUnlinkBusy] = useState<{ label: string; count: number } | null>(null);
+  const [unlinkFailures, setUnlinkFailures] = useState<BatchFailure[] | null>(null);
+  const [unlinkRequestError, setUnlinkRequestError] = useState<string | null>(null);
   const [metaDialogOpen, setMetaDialogOpen] = useState(false);
   const [metaRequestError, setMetaRequestError] = useState<string | null>(null);
   const slicerEnabled = Boolean(slicerSettings?.enabled);
@@ -258,6 +271,108 @@ export default function AssetGrid({
     onAddToProject: openProjectPicker,
     onAssetsFiled,
     onScanStatus,
+  });
+
+  // Membership removal is NOT deletion: this path calls `removeProjectAssets`
+  // only. `deleteAsset` / `batchDeleteAssets` are destroy routes (WRITE) and
+  // must never be called from the unlink path, whatever the role.
+  const canRemoveFromProject = isProject && canContribute;
+  const unlinkFailureLabels = useMemo(
+    () => failureLines(unlinkFailures ?? [], items),
+    [unlinkFailures, items],
+  );
+
+  const unlinkAssets = useStableCallback(async (targets: Asset[]) => {
+    // Only reachable through `removeFromProject`, which is wired for project
+    // mode alone; the guard keeps that a fact rather than a cast.
+    if (projectId == null) return;
+    const ids = targets.map(target => target.id);
+    const before = items;
+    const startOffset = offset;
+    // Same discipline as `bulkDelete`: snapshot the window, drop optimistically,
+    // and rewind the paging cursor by the rows that actually left it.
+    const dropped = before.filter(item => ids.includes(item.id)).length;
+    setUnlinkFailures(null);
+    setUnlinkRequestError(null);
+    setUnlinkBusy({ label: "Removing", count: ids.length });
+    setItems(dropIds(before, ids));
+    setOffset(Math.max(0, startOffset - dropped));
+    try {
+      const result = await removeProjectAssets(projectId, ids);
+      const failedIds = new Set(result.failed.map(failure => failure.id));
+      // A failed unlink means the membership is still there: put those rows
+      // back from the snapshot (the cursor is recomputed absolutely, never
+      // patched).
+      const remaining = before.filter(
+        item => !ids.includes(item.id) || failedIds.has(item.id),
+      );
+      setItems(remaining);
+      setOffset(Math.max(0, startOffset - (before.length - remaining.length)));
+      if (result.failed.length) {
+        if (targets.length > 1) {
+          setUnlinkFailures(result.failed);
+        } else {
+          // A card-menu unlink has no bar line to land in, so report it as a
+          // toast while the row stays put.
+          notifyError(result.failed[0].error || "Failed to remove the file from this project.");
+        }
+      }
+      if (result.removed.length > 0) {
+        // The files stay in the library; only memberships moved, so App has to
+        // refetch the project counts/list rather than the asset listing. This
+        // also holds for a partial success: the successful rows really left.
+        onProjectsChanged?.();
+      }
+    } catch (err) {
+      setItems(before);
+      setOffset(startOffset);
+      if (err instanceof UnauthorizedError) {
+        onUnauthorized?.();
+        return;
+      }
+      // A whole-request failure has no per-asset ids to report honestly, so the
+      // single path toasts and the bulk path uses the bar's request-error slot.
+      const fallback =
+        targets.length === 1
+          ? "Failed to remove the file from this project."
+          : "Failed to remove the selection from this project.";
+      const message = errorMessage(err, fallback);
+      if (targets.length === 1) notifyError(message);
+      else setUnlinkRequestError(message);
+    } finally {
+      setUnlinkBusy(null);
+    }
+  });
+
+  // The confirm-gated entry point both the card menu and the bar share.
+  const requestUnlink = useStableCallback((targets: Asset[]) => {
+    const one = targets.length === 1 ? targets[0] : null;
+    requestConfirm({
+      title: one
+        ? `Remove "${one.name}" from this project?`
+        : `Remove ${targets.length} files from this project?`,
+      body: `The file${targets.length === 1 ? " stays" : "s stay"} in your library. Only ${
+        targets.length === 1 ? "its membership of" : "their membership of"
+      } "${projectName ?? "this project"}" is removed, and you can add ${
+        targets.length === 1 ? "it" : "them"
+      } back at any time.`,
+      confirmLabel: "Remove from project",
+      // Neutral, never danger: this is not a destructive action on the bytes.
+      danger: false,
+      run: () => unlinkAssets(targets),
+    });
+  });
+
+  const removeFromProject = useStableCallback((asset: Asset) => requestUnlink([asset]));
+  const removeSelectionFromProject = useStableCallback(() => {
+    const targets = items.filter(item => selectedIds.has(item.id));
+    if (targets.length) requestUnlink(targets);
+  });
+
+  const dismissUnlinkFailures = useStableCallback(() => {
+    dismissBulkFailures();
+    setUnlinkFailures(null);
+    setUnlinkRequestError(null);
   });
 
   // One request per path: a single asset needs its file name confirmed (the
@@ -438,7 +553,8 @@ export default function AssetGrid({
       key={item.id}
       item={item}
       canContribute={canContribute}
-      canDelete={canDelete}
+      // Never the raw capability in project mode: unlink is not destroy.
+      canDelete={canDeleteAssets}
       onPreview={openPreview}
       onOpenDetails={openDetails}
       onDownloadSingle={downloadSingle}
@@ -446,6 +562,7 @@ export default function AssetGrid({
       downloading={downloadingId === item.id}
       onDelete={removeAsset}
       onAddToProject={addToProject}
+      onRemoveFromProject={canRemoveFromProject ? removeFromProject : undefined}
       selected={selectedIds.has(item.id)}
       onToggleSelected={toggleSelected}
       slicerEnabled={slicerEnabled}
@@ -495,24 +612,25 @@ export default function AssetGrid({
       )}
       <BulkActionBar
         canContribute={canContribute}
-        canDelete={canDelete}
+        canDelete={canDeleteAssets}
         count={selectedIds.size}
         folders={folders}
         showFolderControls={!isProject}
-        busy={bulkBusy}
-        failures={bulkFailures}
-        failureLabels={bulkFailureLabels}
-        requestError={bulkRequestError}
+        busy={bulkBusy ?? unlinkBusy}
+        failures={bulkFailures ?? unlinkFailures}
+        failureLabels={[...bulkFailureLabels, ...unlinkFailureLabels]}
+        requestError={bulkRequestError ?? unlinkRequestError}
         onMove={bulkMoveToFolder}
         onAddTags={bulkAddTags}
         onRemoveTags={bulkRemoveTags}
         onEditMeta={openMetaDialog}
         onAddToProject={bulkAddToProject}
+        onRemoveFromProject={canRemoveFromProject ? removeSelectionFromProject : undefined}
         onDownload={downloadSelected}
         onDelete={openBulkDelete}
         onClear={clearSelection}
         onSelectAll={selectAllLoaded}
-        onDismissFailures={dismissBulkFailures}
+        onDismissFailures={dismissUnlinkFailures}
       />
       {!isProject && !missingOnly && canContribute && uploader.modal}
       <AssetToolbar
@@ -575,7 +693,7 @@ export default function AssetGrid({
           theme={theme}
           onClose={closePreview}
           canContribute={canContribute}
-          canDelete={canDelete}
+          canDelete={canDeleteAssets}
           onSaveTags={onSaveTags}
           onSaveDetails={onSaveDetails}
           onRename={onRename}

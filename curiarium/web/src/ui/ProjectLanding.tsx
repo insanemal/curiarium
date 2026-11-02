@@ -4,22 +4,18 @@ import {
   useMemo,
   useRef,
   useState,
-  type ChangeEvent,
   type KeyboardEvent,
   type ReactElement,
   type ReactNode,
+  type RefObject,
 } from "react";
 import {
   Clock,
   Download,
   ExternalLink,
-  File as FileIcon,
-  FileBox,
   Files,
   HardDrive,
-  Image as ImageIcon,
   Layers3,
-  Paperclip,
   Pencil,
   Plus,
   Search,
@@ -31,14 +27,11 @@ import {
   UnauthorizedError,
   addProjectAssets,
   deleteProject,
-  downloadAsset,
   downloadZip,
   fileUrl,
   listAssets,
   listProjectAssets,
-  removeProjectAssets,
   updateProject,
-  uploadAssetFile,
   type Asset,
   type Project,
   type ProjectPatch,
@@ -58,6 +51,7 @@ import {
 import { notifyError, notifyInfo } from "../lib/toast";
 import { useFileGrants, useLiveFileGrants } from "../lib/useFileGrants";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
+import AssetGrid from "./asset-grid/AssetGrid";
 import LicenceChip from "./LicenceChip";
 import AttachFilesControl from "./project-attach/AttachFilesControl";
 import { useAttachDrop } from "./project-attach/useAttachDrop";
@@ -78,13 +72,18 @@ type Props = {
   /** App splices the returned row into its project list. */
   onProjectUpdated: (project: Project) => void;
   onProjectDeleted: (id: string) => void;
-  /** App bumps `assetsVersion`, which retriggers the member refetch below. */
+  /**
+   * App bumps `assetsVersion`; that refetches the project's members (the hero,
+   * gallery, tag chips and Add-files exclusions read them) and the counts.
+   */
   onAssetsChanged: () => void;
   onUnauthorized?: () => void;
   slicerSettings?: SlicerSettings;
   engravingSettings?: EngravingSettings;
   previewSettings?: PreviewSettings;
   theme: ResolvedTheme;
+  /** Scroll container the mounted member grid lives in (the app's `<main>`). */
+  scrollElementRef?: RefObject<HTMLElement | null>;
 };
 
 type Draft = {
@@ -139,13 +138,6 @@ function metadataEntries(metadata: Record<string, unknown>): MetadataEntry[] {
     });
 }
 
-/** Placeholder icon for a member without a thumbnail of its own. */
-function placeholderIconFor(asset: Asset) {
-  if (isImageAsset(asset)) return ImageIcon;
-  if (isModelAsset(asset)) return FileBox;
-  return FileIcon;
-}
-
 const FOCUS_VISIBLE =
   "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2";
 const BUTTON_PRIMARY = `inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-2 text-sm font-semibold transition-colors hover:bg-accent-strong disabled:opacity-60 ${FOCUS_VISIBLE}`;
@@ -187,9 +179,10 @@ const USER_SUPPLIED_FILES = "user-supplied";
 
 /**
  * The project detail landing page (Mf-6cxs): hero with cover + gallery,
- * actions, metadata details, the rendered markdown description and the
- * compact member file list. `ProjectView` owns the navigation chrome (Back
- * button, Escape-to-close); this page only intercepts Escape while editing (it
+ * actions, metadata details, the rendered markdown description and the member
+ * listing (the project-scoped `AssetGrid`, Mf-73vb). `ProjectView` owns the
+ * navigation chrome (Back button, Escape-to-close); this page only intercepts
+ * Escape while editing (it
  * `preventDefault()`s so the project stays open) and lets open dialogs handle
  * their own.
  */
@@ -203,7 +196,10 @@ export default function ProjectLanding({
   onAssetsChanged,
   onUnauthorized,
   slicerSettings,
+  engravingSettings,
+  previewSettings,
   theme,
+  scrollElementRef,
 }: Props): ReactElement {
   const handleApiError = useCallback(
     (err: unknown, message: string) => {
@@ -230,57 +226,28 @@ export default function ProjectLanding({
   // --- Members (the project's files) --------------------------------------
 
   const [members, setMembers] = useState<Asset[]>([]);
-  const [membersLoading, setMembersLoading] = useState(true);
-  const [membersHasMore, setMembersHasMore] = useState(false);
-  const [membersNextOffset, setMembersNextOffset] = useState<number | null>(null);
-  const [membersLoadingMore, setMembersLoadingMore] = useState(false);
   // Guards against a stale response landing after the project changed.
   const membersRequestRef = useRef(0);
 
   const refreshMembers = useCallback(async () => {
     const requestId = ++membersRequestRef.current;
-    setMembersLoading(true);
     try {
       const res = await listProjectAssets({ projectId: project.id, limit: MEMBER_PAGE_SIZE });
       if (membersRequestRef.current !== requestId) return;
       setMembers(res.items);
-      setMembersHasMore(res.hasMore);
-      setMembersNextOffset(res.nextOffset ?? null);
     } catch (err) {
       if (membersRequestRef.current !== requestId) return;
       handleApiError(err, "Failed to load the project's files.");
-    } finally {
-      if (membersRequestRef.current === requestId) setMembersLoading(false);
     }
   }, [project.id, handleApiError]);
 
-  // The accumulation resets whenever the project changes; App's
-  // `assetsVersion` bump refetches the truth after membership changes.
+  // The member list resets whenever the project changes; App's `assetsVersion`
+  // bump refetches it. The grid below owns its own listing, but the hero cover,
+  // gallery, tag chips and Add-files exclusions all still read this fetch.
   useEffect(() => {
     setMembers([]);
-    setMembersHasMore(false);
-    setMembersNextOffset(null);
     void refreshMembers();
   }, [refreshMembers, assetsVersion]);
-
-  const loadMoreMembers = async () => {
-    if (membersLoadingMore || !membersHasMore) return;
-    setMembersLoadingMore(true);
-    try {
-      const res = await listProjectAssets({
-        projectId: project.id,
-        limit: MEMBER_PAGE_SIZE,
-        offset: membersNextOffset ?? members.length,
-      });
-      setMembers(previous => [...previous, ...res.items]);
-      setMembersHasMore(res.hasMore);
-      setMembersNextOffset(res.nextOffset ?? null);
-    } catch (err) {
-      handleApiError(err, "Failed to load more files.");
-    } finally {
-      setMembersLoadingMore(false);
-    }
-  };
 
   // --- Derived hero data ---------------------------------------------------
 
@@ -308,19 +275,19 @@ export default function ProjectLanding({
 
   const coverUrl = coverRel ? fileUrl(coverRel) : null;
 
-  // One silent keeper for every `<img src>` this page paints: the hero cover,
-  // each gallery thumbnail (through the same `thumb_url || url` expression the
-  // `<img>` reads, so the rendered rel is always the granted one) and each
-  // member row's thumb. Silent because a re-mint must not repaint a mounted
-  // `<img>` (ADR 0005 decision 10); the gallery anchors have their own live
-  // keeper in `GalleryLink`.
+  // One silent keeper for every `<img src>` this page itself paints: the hero
+  // cover and each gallery thumbnail (through the same `thumb_url || url`
+  // expression the `<img>` reads, so the rendered rel is always the granted
+  // one). The grid's cards own their own keeper (`AssetCard`'s `useFileGrants`),
+  // so member rows are deliberately absent here.
+  // Silent because a re-mint must not repaint a mounted `<img>` (ADR 0005
+  // decision 10); the gallery anchors have their own live keeper in `GalleryLink`.
   const paintedRels = useMemo(
     () => [
       coverRel,
       ...galleryMembers.map(asset => asset.thumb_url || asset.url),
-      ...members.map(member => member.thumb_url),
     ],
-    [coverRel, galleryMembers, members],
+    [coverRel, galleryMembers],
   );
   useFileGrants(paintedRels);
 
@@ -422,42 +389,6 @@ export default function ProjectLanding({
     }
   };
 
-  const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const downloadOne = async (asset: Asset) => {
-    if (downloadingId) return;
-    setDownloadingId(asset.id);
-    try {
-      const res = await downloadAsset(asset);
-      await saveResponseToDisk(res, asset.filename || "download");
-    } catch (err) {
-      handleApiError(err, "Download failed. Please try again.");
-    } finally {
-      setDownloadingId(null);
-    }
-  };
-
-  const requestRemoveAsset = (asset: Asset) =>
-    setConfirm({
-      title: `Remove ${asset.name}?`,
-      body: `"${asset.name}" stays in your library; only its membership in this project is removed.`,
-      confirmLabel: "Remove",
-      danger: true,
-      run: async () => {
-        try {
-          const res = await removeProjectAssets(project.id, [asset.id]);
-          if (res.failed.length > 0) {
-            notifyError(`Failed to remove "${asset.name}" from the project.`);
-            return;
-          }
-          setMembers(previous => previous.filter(member => member.id !== asset.id));
-          notifyInfo(`Removed "${asset.name}" from the project.`);
-          onAssetsChanged();
-        } catch (err) {
-          handleApiError(err, "Failed to remove the file from the project.");
-        }
-      },
-    });
-
   const requestDeleteProject = () =>
     setConfirm({
       title: `Delete ${project.name}?`,
@@ -474,35 +405,6 @@ export default function ProjectLanding({
         }
       },
     });
-
-  // --- Supporting files ------------------------------------------------------
-
-  const supportInputRef = useRef<HTMLInputElement | null>(null);
-  const supportTargetRef = useRef<Asset | null>(null);
-  const [supportBusyId, setSupportBusyId] = useState<string | null>(null);
-
-  const pickSupportingFile = (asset: Asset) => {
-    supportTargetRef.current = asset;
-    supportInputRef.current?.click();
-  };
-
-  const handleSupportFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    const asset = supportTargetRef.current;
-    supportTargetRef.current = null;
-    if (!file || !asset) return;
-    setSupportBusyId(asset.id);
-    try {
-      await uploadAssetFile(asset.id, file);
-      notifyInfo(`Added "${file.name}" to ${asset.name}.`);
-      await refreshMembers();
-    } catch (err) {
-      handleApiError(err, "Failed to add the supporting file.");
-    } finally {
-      setSupportBusyId(null);
-    }
-  };
 
   // --- Inline editing ---------------------------------------------------------
 
@@ -716,16 +618,6 @@ export default function ProjectLanding({
 
   return (
     <div className="flex min-w-0 flex-col gap-6" onKeyDown={handleKeyDown} data-theme={theme}>
-      {/* Hidden input shared by every row's "add supporting file" action. */}
-      <input
-        ref={supportInputRef}
-        type="file"
-        className="hidden"
-        aria-hidden="true"
-        tabIndex={-1}
-        onChange={event => void handleSupportFile(event)}
-      />
-
       <header className="flex min-w-0 flex-col gap-5">
         <div className="flex min-w-0 flex-col gap-5 md:flex-row">
           <div className="min-w-0 md:basis-2/5">
@@ -1112,13 +1004,12 @@ export default function ProjectLanding({
             Files
           </h2>
           <div className="flex flex-wrap items-center gap-2">
-            {membersHasMore && (
-              <span className="text-xs text-muted">
-                Showing {members.length} of {project.asset_count}
-              </span>
-            )}
-            {/* One control only: the empty state shows its own, below. */}
-            {canContribute && members.length > 0 && <AttachFilesControl attacher={attacher} />}
+            {/* The project's own count, not the loaded member window: the grid
+                below pages itself, so a "Showing X of Y" here would lie. */}
+            <span className="text-xs text-muted">
+              {project.asset_count} file{project.asset_count === 1 ? "" : "s"} in this project
+            </span>
+            {canContribute && <AttachFilesControl attacher={attacher} />}
           </div>
         </div>
 
@@ -1128,126 +1019,23 @@ export default function ProjectLanding({
           </p>
         )}
 
-        {membersLoading ? (
-          <p className="mt-2 text-sm text-muted">Loading files…</p>
-        ) : members.length === 0 ? (
-          <div className="mt-2 rounded-lg border border-dashed border-panel-strong px-4 py-8 text-center">
-            <p className="text-sm text-muted">This project has no files yet.</p>
-            {canContribute && (
-              <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-                <button
-                  type="button"
-                  className={`text-sm font-semibold text-accent hover:underline ${FOCUS_VISIBLE}`}
-                  onClick={() => void openPicker()}
-                >
-                  Add files
-                </button>
-                <AttachFilesControl attacher={attacher} />
-              </div>
-            )}
-          </div>
-        ) : (
-          <>
-            <ul className="mt-2 flex flex-col gap-2">
-              {members.map(asset => {
-                const thumbUrl = asset.thumb_url ? fileUrl(asset.thumb_url) : null;
-                const ThumbIcon = placeholderIconFor(asset);
-                return (
-                  <li
-                    key={asset.id}
-                    className="flex min-w-0 items-center gap-3 rounded-lg border border-panel bg-panel-soft px-3 py-2"
-                  >
-                    {thumbUrl ? (
-                      <img
-                        src={thumbUrl}
-                        alt=""
-                        loading="lazy"
-                        className="h-10 w-10 shrink-0 rounded-md border border-panel object-cover"
-                      />
-                    ) : (
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-panel bg-panel-strong">
-                        <ThumbIcon className="h-5 w-5 text-subtle" aria-hidden="true" />
-                      </span>
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{asset.name}</p>
-                      <p className="truncate text-xs text-muted">
-                        {formatBytes(asset.size)} · {typeLabelFor(asset)}
-                        {asset.supporting_file_count > 0 &&
-                          ` · ${asset.supporting_file_count} supporting ${
-                            asset.supporting_file_count === 1 ? "file" : "files"
-                          }`}
-                        {asset.created_by && ` · Added by ${asset.created_by}`}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      {canOpenInSlicer(asset) && (
-                        <button
-                          type="button"
-                          aria-label={`Open ${asset.name} in ${slicerLabel}`}
-                          title={`Open in ${slicerLabel}`}
-                          className={BUTTON_ICON}
-                          onClick={() => void openInSlicer(asset)}
-                        >
-                          <FileBox className="h-4 w-4" aria-hidden="true" />
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        aria-label={`Download ${asset.name}`}
-                        title="Download"
-                        className={BUTTON_ICON}
-                        disabled={downloadingId === asset.id}
-                        onClick={() => void downloadOne(asset)}
-                      >
-                        <Download className="h-4 w-4" aria-hidden="true" />
-                      </button>
-                      {/* Deleting a member only removes the join row, not the
-                          asset: `DELETE /project/{project_id}/assets` is a
-                          CONTRIBUTE route server-side, so this stays
-                          canContribute on purpose. Do not "fix" it. */}
-                      {canContribute && (
-                        <>
-                          <button
-                            type="button"
-                            aria-label={`Add supporting file to ${asset.name}`}
-                            title="Add supporting file"
-                            className={BUTTON_ICON}
-                            disabled={supportBusyId === asset.id}
-                            onClick={() => pickSupportingFile(asset)}
-                          >
-                            <Paperclip className="h-4 w-4" aria-hidden="true" />
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={`Remove ${asset.name} from project`}
-                            title="Remove from project"
-                            className={BUTTON_ICON}
-                            onClick={() => requestRemoveAsset(asset)}
-                          >
-                            <X className="h-4 w-4" aria-hidden="true" />
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-            {membersHasMore && (
-              <div className="mt-3">
-                <button
-                  type="button"
-                  className={BUTTON_SECONDARY}
-                  disabled={membersLoadingMore}
-                  onClick={() => void loadMoreMembers()}
-                >
-                  {membersLoadingMore ? "Loading…" : "Load more"}
-                </button>
-              </div>
-            )}
-          </>
-        )}
+        {/* The grid owns the member listing, its empty state and every per-file
+            control (including the unlink, which is a contribute write). */}
+        <div className="mt-2">
+          <AssetGrid
+            projectId={project.id}
+            projectName={project.name}
+            canContribute={canContribute}
+            canDelete={canDelete}
+            assetsVersion={assetsVersion}
+            onProjectsChanged={onAssetsChanged}
+            scrollElementRef={scrollElementRef}
+            slicerSettings={slicerSettings}
+            engravingSettings={engravingSettings}
+            previewSettings={previewSettings}
+            theme={theme}
+          />
+        </div>
       </section>
 
       {confirm && (

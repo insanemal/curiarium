@@ -7,9 +7,9 @@ import type { Project } from "../lib/api";
 
 /**
  * The real `ProjectView` + `ProjectLanding` pair, with `../lib/api` mocked the
- * way the landing page's own tests mock it. Neither component is stubbed: the
- * point is that a licence edit reaches the card grid through the same list
- * splice `App.handleProjectUpdated` performs.
+ * way the landing page's own tests mock it. The member grid is stubbed (Mf-73vb):
+ * it has its own suite, and this file is about a licence edit reaching the card
+ * grid through the same list splice `App.handleProjectUpdated` performs.
  */
 vi.mock("../lib/api", () => ({
   UnauthorizedError: class UnauthorizedError extends Error {},
@@ -31,6 +31,12 @@ vi.mock("../lib/api", () => ({
 
 vi.mock("../lib/download", () => ({
   saveResponseToDisk: vi.fn(),
+}));
+
+// The member grid fetches its own listing/facets on mount and has its own
+// suite (Mf-73vb); the harness here never looks at members.
+vi.mock("./asset-grid/AssetGrid", () => ({
+  default: () => <div data-testid="asset-grid-stub" />,
 }));
 
 import ProjectView from "./ProjectView";

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { ComponentProps } from "react";
+import { createRef, type ComponentProps } from "react";
 
 import type { Asset, Project } from "../lib/api";
 
@@ -24,6 +24,27 @@ vi.mock("../lib/api", () => ({
 
 vi.mock("../lib/download", () => ({
   saveResponseToDisk: vi.fn(),
+}));
+
+// The landing delegates the member list to the real grid; this stub records
+// the context it is handed so the forwarding contract stays testable here.
+const gridState = vi.hoisted(() => ({
+  received: null as Record<string, unknown> | null,
+}));
+
+vi.mock("./asset-grid/AssetGrid", () => ({
+  default: (props: Record<string, unknown>) => {
+    gridState.received = props;
+    return (
+      <div
+        data-testid="asset-grid-stub"
+        data-project-id={String(props.projectId)}
+        data-assets-version={String(props.assetsVersion)}
+        data-can-contribute={String(props.canContribute)}
+        data-can-delete={String(props.canDelete)}
+      />
+    );
+  },
 }));
 
 import ProjectLanding from "./ProjectLanding";
@@ -181,7 +202,10 @@ beforeEach(() => {
   uploadAssetFileMock.mockImplementation(async id => makeAsset({ id }));
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  gridState.received = null;
+  cleanup();
+});
 
 describe("ProjectLanding hero", () => {
   it("renders title, creator, licence chip, source badge and the stat row", async () => {
@@ -192,7 +216,7 @@ describe("ProjectLanding hero", () => {
         licence_url: "https://creativecommons.org/licenses/by-sa/4.0/",
       }),
     });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     expect(screen.getByRole("heading", { level: 1, name: "Hydra" })).toBeTruthy();
     expect(screen.getByText("By Ada")).toBeTruthy();
@@ -218,13 +242,13 @@ describe("ProjectLanding hero", () => {
     renderLanding({
       project: makeProject({ source_url: "https://cults3d.com/en/3d-model/hydra" }),
     });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
     expect(screen.getByRole("link", { name: "View original" })).toBeTruthy();
   });
 
   it("shows only image members in the gallery, cover first", async () => {
     renderLanding({ project: makeProject({ cover_asset_id: "a3" }) });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const gallery = screen.getByTestId("project-gallery");
     const imgs = within(gallery).getAllByRole("img");
@@ -235,7 +259,7 @@ describe("ProjectLanding hero", () => {
   it("patches exactly cover_asset_id when choosing a new cover", async () => {
     const onProjectUpdated = vi.fn();
     renderLanding({ onProjectUpdated });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Use Photo one as cover" }));
 
@@ -247,7 +271,7 @@ describe("ProjectLanding hero", () => {
 
   it("prefers cover_thumb_url for the hero cover", async () => {
     renderLanding({ project: makeProject({ cover_thumb_url: "/projects/p1/cover-thumb" }) });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const img = screen.getByRole("img", { name: "Hydra cover" });
     expect(img.getAttribute("src")).toBe("/projects/p1/cover-thumb");
@@ -255,7 +279,7 @@ describe("ProjectLanding hero", () => {
 
   it("falls back to the first image member's thumb for the hero cover", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const img = screen.getByRole("img", { name: "Hydra cover" });
     expect(img.getAttribute("src")).toBe("/assets/a2/thumb");
@@ -275,7 +299,7 @@ describe("ProjectLanding hero", () => {
       hasMore: false,
     });
     renderLanding({ project: makeProject({ asset_count: 1 }) });
-    await screen.findByText("Only model");
+    await waitFor(() => expect(listProjectAssetsMock).toHaveBeenCalled());
 
     expect(screen.getByRole("img", { name: "No cover image" })).toBeTruthy();
     expect(screen.queryByTestId("project-gallery")).toBeNull();
@@ -298,7 +322,7 @@ describe("ProjectLanding hero", () => {
     ];
     listProjectAssetsMock.mockResolvedValue({ items: tagged, hasMore: false });
     renderLanding();
-    await screen.findByText("T1");
+    await screen.findByText("alpha");
 
     expect(screen.getByText("alpha")).toBeTruthy();
     expect(screen.getByText("hotel")).toBeTruthy();
@@ -311,7 +335,7 @@ describe("ProjectLanding hero", () => {
 describe("ProjectLanding actions", () => {
   it("downloads everything with exactly { project_id } and saves the zip", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: /Download all as ZIP/ }));
 
@@ -325,7 +349,7 @@ describe("ProjectLanding actions", () => {
   it("disables download-all with an explanation when the project has no files", async () => {
     listProjectAssetsMock.mockResolvedValue({ items: [], hasMore: false });
     renderLanding({ project: makeProject({ asset_count: 0 }) });
-    await screen.findByText("This project has no files yet.");
+    await waitFor(() => expect(listProjectAssetsMock).toHaveBeenCalled());
 
     const button = screen.getByRole("button", {
       name: /Download all as ZIP/,
@@ -336,19 +360,19 @@ describe("ProjectLanding actions", () => {
 
   it("shows the primary-file slicer action only when the slicer is enabled", async () => {
     const first = renderLanding({ slicerSettings: { enabled: false, selected: "orca" } });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
     expect(screen.queryByRole("button", { name: "Open in OrcaSlicer" })).toBeNull();
     first.unmount();
 
     renderLanding({ slicerSettings: { enabled: true, selected: "orca" } });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
     expect(screen.getByRole("button", { name: "Open in OrcaSlicer" })).toBeTruthy();
   });
 
   it("deletes the project after an honest confirm dialog", async () => {
     const onProjectDeleted = vi.fn();
     renderLanding({ onProjectDeleted });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     const dialog = screen.getByRole("dialog", { name: "Delete Hydra?" });
@@ -361,122 +385,46 @@ describe("ProjectLanding actions", () => {
 });
 
 describe("ProjectLanding files", () => {
-  it("lists exactly the mocked members with name, size and type", async () => {
-    renderLanding();
-    await screen.findByText("Body");
-
-    const files = screen.getByRole("region", { name: "Files" });
-    const rows = within(files).getAllByRole("listitem");
-    expect(rows.length).toBe(3);
-    expect(within(files).getByText("Body")).toBeTruthy();
-    expect(within(files).getByText("Photo one")).toBeTruthy();
-    expect(within(files).getByText("Photo two")).toBeTruthy();
-    expect(within(files).getByText("2.0 KB · STL")).toBeTruthy();
-    expect(within(files).getByText("1.0 KB · JPG")).toBeTruthy();
-    expect(within(files).getByText("2.0 KB · PNG")).toBeTruthy();
-  });
-
-  it("appends the uploader to the member meta line and leaves it out when unset", async () => {
-    listProjectAssetsMock.mockResolvedValue({
-      items: [
-        { ...members[0], created_by: "Ada", created_via: "upload" },
-        { ...members[1], created_by: null, created_via: "upload" },
-        { ...members[2], created_by: "Ada", created_via: "zip-import", supporting_file_count: 2 },
-      ],
-      hasMore: false,
-    });
-    renderLanding();
-    await screen.findByText("Body");
-
-    const files = screen.getByRole("region", { name: "Files" });
-    expect(within(files).getByText("2.0 KB · STL · Added by Ada")).toBeTruthy();
-    // No uploader means no dangling separator, byte-identical to the old line.
-    expect(within(files).getByText("1.0 KB · JPG")).toBeTruthy();
-    // The supporting-file suffix keeps its place: bytes · type · supporting · added by.
-    expect(
-      within(files).getByText("2.0 KB · PNG · 2 supporting files · Added by Ada"),
-    ).toBeTruthy();
-  });
-
-  it("removes a file from the project after confirming, then refreshes", async () => {
-    const onAssetsChanged = vi.fn();
-    removeProjectAssetsMock.mockResolvedValue({ removed: ["a2"], skipped: [], failed: [] });
-    renderLanding({ onAssetsChanged });
-    await screen.findByText("Photo one");
-
-    fireEvent.click(screen.getByRole("button", { name: "Remove Photo one from project" }));
-    const dialog = screen.getByRole("dialog", { name: "Remove Photo one?" });
-    expect(dialog.textContent).toMatch(/stays in your library/);
-
-    fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
-    await waitFor(() => expect(removeProjectAssetsMock).toHaveBeenCalledWith("p1", ["a2"]));
-    await waitFor(() => expect(screen.queryByText("Photo one")).toBeNull());
-    expect(onAssetsChanged).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText("Body")).toBeTruthy();
-  });
-
-  it("downloads a single file through downloadAsset", async () => {
-    renderLanding();
-    await screen.findByText("Body");
-
-    fireEvent.click(screen.getByRole("button", { name: "Download Body" }));
-
-    await waitFor(() => expect(downloadAssetMock).toHaveBeenCalledTimes(1));
-    expect(downloadAssetMock.mock.calls[0][0]).toMatchObject({ id: "a1" });
-    await waitFor(() => expect(saveResponseToDiskMock).toHaveBeenCalledTimes(1));
-    expect(saveResponseToDiskMock.mock.calls[0][1]).toBe("body.stl");
-  });
-
-  it("appends the next page and shows progress while more remain", async () => {
-    listProjectAssetsMock
-      .mockReset()
-      .mockResolvedValueOnce({ items: members.slice(0, 2), hasMore: true, nextOffset: 2 })
-      .mockResolvedValueOnce({ items: members.slice(2), hasMore: false });
-    renderLanding();
-    await screen.findByText("Photo one");
-
-    expect(screen.queryByText("Photo two")).toBeNull();
-    expect(screen.getByText("Showing 2 of 3")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
-    await screen.findByText("Photo two");
-
-    expect(listProjectAssetsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ projectId: "p1", offset: 2 }),
-    );
-    expect(screen.queryByText(/Showing \d+ of \d+/)).toBeNull();
-  });
-
-  it("shows the empty state with an add-files button", async () => {
+  it("offers exactly one add-files button that opens the picker", async () => {
     listProjectAssetsMock.mockResolvedValue({ items: [], hasMore: false });
     renderLanding({ project: makeProject({ asset_count: 0 }) });
-    await screen.findByText("This project has no files yet.");
+    await waitFor(() => expect(listProjectAssetsMock).toHaveBeenCalled());
 
+    // The grid owns the empty-state copy and its own attach control (stubbed
+    // here), so the page must contribute exactly the hero action row's button.
     const addButtons = screen.getAllByRole("button", { name: "Add files" });
-    expect(addButtons.length).toBe(2); // actions row + empty state
-    fireEvent.click(addButtons[addButtons.length - 1]);
+    expect(addButtons.length).toBe(1);
+    fireEvent.click(addButtons[0]);
     await screen.findByRole("dialog", { name: /Add files to Hydra/ });
   });
 
-  it("uploads a supporting file and refreshes the list", async () => {
-    renderLanding();
-    await screen.findByText("Body");
+  it("delegates member browsing to the project-scoped grid and forwards its context", async () => {
+    const scrollElementRef = createRef<HTMLElement>();
+    const onAssetsChanged = vi.fn();
+    renderLanding({ scrollElementRef, onAssetsChanged });
 
-    fireEvent.click(screen.getByRole("button", { name: "Add supporting file to Body" }));
-    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
-    const file = new File(["notes"], "notes.txt", { type: "text/plain" });
-    fireEvent.change(input, { target: { files: [file] } });
-
-    await waitFor(() => expect(uploadAssetFileMock).toHaveBeenCalledWith("a1", file));
-    await waitFor(() => expect(listProjectAssetsMock).toHaveBeenCalledTimes(2));
-    expect(getToasts().some(toast => /notes\.txt/.test(toast.message))).toBe(true);
+    await waitFor(() => expect(gridState.received).not.toBeNull());
+    const received = gridState.received ?? {};
+    expect(received.projectId).toBe("p1");
+    expect(received.projectName).toBe("Hydra");
+    expect(received.canContribute).toBe(true);
+    expect(received.canDelete).toBe(true);
+    expect(received.assetsVersion).toBe(0);
+    // The grid calls this after a membership change; it must be the App handler
+    // the page already uses for counts and the member refetch.
+    expect(received.onProjectsChanged).toBe(onAssetsChanged);
+    expect(received.scrollElementRef).toBe(scrollElementRef);
   });
 });
 
 describe("ProjectLanding viewer role", () => {
   it("hides every write control and keeps the read surfaces", async () => {
-    renderLanding({ canContribute: false, canDelete: false, project: makeProject({ cover_asset_id: "a3" }) });
-    await screen.findByText("Body");
+    renderLanding({
+      canContribute: false,
+      canDelete: false,
+      project: makeProject({ cover_asset_id: "a3" }),
+    });
+    await screen.findByRole("img", { name: "Photo one" });
 
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Add files" })).toBeNull();
@@ -485,19 +433,17 @@ describe("ProjectLanding viewer role", () => {
     expect(screen.queryByRole("button", { name: "Add a description" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Attach files" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Attach folder" })).toBeNull();
-    expect(screen.queryAllByRole("button", { name: /^Add supporting file to / })).toHaveLength(0);
-    expect(screen.queryAllByRole("button", { name: /^Remove .* from project$/ })).toHaveLength(0);
+    // Per-card controls live in the stubbed grid now; it receives the
+    // capabilities and derives the absence of both write affordances itself.
+    expect(gridState.received?.canContribute).toBe(false);
+    expect(gridState.received?.canDelete).toBe(false);
 
-    // Reads stay: the ZIP export, the member downloads and the rendered page.
+    // Reads stay: the ZIP export and the rendered page.
     expect(screen.getByRole("button", { name: /Download all as ZIP/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Download Body" })).toBeTruthy();
     expect(screen.getByText("bold").tagName).toBe("STRONG");
 
     const details = screen.getByRole("region", { name: "Details" });
     expect(within(details).getByText("Own creation")).toBeTruthy();
-
-    const files = screen.getByRole("region", { name: "Files" });
-    expect(within(files).getByText("Body")).toBeTruthy();
 
     // The gallery keeps its images and the cover badge.
     const gallery = screen.getByTestId("project-gallery");
@@ -505,10 +451,10 @@ describe("ProjectLanding viewer role", () => {
     expect(within(gallery).getByText("Cover")).toBeTruthy();
   });
 
-  it("keeps the empty state readable without offering add or attach controls", async () => {
+  it("offers no add or attach controls without the contribute capability", async () => {
     listProjectAssetsMock.mockResolvedValue({ items: [], hasMore: false });
     renderLanding({ canContribute: false, canDelete: false, project: makeProject({ asset_count: 0 }) });
-    await screen.findByText("This project has no files yet.");
+    await waitFor(() => expect(listProjectAssetsMock).toHaveBeenCalled());
 
     expect(screen.queryByRole("button", { name: "Add files" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Attach files" })).toBeNull();
@@ -517,7 +463,7 @@ describe("ProjectLanding viewer role", () => {
 
   it("shows the no-description placeholder without the edit affordance", async () => {
     renderLanding({ canContribute: false, canDelete: false, project: makeProject({ description: null }) });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     expect(screen.getByText("No description yet.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Add a description" })).toBeNull();
@@ -529,7 +475,7 @@ describe("ProjectLanding viewer role", () => {
       canDelete: false,
       project: makeProject({ origin: "imported", metadata_json: { _files: "user-supplied" } }),
     });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const details = screen.getByRole("region", { name: "Details" });
     const note = within(details).getByText(/Imported details only/);
@@ -539,7 +485,7 @@ describe("ProjectLanding viewer role", () => {
 
   it("is not a drop target, so a dropped file attaches nothing", async () => {
     renderLanding({ canContribute: false, canDelete: false });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const section = screen.getByRole("heading", { name: "Files" }).closest("section");
     if (!section) throw new Error("missing Files section");
@@ -559,7 +505,7 @@ describe("ProjectLanding viewer role", () => {
 
   it("reaches no write API by clicking any visible control", async () => {
     renderLanding({ canContribute: false, canDelete: false });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const controls = screen.getAllByRole("button");
     expect(controls.length).toBeGreaterThan(0);
@@ -576,7 +522,7 @@ describe("ProjectLanding viewer role", () => {
 describe("ProjectLanding editor role", () => {
   it("keeps every write control", async () => {
     renderLanding({ project: makeProject({ cover_asset_id: "a3" }) });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add files" })).toBeTruthy();
@@ -584,24 +530,28 @@ describe("ProjectLanding editor role", () => {
     expect(screen.getByRole("button", { name: "Use Photo one as cover" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Attach files" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Attach folder" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Add supporting file to Body" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Remove Body from project" })).toBeTruthy();
+
+    // Per-file write controls moved into the grid's card menu; the page's job
+    // is to forward the capabilities unchanged (the grid derives the unlink and
+    // suppresses the destroy route itself).
+    expect(gridState.received?.canContribute).toBe(true);
+    expect(gridState.received?.canDelete).toBe(true);
   });
 
   it("keeps the empty-state write controls", async () => {
     listProjectAssetsMock.mockResolvedValue({ items: [], hasMore: false });
     renderLanding({ project: makeProject({ description: null, asset_count: 0 }) });
-    await screen.findByText("This project has no files yet.");
+    await waitFor(() => expect(listProjectAssetsMock).toHaveBeenCalled());
 
     expect(screen.getByRole("button", { name: "Add a description" })).toBeTruthy();
-    // The action row and the empty state both offer the library picker.
-    expect(screen.getAllByRole("button", { name: "Add files" }).length).toBe(2);
+    // The grid owns its own empty state; the page offers the library picker once.
+    expect(screen.getAllByRole("button", { name: "Add files" }).length).toBe(1);
     expect(screen.getByRole("button", { name: "Attach files" })).toBeTruthy();
   });
 
   it("closes the editor when the role is demoted mid-edit", async () => {
     const view = renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(screen.getByRole("textbox", { name: "Project name" })).toBeTruthy();
@@ -618,7 +568,7 @@ describe("ProjectLanding editor role", () => {
 describe("ProjectLanding description", () => {
   it("renders the markdown description", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const strong = screen.getByText("bold");
     expect(strong.tagName).toBe("STRONG");
@@ -626,7 +576,7 @@ describe("ProjectLanding description", () => {
 
   it("offers an editable placeholder when there is no description", async () => {
     renderLanding({ project: makeProject({ description: null }) });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     expect(screen.getByText("No description yet.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Add a description" }));
@@ -651,7 +601,7 @@ describe("ProjectLanding details", () => {
         },
       }),
     });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const details = screen.getByRole("region", { name: "Details" });
     expect(within(details).getByText("Print settings")).toBeTruthy();
@@ -670,14 +620,14 @@ describe("ProjectLanding details", () => {
 
   it("omits the print-settings table when metadata_json is empty", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     expect(screen.queryByText("Print settings")).toBeNull();
   });
 
   it("describes an in-app project as an own creation without source rows", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const details = screen.getByRole("region", { name: "Details" });
     expect(within(details).getByText("Own creation")).toBeTruthy();
@@ -690,7 +640,7 @@ describe("ProjectLanding details", () => {
 
   it("marks a missing licence in the hero and the details panel", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const unknowns = Array.from(document.querySelectorAll("[data-licence-unknown]"));
     expect(unknowns.map(element => element.textContent)).toEqual([
@@ -703,7 +653,7 @@ describe("ProjectLanding details", () => {
 
   it("treats a whitespace-only licence as missing", async () => {
     renderLanding({ project: makeProject({ licence: "   " }) });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const details = screen.getByRole("region", { name: "Details" });
     expect(within(details).getByText("Licence unknown")).toBeTruthy();
@@ -718,7 +668,7 @@ describe("ProjectLanding details", () => {
         licence_url: "https://creativecommons.org/licenses/by-sa/4.0/",
       }),
     });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     // Hero chip plus the details-panel row.
     const chips = Array.from(document.querySelectorAll("[data-licence-chip]"));
@@ -741,7 +691,7 @@ describe("ProjectLanding details", () => {
         licence_url: null,
       }),
     });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const details = screen.getByRole("region", { name: "Details" });
     expect(within(details).getByText("Imported")).toBeTruthy();
@@ -762,7 +712,7 @@ describe("ProjectLanding details", () => {
         metadata_json: { filament: "PLA", _files: "user-supplied" },
       }),
     });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const details = screen.getByRole("region", { name: "Details" });
     const note = within(details).getByText(/Imported details only/);
@@ -780,7 +730,7 @@ describe("ProjectLanding details", () => {
 
   it("shows no imported-details note for a project whose files came with it", async () => {
     renderLanding({ project: makeProject({ metadata_json: { filament: "PLA" } }) });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     expect(screen.queryByText(/Imported details only/)).toBeNull();
   });
@@ -790,7 +740,7 @@ describe("ProjectLanding inline editing", () => {
   it("saves only the changed fields and reports the update", async () => {
     const onProjectUpdated = vi.fn();
     renderLanding({ onProjectUpdated });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Licence" }), {
@@ -809,7 +759,7 @@ describe("ProjectLanding inline editing", () => {
 
   it("asks before discarding changes on cancel", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
@@ -831,7 +781,7 @@ describe("ProjectLanding inline editing", () => {
     const seenOnDocument: boolean[] = [];
     document.addEventListener("keydown", event => seenOnDocument.push(event.defaultPrevented));
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const nameInput = screen.getByRole("textbox", { name: "Project name" });
@@ -846,7 +796,7 @@ describe("ProjectLanding inline editing", () => {
 
   it("blocks saving an empty project name", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
@@ -871,7 +821,7 @@ describe("ProjectLanding add-files dialog", () => {
     listAssetsMock.mockResolvedValue({ items: libraryAssets, hasMore: false });
     addProjectAssetsMock.mockResolvedValue({ added: ["lib1", "lib2"], skipped: [], failed: [] });
     renderLanding({ onAssetsChanged });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Add files" }));
     const dialog = await screen.findByRole("dialog", { name: /Add files to Hydra/ });
@@ -901,7 +851,7 @@ describe("ProjectLanding add-files dialog", () => {
   it("closes on Escape without adding anything", async () => {
     listAssetsMock.mockResolvedValue({ items: libraryAssets, hasMore: false });
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Add files" }));
     const dialog = await screen.findByRole("dialog", { name: /Add files to Hydra/ });
@@ -917,7 +867,7 @@ describe("ProjectLanding add-files dialog", () => {
 describe("ProjectLanding unsaved changes", () => {
   it("guards a dirty description behind the discard confirmation", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const description = screen.getByRole("textbox", { name: "Description" });
@@ -943,7 +893,7 @@ describe("ProjectLanding unsaved changes", () => {
   it("clears the dirty flag after saving so a fresh cancel does not prompt", async () => {
     const onProjectUpdated = vi.fn();
     const view = renderLanding({ onProjectUpdated });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Description" }), {
@@ -971,7 +921,7 @@ describe("ProjectLanding unsaved changes", () => {
 describe("ProjectLanding attach-own-files", () => {
   it("renders the attach controls and a folder input that carries webkitdirectory", async () => {
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     expect(screen.getByRole("button", { name: "Attach files" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Attach folder" })).toBeTruthy();
@@ -987,7 +937,7 @@ describe("ProjectLanding attach-own-files", () => {
       failed: [],
     }));
     renderLanding({ onAssetsChanged });
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const picked = new File(["cube"], "widget.stl", { type: "model/stl" });
     fireEvent.change(screen.getByTestId("attach-files-input"), { target: { files: [picked] } });
@@ -1008,7 +958,7 @@ describe("ProjectLanding attach-own-files", () => {
       failed: [],
     }));
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     const section = screen.getByRole("heading", { name: "Files" }).closest("section");
     if (!section) throw new Error("missing Files section");
@@ -1031,9 +981,9 @@ describe("ProjectLanding attach-own-files", () => {
     listProjectAssetsMock.mockResolvedValue({ items: [], hasMore: false });
     renderLanding({ project: makeProject({ asset_count: 0 }) });
 
-    await screen.findByText("This project has no files yet.");
-    // The hero action and the empty state both offer the library picker.
-    expect(screen.getAllByRole("button", { name: "Add files" }).length).toBeGreaterThan(0);
+    await waitFor(() => expect(listProjectAssetsMock).toHaveBeenCalled());
+    // The page's own control stays available even with no members.
+    expect(screen.getAllByRole("button", { name: "Add files" }).length).toBe(1);
     expect(screen.getByRole("button", { name: "Attach files" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Attach folder" })).toBeTruthy();
   });
@@ -1044,7 +994,7 @@ describe("ProjectLanding attach escape guard", () => {
     const seenOnDocument: boolean[] = [];
     document.addEventListener("keydown", event => seenOnDocument.push(event.defaultPrevented));
     renderLanding();
-    await screen.findByText("Body");
+    await screen.findByRole("img", { name: "Photo one" });
 
     fireEvent.change(screen.getByTestId("attach-files-input"), {
       target: { files: [new File(["zip-bytes"], "pack.zip")] },

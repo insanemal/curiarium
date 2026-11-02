@@ -6,6 +6,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type ReactElement,
+  type RefObject,
 } from "react";
 import { Layers3, Search, X } from "lucide-react";
 
@@ -45,6 +46,8 @@ type Props = {
   engravingSettings?: EngravingSettings;
   previewSettings?: PreviewSettings;
   theme: ResolvedTheme;
+  /** Scroll container the project's member grid lives in (the app's `<main>`). */
+  scrollElementRef?: RefObject<HTMLElement | null>;
 };
 
 function coverFor(project: Project, className: string) {
@@ -146,6 +149,7 @@ export default function ProjectView({
   engravingSettings,
   previewSettings,
   theme,
+  scrollElementRef,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -317,6 +321,7 @@ export default function ProjectView({
           engravingSettings={engravingSettings}
           previewSettings={previewSettings}
           theme={theme}
+          scrollElementRef={scrollElementRef}
         />
       </div>
     );

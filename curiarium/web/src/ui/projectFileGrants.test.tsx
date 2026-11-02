@@ -2,8 +2,8 @@
 //
 // Acceptance test for `Mf-8a4e`: the project surfaces that render a
 // browser-loaded `fileUrl()` (`ProjectLanding`'s hero cover, gallery thumbs and
-// gallery anchors, its member-row thumbs, `ProjectView`'s card covers and
-// `ImagePickerDialog`'s insert thumbs) must keep their grants warm. ADR 0005
+// gallery anchors, the member grid's card thumbs, `ProjectView`'s card covers
+// and `ImagePickerDialog`'s insert thumbs) must keep their grants warm. ADR 0005
 // decision 10: a grant lives 60 s, so a surface with no keeper goes blank a
 // minute after mount.
 //
@@ -17,7 +17,7 @@
 // The `(a)` assertions — "a further POST /file-grants batch after the mount
 // baseline contains this rel" — are the proof obligation: they are what dies
 // on the pre-fix tree, where the element exists but nothing re-mints it.
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { type ComponentProps } from "react";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -95,6 +95,10 @@ function installFetchStub(): void {
       }
       if (method === "GET" && /\/project\/[^/]+\/assets$/.test(path)) {
         return jsonResponse(projectMembers, 200, { "X-Has-More": "false" });
+      }
+      // The project-scoped grid fetches its facets alongside the listing.
+      if (method === "GET" && (path.endsWith("/tags") || path.endsWith("/creators"))) {
+        return jsonResponse([], 200);
       }
       return jsonResponse({});
     }),
@@ -256,10 +260,9 @@ function galleryHref(name: string): string {
   return anchor.getAttribute("href") ?? "";
 }
 
-/** The Files-section row's thumbnail, found through its member name. */
-function memberRowThumb(name: string): HTMLImageElement {
-  const row = screen.getByText(name).closest("li");
-  return requireImage(row?.querySelector("img") ?? null);
+/** A project grid card's thumbnail, found by the card's asset id. */
+function gridCardThumb(assetId: string): HTMLImageElement {
+  return requireImage(document.querySelector(`[data-asset-id="${assetId}"] img`));
 }
 
 const COVER_PROJECTS: Project[] = [
@@ -449,27 +452,29 @@ describe("project file grants", () => {
     expect(imgSrc(galleryImage("Photo two"))).toBe(mountSrc);
   });
 
-  it("a Files-section member row re-mints its thumbnail past the TTL and keeps its silent src", async () => {
-    const props = landingProps();
-    const view = render(<ProjectLanding {...props} />);
+  it("a project grid card re-mints its thumbnail past the TTL and keeps its silent src", async () => {
+    render(<ProjectLanding {...landingProps()} />);
     await flush();
 
     const baseline = mintRequests.length;
-    const mountSrc = imgSrc(memberRowThumb("Body"));
+    const mountSrc = imgSrc(gridCardThumb("model1"));
 
     await advance(61_000);
 
     expect(
       mintsSince(baseline),
-      "ProjectLanding member-row thumb (Mf-8a4e): no POST /file-grants after the mount baseline carried /thumb/model1.jpg, so the member row goes blank after 60 s",
+      "ProjectLanding grid card thumb (Mf-8a4e): no POST /file-grants after the mount baseline carried /thumb/model1.jpg, so the grid card goes blank after 60 s",
     ).toContain("/thumb/model1.jpg");
     expect(grantedFileUrl("/thumb/model1.jpg")).not.toBeNull();
-    expect(imgSrc(memberRowThumb("Body"))).toBe(mountSrc);
+    expect(imgSrc(gridCardThumb("model1"))).toBe(mountSrc);
 
-    // (d) a parent re-render paints the refreshed grant.
-    view.rerender(<ProjectLanding {...props} />);
+    // (d) a card re-render paints the refreshed grant. AssetCard is memoised,
+    // so the honest trigger is the card's own interaction, not a parent pass.
+    const card = screen.getByText("Body").closest("[data-asset-id]");
+    if (!card) throw new Error("expected the model card");
+    fireEvent.click(within(card as HTMLElement).getByRole("checkbox", { name: "Select" }));
     await flush();
-    const rerenderedSig = sigOf(imgSrc(memberRowThumb("Body")));
+    const rerenderedSig = sigOf(imgSrc(gridCardThumb("model1")));
     expect(rerenderedSig).not.toBeNull();
     expect(rerenderedSig).not.toBe(sigOf(mountSrc));
   });
