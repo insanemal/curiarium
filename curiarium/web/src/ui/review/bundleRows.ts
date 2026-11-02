@@ -38,9 +38,10 @@ export function isBlocked(row: BundleDetectItem): boolean {
 
 /** A row this queue can actually create from. Already-created rows are not
  *  creatable: the server can only answer `skipped`/`already_created` for them,
- *  so sending them would be a request that cannot create anything. */
+ *  so sending them would be a request that cannot create anything. The id is
+ *  the identity, so a nameless project is still settled. */
 export function isCreatable(row: BundleDetectItem): boolean {
-  return !isBlocked(row) && !row.existing_project;
+  return !isBlocked(row) && !row.existing_project_id;
 }
 
 /** The two reveal toggles that widen what the queue shows. */
@@ -53,7 +54,8 @@ export type VisibilityOptions = {
  *  both call this one rule, so they cannot describe the queue two ways. */
 export function matchesVisibility(row: BundleDetectItem, options: VisibilityOptions): boolean {
   return (
-    (options.showDismissed || !row.dismissed) && (options.showCreated || !row.existing_project)
+    (options.showDismissed || !row.dismissed) &&
+    (options.showCreated || !row.existing_project_id)
   );
 }
 
@@ -74,6 +76,16 @@ export function statusLine(row: BundleDetectItem): string {
     ? BLOCKED_REASON_LABELS[row.blocked_reason] ?? row.blocked_reason
     : "blocked";
   return `Blocked - ${reason}`;
+}
+
+/** The detail line for a row that already became a project, or null when it did
+ *  not. The id is the identity and is never spoken: a name we have is named, a
+ *  name we do not have says so honestly rather than printing a uuid or nothing. */
+export function createdProjectLine(row: BundleDetectItem): string | null {
+  if (!row.existing_project_id) return null;
+  const name = (row.existing_project_name ?? "").trim();
+  if (name) return `Already created as project ${name}`;
+  return "Already created as a project - its name is unavailable.";
 }
 
 export function countLabel(value: number, one: string, many: string): string {

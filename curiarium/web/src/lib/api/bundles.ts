@@ -43,7 +43,10 @@ export type BundleDetectItem = {
   status: string;
   blocked_reason: string | null;
   archive: BundleArchive | null;
-  existing_project: string | null;
+  // Both are required so the compiler forces every fixture to declare the pair:
+  // a payload that names an id also names its project (or says it is nameless).
+  existing_project_id: string | null;
+  existing_project_name: string | null;
   dismissed: boolean;
 };
 

@@ -56,7 +56,8 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     status: "ready",
     blocked_reason: null,
     archive: null,
-    existing_project: null,
+    existing_project_id: null,
+    existing_project_name: null,
     dismissed: false,
     ...overrides,
   };
@@ -143,7 +144,7 @@ function makeReport(
       ready,
       blocked: bundles.length - ready,
       dismissed: bundles.filter(row => row.dismissed).length,
-      already_created: bundles.filter(row => row.existing_project).length,
+      already_created: bundles.filter(row => row.existing_project_id).length,
     },
     bundles,
     stale_dismissals: [],
@@ -368,7 +369,8 @@ describe("BundleReviewView badge agreement", () => {
     const created = makeBundle({
       key: "Settled",
       title: "Settled bundle",
-      existing_project: "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61",
+      existing_project_id: "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61",
+      existing_project_name: "Settled project",
     });
     const report = makeReport([pending, dismissed, created]);
     renderView(makeState({ report }));
@@ -402,7 +404,8 @@ describe("BundleReviewView empty states", () => {
   const createdRow = makeBundle({
     key: "Settled",
     title: "Settled bundle",
-    existing_project: "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61",
+    existing_project_id: "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61",
+    existing_project_name: "Settled project",
   });
 
   type Case = {
@@ -499,7 +502,8 @@ describe("BundleReviewView writes", () => {
     const created = makeBundle({
       key: "Legacy_created",
       title: "Legacy created",
-      existing_project: "Legacy created",
+      existing_project_id: "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+      existing_project_name: "Legacy created",
     });
     const state = makeState({ report: makeReport([moai, cableClip, legacyVase, created]) });
     renderView(state);
@@ -522,7 +526,8 @@ describe("BundleReviewView writes", () => {
       key: "Low_created",
       title: "Low created",
       confidence: "low",
-      existing_project: "Low created",
+      existing_project_id: "8d2e3f4a-5b6c-4d7e-9f80-1a2b3c4d5e6f",
+      existing_project_name: "Low created",
     });
     const lowReady = makeBundle({ key: "Sword_hilt", title: "Sword hilt", confidence: "low" });
     const state = makeState({
@@ -609,13 +614,14 @@ describe("BundleReviewView writes", () => {
   });
 
   it("hides an already-created bundle and reports its project once Show created is on", () => {
-    // The wire sends the existing project's uuid, not its name, so the fixture
-    // says what the API can actually send.
+    // The wire sends the existing project's uuid AND its name, so the panel can
+    // name the project without ever putting the uuid on screen.
     const projectId = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
     const created = makeBundle({
       key: "Moai_created",
       title: "Moai created",
-      existing_project: projectId,
+      existing_project_id: projectId,
+      existing_project_name: "Moai statue",
     });
     const state = makeState({ report: makeReport([created]) });
     render(<VisibilityHarness initial={state} />);
@@ -632,7 +638,10 @@ describe("BundleReviewView writes", () => {
 
     expect(rowKeys()).toEqual(["Moai_created"]);
     expect(within(listbox()).getByText("Created")).toBeTruthy();
-    expect(within(detail()).getByText(`Already created as project ${projectId}`)).toBeTruthy();
+    expect(within(detail()).getByText("Already created as project Moai statue")).toBeTruthy();
+    // The identity is never rendered: a uuid on screen is the bug this ticket
+    // removes, so the panel must not contain it anywhere.
+    expect(within(detail()).queryByText(new RegExp(projectId))).toBeNull();
     // There is nothing to create, so neither the name field nor the button is
     // offered; dismissing is still a real decision, so that stays.
     expect(within(detail()).queryByRole("button", { name: "Create project" })).toBeNull();

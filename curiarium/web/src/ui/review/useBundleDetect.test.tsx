@@ -46,7 +46,8 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     status: "ready",
     blocked_reason: null,
     archive: null,
-    existing_project: null,
+    existing_project_id: null,
+    existing_project_name: null,
     dismissed: false,
     ...overrides,
   };

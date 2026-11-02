@@ -151,7 +151,8 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     status: "ready",
     blocked_reason: null,
     archive: null,
-    existing_project: null,
+    existing_project_id: null,
+    existing_project_name: null,
     dismissed: false,
     ...overrides,
   };
@@ -169,7 +170,7 @@ function makeReport(bundles: BundleDetectItem[]): BundleReport {
       ready,
       blocked: bundles.length - ready,
       dismissed: bundles.filter(row => row.dismissed).length,
-      already_created: bundles.filter(row => row.existing_project).length,
+      already_created: bundles.filter(row => row.existing_project_id).length,
     },
     bundles,
     stale_dismissals: [],
@@ -184,7 +185,12 @@ const FIRST_REPORT = makeReport([
 
 /** The same walk after Moai became a project: nothing awaits a decision. */
 const SECOND_REPORT = makeReport([
-  makeBundle({ existing_project: "Moai statue" }),
+  // A name alone was the lie this ticket removes: the wire names the id and
+  // derives the name, never a friendly string with no identity behind it.
+  makeBundle({
+    existing_project_id: "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61",
+    existing_project_name: "Moai statue",
+  }),
   makeBundle({ key: "Old", title: "Old bundle", dismissed: true }),
 ]);
 

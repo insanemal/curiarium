@@ -374,7 +374,12 @@ def test_a_second_run_creates_nothing(client: TestClient, isolated_storage: Path
     report = detect(client, headers)
 
     assert report["counts"]["already_created"] == 1
-    assert row_for(report, MOAI)["existing_project"] == project_id
+    row = row_for(report, MOAI)
+    projects = project_listing(client, headers)
+    assert row["existing_project_id"] == project_id
+    # Identity against the served project, not a literal: the name must be the
+    # one the project endpoint returns for that id, read in the same request.
+    assert row["existing_project_name"] == projects[project_id]["name"]
     second = create(client, headers, [{"key": MOAI}])
     assert second["created"] == 0
     assert second["skipped"] == 1
@@ -394,7 +399,11 @@ def test_an_edited_project_is_never_overwritten(client: TestClient, isolated_sto
     assert client.post(f"/project/{project_id}/assets", json={"asset_ids": [extra_id]}, headers=headers).status_code == 200
 
     report = detect(client, headers)
-    assert row_for(report, MOAI)["existing_project"] == project_id
+    row = row_for(report, MOAI)
+    assert row["existing_project_id"] == project_id
+    # The name is derived per read, never stored at detect time, so an edited
+    # project's new name is what the report says - there is no stale copy.
+    assert row["existing_project_name"] == "Edited Moai"
     again = create(client, headers, [{"key": MOAI}])
 
     assert again["created"] == 0
@@ -403,6 +412,34 @@ def test_an_edited_project_is_never_overwritten(client: TestClient, isolated_sto
     assert len(projects) == 1
     assert projects[project_id]["name"] == "Edited Moai"
     assert member_count(project_id) == 4
+
+
+def test_a_legacy_blank_name_still_reads_as_created(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A project whose name is blank is still created: the id is the identity.
+
+    The name is a display fact, so a blank one becomes None rather than leaking
+    an empty string, and the row stays out of the queue because
+    ``counts.already_created`` keys on the id alone (the Mf-gyxg behaviour).
+    """
+    moai_bundle(isolated_storage)
+    scan()
+    headers = auth_header(client)
+    project_id = create(client, headers, [{"key": MOAI}])["results"][0]["project_id"]
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        project.name = ""
+        session.add(project)
+        session.commit()
+
+    report = detect(client, headers)
+    row = row_for(report, MOAI)
+
+    assert row["existing_project_id"] == project_id
+    assert row["existing_project_name"] is None
+    assert report["counts"]["already_created"] == 1
 
 
 def test_detection_writes_nothing(client: TestClient, isolated_storage: Path) -> None:

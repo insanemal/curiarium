@@ -315,7 +315,7 @@
         "title": "Dismissed",
         "type": "boolean"
       },
-      "existing_project": {
+      "existing_project_id": {
         "anyOf": [
           {
             "type": "string"
@@ -324,7 +324,18 @@
             "type": "null"
           }
         ],
-        "title": "Existing Project"
+        "title": "Existing Project Id"
+      },
+      "existing_project_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Existing Project Name"
       },
       "image_count": {
         "default": 0,

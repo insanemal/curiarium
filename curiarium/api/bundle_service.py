@@ -641,6 +641,13 @@ def _report_row(
             "twin_verified": twin_verified(root / candidate.archive_path, candidate.snapshot.entries),
         }
     existing = find_existing_project(session, key=key, source_url=facts.source_url, name=suggestion)
+    # One row read, two derived fields: the id is the identity, the name is what
+    # a human can read. A blank/whitespace name is reported as None so the wire
+    # never implies a name it does not have.
+    existing_project_id = existing.id if existing else None
+    existing_project_name = existing.name if existing else None
+    if existing_project_name is not None and not existing_project_name.strip():
+        existing_project_name = None
     return {
         "key": key,
         "rel_path": key,
@@ -663,7 +670,8 @@ def _report_row(
         "status": status,
         "blocked_reason": blocked_reason,
         "archive": archive,
-        "existing_project": existing.id if existing else None,
+        "existing_project_id": existing_project_id,
+        "existing_project_name": existing_project_name,
         "dismissed": key in dismissals,
     }
 
@@ -700,7 +708,7 @@ def build_report(*, path: str = "", limit: int = DEFAULT_LIMIT, include_dismisse
         "ready": sum(1 for row in visible if row["status"] == READY),
         "blocked": sum(1 for row in visible if row["status"] == BLOCKED),
         "dismissed": sum(1 for row in rows if row["dismissed"]),
-        "already_created": sum(1 for row in visible if row["existing_project"]),
+        "already_created": sum(1 for row in visible if row["existing_project_id"]),
     }
     bound = max(0, int(limit))
     live_keys = {candidate.key for candidate in candidates}

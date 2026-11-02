@@ -86,7 +86,8 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     status: "ready",
     blocked_reason: null,
     archive: null,
-    existing_project: null,
+    existing_project_id: null,
+    existing_project_name: null,
     dismissed: false,
     ...overrides,
   };
@@ -162,7 +163,11 @@ describe("bundleBadgeCount", () => {
   });
 
   it("excludes rows that already became a project", () => {
-    expect(bundleBadgeCount(makeReport([makeBundle({ existing_project: "project-7" })]))).toBe(0);
+    const created = makeBundle({
+      existing_project_id: "project-7",
+      existing_project_name: "Project 7",
+    });
+    expect(bundleBadgeCount(makeReport([created]))).toBe(0);
   });
 
   it("counts blocked rows", () => {
@@ -173,7 +178,8 @@ describe("bundleBadgeCount", () => {
     const settled = makeBundle({
       key: "Settled",
       dismissed: true,
-      existing_project: "project-7",
+      existing_project_id: "project-7",
+      existing_project_name: "Project 7",
     });
     expect(bundleBadgeCount(makeReport([settled, makeBundle()]))).toBe(1);
   });
@@ -182,7 +188,11 @@ describe("bundleBadgeCount", () => {
     const rows = [
       makeBundle({ key: "Open 1" }),
       makeBundle({ key: "Open 2" }),
-      makeBundle({ key: "Created", existing_project: "project-7" }),
+      makeBundle({
+        key: "Created",
+        existing_project_id: "project-7",
+        existing_project_name: "Project 7",
+      }),
       makeBundle({ key: "Dismissed", dismissed: true }),
     ];
     expect(bundleBadgeCount(makeReport(rows))).toBe(2);
@@ -194,9 +204,18 @@ describe("bundleBadgeCount", () => {
     const report = makeReport([
       makeBundle({ key: "Pending" }),
       makeBundle({ key: "Blocked", status: "blocked" }),
-      makeBundle({ key: "Created", existing_project: "project-7" }),
+      makeBundle({
+        key: "Created",
+        existing_project_id: "project-7",
+        existing_project_name: "Project 7",
+      }),
       makeBundle({ key: "Dismissed", dismissed: true }),
-      makeBundle({ key: "Settled", dismissed: true, existing_project: "project-7" }),
+      makeBundle({
+        key: "Settled",
+        dismissed: true,
+        existing_project_id: "project-7",
+        existing_project_name: "Project 7",
+      }),
     ]);
 
     expect(bundleBadgeCount(report)).toBe(report.bundles.filter(needsDecision).length);

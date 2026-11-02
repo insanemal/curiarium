@@ -69,7 +69,12 @@ class BundleDetectItemOut(BaseModel):
   status: str
   blocked_reason: Optional[str] = None
   archive: Optional[BundleArchiveOut] = None
-  existing_project: Optional[str] = None
+  # The pair is derived from one Project row on every read: the id is the
+  # identity every check keys on, the name is what the panel says. A name the
+  # project no longer has (blank/whitespace) is reported as None, never as the
+  # id - the client owns the honest nameless line.
+  existing_project_id: Optional[str] = None
+  existing_project_name: Optional[str] = None
   dismissed: bool = False
 
 

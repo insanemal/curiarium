@@ -7,6 +7,7 @@ import {
   countLabel,
   countsLine,
   coverLine,
+  createdProjectLine,
   headline,
   isBlocked,
   isCreatable,
@@ -40,7 +41,8 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     status: "ready",
     blocked_reason: null,
     archive: null,
-    existing_project: null,
+    existing_project_id: null,
+    existing_project_name: null,
     dismissed: false,
     ...overrides,
   };
@@ -104,15 +106,17 @@ describe("isBlocked", () => {
 
 describe("isCreatable", () => {
   it("accepts a ready row that is not already a project", () => {
-    expect(isCreatable(makeBundle({ status: "ready", existing_project: null }))).toBe(true);
+    expect(isCreatable(makeBundle({ status: "ready", existing_project_id: null }))).toBe(true);
   });
 
   it("rejects a blocked row", () => {
-    expect(isCreatable(makeBundle({ status: "blocked", existing_project: null }))).toBe(false);
+    expect(isCreatable(makeBundle({ status: "blocked", existing_project_id: null }))).toBe(false);
   });
 
   it("rejects a ready row that already became a project", () => {
-    expect(isCreatable(makeBundle({ status: "ready", existing_project: "project-7" }))).toBe(false);
+    expect(isCreatable(makeBundle({ status: "ready", existing_project_id: "project-7" }))).toBe(
+      false,
+    );
   });
 });
 
@@ -120,8 +124,8 @@ describe("matchesVisibility", () => {
   const pending = makeBundle();
   const blocked = makeBundle({ status: "blocked", blocked_reason: "unresolved_directory" });
   const dismissed = makeBundle({ dismissed: true });
-  const created = makeBundle({ existing_project: "project-7" });
-  const both = makeBundle({ dismissed: true, existing_project: "project-7" });
+  const created = makeBundle({ existing_project_id: "project-7" });
+  const both = makeBundle({ dismissed: true, existing_project_id: "project-7" });
 
   it("keeps a pending row under every combination of toggles", () => {
     for (const showDismissed of [false, true]) {
@@ -161,8 +165,8 @@ describe("needsDecision", () => {
       blockedHigh,
       readyLow,
       makeBundle({ dismissed: true }),
-      makeBundle({ existing_project: "project-7" }),
-      makeBundle({ dismissed: true, existing_project: "project-7" }),
+      makeBundle({ existing_project_id: "project-7" }),
+      makeBundle({ dismissed: true, existing_project_id: "project-7" }),
     ];
     for (const row of rows) {
       expect(needsDecision(row)).toBe(
@@ -175,10 +179,19 @@ describe("needsDecision", () => {
     expect(needsDecision(readyHigh)).toBe(true);
     expect(needsDecision(blockedHigh)).toBe(true);
     expect(needsDecision(makeBundle({ dismissed: true }))).toBe(false);
-    expect(needsDecision(makeBundle({ existing_project: "project-7" }))).toBe(false);
-    expect(needsDecision(makeBundle({ dismissed: true, existing_project: "project-7" }))).toBe(
+    expect(needsDecision(makeBundle({ existing_project_id: "project-7" }))).toBe(false);
+    expect(needsDecision(makeBundle({ dismissed: true, existing_project_id: "project-7" }))).toBe(
       false,
     );
+    // A nameless project is still settled: the id, not the name, is the identity
+    // that keeps it out of the queue (the Mf-gyxg behaviour).
+    expect(
+      needsDecision({
+        ...makeBundle(),
+        existing_project_id: "project-7",
+        existing_project_name: null,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -207,6 +220,43 @@ describe("statusLine", () => {
 
   it("falls back to a bare blocked line when the reason is missing", () => {
     expect(statusLine(makeBundle({ status: "blocked", blocked_reason: null }))).toBe("Blocked - blocked");
+  });
+});
+
+describe("createdProjectLine", () => {
+  const projectId = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
+
+  it("says nothing for a row that never became a project", () => {
+    expect(createdProjectLine(makeBundle())).toBeNull();
+    // A name without an id is not a project: the id is the identity.
+    expect(createdProjectLine(makeBundle({ existing_project_name: "Moai statue" }))).toBeNull();
+  });
+
+  it("names the project when the wire carries a usable name", () => {
+    expect(
+      createdProjectLine(
+        makeBundle({ existing_project_id: projectId, existing_project_name: "Moai statue" }),
+      ),
+    ).toBe("Already created as project Moai statue");
+  });
+
+  it("trims a padded name before speaking it", () => {
+    expect(
+      createdProjectLine(
+        makeBundle({ existing_project_id: projectId, existing_project_name: "  Moai statue  " }),
+      ),
+    ).toBe("Already created as project Moai statue");
+  });
+
+  it("says the name is unavailable rather than printing the id or nothing", () => {
+    for (const existing_project_name of [null, "", "   "]) {
+      const line = createdProjectLine(
+        makeBundle({ existing_project_id: projectId, existing_project_name }),
+      );
+      expect(line).toBe("Already created as a project - its name is unavailable.");
+      expect(line).not.toBe("");
+      expect(line).not.toContain(projectId);
+    }
   });
 });
 

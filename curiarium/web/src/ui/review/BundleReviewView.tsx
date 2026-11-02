@@ -10,6 +10,7 @@ import {
   countLabel,
   countsLine,
   coverLine,
+  createdProjectLine,
   headline,
   isCreatable,
   matchesFilter,
@@ -33,7 +34,7 @@ function confidenceClass(confidence: string): string {
 
 /** The row's rightmost column: an existing project outranks a dismissal. */
 function rowState(row: BundleDetectItem): string {
-  if (row.existing_project) return "Created";
+  if (row.existing_project_id) return "Created";
   if (row.dismissed) return "Dismissed";
   return "";
 }
@@ -145,6 +146,7 @@ export default function BundleReviewView({ state, canContribute }: Props) {
   const stale = report?.stale_dismissals ?? [];
   const activeRow = filtered.find(row => row.key === activeKey) ?? null;
   const activeArchive = activeRow === null ? null : archiveLine(activeRow);
+  const activeCreatedLine = activeRow === null ? null : createdProjectLine(activeRow);
 
   // The active key, not an index: a refetch reorders rows and an index would
   // silently point at a different bundle after every mutation.
@@ -474,15 +476,13 @@ export default function BundleReviewView({ state, canContribute }: Props) {
                   {activeRow.description_excerpt && (
                     <span className="review-detail-excerpt">{activeRow.description_excerpt}</span>
                   )}
-                  {activeRow.existing_project && (
-                    <span>{`Already created as project ${activeRow.existing_project}`}</span>
-                  )}
+                  {activeCreatedLine && <span>{activeCreatedLine}</span>}
                 </div>
                 {canContribute && (
                   <>
                     {/* An already-created row has nothing to create, so the name
                         field and the button go rather than sitting disabled. */}
-                    {!activeRow.existing_project && (
+                    {!activeRow.existing_project_id && (
                       <label className="review-detail-field">
                         <span>Project name</span>
                         <input
@@ -496,7 +496,7 @@ export default function BundleReviewView({ state, canContribute }: Props) {
                       </label>
                     )}
                     <div className="review-detail-actions">
-                      {!activeRow.existing_project && (
+                      {!activeRow.existing_project_id && (
                         <button
                           type="button"
                           className={PRIMARY_BUTTON}
