@@ -1,6 +1,7 @@
 {
   "download_dir": "",
   "log_file": "",
+  "allowed_hosts": ["10.0.10.200"],
   "slicers": {
     "orca": {
       "command": "C:\\\\Program Files\\\\OrcaSlicer\\\\OrcaSlicer.exe"

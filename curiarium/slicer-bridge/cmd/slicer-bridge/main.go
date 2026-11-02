@@ -23,6 +23,9 @@ type SlicerConfig struct {
 type Config struct {
 	DownloadDir string                  `json:"download_dir,omitempty"`
 	LogFile     string                  `json:"log_file,omitempty"`
+	// AllowedHosts lists Curiarium servers on a private network (for example
+	// "10.0.10.200" or "truenas.local") that the bridge may download from.
+	AllowedHosts []string `json:"allowed_hosts,omitempty"`
 	Slicers     map[string]SlicerConfig `json:"slicers,omitempty"`
 	Engravers   map[string]SlicerConfig `json:"engravers,omitempty"`
 }
@@ -66,6 +69,7 @@ func main() {
 
 	if err := handleProtocol(arg, cfg); err != nil {
 		log.Printf("error: %v", err)
+		notifyError(err)
 	}
 }
 
@@ -134,8 +138,8 @@ func handleProtocol(raw string, cfg Config) error {
 	}
 
 	targetPath := uniquePath(downloadDir, filename)
-	if err := downloadFile(downloadURL, targetPath); err != nil {
-		return err
+	if err := downloadFile(downloadURL, targetPath, cfg.AllowedHosts); err != nil {
+		return fmt.Errorf("download failed: %w", err)
 	}
 
 	if appID == "" || appID == "other" {
@@ -150,6 +154,7 @@ func handleProtocol(raw string, cfg Config) error {
 		cmd, args = resolveSlicerCommand(appID, cfg)
 	}
 	if cmd == "" {
+		log.Printf("%s %q not found on this machine; opening with the OS default app", tool, appID)
 		return openWithDefault(targetPath)
 	}
 
@@ -251,8 +256,32 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func downloadFile(downloadURL, targetPath string) error {
-	return newDownloader().download(context.Background(), downloadURL, targetPath)
+func downloadFile(downloadURL, targetPath string, allowedHosts []string) error {
+	d := newDownloader()
+	d.allowedHosts = map[string]bool{}
+	for _, h := range allowedHosts {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			d.allowedHosts[h] = true
+		}
+	}
+	return d.download(context.Background(), downloadURL, targetPath)
+}
+
+// notifyError tells the user a launch failed. The bridge runs without a
+// terminal, so without this every failure is silent and only reaches the log.
+func notifyError(err error) {
+	msg := redactURL(err.Error())
+	switch runtime.GOOS {
+	case "linux":
+		if p, lerr := exec.LookPath("notify-send"); lerr == nil {
+			_ = exec.Command(p, "-a", "Curiarium Bridge", "Open in slicer failed", msg).Run()
+		}
+	case "windows":
+		script := "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show($env:CURIARIUM_BRIDGE_ERR, 'Curiarium Bridge')"
+		c := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script)
+		c.Env = append(os.Environ(), "CURIARIUM_BRIDGE_ERR="+msg)
+		_ = c.Run()
+	}
 }
 
 func resolveSlicerCommand(id string, cfg Config) (string, []string) {

@@ -12,17 +12,15 @@ Protocol formats:
 The `url` parameter should be a direct HTTP(s) download link. Curiarium
 already includes the auth token in that URL.
 
-## Quick install (no shell commands)
+## Install
 
-Download the latest Bridge binary for your OS from the
-[Curiarium releases](https://github.com/VincentCinque/MakersVault/releases/latest)
-page and run it once. The installer registers the `curiarium-slicer://` and
-`curiarium-engrave://` protocol handlers and copies the binary into a stable location:
+Bridge binaries are not published as releases yet. Build from source (see
+Build below), then run the binary once. The installer registers the
+`curiarium-slicer://` and `curiarium-engrave://` protocol handlers and copies the
+binary into a stable location:
 
 - Windows: `%LOCALAPPDATA%\Curiarium\SlicerBridge\curiarium-slicer.exe`
 - Linux: `~/.local/bin/curiarium-slicer`
-
-If your Linux file manager blocks execution, mark the file as executable and run it once.
 
 ## Build
 
@@ -71,6 +69,19 @@ Linux: `~/.config/curiarium-slicer/config.json`
 
 Use `config.example.json` as a template.
 
+### Servers on a private network
+
+By default the bridge refuses to download from loopback, private (10.x,
+172.16-31.x, 192.168.x), link-local and `.local` hosts. A self-hosted Curiarium
+server on your LAN therefore needs to be listed explicitly:
+
+```json
+{ "allowed_hosts": ["10.0.10.200", "truenas.local"] }
+```
+
+Only the listed hosts are trusted; everything else stays blocked. Use the
+hostname or IP exactly as it appears in your Curiarium URL.
+
 Environment override (per slicer):
 `CURIARIUM_SLICER_ORCA=C:\Path\To\OrcaSlicer.exe`
 
@@ -116,3 +127,5 @@ Linux: `~/.config/curiarium-slicer/bridge.log`
 
 - The bridge downloads files into the user cache directory unless configured.
 - If an app is not found, the file opens with the OS default app.
+- Failures (blocked host, download error) show a desktop notification
+  (`notify-send` on Linux) and are written to the log.

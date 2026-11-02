@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const errLocalAddress = "local addresses are not allowed (add the host to allowed_hosts in config.json to trust it)"
+
 const (
 	defaultMaxRedirects = 5
 	downloadTimeout     = 5 * time.Minute
@@ -62,6 +64,9 @@ type downloader struct {
 	dial         func(ctx context.Context, network, address string) (net.Conn, error)
 	pins         map[string][]netip.Addr
 	client       *http.Client
+	// allowedHosts are hosts the user listed in config.json as trusted. They may
+	// resolve to private/LAN addresses; every other host stays locked down.
+	allowedHosts map[string]bool
 }
 
 func newDownloader() *downloader {
@@ -216,12 +221,13 @@ func validatePort(port string) error {
 
 func (d *downloader) resolveHost(ctx context.Context, host string) ([]netip.Addr, error) {
 	lowered := strings.ToLower(host)
-	if lowered == "localhost" || strings.HasSuffix(lowered, ".local") {
-		return nil, errors.New("local addresses are not allowed")
+	trusted := d.allowedHosts[lowered]
+	if !trusted && (lowered == "localhost" || strings.HasSuffix(lowered, ".local")) {
+		return nil, errors.New(errLocalAddress)
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
-		if isBlockedAddress(addr) {
-			return nil, errors.New("local addresses are not allowed")
+		if !trusted && isBlockedAddress(addr) {
+			return nil, errors.New(errLocalAddress)
 		}
 		return []netip.Addr{addr.Unmap()}, nil
 	}
@@ -233,8 +239,8 @@ func (d *downloader) resolveHost(ctx context.Context, host string) ([]netip.Addr
 	validated := make([]netip.Addr, 0, len(addresses))
 	for _, addr := range addresses {
 		addr = addr.Unmap()
-		if isBlockedAddress(addr) {
-			return nil, errors.New("local addresses are not allowed")
+		if !trusted && isBlockedAddress(addr) {
+			return nil, errors.New(errLocalAddress)
 		}
 		validated = append(validated, addr)
 	}
