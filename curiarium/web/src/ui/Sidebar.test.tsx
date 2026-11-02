@@ -488,6 +488,7 @@ describe("Sidebar write controls by role", () => {
     await screen.findByText("Keep");
 
     const row = treeRow("f1");
+    expect(row.getAttribute("data-drop-destination")).toBe("folder");
     const dataTransfer = makeDrop([new File(["content"], "dropped.stl")]);
     fireEvent.dragOver(row, { dataTransfer });
     expect(row.className).not.toContain("is-drop-target");
@@ -503,6 +504,7 @@ describe("Sidebar write controls by role", () => {
     await screen.findByText("Keep");
 
     const row = treeRow("f1");
+    expect(row.getAttribute("data-drop-destination")).toBe("folder");
     const dataTransfer = makeDrop([new File(["content"], "dropped.stl")]);
     fireEvent.dragOver(row, { dataTransfer });
     expect(row.className).toContain("is-drop-target");
@@ -520,6 +522,7 @@ describe("Sidebar write controls by role", () => {
     await screen.findByText("Keep");
 
     const row = treeRow("f1");
+    expect(row.getAttribute("data-drop-destination")).toBe("folder");
     const dataTransfer = makeDrop([new File(["content"], "dropped.stl")]);
     fireEvent.dragOver(row, { dataTransfer });
     expect(row.className).toContain("is-drop-target");
@@ -528,6 +531,124 @@ describe("Sidebar write controls by role", () => {
 
     await waitFor(() => expect(uploadEntriesMock).toHaveBeenCalledTimes(1));
     expect(uploadEntriesMock.mock.calls[0][1]).toBe("f1");
+  });
+
+  it("All files is a result scope, so a drop there is not accepted", async () => {
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="editor" />);
+    await screen.findByText("Keep");
+
+    const allFiles = screen.getByRole("button", { name: "All files" });
+    const dataTransfer = makeDrop([new File(["content"], "dropped.stl")]);
+
+    fireEvent.dragEnter(allFiles, { dataTransfer });
+    expect(allFiles.className).not.toContain("is-drop-target");
+    // `fireEvent` reports whether the DOM event ended up cancelled. An accepted
+    // drop calls preventDefault, so an uncancelled dragover/drop is the refusal.
+    expect(fireEvent.dragOver(allFiles, { dataTransfer })).toBe(true);
+    expect(allFiles.className).not.toContain("is-drop-target");
+
+    expect(fireEvent.drop(allFiles, { dataTransfer })).toBe(true);
+    expect(uploadEntriesMock).not.toHaveBeenCalled();
+    expect(allFiles.className).not.toContain("is-drop-target");
+  });
+
+  it.each(["contributor", "editor"] as const)(
+    "Unfiled is the root upload destination and is highlighted before the drop (%s)",
+    async role => {
+      render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role={role} />);
+      await screen.findByText("Keep");
+
+      const unfiled = screen.getByRole("button", { name: "Unfiled" });
+      expect(unfiled.getAttribute("data-drop-destination")).toBe("unfiled");
+
+      const dataTransfer = makeDrop([new File(["content"], "dropped.stl")]);
+      fireEvent.dragOver(unfiled, { dataTransfer });
+      // The highlight exists before any drop, so the user can see the target.
+      expect(unfiled.className).toContain("is-drop-target");
+
+      // An accepted drop cancels the event; this is the same signal the
+      // All-files refusal case reads in the opposite direction.
+      expect(fireEvent.drop(unfiled, { dataTransfer })).toBe(false);
+
+      await waitFor(() => expect(uploadEntriesMock).toHaveBeenCalledTimes(1));
+      // Unfiled uploads to the library root: a null folder id.
+      expect(uploadEntriesMock.mock.calls[0][1]).toBeNull();
+    },
+  );
+
+  it("a viewer's drop on Unfiled shows no target and uploads nothing", async () => {
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="viewer" />);
+    await screen.findByText("Keep");
+
+    const unfiled = screen.getByRole("button", { name: "Unfiled" });
+    const dataTransfer = makeDrop([new File(["content"], "dropped.stl")]);
+
+    fireEvent.dragEnter(unfiled, { dataTransfer });
+    fireEvent.dragOver(unfiled, { dataTransfer });
+    expect(unfiled.className).not.toContain("is-drop-target");
+
+    fireEvent.drop(unfiled, { dataTransfer });
+    expect(uploadEntriesMock).not.toHaveBeenCalled();
+    expect(unfiled.className).not.toContain("is-drop-target");
+  });
+
+  it("the ambiguous rail background refuses with a reason", async () => {
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="editor" />);
+    await screen.findByText("Keep");
+
+    const aside = screen.getByRole("complementary", { name: "Files" });
+    const dataTransfer = makeDrop([new File(["content"], "dropped.stl")]);
+
+    fireEvent.dragEnter(aside, { dataTransfer });
+    // Neither dragover nor drop is cancelled on the background: no destination.
+    expect(fireEvent.dragOver(aside, { dataTransfer })).toBe(true);
+
+    const hint = document.querySelector("[data-rail-drop-hint]");
+    expect(hint).not.toBeNull();
+    expect(hint?.textContent).toMatch(/Unfiled/);
+    expect(hint?.textContent).toMatch(/folder/);
+
+    expect(fireEvent.drop(aside, { dataTransfer })).toBe(true);
+    expect(uploadEntriesMock).not.toHaveBeenCalled();
+    // The refusal stands: the drop was not a destination, so the hint survives.
+    expect(document.querySelector("[data-rail-drop-hint]")).not.toBeNull();
+
+    // Leaving from a child (currentTarget is the aside, target is the child)
+    // must not clear the hint; only leaving the rail itself does.
+    const searchBox = within(aside).getByLabelText("Search folders");
+    fireEvent.dragLeave(searchBox, { dataTransfer });
+    expect(document.querySelector("[data-rail-drop-hint]")).not.toBeNull();
+
+    fireEvent.dragLeave(aside, { dataTransfer });
+    expect(document.querySelector("[data-rail-drop-hint]")).toBeNull();
+
+    // Re-entering the background refuses again, and reaching a real
+    // destination row replaces the hint instead of flashing it.
+    fireEvent.dragEnter(aside, { dataTransfer });
+    expect(document.querySelector("[data-rail-drop-hint]")).not.toBeNull();
+    fireEvent.dragEnter(screen.getByRole("button", { name: "Unfiled" }), { dataTransfer });
+    expect(document.querySelector("[data-rail-drop-hint]")).toBeNull();
+    expect(screen.getByRole("button", { name: "Unfiled" }).className).toContain("is-drop-target");
+
+    // A bare drop on the rail, with no row ever targeted, has no upload path.
+    fireEvent.dragLeave(screen.getByRole("button", { name: "Unfiled" }), { dataTransfer });
+    expect(fireEvent.drop(aside, { dataTransfer })).toBe(true);
+    expect(uploadEntriesMock).not.toHaveBeenCalled();
+  });
+
+  it("a viewer never sees the rail refusal hint", async () => {
+    render(<Sidebar {...navProps} selectedId={null} onSelect={vi.fn()} role="viewer" />);
+    await screen.findByText("Keep");
+
+    const aside = screen.getByRole("complementary", { name: "Files" });
+    const dataTransfer = makeDrop([new File(["content"], "dropped.stl")]);
+
+    fireEvent.dragEnter(aside, { dataTransfer });
+    fireEvent.dragOver(aside, { dataTransfer });
+    expect(document.querySelector("[data-rail-drop-hint]")).toBeNull();
+
+    expect(fireEvent.drop(aside, { dataTransfer })).toBe(true);
+    expect(uploadEntriesMock).not.toHaveBeenCalled();
   });
 });
 

@@ -186,10 +186,18 @@ const EDITOR: Capabilities = { canContribute: true, canDelete: true };
 /** A viewer holds neither. */
 const VIEWER: Capabilities = { canContribute: false, canDelete: false };
 
-function renderGrid({ canContribute, canDelete }: Capabilities) {
+function renderGrid(
+  { canContribute, canDelete }: Capabilities,
+  { unfiled = false }: { unfiled?: boolean } = {},
+) {
   const utils = render(
     <>
-      <AssetGrid canContribute={canContribute} canDelete={canDelete} theme="dark" />
+      <AssetGrid
+        canContribute={canContribute}
+        canDelete={canDelete}
+        theme="dark"
+        unfiled={unfiled}
+      />
       <Toaster />
     </>,
   );
@@ -749,13 +757,33 @@ describe("AssetGrid role capability", () => {
       }
     });
 
-    it("shows the drop overlay to an editor, so the viewer assertion is not vacuous", async () => {
-      const { container } = renderGrid(EDITOR);
+    it("still shows the upload overlay to an editor in the Unfiled scope, so a destination is not broken", async () => {
+      // The All-files scope refuses by design, so the upload example moved to a
+      // scope that really accepts a drop.
+      const { container } = renderGrid(EDITOR, { unfiled: true });
       await screen.findByText("Calibration cube");
 
       fireEvent.dragEnter(container.firstElementChild as HTMLElement, fileDrag());
 
       expect(await screen.findByText(/Drop files or folders to upload/)).toBeTruthy();
+    });
+
+    it("shows the All-files refusal to a contributor and nothing to a viewer", async () => {
+      // The refusal text is neither the upload copy nor gated by role alone: the
+      // overlay is contributor-gated, so a viewer sees no refusal either.
+      const viewer = renderGrid(VIEWER);
+      await screen.findByText("Calibration cube");
+      fireEvent.dragEnter(viewer.container.firstElementChild as HTMLElement, fileDrag());
+      expect(screen.queryByText(/result scope/)).toBeNull();
+      cleanup();
+
+      const contributor = renderGrid(CONTRIBUTOR);
+      await screen.findByText("Calibration cube");
+      fireEvent.dragEnter(
+        contributor.container.firstElementChild as HTMLElement,
+        fileDrag(),
+      );
+      expect(await screen.findByText(/result scope/)).toBeTruthy();
     });
   });
 

@@ -3,12 +3,21 @@ import React, { useRef, useState } from "react";
 import { entriesFromDataTransfer } from "../../lib/uploadTree";
 import type { Uploader } from "../useUpload";
 
+/**
+ * What the current Files scope does with a drag: accept the upload and name the
+ * destination, refuse it with a reason, or stay inert (project and missing
+ * mode, where a drop means nothing at all).
+ */
+export type DropPolicy =
+  | { kind: "upload"; name: string }
+  | { kind: "refuse"; message: string }
+  | { kind: "inert" };
+
 type AssetDropOptions = {
-  isProject: boolean;
+  policy: DropPolicy;
   /** Roles below contributor get no drop handling: a drop here is an upload. */
   canContribute: boolean;
   uploader: Uploader;
-  dropTargetName: string;
 };
 
 export type AssetDropApi = {
@@ -27,12 +36,7 @@ export type AssetDropApi = {
  * that element: `dragDepth` counts enter/leave pairs, so the same node hierarchy
  * must see all four events.
  */
-export function useAssetDrop({
-  isProject,
-  canContribute,
-  uploader,
-  dropTargetName,
-}: AssetDropOptions): AssetDropApi {
+export function useAssetDrop({ policy, canContribute, uploader }: AssetDropOptions): AssetDropApi {
   const dragDepth = useRef(0);
   const [dragActive, setDragActive] = useState(false);
   const [dropUploading, setDropUploading] = useState(false);
@@ -42,27 +46,42 @@ export function useAssetDrop({
     return types.includes("Files");
   };
 
+  // "inert" is the project/missing case: no overlay, no message, no state.
+  const engaged = (e: React.DragEvent<HTMLDivElement>) =>
+    canContribute && policy.kind !== "inert" && isFileDrag(e);
+
   const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
-    // Uploads always target a files folder, and projects have none. A role
-    // below contributor cannot upload at all, so it must not even see the drag
-    // affordance.
-    if (!canContribute || isProject || !isFileDrag(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
+    if (!engaged(e)) return;
+    // A refusal shows the overlay without cancelling anything; `handleDragOver`
+    // carries the spec reason, since its cancellation is what decides legality.
+    if (policy.kind === "upload") {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    // `dragDepth` is shared by both branches so a child-to-child move does not
+    // flicker the overlay off and on.
     dragDepth.current += 1;
     setDragActive(true);
   };
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    if (!canContribute || isProject || !isFileDrag(e)) return;
+    if (!engaged(e)) return;
+    // `preventDefault` on dragover is what makes a drop legal, so a refusal that
+    // cancelled anything would be a lie: the browser shows the no-drop cursor
+    // and, per the HTML drag-and-drop spec, never dispatches `drop` on an
+    // uncancelled target. jsdom dispatches whatever we fire, so the tests can
+    // only prove that these handlers cancel nothing and upload nothing.
+    if (policy.kind !== "upload") return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
   };
 
   const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
-    if (!canContribute || isProject || !isFileDrag(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
+    if (!engaged(e)) return;
+    if (policy.kind === "upload") {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     dragDepth.current -= 1;
     if (dragDepth.current <= 0) {
       dragDepth.current = 0;
@@ -71,7 +90,14 @@ export function useAssetDrop({
   };
 
   const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
-    if (!canContribute || isProject || !isFileDrag(e)) return;
+    if (!engaged(e)) return;
+    if (policy.kind === "refuse") {
+      // Nothing was accepted, so nothing is uploaded and the drag is not
+      // cancelled; only the refusal state is reset.
+      dragDepth.current = 0;
+      setDragActive(false);
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
     dragDepth.current = 0;
@@ -86,10 +112,16 @@ export function useAssetDrop({
     }
   };
 
-  const showDropOverlay = canContribute && !isProject && (dragActive || dropUploading);
-  const dropMessage = dropUploading
-    ? `Uploading to ${dropTargetName}...`
-    : `Drop files or folders to upload to ${dropTargetName}`;
+  const showDropOverlay =
+    canContribute && policy.kind !== "inert" && (dragActive || dropUploading);
+  let dropMessage = "";
+  if (policy.kind === "refuse") {
+    dropMessage = policy.message;
+  } else if (policy.kind === "upload") {
+    dropMessage = dropUploading
+      ? `Uploading to ${policy.name}...`
+      : `Drop files or folders to upload to ${policy.name}`;
+  }
 
   return {
     dragActive,

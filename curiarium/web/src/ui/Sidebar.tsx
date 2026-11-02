@@ -43,7 +43,7 @@ type Props = {
   role?: Role | null;
 };
 
-const DROP_ALL_ID = "__all";
+const DROP_UNFILED_ID = "__unfiled";
 /** Create cannot invalidate its own destination, so nothing is excluded there. */
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
@@ -78,6 +78,9 @@ export default function Sidebar({
   const [editTags, setEditTags] = useState<string[]>([]);
   const [editParent, setEditParent] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  // The rail background is not a drop destination; this drives the hint that
+  // says so. A destination row takes over as soon as the pointer reaches it.
+  const [railDropRefused, setRailDropRefused] = useState(false);
   const [dropUploading, setDropUploading] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
   const [query, setQuery] = useState("");
@@ -92,10 +95,13 @@ export default function Sidebar({
     return types.includes("Files");
   };
 
+  // One handler for dragenter and dragover: both must light the target and
+  // clear a rail refusal that a previous hop left behind.
   const handleDragOverTarget = (targetId: string) => (e: React.DragEvent<HTMLElement>) => {
     if (!isFileDrag(e)) return;
     e.preventDefault();
     e.stopPropagation();
+    setRailDropRefused(false);
     if (!dropUploading) {
       setDropTargetId(targetId);
     }
@@ -120,37 +126,23 @@ export default function Sidebar({
     setDropUploading(false);
   };
 
-  const handleSidebarDragOver = (e: React.DragEvent<HTMLElement>) => {
+  // A file drag over any non-destination part of the rail cancels nothing: no
+  // preventDefault and no dropEffect, so the drop is refused. The hint is the
+  // only feedback, because a silent refusal looks like a broken drag.
+  const handleSidebarDragRefusal = (e: React.DragEvent<HTMLElement>) => {
     if (!isFileDrag(e)) return;
-    e.preventDefault();
+    setRailDropRefused(true);
+    setDropTargetId(null);
   };
 
   const handleSidebarDragLeave = (e: React.DragEvent<HTMLElement>) => {
     if (!isFileDrag(e)) return;
+    // A child-to-child move inside the rail also fires dragleave on the aside,
+    // with a different target; clearing there would flicker the hint.
     if (e.currentTarget !== e.target) return;
     e.preventDefault();
+    setRailDropRefused(false);
     setDropTargetId(null);
-  };
-
-  const handleSidebarDrop = (e: React.DragEvent<HTMLElement>) => {
-    if (!isFileDrag(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (dropUploading) return;
-    const targetFolderId =
-      dropTargetId === DROP_ALL_ID ? null : dropTargetId;
-    setDropTargetId(null);
-    if (!targetFolderId && dropTargetId !== DROP_ALL_ID) return;
-    setDropUploading(true);
-    void (async () => {
-      const entries = await entriesFromDataTransfer(e.dataTransfer);
-      if (!entries.length) {
-        setDropUploading(false);
-        return;
-      }
-      await uploader.upload(entries, { folderId: targetFolderId });
-      setDropUploading(false);
-    })();
   };
 
   const handleError = (err: unknown, message: string) => {
@@ -454,8 +446,10 @@ export default function Sidebar({
           aria-selected={isSelected}
           aria-current={isSelected ? "page" : undefined}
           data-tree-row={folder.id}
+          data-drop-destination="folder"
           tabIndex={folder.id === rovingFolderId ? 0 : -1}
           ref={setRowElement(folder.id)}
+          onDragEnter={canContribute ? handleDragOverTarget(folder.id) : undefined}
           onDragOver={canContribute ? handleDragOverTarget(folder.id) : undefined}
           onDrop={canContribute ? handleDropFiles(folder.id) : undefined}
         >
@@ -547,10 +541,14 @@ export default function Sidebar({
     <aside
       className="sidebar-shell"
       aria-label="Files"
-      onDragOver={canContribute ? handleSidebarDragOver : undefined}
+      onDragEnter={canContribute ? handleSidebarDragRefusal : undefined}
+      onDragOver={canContribute ? handleSidebarDragRefusal : undefined}
       onDragLeave={canContribute ? handleSidebarDragLeave : undefined}
-      onDrop={canContribute ? handleSidebarDrop : undefined}
     >
+      {/* No `onDrop` on the rail on purpose: every destination row owns its drop
+          and stops propagation, so a drop reaching the rail is on the
+          background - it has no destination, so nothing is cancelled and nothing
+          is uploaded. */}
       <div className="sidebar-header">
         <div className="min-w-0">
           <p className="sidebar-eyebrow">Curiarium</p>
@@ -583,11 +581,12 @@ export default function Sidebar({
       </label>
 
       <nav className="sidebar-navigation" aria-label="Library folders">
-        {/* Two honest piles: "All files" means everything, "Unfiled" means the
-            library root only (folder_id IS NULL), so the root stays reachable. */}
+        {/* "Unfiled" is the root upload destination (folder_id IS NULL); "All
+            files" spans every folder, so it is a result scope and refuses a
+            drop rather than guessing which folder could own it. */}
         <button
           type="button"
-          className={`sidebar-all-items ${!selectedId && !unfiled ? "is-selected" : ""} ${dropTargetId === DROP_ALL_ID ? "is-drop-target" : ""}`}
+          className={`sidebar-all-items ${!selectedId && !unfiled ? "is-selected" : ""}`}
           aria-label="All files"
           aria-current={!selectedId && !unfiled ? "page" : undefined}
           onClick={() => onSelect(null)}
@@ -596,8 +595,6 @@ export default function Sidebar({
             event.preventDefault();
             focusTreeRow(treeRows[0]?.id ?? null);
           }}
-          onDragOver={canContribute ? handleDragOverTarget(DROP_ALL_ID) : undefined}
-          onDrop={canContribute ? handleDropFiles(null) : undefined}
         >
           <span className="sidebar-all-icon"><Layers3 className="h-4 w-4" /></span>
           <span className="flex-1 text-left">All files</span>
@@ -606,15 +603,19 @@ export default function Sidebar({
 
         <button
           type="button"
-          className={`sidebar-all-items ${!selectedId && unfiled ? "is-selected" : ""}`}
+          className={`sidebar-all-items ${!selectedId && unfiled ? "is-selected" : ""} ${dropTargetId === DROP_UNFILED_ID ? "is-drop-target" : ""}`}
           aria-label="Unfiled"
           aria-current={!selectedId && unfiled ? "page" : undefined}
+          data-drop-destination="unfiled"
           onClick={onSelectUnfiled}
           onKeyDown={event => {
             if (event.key !== "ArrowDown") return;
             event.preventDefault();
             focusTreeRow(treeRows[0]?.id ?? null);
           }}
+          onDragEnter={canContribute ? handleDragOverTarget(DROP_UNFILED_ID) : undefined}
+          onDragOver={canContribute ? handleDragOverTarget(DROP_UNFILED_ID) : undefined}
+          onDrop={canContribute ? handleDropFiles(null) : undefined}
         >
           <span className="sidebar-all-icon"><Inbox className="h-4 w-4" /></span>
           <span className="flex-1 text-left">Unfiled</span>
@@ -649,6 +650,14 @@ export default function Sidebar({
           )}
         </div>
       </nav>
+
+      {/* The structural guard keeps entering a destination row from flashing the
+          refusal: that row already cleared `railDropRefused`. */}
+      {canContribute && railDropRefused && !dropTargetId && (
+        <p data-rail-drop-hint className="px-2 py-1 text-sm opacity-70">
+          Drop files on Unfiled or a folder. The rail background has no destination.
+        </p>
+      )}
 
       {/* Wrapped too: a demotion mid-edit must not leave a Create/Save dialog
           on screen whose submit the API will refuse. */}

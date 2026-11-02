@@ -2,6 +2,7 @@ import { type RefObject } from "react";
 
 import { type Asset, type Folder } from "../../lib/api";
 import { GRID_GAP_PX } from "../../lib/virtualGrid";
+import { type FilesScopeKind } from "../filesScope";
 import type { VirtualRowsResult } from "../useVirtualRows";
 import { GROUP_CARD_CAP, type GroupBucket, type MissingScanOutcome, type SortKey } from "./assetGridMeta";
 
@@ -18,13 +19,12 @@ type AssetGridBodyProps = {
   toggleGroup: (id: string) => void;
   toggleGroupExpanded: (id: string) => void;
   isProject: boolean;
-  /** Files mode: the grid is showing the library root only. */
-  unfiled: boolean;
+  /** The Files scope on screen, derived once by `filesScope`; the body only picks copy. */
+  scopeKind: FilesScopeKind;
   /** Pinned missing-files mode; only affects the empty-state copy here. */
   missingOnly?: boolean;
   /** What the last scan said about the flag set, for the empty-state copy. */
   missingScan?: MissingScanOutcome;
-  folderId?: string | null;
   subfolders: Folder[];
   loading: boolean;
   /** Retryable first-load failure; null when the listing loaded or was never attempted. */
@@ -58,10 +58,9 @@ export default function AssetGridBody({
   toggleGroup,
   toggleGroupExpanded,
   isProject,
-  unfiled,
+  scopeKind,
   missingOnly,
   missingScan,
-  folderId,
   subfolders,
   loading,
   error,
@@ -81,17 +80,19 @@ export default function AssetGridBody({
   const narrowed =
     Boolean(queryRef.current) || activeTags.length > 0 || activeCreator !== null || notInProject;
 
+  // The scope kind is derived once by `filesScope` and handed down, so these
+  // empty states cannot disagree with the breadcrumb or the drop policy. Only
+  // the kind is needed here: the three Files scopes stay mutually exclusive by
+  // construction, and `filesActive` keeps project and missing mode clear of
+  // every Files-scope empty state below.
+  const filesActive = !isProject && !missingOnly;
+  const folderScope = filesActive && scopeKind === "folder";
+  const unfiledScope = filesActive && scopeKind === "unfiled";
+  const allFilesScope = filesActive && scopeKind === "all";
+  const settled = !loading && !items.length && !error;
+
   return (
     <>
-      {/* A folder holding only subfolders must never look broken (#15). Applies
-          to both the flat and the grouped sort modes. At the root there are no
-          subfolder tiles, so the hint stays off. */}
-      {!isProject && !!folderId && !loading && !items.length && subfolders.length > 0 && (
-        <p className="text-sm opacity-70">
-          No files directly in this folder — pick a subfolder above.
-        </p>
-      )}
-
       {/* Pinned mode has no toolbar-sourced rows to fall back on, so the queue
           owns a first-load line: the toolbar's "Loading..." describes the
           toolbar, not the queue. */}
@@ -141,17 +142,55 @@ export default function AssetGridBody({
 
       {/* The Unfiled row exists to answer "what is still loose?": an empty pile
           is the good outcome, so say so instead of leaving the page blank. But
-          an empty result is not an empty pile: a search or tag filter that
-          matched nothing must not claim every asset is filed while the sidebar
-          count says otherwise. */}
-      {unfiled &&
-        !loading &&
-        !items.length &&
-        !queryRef.current &&
-        activeTags.length === 0 && (
+          an empty result is not an empty pile: any filter that matched nothing
+          must not claim every asset is filed while the sidebar count disagrees. */}
+      {unfiledScope && settled && !narrowed && (
         <div className="text-sm opacity-70" data-unfiled-empty>
           <p className="font-medium">Nothing unfiled</p>
           <p>Every asset is in a folder.</p>
+        </div>
+      )}
+      {unfiledScope && settled && narrowed && (
+        <div className="text-sm opacity-70" data-unfiled-empty-filter>
+          <p className="font-medium">No unfiled files match this filter</p>
+          <p>Clear the search and the filters to see everything at the library root.</p>
+        </div>
+      )}
+
+      {/* "All files" spans every folder, so an empty list there says something
+          about the whole library, and only when nothing narrows it. */}
+      {allFilesScope && settled && !narrowed && (
+        <div className="text-sm opacity-70" data-all-files-empty>
+          <p className="font-medium">The library is empty</p>
+          <p>Upload to Unfiled or a folder to get started.</p>
+        </div>
+      )}
+      {allFilesScope && settled && narrowed && (
+        <div className="text-sm opacity-70" data-all-files-empty-filter>
+          <p className="font-medium">No files match this filter</p>
+          <p>Clear the search and the filters to see the whole library.</p>
+        </div>
+      )}
+
+      {/* A folder holding only subfolders must never look broken (#15). Applies
+          to both the flat and the grouped sort modes. When a filter is what
+          emptied the view, sending the user to the tiles above would be wrong
+          advice, so the narrowed case gets its own line. */}
+      {folderScope && settled && !narrowed && subfolders.length === 0 && (
+        <div className="text-sm opacity-70" data-folder-empty>
+          <p className="font-medium">Nothing in this folder yet</p>
+          <p>This view lists the folder's own files. Files in its subfolders are not included.</p>
+        </div>
+      )}
+      {folderScope && settled && !narrowed && subfolders.length > 0 && (
+        <p className="text-sm opacity-70">
+          No files directly in this folder — pick a subfolder above.
+        </p>
+      )}
+      {folderScope && settled && narrowed && (
+        <div className="text-sm opacity-70" data-folder-empty-filter>
+          <p className="font-medium">No files in this folder match this filter</p>
+          <p>Clear the search and the filters to see the folder's direct files.</p>
         </div>
       )}
 

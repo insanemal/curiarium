@@ -30,7 +30,6 @@ export type AssetSortingApi = {
   folderById: Record<string, Folder>;
   folderNames: Record<string, string>;
   subfolders: Folder[];
-  dropTargetName: string;
 };
 
 /**
@@ -54,11 +53,6 @@ export function useAssetSorting({
     folders.forEach(f => { map[f.id] = f; });
     return map;
   }, [folders]);
-
-  const dropTargetName = useMemo(() => {
-    if (!folderId) return "All Items";
-    return folderById[folderId]?.name || "this folder";
-  }, [folderId, folderById]);
 
   const folderNames = useMemo(() => {
     const m: Record<string, string> = {};
@@ -182,6 +176,5 @@ export function useAssetSorting({
     folderById,
     folderNames,
     subfolders,
-    dropTargetName,
   };
 }

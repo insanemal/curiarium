@@ -34,11 +34,94 @@ function folderTiles(): HTMLElement {
 afterEach(cleanup);
 
 describe("FolderBreadcrumbs", () => {
-  it("renders nothing at the root", () => {
+  it("shows the All-files scope as one non-interactive current crumb", () => {
     const { container } = render(
       <FolderBreadcrumbs folders={folders} folderId={null} onNavigate={vi.fn()} />,
     );
+
+    const nav = breadcrumbsNav();
+    expect(nav.getAttribute("aria-label")).toBe("Files scope");
+    // No button at all: the only crumb is the scope you are already in, so a
+    // button here would navigate nowhere.
+    expect(within(nav).queryAllByRole("button")).toEqual([]);
+    const current = container.querySelector<HTMLElement>("[data-scope-current]");
+    expect(current?.textContent).toBe("All files");
+    expect(current?.getAttribute("aria-current")).toBe("page");
+  });
+
+  it("says what each scope contains, in a note outside the nav landmark", () => {
+    const { container } = render(
+      <FolderBreadcrumbs folders={folders} folderId={null} onNavigate={vi.fn()} />,
+    );
+
+    const nav = breadcrumbsNav();
+    const note = container.querySelector<HTMLElement>("[data-scope-note]");
+    expect(note?.textContent).toBe("Every file in the library, in every folder.");
+    // The nav is a link landmark: the prose must not live inside it.
+    expect(nav.querySelector("[data-scope-note]")).toBeNull();
+    expect(nav.nextElementSibling).toBe(note);
+  });
+
+  it("names Unfiled as the current scope and offers All files as the way back", () => {
+    const onNavigate = vi.fn();
+    render(
+      <FolderBreadcrumbs
+        folders={folders}
+        folderId={null}
+        unfiled
+        onNavigate={onNavigate}
+        onSelectUnfiled={vi.fn()}
+      />,
+    );
+
+    const nav = within(breadcrumbsNav());
+    expect(nav.getAllByRole("button").map(button => button.textContent)).toEqual([
+      "All files",
+      "Unfiled",
+    ]);
+    expect(nav.getByRole("button", { name: "Unfiled" }).getAttribute("aria-current")).toBe(
+      "page",
+    );
+    expect(document.querySelector("[data-scope-note]")?.textContent).toBe(
+      "Files at the library root: no folder owns them.",
+    );
+
+    fireEvent.click(nav.getByRole("button", { name: "All files" }));
+    expect(onNavigate).toHaveBeenLastCalledWith(null);
+  });
+
+  it("leaves the Unfiled crumb inert when its caller wires no unfiled selection", () => {
+    const onNavigate = vi.fn();
+    render(
+      <FolderBreadcrumbs folders={folders} folderId={null} unfiled onNavigate={onNavigate} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Unfiled" }));
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("calls onSelectUnfiled from the current Unfiled crumb when a caller wires it", () => {
+    const onSelectUnfiled = vi.fn();
+    render(
+      <FolderBreadcrumbs
+        folders={folders}
+        folderId={null}
+        unfiled
+        onNavigate={vi.fn()}
+        onSelectUnfiled={onSelectUnfiled}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Unfiled" }));
+    expect(onSelectUnfiled).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the trail while a selected folder's path cannot be resolved", () => {
+    const { container } = render(
+      <FolderBreadcrumbs folders={folders} folderId="ghost" onNavigate={vi.fn()} />,
+    );
     expect(container.querySelector("[data-folder-breadcrumbs]")).toBeNull();
+    expect(container.querySelector("[data-scope-note]")).toBeNull();
   });
 
   it("lists every ancestor in root → current order with aria-current on the last", () => {
@@ -57,6 +140,10 @@ describe("FolderBreadcrumbs", () => {
     ).toBeNull();
     expect(nav.getByRole("button", { name: "Corners" }).getAttribute("aria-current")).toBe(
       "page",
+    );
+    // The current folder crumb stays a button: the caller navigates from it.
+    expect(document.querySelector("[data-scope-note]")?.textContent).toBe(
+      "Direct contents of Corners. Subfolders are tiles, not included here.",
     );
   });
 

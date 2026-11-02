@@ -1089,6 +1089,7 @@ describe("files-mode Unfiled pile", () => {
     expect(callQuery(1).tags).toEqual(["pla"]);
     expect(screen.queryByText("Nothing unfiled")).toBeNull();
     expect(screen.queryByText("Every asset is in a folder.")).toBeNull();
+    expect(document.querySelector("[data-unfiled-empty-filter]")).toBeTruthy();
 
     // The same holds for a search: the pile is only "empty" when nothing narrows it.
     const searchInput = screen.getByPlaceholderText(
@@ -1101,6 +1102,148 @@ describe("files-mode Unfiled pile", () => {
     expect(callQuery(2).q).toBe("cube");
     expect(screen.queryByText("Nothing unfiled")).toBeNull();
     expect(screen.queryByText("Every asset is in a folder.")).toBeNull();
+  });
+});
+
+/**
+ * The Files scopes and their labels (Mf-qmhx). Each scope has exactly one empty
+ * state, and a filter that emptied the view is never described as an empty set.
+ */
+describe("Files-scope labels and empty states (Mf-qmhx)", () => {
+  const scopeFolders: Folder[] = [
+    { id: "p", name: "Parts", tags: [] },
+    { id: "c1", name: "Brackets", tags: [], parent_id: "p" },
+    { id: "c2", name: "Clamps", tags: [], parent_id: "p" },
+  ];
+
+  beforeEach(() => {
+    resetToasts();
+    listAssetsMock.mockReset();
+    listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+    listTagsMock.mockReset();
+    listTagsMock.mockResolvedValue([]);
+    listCreatorsMock.mockReset();
+    listCreatorsMock.mockResolvedValue([]);
+    listFoldersMock.mockReset();
+    listFoldersMock.mockResolvedValue(scopeFolders);
+    fileUrlMock.mockClear();
+  });
+
+  afterEach(cleanup);
+
+  /** Types into the toolbar search and submits it, which is what narrows the grid. */
+  async function searchFor(text: string): Promise<void> {
+    const input = screen.getByPlaceholderText(
+      "Search title, filename, notes...",
+    ) as HTMLInputElement;
+    const callsBefore = listAssetsMock.mock.calls.length;
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(listAssetsMock.mock.calls.length).toBe(callsBefore + 1));
+  }
+
+  it("says the library itself is empty in the All-files scope", async () => {
+    const { container } = renderHarness();
+
+    const empty = await waitFor(() => {
+      const found = container.querySelector<HTMLElement>("[data-all-files-empty]");
+      if (!found) throw new Error("all-files empty state not rendered");
+      return found;
+    });
+    expect(within(empty).getByText("The library is empty")).toBeTruthy();
+    expect(
+      within(empty).getByText("Upload to Unfiled or a folder to get started."),
+    ).toBeTruthy();
+  });
+
+  it("calls a filtered All-files result a filter, never an empty library", async () => {
+    const { container } = renderHarness();
+    await waitFor(() => expect(container.querySelector("[data-all-files-empty]")).toBeTruthy());
+
+    await searchFor("nothing-matches-this");
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-all-files-empty-filter]")).toBeTruthy(),
+    );
+    expect(container.querySelector("[data-all-files-empty]")).toBeNull();
+    expect(screen.queryByText("The library is empty")).toBeNull();
+  });
+
+  it("says an empty folder lists only its own files, not its subfolders'", async () => {
+    // `c1` has no children, so the folder really is the whole view.
+    const { container } = renderHarness({ folderId: "c1" });
+
+    const empty = await waitFor(() => {
+      const found = container.querySelector<HTMLElement>("[data-folder-empty]");
+      if (!found) throw new Error("folder empty state not rendered");
+      return found;
+    });
+    expect(within(empty).getByText("Nothing in this folder yet")).toBeTruthy();
+    expect(empty.textContent).toContain("not included");
+    expect(container.querySelector("[data-all-files-empty]")).toBeNull();
+  });
+
+  it("points at the subfolder tiles when a folder holds only subfolders", async () => {
+    const { container } = renderHarness({ folderId: "p" });
+
+    expect(
+      await screen.findByText("No files directly in this folder — pick a subfolder above."),
+    ).toBeTruthy();
+    // The hint is not the "empty folder" state: the files may live one level down.
+    expect(container.querySelector("[data-folder-empty]")).toBeNull();
+  });
+
+  it("blames the filter, not the subfolders, when a filter empties a folder", async () => {
+    const { container } = renderHarness({ folderId: "p" });
+    await screen.findByText("No files directly in this folder — pick a subfolder above.");
+
+    await searchFor("nothing-matches-this");
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-folder-empty-filter]")).toBeTruthy(),
+    );
+    expect(
+      screen.queryByText("No files directly in this folder — pick a subfolder above."),
+    ).toBeNull();
+    expect(container.querySelector("[data-folder-empty]")).toBeNull();
+  });
+
+  it("says an empty unfiled pile is filtered, never that every asset is filed", async () => {
+    listTagsMock.mockResolvedValue(["pla"]);
+    const { container } = renderHarness({ unfiled: true });
+    await screen.findByText("Nothing unfiled");
+
+    fireEvent.click(await screen.findByRole("button", { name: "pla" }));
+
+    await waitFor(() =>
+      expect(container.querySelector("[data-unfiled-empty-filter]")).toBeTruthy(),
+    );
+    expect(screen.queryByText("Nothing unfiled")).toBeNull();
+    expect(container.querySelector("[data-unfiled-empty]")).toBeNull();
+  });
+
+  it("names the All-files scope as the current one", async () => {
+    listAssetsMock.mockResolvedValue({ items: assets, hasMore: false });
+    render(<AssetGrid canContribute canDelete theme="dark" />);
+    await screen.findByText("Calibration cube");
+
+    const current = document.querySelectorAll<HTMLElement>("[data-scope-current]");
+    expect(current).toHaveLength(1);
+    expect(current[0].textContent).toBe("All files");
+  });
+
+  it("says the Unfiled scope's note describes the library root", async () => {
+    listAssetsMock.mockResolvedValue({ items: assets, hasMore: false });
+    render(<AssetGrid canContribute canDelete theme="dark" unfiled />);
+    await screen.findByText("Calibration cube");
+
+    const nav = document.querySelector<HTMLElement>("[data-folder-breadcrumbs]");
+    if (!nav) throw new Error("breadcrumbs not rendered");
+    const note = nav.nextElementSibling as HTMLElement | null;
+    expect(note?.hasAttribute("data-scope-note")).toBe(true);
+    expect(note?.textContent).toMatch(/library root/);
+    // The note sits beside the link landmark, never inside it.
+    expect(nav.querySelector("[data-scope-note]")).toBeNull();
   });
 });
 
@@ -2374,7 +2517,8 @@ describe("AssetGrid shared dialogs and toasts", () => {
     listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
     uploadAssetMock.mockRejectedValue(new Error("disk full"));
 
-    const { container } = renderWithToaster(<AssetGrid canContribute canDelete theme="dark" />);
+    // Unfiled is an upload destination; the All-files scope refuses drops by design.
+    const { container } = renderWithToaster(<AssetGrid canContribute canDelete theme="dark" unfiled />);
     await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
 
     const dropped = new File(["content"], "sample.stl", { type: "application/octet-stream" });
@@ -2389,6 +2533,32 @@ describe("AssetGrid shared dialogs and toasts", () => {
 
     await waitFor(() => expect(uploadAssetMock).toHaveBeenCalledTimes(2));
     expect(uploadAssetMock.mock.calls[1][0].name).toBe("sample.stl");
+  });
+
+  it("the All-files scope refuses a drop and names where to drop instead", async () => {
+    listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+
+    const { container } = renderWithToaster(<AssetGrid canContribute canDelete theme="dark" />);
+    await waitFor(() => expect(screen.queryByText("Loading...")).toBeNull());
+
+    const dropped = new File(["content"], "sample.stl", { type: "application/octet-stream" });
+    const root = container.firstChild as Element;
+    fireEvent.dragEnter(root, { dataTransfer: makeDrop([dropped]) });
+
+    // The overlay explains the refusal and names a destination that accepts one.
+    const refusal = await screen.findByText(/All files is a result scope\./);
+    expect(refusal.textContent).toContain("Unfiled");
+
+    // A refusal cancels nothing: an uncancelled dragover is what keeps a drop
+    // illegal, so `fireEvent` reporting the events as not default-prevented is
+    // the whole of the evidence here. jsdom dispatches whatever we fire, so this
+    // cannot show what a browser then does - only that no handler cancelled and
+    // that nothing was uploaded.
+    expect(fireEvent.dragOver(root, { dataTransfer: makeDrop([dropped]) })).toBe(true);
+    await act(async () => {
+      expect(fireEvent.drop(root, { dataTransfer: makeDrop([dropped]) })).toBe(true);
+    });
+    expect(uploadAssetMock).not.toHaveBeenCalled();
   });
 
   it("cancelling the supporting-file remove dialog makes no request", async () => {
@@ -3031,6 +3201,12 @@ describe("folder cards", () => {
       "All files",
       "Parts",
     ]);
+
+    // The scope note is the nav's sibling (a link landmark holds links, not
+    // prose) and it names the open folder's direct contents.
+    const note = nav.nextElementSibling as HTMLElement | null;
+    expect(note?.hasAttribute("data-scope-note")).toBe(true);
+    expect(nav.querySelector("[data-scope-note]")).toBeNull();
 
     const tiles = await waitFor(() => {
       const found = document.querySelector<HTMLElement>("[data-folder-tiles]");

@@ -13,6 +13,7 @@ import BulkMetaDialog from "../BulkMetaDialog";
 import ConfirmDialog from "../ConfirmDialog";
 import FolderBreadcrumbs, { FolderTiles } from "../FolderNav";
 import ProjectPickerDialog from "../ProjectPickerDialog";
+import { filesScope } from "../filesScope";
 import { useUpload } from "../useUpload";
 import { useVirtualRows } from "../useVirtualRows";
 import AssetGridBody from "./AssetGridBody";
@@ -22,7 +23,7 @@ import type { DetailSection } from "./AssetDetailsEditor";
 import { AssetPreviewModal } from "./preview";
 import { noop, type MissingScanOutcome } from "./assetGridMeta";
 import { useAssetActions } from "./useAssetActions";
-import { useAssetDrop } from "./useAssetDrop";
+import { useAssetDrop, type DropPolicy } from "./useAssetDrop";
 import { useAssetList } from "./useAssetList";
 import { useAssetSorting } from "./useAssetSorting";
 import { useBulkActions } from "./useBulkActions";
@@ -366,7 +367,6 @@ export default function AssetGrid({
     toggleGroup,
     toggleGroupExpanded,
     subfolders,
-    dropTargetName,
   } = useAssetSorting({
     items,
     folders,
@@ -401,6 +401,26 @@ export default function AssetGrid({
     },
   });
 
+  // The scope owns the destination name: the old sorting-hook value said
+  // "All Items" for the root and could not tell Unfiled from All files.
+  const scope = filesScope({ folderId: folderId ?? null, unfiled: isUnfiled, folders });
+  // Missing mode hides the folder chrome: a breadcrumb would navigate away and
+  // unmount the queue, and a missing file is not a place to drop a new one, so
+  // the drop hook stays inert there and in project mode.
+  let dropPolicy: DropPolicy = { kind: "inert" };
+  if (!isProject && !missingOnly) {
+    if (scope.dropPolicy === "upload") {
+      dropPolicy = { kind: "upload", name: scope.label };
+    } else {
+      // All files spans every folder, so no single folder could own an upload
+      // dropped there: the overlay names the scopes that can instead.
+      dropPolicy = {
+        kind: "refuse",
+        message: "All files is a result scope. Drop on Unfiled or a folder to upload.",
+      };
+    }
+  }
+
   const {
     showDropOverlay,
     dropMessage,
@@ -408,10 +428,7 @@ export default function AssetGrid({
     handleDragOver,
     handleDragLeave,
     handleDrop,
-  // Missing mode hides the folder chrome: a breadcrumb would navigate away and
-  // unmount the queue, and a missing file is not a place to drop a new one, so
-  // the drop hook is told this is project-like (inert drag/drop).
-  } = useAssetDrop({ isProject: isProject || missingOnly, canContribute, uploader, dropTargetName });
+  } = useAssetDrop({ policy: dropPolicy, canContribute, uploader });
 
   // Single source of truth for card props so the virtualized flat grid and the
   // grouped rows render exactly the same cards. All callbacks are stable, so
@@ -473,6 +490,7 @@ export default function AssetGrid({
           folders={folders}
           folderId={folderId ?? null}
           onNavigate={onNavigateFolder ?? noop}
+          unfiled={isUnfiled}
         />
       )}
       <BulkActionBar
@@ -530,7 +548,7 @@ export default function AssetGrid({
         sortKey={sortKey}
         folderGroups={folderGroups}
         typeGroups={typeGroups}
-        unfiled={isUnfiled}
+        scopeKind={scope.kind}
         missingOnly={missingOnly}
         missingScan={missingScan}
         collapsedGroups={collapsedGroups}
@@ -538,7 +556,6 @@ export default function AssetGrid({
         toggleGroup={toggleGroup}
         toggleGroupExpanded={toggleGroupExpanded}
         isProject={isProject}
-        folderId={folderId}
         subfolders={subfolders}
         loading={loading}
         error={error}

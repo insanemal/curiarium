@@ -670,18 +670,20 @@ sessions stay valid.
   history (REVIEW → Imports running, from `GET /imports/runs`, which is
   `read`) and the cookie preferences (client-side settings, not API writes).
   A contributor sits between the two, and the UI shows it: they gain the upload
-  bar, drag-and-drop upload (grid and sidebar), link/zip/project import, asset
-  tag and notes/creator/collection edits, folder create and subfolder create,
-  project create/edit/add-member/remove-member, attaching files to a project,
-  adding a supporting file, the display-only supporting-file rename and
-  reorder, thumbnail generation, the contribute half of the bulk bar (tags and
-  metadata) and the upload-queue panel (a retry of an upload is a contribute,
-  not a write). They still lose folder rename and move (and therefore folder
-  retagging), asset rename, moving an asset between folders, folder delete,
-  asset delete, supporting-file delete, prepared-print delete, batch move and
-  batch delete, the local folder-scan panel (REVIEW → Imports running, hidden
-  below `editor` although both of its calls are `contribute`) and snapshot
-  actions. The client is still not the boundary: a stale or tampered role cache
+  bar, drag-and-drop upload (onto the grid in a folder or in the Unfiled scope,
+  onto the Unfiled row or a folder row in the sidebar - never onto the All-files
+  scope, which spans every folder and is a result scope with no destination),
+  link/zip/project import, asset tag and notes/creator/collection edits, folder
+  create and subfolder create, project create/edit/add-member/remove-member,
+  attaching files to a project, adding a supporting file, the display-only
+  supporting-file rename and reorder, thumbnail generation, the contribute half
+  of the bulk bar (tags and metadata) and the upload-queue panel (a retry of an
+  upload is a contribute, not a write). They still lose folder rename and move
+  (and therefore folder retagging), asset rename, moving an asset between
+  folders, folder delete, asset delete, supporting-file delete, prepared-print
+  delete, batch move and batch delete, the local folder-scan panel
+  (REVIEW → Imports running, hidden below `editor` although both of its calls
+  are `contribute`) and snapshot actions. The client is still not the boundary: a stale or tampered role cache
   only hides or shows a button, it cannot change what the API allows.
 * **No direct-visit not-permitted state is needed for the contribute or write
   surfaces.** Both capabilities only show or hide controls inside views every
