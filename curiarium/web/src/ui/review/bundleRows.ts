@@ -43,6 +43,27 @@ export function isCreatable(row: BundleDetectItem): boolean {
   return !isBlocked(row) && !row.existing_project;
 }
 
+/** The two reveal toggles that widen what the queue shows. */
+export type VisibilityOptions = {
+  showDismissed: boolean;
+  showCreated: boolean;
+};
+
+/** Whether a row survives the queue's reveal toggles. The list and the badge
+ *  both call this one rule, so they cannot describe the queue two ways. */
+export function matchesVisibility(row: BundleDetectItem, options: VisibilityOptions): boolean {
+  return (
+    (options.showDismissed || !row.dismissed) && (options.showCreated || !row.existing_project)
+  );
+}
+
+/** A row that still needs a decision: visible under both toggles at their
+ *  defaults. Delegating to `matchesVisibility` is what makes the badge and the
+ *  list agree by construction rather than by coincidence. */
+export function needsDecision(row: BundleDetectItem): boolean {
+  return matchesVisibility(row, { showDismissed: false, showCreated: false });
+}
+
 export function confidenceLabel(confidence: string): string {
   return confidence === "high" ? "High confidence" : "Low confidence";
 }

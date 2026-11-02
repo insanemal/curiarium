@@ -4,6 +4,7 @@ import type { AssetCounts } from "../../lib/api/assets";
 import type { BundleReport } from "../../lib/api/bundles";
 import type { TrashList } from "../../lib/api/trash";
 import type { ReviewQueueKey } from "../views";
+import { needsDecision } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
 import type { ImportRunsState } from "./useImportRuns";
 
@@ -27,7 +28,9 @@ export function bundleBadgeCount(report: BundleReport | null): number | null {
   // plausible-looking undercount. The Trash precedent is the same
   // `–`-until-known rule.
   if (report.truncated) return null;
-  return report.bundles.filter(row => !row.dismissed && !row.existing_project).length;
+  // The list's own predicate, on the list's own array: at the default toggles
+  // the badge and the rows cannot drift.
+  return report.bundles.filter(needsDecision).length;
 }
 
 /**

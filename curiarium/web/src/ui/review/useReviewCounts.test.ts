@@ -6,6 +6,7 @@ import type { AssetCounts } from "../../lib/api/assets";
 import type { BundleDetectItem, BundleReport } from "../../lib/api/bundles";
 import type { ImportRunDetail } from "../../lib/api/settings";
 import type { TrashEntry, TrashList } from "../../lib/api/trash";
+import { needsDecision } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
 import type { ImportRunsState } from "./useImportRuns";
 import {
@@ -130,6 +131,8 @@ function makeState(report: BundleReport | null): BundleDetectState {
     lastRefreshedAt: null,
     showDismissed: false,
     setShowDismissed: () => undefined,
+    showCreated: false,
+    setShowCreated: () => undefined,
     refresh: async () => undefined,
     create: async () => undefined,
     dismiss: async () => undefined,
@@ -183,6 +186,21 @@ describe("bundleBadgeCount", () => {
       makeBundle({ key: "Dismissed", dismissed: true }),
     ];
     expect(bundleBadgeCount(makeReport(rows))).toBe(2);
+  });
+
+  it("equals the count of the queue's own predicate on a mixed report", () => {
+    // The badge IS the list's rule: one predicate, one array, one number. A
+    // truncated report is the one deliberate exception (see `null` above).
+    const report = makeReport([
+      makeBundle({ key: "Pending" }),
+      makeBundle({ key: "Blocked", status: "blocked" }),
+      makeBundle({ key: "Created", existing_project: "project-7" }),
+      makeBundle({ key: "Dismissed", dismissed: true }),
+      makeBundle({ key: "Settled", dismissed: true, existing_project: "project-7" }),
+    ]);
+
+    expect(bundleBadgeCount(report)).toBe(report.bundles.filter(needsDecision).length);
+    expect(bundleBadgeCount(report)).toBe(2);
   });
 });
 

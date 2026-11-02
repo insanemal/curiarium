@@ -94,6 +94,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // Restores the Storage.prototype.setItem spy even when an assertion threw,
+  // so a red run cannot leak a spy into the tests after it.
+  vi.restoreAllMocks();
 });
 
 describe("useBundleDetect", () => {
@@ -216,6 +219,50 @@ describe("useBundleDetect", () => {
 
     expect(result.current.showDismissed).toBe(true);
   });
+
+  it("keeps the show-created toggle", async () => {
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    expect(result.current.showCreated).toBe(false);
+
+    act(() => {
+      result.current.setShowCreated(true);
+    });
+
+    expect(result.current.showCreated).toBe(true);
+  });
+
+  // The persistence decision, pinned for both toggles: session state only. A
+  // persisted Show created would put the settled rows back in the queue for
+  // whoever ever flipped it, which is the bug this queue avoids.
+  it.each([
+    ["showDismissed", "setShowDismissed"],
+    ["showCreated", "setShowCreated"],
+  ] as const)(
+    "keeps %s across queue re-entry and writes no localStorage key",
+    async (field, setter) => {
+      const setItem = vi.spyOn(Storage.prototype, "setItem");
+      const { result, rerender } = renderHook(
+        ({ enabled }: { enabled: boolean }) => useBundleDetect({ enabled }),
+        { initialProps: { enabled: false } },
+      );
+      expect(result.current[field]).toBe(false);
+
+      act(() => {
+        result.current[setter](true);
+      });
+      expect(result.current[field]).toBe(true);
+
+      rerender({ enabled: true });
+      await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(1));
+      rerender({ enabled: false });
+      rerender({ enabled: true });
+
+      // Still on after the round trip, because leaving the queue is not a reset.
+      expect(result.current[field]).toBe(true);
+      // Only a page reload resets it, because nothing was ever stored.
+      expect(setItem).not.toHaveBeenCalled();
+    },
+  );
 
   it("turns a failed report into an error and never throws", async () => {
     getBundleReportMock.mockRejectedValue(new Error("boom"));

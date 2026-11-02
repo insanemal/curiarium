@@ -13,6 +13,7 @@ vi.mock("../../lib/api", () => ({
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
 import type { BundleDetectItem, BundleReport } from "../../lib/api/bundles";
 import BundleReviewView from "./BundleReviewView";
+import { needsDecision } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
 
 const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
@@ -159,6 +160,8 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
     lastRefreshedAt: null,
     showDismissed: false,
     setShowDismissed: vi.fn(),
+    showCreated: false,
+    setShowCreated: vi.fn(),
     refresh: vi.fn(async () => {}),
     create: vi.fn(async () => {}),
     dismiss: vi.fn(async () => {}),
@@ -172,6 +175,13 @@ function renderView(state: BundleDetectState, canContribute = true): void {
 
 function listbox(): HTMLElement {
   return screen.getByRole("listbox", { name: "Bundles to confirm" });
+}
+
+/** The queue header's own count, the number the badge paints. */
+function headerCount(): string {
+  const node = document.querySelector(".review-queue-count");
+  if (!node) throw new Error("no queue count");
+  return node.textContent ?? "";
 }
 
 function detail(): HTMLElement {
@@ -194,9 +204,10 @@ function detailTitle(): string | null {
   return within(detail()).getByRole("heading").textContent;
 }
 
-/** The toggle needs a live setter, exactly as the hook supplies one. */
-function ShowDismissedHarness({ initial }: { initial: BundleDetectState }) {
+/** Both reveal toggles need live setters, exactly as the hook supplies them. */
+function VisibilityHarness({ initial }: { initial: BundleDetectState }) {
   const [showDismissed, setShowDismissed] = React.useState(initial.showDismissed);
+  const [showCreated, setShowCreated] = React.useState(initial.showCreated);
   return (
     <BundleReviewView
       state={{
@@ -205,6 +216,11 @@ function ShowDismissedHarness({ initial }: { initial: BundleDetectState }) {
         setShowDismissed: (value: boolean) => {
           initial.setShowDismissed(value);
           setShowDismissed(value);
+        },
+        showCreated,
+        setShowCreated: (value: boolean) => {
+          initial.setShowCreated(value);
+          setShowCreated(value);
         },
       }}
       canContribute
@@ -263,7 +279,7 @@ describe("BundleReviewView states", () => {
   it("tells the operator a dismissal filter hid every row, not that detection found none", () => {
     const dismissed = makeBundle({ key: "Dismissed_one", title: "Dismissed one", dismissed: true });
     const state = makeState({ report: makeReport([dismissed]) });
-    render(<ShowDismissedHarness initial={state} />);
+    render(<VisibilityHarness initial={state} />);
 
     expect(screen.getByText("Every detected bundle is dismissed.")).toBeTruthy();
     expect(screen.queryByText("No vendor bundles were detected.")).toBeNull();
@@ -333,7 +349,7 @@ describe("BundleReviewView filters", () => {
   it("reveals dismissed rows once Show dismissed is on", () => {
     const dismissed = makeBundle({ key: "Dismissed_one", title: "Dismissed one", dismissed: true });
     const state = makeState({ report: makeReport([moai, dismissed]) });
-    render(<ShowDismissedHarness initial={state} />);
+    render(<VisibilityHarness initial={state} />);
 
     expect(rowKeys()).toEqual(["Moai"]);
 
@@ -343,6 +359,119 @@ describe("BundleReviewView filters", () => {
     expect(rowKeys()).toEqual(["Moai", "Dismissed_one"]);
     expect(screen.getByText("Showing 2 of 2")).toBeTruthy();
   });
+});
+
+describe("BundleReviewView badge agreement", () => {
+  it("counts exactly the rows it shows, from the same predicate", () => {
+    const pending = makeBundle();
+    const dismissed = makeBundle({ key: "Old", title: "Old bundle", dismissed: true });
+    const created = makeBundle({
+      key: "Settled",
+      title: "Settled bundle",
+      existing_project: "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61",
+    });
+    const report = makeReport([pending, dismissed, created]);
+    renderView(makeState({ report }));
+
+    // The view's own predicate, on the report's own array: the assertion pins
+    // the shared rule rather than a second copy of it.
+    const expected = report.bundles.filter(needsDecision).map(row => row.key);
+
+    expect(expected).toEqual(["Moai"]);
+    // What the operator sees: the header's number and the list it heads.
+    const rendered = rowKeys();
+    expect(headerCount()).toBe(String(rendered.length));
+    // ...and both are the shared predicate's answer on the same array.
+    expect(rendered).toEqual(expected);
+    expect(headerCount()).toBe(String(expected.length));
+  });
+});
+
+describe("BundleReviewView empty states", () => {
+  const COPY = {
+    none: "No vendor bundles were detected.",
+    created: "Every detected bundle has a project.",
+    dismissed: "Every detected bundle is dismissed.",
+    mixed: "Every detected bundle is dismissed or already has a project.",
+    filtered: "No bundles match this filter.",
+  };
+
+  const TOGGLE_NAMES = ["Show dismissed", "Show created"];
+
+  const dismissedRow = makeBundle({ key: "Old", title: "Old bundle", dismissed: true });
+  const createdRow = makeBundle({
+    key: "Settled",
+    title: "Settled bundle",
+    existing_project: "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61",
+  });
+
+  type Case = {
+    name: string;
+    state: BundleDetectState;
+    copy: string;
+    /** The reveal toggles on screen: the way out, and nothing else. */
+    toggles: string[];
+    /** A filter button to press after mounting, for the filter-empty case. */
+    filter?: string;
+  };
+
+  const cases: Case[] = [
+    {
+      name: "nothing detected",
+      state: makeState({ report: makeReport([]) }),
+      copy: COPY.none,
+      toggles: [],
+    },
+    {
+      name: "every bundle has a project",
+      state: makeState({ report: makeReport([createdRow]) }),
+      copy: COPY.created,
+      toggles: ["Show created"],
+    },
+    {
+      name: "every bundle is dismissed",
+      state: makeState({ report: makeReport([dismissedRow]) }),
+      copy: COPY.dismissed,
+      toggles: ["Show dismissed"],
+    },
+    {
+      name: "some dismissed and some created",
+      state: makeState({ report: makeReport([dismissedRow, createdRow]) }),
+      copy: COPY.mixed,
+      toggles: ["Show created", "Show dismissed"],
+    },
+    {
+      name: "the filter hid every row",
+      state: makeState({ report: makeReport([moai, cableClip]) }),
+      copy: COPY.filtered,
+      // The filter branch sits inside the normal toolbar, so both toggles stay.
+      toggles: ["Show dismissed", "Show created"],
+      filter: "Blocked",
+    },
+  ];
+
+  it("gives each state its own words", () => {
+    expect(new Set(Object.values(COPY)).size).toBe(Object.values(COPY).length);
+  });
+
+  for (const testCase of cases) {
+    it(`says "${testCase.copy}" when ${testCase.name}, and nothing else`, () => {
+      renderView(testCase.state);
+      if (testCase.filter) fireEvent.click(screen.getByRole("button", { name: testCase.filter }));
+
+      expect(screen.getByText(testCase.copy)).toBeTruthy();
+      for (const other of Object.values(COPY)) {
+        if (other === testCase.copy) continue;
+        expect(screen.queryByText(other)).toBeNull();
+      }
+      // The instruction always comes with the control it names, and a branch
+      // shows no toggle that is not its way out.
+      const shown = TOGGLE_NAMES.filter(
+        name => screen.queryByRole("checkbox", { name }) !== null,
+      );
+      expect(shown.sort()).toEqual([...testCase.toggles].sort());
+    });
+  }
 });
 
 describe("BundleReviewView writes", () => {
@@ -379,7 +508,8 @@ describe("BundleReviewView writes", () => {
     expect(screen.getByRole("button", { name: /^Create selected/ }).textContent).toBe(
       "Create selected (2)",
     );
-    expect(screen.getByText("4 bundles selected")).toBeTruthy();
+    // The already-created row is settled, so it is not shown, let alone selected.
+    expect(screen.getByText("3 bundles selected")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /^Create selected/ }));
 
@@ -472,19 +602,42 @@ describe("BundleReviewView writes", () => {
     expect(screen.queryByLabelText("Name for Moai statue")).toBeNull();
     expect(screen.queryByRole("group", { name: "Bundle actions" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Select all shown" })).toBeNull();
-    // The filters and the Show dismissed toggle are read controls and stay.
+    // The filters and both reveal toggles are read controls and stay.
     expect(screen.getByRole("button", { name: "Blocked" })).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: "Show dismissed" })).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Show created" })).toBeTruthy();
   });
 
-  it("reports an already-created bundle and disables its create", () => {
-    const created = makeBundle({ existing_project: "Moai statue (old)" });
-    renderView(makeState({ report: makeReport([created]) }));
+  it("hides an already-created bundle and reports its project once Show created is on", () => {
+    // The wire sends the existing project's uuid, not its name, so the fixture
+    // says what the API can actually send.
+    const projectId = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
+    const created = makeBundle({
+      key: "Moai_created",
+      title: "Moai created",
+      existing_project: projectId,
+    });
+    const state = makeState({ report: makeReport([created]) });
+    render(<VisibilityHarness initial={state} />);
 
-    expect(within(detail()).getByText("Already created as project Moai statue (old)")).toBeTruthy();
-    const create = within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement;
-    expect(create.disabled).toBe(true);
+    // Created rows are permanently done, so they are hidden by default - and
+    // the queue says why rather than claiming nothing was detected. With no
+    // rows there is no list, and no detail panel for the hidden row either.
+    expect(screen.queryByRole("listbox", { name: "Bundles to confirm" })).toBeNull();
+    expect(screen.queryByRole("complementary", { name: "Bundle details" })).toBeNull();
+    expect(screen.getByText("Every detected bundle has a project.")).toBeTruthy();
+    expect(screen.getByText("Turn on Show created to see them.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show created" }));
+
+    expect(rowKeys()).toEqual(["Moai_created"]);
     expect(within(listbox()).getByText("Created")).toBeTruthy();
+    expect(within(detail()).getByText(`Already created as project ${projectId}`)).toBeTruthy();
+    // There is nothing to create, so neither the name field nor the button is
+    // offered; dismissing is still a real decision, so that stays.
+    expect(within(detail()).queryByRole("button", { name: "Create project" })).toBeNull();
+    expect(within(detail()).queryByLabelText("Name for Moai created")).toBeNull();
+    expect(within(detail()).getByRole("button", { name: "Dismiss" })).toBeTruthy();
   });
 });
 

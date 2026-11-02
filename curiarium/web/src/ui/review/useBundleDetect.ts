@@ -26,6 +26,8 @@ export type BundleDetectState = {
   lastRefreshedAt: number | null;
   showDismissed: boolean;
   setShowDismissed: (value: boolean) => void;
+  showCreated: boolean;
+  setShowCreated: (value: boolean) => void;
   refresh: () => Promise<void>;
   create: (items: BundleCreateItem[]) => Promise<void>;
   dismiss: (keys: string[], dismissed: boolean) => Promise<void>;
@@ -47,6 +49,14 @@ export type BundleDetectState = {
  *   whatever is still in flight.
  *
  * A failure becomes an error string; nothing here throws out of the hook.
+ *
+ * The two reveal toggles (`showDismissed`, `showCreated`) are session state: they
+ * default off, survive leaving and re-entering the queue because the hook stays
+ * mounted for the App's lifetime, and reset on reload. Nothing is written to
+ * localStorage on purpose - a persisted Show created would put the dead rows
+ * back in the queue for whoever ever flipped it, which is the bug this queue
+ * exists to avoid. Created rows are permanently done, so hiding them is the
+ * default the ticket settles on.
  */
 export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetectState {
   const [report, setReport] = React.useState<BundleReport | null>(null);
@@ -55,6 +65,7 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
   const [error, setError] = React.useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = React.useState<number | null>(null);
   const [showDismissed, setShowDismissed] = React.useState(false);
+  const [showCreated, setShowCreated] = React.useState(false);
   // Newest request wins: a walk that started before a mutation's refetch must
   // never overwrite the newer report with its pre-mutation copy.
   const seq = React.useRef(0);
@@ -145,6 +156,8 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     lastRefreshedAt,
     showDismissed,
     setShowDismissed,
+    showCreated,
+    setShowCreated,
     refresh,
     create,
     dismiss,

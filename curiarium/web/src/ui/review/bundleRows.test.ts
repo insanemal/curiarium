@@ -11,6 +11,8 @@ import {
   isBlocked,
   isCreatable,
   matchesFilter,
+  matchesVisibility,
+  needsDecision,
   statusLine,
   typedName,
 } from "./bundleRows";
@@ -111,6 +113,72 @@ describe("isCreatable", () => {
 
   it("rejects a ready row that already became a project", () => {
     expect(isCreatable(makeBundle({ status: "ready", existing_project: "project-7" }))).toBe(false);
+  });
+});
+
+describe("matchesVisibility", () => {
+  const pending = makeBundle();
+  const blocked = makeBundle({ status: "blocked", blocked_reason: "unresolved_directory" });
+  const dismissed = makeBundle({ dismissed: true });
+  const created = makeBundle({ existing_project: "project-7" });
+  const both = makeBundle({ dismissed: true, existing_project: "project-7" });
+
+  it("keeps a pending row under every combination of toggles", () => {
+    for (const showDismissed of [false, true]) {
+      for (const showCreated of [false, true]) {
+        expect(matchesVisibility(pending, { showDismissed, showCreated })).toBe(true);
+        expect(matchesVisibility(blocked, { showDismissed, showCreated })).toBe(true);
+      }
+    }
+  });
+
+  it("hides a dismissed row until Show dismissed is on", () => {
+    expect(matchesVisibility(dismissed, { showDismissed: false, showCreated: false })).toBe(false);
+    expect(matchesVisibility(dismissed, { showDismissed: false, showCreated: true })).toBe(false);
+    expect(matchesVisibility(dismissed, { showDismissed: true, showCreated: false })).toBe(true);
+    expect(matchesVisibility(dismissed, { showDismissed: true, showCreated: true })).toBe(true);
+  });
+
+  it("hides a created row until Show created is on", () => {
+    expect(matchesVisibility(created, { showDismissed: false, showCreated: false })).toBe(false);
+    expect(matchesVisibility(created, { showDismissed: true, showCreated: false })).toBe(false);
+    expect(matchesVisibility(created, { showDismissed: false, showCreated: true })).toBe(true);
+    expect(matchesVisibility(created, { showDismissed: true, showCreated: true })).toBe(true);
+  });
+
+  it("needs both toggles for a row that is dismissed and already created", () => {
+    expect(matchesVisibility(both, { showDismissed: false, showCreated: false })).toBe(false);
+    expect(matchesVisibility(both, { showDismissed: true, showCreated: false })).toBe(false);
+    expect(matchesVisibility(both, { showDismissed: false, showCreated: true })).toBe(false);
+    expect(matchesVisibility(both, { showDismissed: true, showCreated: true })).toBe(true);
+  });
+});
+
+describe("needsDecision", () => {
+  it("is matchesVisibility with both toggles off, for every row shape", () => {
+    const rows = [
+      readyHigh,
+      blockedHigh,
+      readyLow,
+      makeBundle({ dismissed: true }),
+      makeBundle({ existing_project: "project-7" }),
+      makeBundle({ dismissed: true, existing_project: "project-7" }),
+    ];
+    for (const row of rows) {
+      expect(needsDecision(row)).toBe(
+        matchesVisibility(row, { showDismissed: false, showCreated: false }),
+      );
+    }
+  });
+
+  it("keeps a pending row, blocked or not, and drops the settled ones", () => {
+    expect(needsDecision(readyHigh)).toBe(true);
+    expect(needsDecision(blockedHigh)).toBe(true);
+    expect(needsDecision(makeBundle({ dismissed: true }))).toBe(false);
+    expect(needsDecision(makeBundle({ existing_project: "project-7" }))).toBe(false);
+    expect(needsDecision(makeBundle({ dismissed: true, existing_project: "project-7" }))).toBe(
+      false,
+    );
   });
 });
 

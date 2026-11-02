@@ -13,6 +13,7 @@ import {
   headline,
   isCreatable,
   matchesFilter,
+  matchesVisibility,
   statusLine,
   typedName,
   type BundleFilter,
@@ -37,6 +38,52 @@ function rowState(row: BundleDetectItem): string {
   return "";
 }
 
+/** Why a report with rows shows none of them. A project outranks a dismissal,
+ *  exactly as `rowState` says, so a queue of one kind is never confused with a
+ *  queue of the other. */
+type HiddenReason = "created" | "dismissed" | "mixed";
+
+function hiddenReason(rows: BundleDetectItem[]): HiddenReason {
+  if (rows.every(row => rowState(row) === "Created")) return "created";
+  if (rows.every(row => rowState(row) === "Dismissed")) return "dismissed";
+  return "mixed";
+}
+
+/** What an empty queue says when the rows exist but are hidden. The mixed state
+ *  is not either named one: folding it into one of them would make that branch
+ *  lie, so it names both. */
+const HIDDEN_COPY: Record<HiddenReason, string> = {
+  created: "Every detected bundle has a project.",
+  dismissed: "Every detected bundle is dismissed.",
+  mixed: "Every detected bundle is dismissed or already has a project.",
+};
+
+/** The instruction that names the way out; the mixed state names none, so it
+ *  shows both toggles instead. */
+const HIDDEN_HINT: Partial<Record<HiddenReason, string>> = {
+  created: "Turn on Show created to see them.",
+  dismissed: "Turn on Show dismissed to see them.",
+};
+
+/** One reveal toggle. Its label is its accessible name, so the operator and a
+ *  test read the same words. */
+function visibilityToggle(
+  label: string,
+  checked: boolean,
+  setChecked: (value: boolean) => void,
+): React.ReactElement {
+  return (
+    <label className="review-toggle">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={event => setChecked(event.target.checked)}
+      />
+      <span>{label}</span>
+    </label>
+  );
+}
+
 function rowClassName(selected: boolean, active: boolean): string {
   const classes = ["review-row"];
   if (selected) classes.push("is-selected");
@@ -57,7 +104,16 @@ type Props = {
  * the active row.
  */
 export default function BundleReviewView({ state, canContribute }: Props) {
-  const { report, loading, busy, error, showDismissed, setShowDismissed } = state;
+  const {
+    report,
+    loading,
+    busy,
+    error,
+    showDismissed,
+    setShowDismissed,
+    showCreated,
+    setShowCreated,
+  } = state;
   const [filter, setFilter] = React.useState<BundleFilter>("all");
   const [selectedKeys, setSelectedKeys] = React.useState<string[]>([]);
   const [names, setNames] = React.useState<Record<string, string>>({});
@@ -73,10 +129,11 @@ export default function BundleReviewView({ state, canContribute }: Props) {
   const listHadFocusRef = React.useRef(false);
 
   const rows = React.useMemo(() => report?.bundles ?? [], [report]);
-  // Dismissals are filtered here, not server-side: one fetch feeds the toggle.
+  // One fetch feeds both toggles, and the badge calls the same predicate on the
+  // same array: this is what keeps the count and the list from drifting.
   const visible = React.useMemo(
-    () => rows.filter(row => showDismissed || !row.dismissed),
-    [rows, showDismissed],
+    () => rows.filter(row => matchesVisibility(row, { showDismissed, showCreated })),
+    [rows, showDismissed, showCreated],
   );
   const filtered = React.useMemo(
     () => visible.filter(row => matchesFilter(row, filter)),
@@ -243,18 +300,10 @@ export default function BundleReviewView({ state, canContribute }: Props) {
     );
   };
 
-  // The toggle is the way out of the all-dismissed state as well as a toolbar
-  // control, so it is defined once and rendered where it is needed.
-  const showDismissedToggle = (
-    <label className="review-toggle">
-      <input
-        type="checkbox"
-        checked={showDismissed}
-        onChange={event => setShowDismissed(event.target.checked)}
-      />
-      <span>Show dismissed</span>
-    </label>
-  );
+  // Both toggles are the way out of an empty state as well as toolbar controls,
+  // so each is defined once and rendered wherever it is needed.
+  const showDismissedToggle = visibilityToggle("Show dismissed", showDismissed, setShowDismissed);
+  const showCreatedToggle = visibilityToggle("Show created", showCreated, setShowCreated);
 
   const notices = (
     <>
@@ -292,13 +341,18 @@ export default function BundleReviewView({ state, canContribute }: Props) {
   } else if (rows.length === 0) {
     body = <p className="review-empty">No vendor bundles were detected.</p>;
   } else if (visible.length === 0) {
-    // Dismissed empty is not the same thing as detected nothing: say which one
-    // this is, and leave the toggle that gets the rows back on screen.
+    // Rows exist but are hidden, and which ones changes what the queue should
+    // say. Each branch keeps the toggle that is its way out on screen, so the
+    // instruction always has its control.
+    const reason = hiddenReason(rows);
     body = (
       <>
-        <div className="review-toolbar">{showDismissedToggle}</div>
-        <p className="review-empty">Every detected bundle is dismissed.</p>
-        <p className="review-empty">Turn on Show dismissed to see them.</p>
+        <div className="review-toolbar">
+          {reason !== "dismissed" && showCreatedToggle}
+          {reason !== "created" && showDismissedToggle}
+        </div>
+        <p className="review-empty">{HIDDEN_COPY[reason]}</p>
+        {HIDDEN_HINT[reason] && <p className="review-empty">{HIDDEN_HINT[reason]}</p>}
       </>
     );
   } else {
@@ -317,6 +371,7 @@ export default function BundleReviewView({ state, canContribute }: Props) {
             </button>
           ))}
           {showDismissedToggle}
+          {showCreatedToggle}
           {canContribute && (
             <>
               <button
@@ -425,26 +480,32 @@ export default function BundleReviewView({ state, canContribute }: Props) {
                 </div>
                 {canContribute && (
                   <>
-                    <label className="review-detail-field">
-                      <span>Project name</span>
-                      <input
-                        type="text"
-                        aria-label={`Name for ${activeRow.title}`}
-                        value={names[activeRow.key] ?? activeRow.name_suggestion}
-                        onChange={event =>
-                          setNames(prev => ({ ...prev, [activeRow.key]: event.target.value }))
-                        }
-                      />
-                    </label>
+                    {/* An already-created row has nothing to create, so the name
+                        field and the button go rather than sitting disabled. */}
+                    {!activeRow.existing_project && (
+                      <label className="review-detail-field">
+                        <span>Project name</span>
+                        <input
+                          type="text"
+                          aria-label={`Name for ${activeRow.title}`}
+                          value={names[activeRow.key] ?? activeRow.name_suggestion}
+                          onChange={event =>
+                            setNames(prev => ({ ...prev, [activeRow.key]: event.target.value }))
+                          }
+                        />
+                      </label>
+                    )}
                     <div className="review-detail-actions">
-                      <button
-                        type="button"
-                        className={PRIMARY_BUTTON}
-                        disabled={busy || !isCreatable(activeRow)}
-                        onClick={createActive}
-                      >
-                        Create project
-                      </button>
+                      {!activeRow.existing_project && (
+                        <button
+                          type="button"
+                          className={PRIMARY_BUTTON}
+                          disabled={busy || !isCreatable(activeRow)}
+                          onClick={createActive}
+                        >
+                          Create project
+                        </button>
+                      )}
                       <button
                         type="button"
                         className={SECONDARY_BUTTON}

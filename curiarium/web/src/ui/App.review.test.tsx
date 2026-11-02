@@ -312,6 +312,16 @@ describe("App review destination", () => {
     expect(createBundlesMock.mock.calls[0][0]).toEqual([{ key: "Moai", name: "Moai statue" }]);
     await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(badgeText()).toBe("0"));
+    // Both remaining rows are settled - one created, one dismissed - and the
+    // queue has nothing pending, so it says which kinds are hidden rather than
+    // claiming either one alone. No listbox, no created row.
+    expect(
+      await screen.findByText("Every detected bundle is dismissed or already has a project."),
+    ).toBeTruthy();
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show created" }));
+
     expect(await screen.findByText("Already created as project Moai statue")).toBeTruthy();
   });
 
