@@ -60,6 +60,16 @@ function cacheKeyFor(url: string, assetId?: string): string {
   return assetId ? `asset:${assetId}` : url;
 }
 
+/**
+ * A file-hidden layer must never be rendered, so this is seeded in the same
+ * commit as the model it describes. Seeding it from a follow-up effect left one
+ * committed render in which a hidden layer was visible.
+ */
+function hiddenLayersFor(model: LightBurnModel | null): Set<number> {
+  if (!model) return new Set();
+  return new Set(model.layers.filter(layer => layer.isHidden).map(layer => layer.index));
+}
+
 function contentLengthOf(response: Response): number | null {
   const header = response.headers?.get("content-length");
   if (!header) return null;
@@ -127,6 +137,7 @@ export default function LightBurnPreview({
     const cached = readModel(cacheKey);
     if (cached) {
       setModel(cached);
+      setHiddenLayers(hiddenLayersFor(cached));
       setState("ready");
       return () => {
         alive = false;
@@ -134,6 +145,7 @@ export default function LightBurnPreview({
     }
 
     setModel(null);
+    setHiddenLayers(hiddenLayersFor(null));
     setThumbnailUrl(null);
     setLargeFromBytes(false);
     setState("loading");
@@ -170,6 +182,7 @@ export default function LightBurnPreview({
 
         writeModel(cacheKey, parsed);
         setModel(parsed);
+        setHiddenLayers(hiddenLayersFor(parsed));
         setState("ready");
       } catch (err) {
         if (!alive) return;
@@ -182,15 +195,6 @@ export default function LightBurnPreview({
       alive = false;
     };
   }, [shouldLoad, cacheKey, url, sizeWarns]);
-
-  // The file's own hidden flags seed the layer toggles.
-  useEffect(() => {
-    if (!model) {
-      setHiddenLayers(new Set());
-      return;
-    }
-    setHiddenLayers(new Set(model.layers.filter(layer => layer.isHidden).map(layer => layer.index)));
-  }, [model]);
 
   // Only the raster fallback needs an object URL; release it on unmount. A
   // vector render never allocates one, even when a thumbnail is present.
