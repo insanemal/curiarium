@@ -1606,17 +1606,15 @@ def test_service_a_container_of_a_paired_directory_is_still_not_a_bundle(
     assert row["blocked_reason"] == "archive_only"
 
 
-def test_service_a_paired_directory_that_holds_a_nested_archive_is_still_offered(
+def test_service_a_nested_archive_is_a_member_not_a_second_bundle(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """The container strip may never swallow a verified pair.
+    """AC-1: the real Clockwork shape with the nested archive inside it.
 
-    The Clockwork shape (models and images, no text) with a real archive dropped in
-    *inside* the directory - the shape `Mf-74x5` exists for. That nested archive is
-    a member of the outer pair once `Mf-74x5` lands, but until then it is a row of
-    its own, and its presence must not make the outer pair look like a container: a
-    pair-only row claims no subtree, so stripping it would hide verified evidence.
-    What this test protects is exactly that - the verified PAIR is still offered.
+    The directory is one bundle and the nested zip is a supporting file: no
+    second row, no second project, and it is never read as a model. The
+    pair_only/blocked assertions are the documented pre-Mf-t12a INTERIM; the
+    one-row and member assertions are the decision this ticket owns.
     """
     clockwork_pair(isolated_storage)
     nested = {"inner/part.stl": STL_BYTES, "inner/preview.jpg": b"j" * 50, "inner/notes.txt": b"n" * 20}
@@ -1627,14 +1625,101 @@ def test_service_a_paired_directory_that_holds_a_nested_archive_is_still_offered
 
     report = detect(client, headers)
 
-    assert {row["key"] for row in report["bundles"]} == {CLOCKWORK_DIR, nested_zip}
-    pair = row_for(report, CLOCKWORK_DIR)
-    assert pair["archive"] == {"rel_path": CLOCKWORK_ZIP, "twin_verified": True}, (
-        "the verified pair survives the archive-only container strip"
+    assert [row["key"] for row in report["bundles"]] == [CLOCKWORK_DIR], (
+        "one bundle: the nested zip is a member, not a second row"
     )
-    nested_row = row_for(report, nested_zip)
-    assert nested_row["status"] == "blocked"
-    assert nested_row["blocked_reason"] == "archive_only"
+    row = row_for(report, CLOCKWORK_DIR)
+    assert row["archive"] == {"rel_path": CLOCKWORK_ZIP, "twin_verified": True}
+    assert row["model_count"] == 12, "the nested zip is an archive, never a model"
+    assert row["status"] == "blocked" and row["blocked_reason"] == "archive_only", (
+        "pre-Mf-t12a interim: the pair-only row is not creatable yet"
+    )
+    duplicate_paths = {path for group in report["duplicates"] for path in group["paths"]}
+    assert nested_zip not in duplicate_paths, "a member is never offered for deletion"
+    assert [group["paths"] for group in report["duplicates"]] == [[CLOCKWORK_ZIP, CLOCKWORK_DUPLICATE_ZIP]]
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    assert truncated is False
+    assert [candidate.key for candidate in candidates] == [CLOCKWORK_DIR]
+    assert any(entry.rel_path == "Clockwork_v1.8.zip" for entry in candidates[0].snapshot.entries), (
+        "the nested archive is a file of the bundle's own listing"
+    )
+
+
+def test_service_a_nested_archive_alone_does_not_make_a_directory_a_bundle(
+    isolated_storage: Path,
+) -> None:
+    """AC-2: a directory whose only payload is a nested archive is not a bundle.
+
+    The zip's own entries are a full R3 trio, so the fixture is meaningful: the
+    zip is offered as its own archive bundle, while the enclosing directory is
+    not. Under the rejected rule "a nested archive's entries count as evidence
+    for the enclosing bundle" the directory would become a bundle and this test
+    would fail.
+    """
+    nested = {"inner/part.stl": STL_BYTES, "inner/preview.jpg": b"j" * 50, "inner/notes.txt": b"n" * 20}
+    nested_zip = "Solo/Clockwork_v1.8.zip"
+    write_zip(isolated_storage / nested_zip, nested)
+
+    report = bundle_service.build_report()
+
+    assert "Solo" not in {row["key"] for row in report["bundles"]}
+    assert [row["key"] for row in report["bundles"]] == [nested_zip], (
+        "the zip itself is a bundle; the enclosing directory is not"
+    )
+    candidates, _truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    assert [candidate.key for candidate in candidates] == [nested_zip]
+
+
+def test_service_a_nested_archive_is_never_offered_for_deletion(isolated_storage: Path) -> None:
+    """AC-3: a member of a live bundle is never the deletable side of a duplicate.
+
+    The nested zip is byte-identical to a shorter-named copy outside the bundle,
+    so the shortest-name rule would make the member the duplicate-to-delete. The
+    report must drop the member from the group instead.
+    """
+    clockwork_pair(isolated_storage)
+    nested = {"inner/part.stl": STL_BYTES, "inner/preview.jpg": b"j" * 50, "inner/notes.txt": b"n" * 20}
+    nested_zip = f"{CLOCKWORK_DIR}/Clockwork_v1.8.zip"
+    outside_copy = "import/Clockwork_v1.8 copy.zip"
+    write_zip(isolated_storage / nested_zip, nested)
+    shutil.copyfile(isolated_storage / nested_zip, isolated_storage / outside_copy)
+
+    report = bundle_service.build_report()
+
+    duplicate_paths = {path for group in report["duplicates"] for path in group["paths"]}
+    assert nested_zip not in duplicate_paths, "a bundle member is never offered for deletion"
+    assert nested_zip not in report["duplicates_text"]
+    assert [group["paths"] for group in report["duplicates"]] == [[CLOCKWORK_ZIP, CLOCKWORK_DUPLICATE_ZIP]]
+    assert outside_copy in {row["key"] for row in report["bundles"]}, (
+        "the outside copy was the group's keep, so it is still offered as its own archive bundle"
+    )
+
+
+def test_service_a_nested_archive_cannot_pair_a_sibling_directory(isolated_storage: Path) -> None:
+    """AC-4: the entry-root pass must not resurrect a member as a second bundle.
+
+    The nested archive's name differs from the subdirectory it is rooted at, so
+    the stem-twin rule misses and only the entry-root rule could pair it. It must
+    not: the archive is a file of the enclosing bundle, and the subdirectory is
+    not a second project.
+    """
+    clockwork_pair(isolated_storage)
+    sub = {
+        "Clockwork_v1.8/part.stl": STL_BYTES,
+        "Clockwork_v1.8/preview.jpg": b"j" * 50,
+    }
+    for rel_path, payload in sub.items():
+        write_file(isolated_storage / CLOCKWORK_DIR / rel_path, payload)
+    nested_zip = f"{CLOCKWORK_DIR}/Clockwork v1.8 Download.zip"
+    write_zip(isolated_storage / nested_zip, sub)
+
+    report = bundle_service.build_report()
+
+    assert [row["key"] for row in report["bundles"]] == [CLOCKWORK_DIR]
+    row = row_for(report, CLOCKWORK_DIR)
+    assert row["archive"] == {"rel_path": CLOCKWORK_ZIP, "twin_verified": True}
+    assert nested_zip not in {row["key"] for row in report["bundles"]}
 
 
 # --- duplicate archives (Mf-z4vv) -------------------------------------------

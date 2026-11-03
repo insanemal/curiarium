@@ -926,6 +926,52 @@ def test_archive_owned_facts_keeps_the_depth_bound() -> None:
     assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, buried)) is None
 
 
+def test_is_bundle_member_is_strictly_below_and_raw() -> None:
+    assert bundle_detect.is_bundle_member("A/B/c.zip", {"A"}) is True
+    assert bundle_detect.is_bundle_member("A/B/c.zip", {"A/B"}) is True
+    assert bundle_detect.is_bundle_member("A/c.zip", {"A"}) is True
+    assert bundle_detect.is_bundle_member("A.zip", {"A"}) is False, "a twin beside the directory is not a member"
+    assert bundle_detect.is_bundle_member("AB/c.zip", {"A"}) is False, "a segment boundary, not a string prefix"
+    assert bundle_detect.is_bundle_member("A/B/c.zip", {"a"}) is False, "raw and case-sensitive, like the strip"
+    assert bundle_detect.is_bundle_member("A/B/c.zip", set()) is False
+    assert bundle_detect.is_bundle_member("c.zip", {"A"}) is False
+
+
+def test_a_nested_archive_is_never_bundle_evidence() -> None:
+    """The rejected rule would let a zip's entries make its directory a bundle."""
+    only_zip = {"Clockwork_v1.8.zip": 176_000_000}
+
+    assert bundle_detect.classify_entry("Clockwork_v1.8.zip", 176_000_000) == bundle_detect.ARCHIVE
+    assert bundle_detect.detect_bundle(snapshot(CLOCKWORK_ROOT, only_zip), {}) is None
+    assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, only_zip)) is None
+
+    without_model = {
+        "Clockwork_v1.8.zip": 176_000_000,
+        "Clockwork_Render0.png": 400,
+        "notes.txt": 20,
+    }
+    assert bundle_detect.detect_bundle(snapshot(CLOCKWORK_ROOT, without_model), {}) is None
+    assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, without_model)) is None
+
+
+def test_a_nested_archive_is_counted_as_an_archive_only() -> None:
+    files = {
+        "part.stl": 100,
+        "cover.jpg": 50,
+        "notes.txt": 20,
+        "Clockwork_v1.8.zip": 1000,
+    }
+
+    facts = bundle_detect.detect_bundle(snapshot(CLOCKWORK_ROOT, files), {})
+
+    assert facts is not None
+    assert facts.counts.model == 1
+    assert facts.counts.image == 1
+    assert facts.counts.text == 1
+    assert facts.counts.archive == 1
+    assert facts.counts.other == 0
+
+
 # --- duplicate archives (Mf-z4vv) -------------------------------------------
 
 DUPLICATE_DIGEST = "a" * 64

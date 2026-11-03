@@ -48,6 +48,15 @@ paths differ; a file's role is decided by its extension alone. The image
 suffixes are not a second table - they are ``library_scan.IMAGE_SUFFIXES``, the
 constant the scanner and the thumbnailer already agree on.
 
+A nested archive is a supporting file, never a candidate and never evidence
+(Mf-74x5). A ``.zip`` below a detected bundle directory belongs to that bundle:
+it is counted as an archive and nothing else, so it can neither become a second
+row nor supply a model, image or text that would make the enclosing directory a
+bundle. Its central directory may still be listed to decide pairing and its
+bytes hashed for duplicate identity, but nothing inside it is read as evidence
+and nothing is ever extracted. ``is_bundle_member`` is the one predicate for
+that membership.
+
 Every heuristic in this module is proven by ``tests/test_bundle_detect.py``: the
 suffix table, the shared image-suffix constant, both parser shapes and their
 negative cases, the licence table, the display name, the twin key, the cover
@@ -72,7 +81,7 @@ renders text; it never deletes, renames or moves a file.
 import re
 from dataclasses import dataclass
 from pathlib import PurePath
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from config import IMPORT_ALLOWED_EXTS
 from import_resolvers import thingiverse_thing_id_from_url
@@ -411,6 +420,24 @@ def is_macosx_artifact(rel_path: str) -> bool:
     """
     head, _separator, _rest = (rel_path or "").partition("/")
     return head.casefold() == _MACOSX_ROOT
+
+
+def is_bundle_member(rel_path: str, bundle_dirs: AbstractSet[str]) -> bool:
+    """Whether ``rel_path`` is a file of one of the detected bundle directories.
+
+    Membership is strict and raw: the path must sit BELOW the directory, so a
+    ``<name>.zip`` beside a ``<name>/`` is that directory's twin (provenance),
+    not one of its files, and the comparison is case-sensitive exactly like the
+    container strip and ``_forget_claimed_subtree`` it has to agree with. This
+    is the one place the Mf-74x5 rule is expressed: a nested archive is a
+    supporting file of the enclosing bundle, never a bundle of its own.
+    """
+    head, separator, _rest = (rel_path or "").rpartition("/")
+    while separator:
+        if head in bundle_dirs:
+            return True
+        head, separator, _rest = head.rpartition("/")
+    return False
 
 
 def common_entry_root(rel_paths: Iterable[str]) -> Optional[str]:

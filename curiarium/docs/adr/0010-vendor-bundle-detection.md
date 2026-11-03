@@ -27,6 +27,10 @@ container name; the stem rule is unchanged and keeps precedence).
 hash, reported with reclaimable bytes and a copyable list; the copy is never a
 second row and nothing is ever deleted).
 
+**Extended:** ticket `Mf-74x5` (a `.zip` nested inside a detected bundle is a
+supporting member, never a candidate, never a pairing and never evidence; its
+entries are opaque and nothing is ever extracted).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -216,8 +220,9 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    and a uniquely-sized archive is never read; the worst case, a library where
    every archive is the same size, reads each archive exactly once. Nothing here
    hashes a zip's member entries: identity is over the archive files the walk
-   finds, so the nested-archive shape `Mf-74x5` owns is untouched and remains a
-   candidate under that change's own rule. The report never deletes, renames or
+   finds, so a nested archive is still identified as a copy, but it is then
+   removed from the reported group because a member of a live bundle is never
+   offered for deletion (Decision 17). The report never deletes, renames or
    moves a file - it only renders text (`keep` and `duplicate` lines) an operator
    can act on themselves.
 
@@ -475,6 +480,41 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     its own models - and the container-rule tests are the regression signal for
     that.
 
+17. **A nested archive is a member, never a candidate, and never evidence.**
+    A `.zip` strictly below a detected bundle's directory belongs to that
+    bundle. It is counted as an `archive` and nothing else: it never becomes a
+    second row, never pairs a sibling directory through its entry root, and
+    never supplies a model, image or text that would make the enclosing
+    directory a bundle. `bundle_detect.is_bundle_member` is the one predicate;
+    membership is strict and raw, so `<name>.zip` beside `<name>/` is the
+    directory's twin (Decision 4), not one of its files. **The rule is opaque:
+    the archive's entries are never read as evidence for the enclosing bundle.**
+    Reading a central directory per bundle per report would be bounded and
+    cheap, and extracting is never allowed, so cost is not the reason. The
+    reason is correctness: the Clockwork directory's own twelve STLs already
+    are the bundle's models, and counting the same payload again inside
+    `Clockwork_v1.8.zip` would double the bundle's model count; and a directory
+    whose only payload is a nested archive must NOT become a bundle, which is
+    this ticket's acceptance. A directory that really is only a zip's contents
+    has a correct path: `POST /import/archive` extracts in place (Decision 6),
+    the next scan registers the models, and they then count as the directory's
+    own. The member filter runs AFTER the archive-only container strip on
+    purpose: a LOW folder that holds only a zip-only bundle is a container, not
+    a bundle, so that zip is not "inside a detected bundle" and stays its own
+    row. **Forward obligation for `Mf-t12a`:** when t12a makes an archive-owned
+    directory a real LOW candidate, the strip will see its nested zip as
+    archive-only and drop the directory, inverting this decision. t12a must
+    exempt a LOW candidate carrying a verified archive pair, the same
+    justification that already exempts HIGH and `pair_only` rows, or the
+    Clockwork directory vanishes and its nested zip becomes the only row.
+    Duplicate identity still sees a member (its bytes are bytes the walk finds),
+    but a member is never on the deletable side: it is removed from the group,
+    and a group left with fewer than two non-member paths disappears. The
+    residual is honest: an outside copy whose only twin is a member is either
+    still offered as its own archive bundle (when it was the keep) or was
+    already suppressed (when it was not). The report never invites deleting a
+    file that is part of a live bundle, and nothing is extracted or written.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -533,6 +573,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 * Nothing here heals a folder row. A legacy bundle stays `blocked` until Mf-um7x
   (or a rescan) gives its `Folder` a `storage_path`, and the report is the
   surface that says which bundles are waiting on that.
+* **A nested archive is opaque, so a directory whose only payload is a zip is not
+  a bundle.** Its entries never count as evidence, which is what keeps the
+  Clockwork directory one bundle and a zip-only directory from becoming one on
+  the zip's contents. The import door extracts in place when the operator wants
+  those models counted. A duplicate whose only twin is a bundle member is not
+  reported as reclaimable when the member was the suppressed copy, which is the
+  safe direction and is stated rather than hidden.
 
 ## Alternatives considered
 
@@ -695,8 +742,9 @@ unchanged.
   create attaches its two models and nothing from the archive; an archive that
   also carries `__MACOSX/` AppleDouble cruft still pairs on its real entries,
   because both layers skip it through the one `is_macosx_artifact` predicate; a
-  pair-only directory holding a nested archive is still offered, so the verified
-  pair is never a target of the strip; and a low container holding a paired
+  pair-only directory holding a nested archive is one row with that archive as a
+  member (never a second row, never a pairing, never a duplicate-to-delete); and
+  a low container holding a paired
   directory still drops the container, so the `archive_only_keys` strip fires for
   a pair-only candidate too.
 - The duplicate-archive contract (`Mf-z4vv`) is pinned at three levels. In
@@ -743,6 +791,20 @@ unchanged.
   (`BundleReportOut`, `BundleDetectItemOut`, `BundleCreateRequest`,
   `BundleCreateResponse`, `BundleDismissRequest`, `BundleDismissResponse`, ...)
   and the three new paths.
+- The same two files pin the nested-archive rule (`Mf-74x5`). In
+  `tests/test_bundle_detect.py`: `is_bundle_member` is strict (a twin beside the
+  directory is not a member), segment-bounded (`AB/` is not under `A/`) and
+  raw/case-sensitive; a snapshot whose only entry is `Clockwork_v1.8.zip` is not
+  a bundle and has no archive-owned facts, and a trio plus a nested zip counts
+  one model and one archive. In `tests/test_bundle_service.py`, against a
+  temporary root: the real-name Clockwork directory plus
+  `Clockwork_v1.8.zip` is exactly one row, the nested zip is a member of the
+  bundle's own listing, `model_count` stays 12, and the nested zip is not in
+  `duplicates`; a directory holding only that zip is not a bundle while the zip
+  itself is offered; a byte-identical shorter-named copy outside the bundle does
+  not make the member deletable, and the outside copy is still offered; and a
+  nested `Clockwork v1.8 Download.zip` rooted at a subdirectory of the bundle
+  produces no second `pair_only` row.
 
 ## Superseding conditions
 

@@ -19,6 +19,18 @@ folder's recursive entries. Names only, never a checksum - the archive attaches
 nothing, so a mismatch is information for the operator (``False``), not an
 assertion to raise.
 
+**A nested archive is a member, never a candidate.** A ``.zip`` strictly below a
+detected bundle's directory belongs to that bundle: it is counted as an archive
+and nothing else, so it never becomes a second row, never pairs a sibling
+directory through its entry root, and never supplies a model, image or text that
+would make the enclosing directory a bundle. Its central directory may still be
+listed to decide pairing and its bytes hashed for duplicate identity, but nothing
+inside it is read as evidence and nothing is ever extracted.
+``bundle_detect.is_bundle_member`` is the one predicate for that membership; the
+container strip still runs first, so a LOW folder that holds only a zip-only bundle is a
+container rather than a bundle and that zip is not "nested" at all. The member
+filter runs after the strip on purpose - see the Mf-t12a note at the strip.
+
 **Renamed extractions pair on the archive's entry root.** A vendor rename breaks
 the stem rule: ``import/17_ClockworkMonster/`` beside ``17_Fates End -
 ClockworkMonster Tower.zip`` shares nothing but an ordinal prefix. So a second
@@ -45,6 +57,13 @@ becomes a second row and can never pair a second directory - and reported in
 another archive are opened, so a uniquely-sized archive is never read, and the
 worst case (every archive the same size) reads each exactly once. The report
 never deletes, renames or moves anything: it only renders text.
+
+A duplicate that is a *member* of a live bundle is never on the deletable side:
+it is removed from the group, and a group left with fewer than two non-member
+paths disappears. An outside copy whose only twin is a member is therefore either
+still offered as its own archive bundle (when it was the group's keep) or was
+already suppressed (when it was not); the report never invites deleting part of a
+live bundle.
 
 **Interim: a paired directory no rule offers is one blocked row.** The Clockwork
 shape - models and images, no text - is not an R3 bundle, so the pair would
@@ -445,7 +464,10 @@ def _build_candidates(
 
     # A directory a verified archive owns but no rule offers (yet): one row keyed
     # at the directory, so the pair is visible and yields to a real folder
-    # candidate of the same key when one exists.
+    # candidate of the same key when one exists. The facts are computed now but
+    # the row is appended after the member filter, because a pair-only directory
+    # is itself a bundle directory for that filter.
+    pair_only_specs: Dict[str, Tuple[bundle_detect.BundleSnapshot, bundle_detect.BundleFacts]] = {}
     for folder in sorted(pairs, key=lambda item: (item.casefold(), item)):
         if any(candidate.key == folder for candidate in found):
             continue
@@ -456,6 +478,63 @@ def _build_candidates(
         facts = bundle_detect.archive_owned_facts(snapshot)
         if facts is None:
             continue
+        pair_only_specs[folder] = (snapshot, facts)
+
+    # An archive-only bundle is still a bundle: a low folder that strictly
+    # contains one is a container too, and the folder pass cannot see it because
+    # the archive is read after the directory walk. `archive_only_keys` is the keys
+    # of both kinds of archive-only row - an archive of its own, and a pair-only
+    # directory the archive owns - because a LOW folder strictly containing either
+    # one holds nothing but another thing's payload and is therefore a container,
+    # never a bundle. A pair-only row is never a *target* of that strip: it is
+    # verified evidence rather than a guess, it claims no subtree, and the
+    # archive's membership does not depend on the row, so dropping it would only
+    # hide the pair the operator can see on disk.
+    #
+    # Mf-t12a collision, recorded here because this order is deliberate: when
+    # t12a makes an archive-owned directory a real LOW candidate, this strip will
+    # drop the Clockwork directory because its nested zip is archive-only at strip
+    # time, and the member filter below will then have no bundle to nest it
+    # under. t12a must exempt a LOW candidate carrying a verified archive pair,
+    # the same way this strip already exempts HIGH and pair_only rows.
+    archive_only_keys = [candidate.key for candidate in found if candidate.offers_archive_only]
+    archive_only_keys.extend(pair_only_specs)
+    if archive_only_keys:
+        found = [
+            candidate
+            for candidate in found
+            if not (
+                not candidate.is_archive
+                and not candidate.pair_only
+                and candidate.confidence == bundle_detect.CONFIDENCE_LOW
+                and any(key.startswith(candidate.key + "/") for key in archive_only_keys)
+            )
+        ]
+
+    # A zip inside a detected bundle is a supporting file of that bundle, never a
+    # candidate and never a pairing (Mf-74x5). The bundle directories are the
+    # folder candidates that survived the strip plus the pair-only directories
+    # above; membership is strict, so a twin beside a directory is not a member.
+    bundle_dirs = {candidate.key for candidate in found if not candidate.is_archive}
+    bundle_dirs.update(pair_only_specs)
+    nested = _nested_archives(files_by_dir, bundle_dirs)
+    if nested:
+        found = [
+            candidate
+            for candidate in found
+            if not (candidate.is_archive and candidate.key in nested)
+        ]
+        pairs = {
+            folder: [pair for pair in folder_pairs if pair[0] not in nested]
+            for folder, folder_pairs in pairs.items()
+        }
+        pairs = {folder: folder_pairs for folder, folder_pairs in pairs.items() if folder_pairs}
+        pair_only_specs = {
+            folder: spec for folder, spec in pair_only_specs.items() if folder in pairs
+        }
+
+    for folder in sorted(pair_only_specs, key=lambda item: (item.casefold(), item)):
+        snapshot, facts = pair_only_specs[folder]
         archive_path, entry_root = _paired_archive(pairs[folder])
         found.append(
             BundleCandidate(
@@ -468,29 +547,6 @@ def _build_candidates(
                 pair_only=True,
             )
         )
-
-    # An archive-only bundle is still a bundle: a low folder that strictly
-    # contains one is a container too, and the folder pass cannot see it because
-    # the archive is read after the directory walk. `archive_only_keys` is the keys
-    # of both kinds of archive-only row - an archive of its own, and a pair-only
-    # directory the archive owns - because a LOW folder strictly containing either
-    # one holds nothing but another thing's payload and is therefore a container,
-    # never a bundle. A pair-only row is never a *target* of that strip: it is
-    # verified evidence rather than a guess, it claims no subtree, and the nested
-    # archive stays a row of its own either way, so dropping it would only hide
-    # the pair the operator can see on disk.
-    archive_only_keys = [candidate.key for candidate in found if candidate.offers_archive_only]
-    if archive_only_keys:
-        found = [
-            candidate
-            for candidate in found
-            if not (
-                not candidate.is_archive
-                and not candidate.pair_only
-                and candidate.confidence == bundle_detect.CONFIDENCE_LOW
-                and any(key.startswith(candidate.key + "/") for key in archive_only_keys)
-            )
-        ]
 
     # A folder candidate's archive is provenance: reported, never a member. A row
     # that is already archive-only is reported as it was built.
@@ -535,12 +591,20 @@ def scan_bundles(root: Path) -> BundleScan:
 
     Byte-identical archives are one bundle, so the walk also groups duplicates by
     content hash and suppresses every copy from both archive passes.
+
+    A ``.zip`` strictly below a detected bundle's directory is a *member* of that
+    bundle (``bundle_detect.is_bundle_member``): it is never a candidate and never
+    a pairing, and it is removed from every duplicate group before it is reported,
+    so the report never offers part of a live bundle for deletion.
     """
     root = Path(root)
     files_by_dir, dirs_by_parent, truncated = _walk_tree(root)
     duplicates = duplicate_archives(root, files_by_dir)
     suppressed = frozenset(bundle_detect.duplicate_archive_paths(duplicates))
     candidates = _build_candidates(root, files_by_dir, dirs_by_parent, suppressed)
+    bundle_dirs = {candidate.key for candidate in candidates if not candidate.is_archive}
+    nested = _nested_archives(files_by_dir, bundle_dirs)
+    duplicates = _without_nested_members(duplicates, nested)
     return BundleScan(candidates=candidates, truncated=truncated, duplicates=duplicates)
 
 
@@ -568,6 +632,25 @@ def _zip_files(files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]) -> List[st
     return [rel_path for rel_path, _size in _zip_entries(files_by_dir)]
 
 
+def _nested_archives(
+    files_by_dir: Mapping[str, Sequence[Tuple[str, int]]], bundle_dirs: AbstractSet[str]
+) -> set:
+    """Every archive that is a file of one of ``bundle_dirs``.
+
+    A member is a supporting file of the enclosing bundle: it is never a
+    candidate, never a pairing, and never offered for deletion. Computed from
+    every walk entry, including suppressed duplicates, so a member cannot slip
+    back in through the suppression set.
+    """
+    if not bundle_dirs:
+        return set()
+    return {
+        rel_path
+        for rel_path in _zip_files(files_by_dir)
+        if bundle_detect.is_bundle_member(rel_path, bundle_dirs)
+    }
+
+
 def duplicate_archives(
     root: Path, files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]
 ) -> Tuple[bundle_detect.DuplicateGroup, ...]:
@@ -585,6 +668,30 @@ def duplicate_archives(
             if digest is not None:
                 identities.append(bundle_detect.ArchiveIdentity(rel_path=rel_path, size=size, digest=digest))
     return bundle_detect.duplicate_groups(identities)
+
+
+def _without_nested_members(
+    groups: Sequence[bundle_detect.DuplicateGroup], nested: AbstractSet[str]
+) -> Tuple[bundle_detect.DuplicateGroup, ...]:
+    """Drop bundle members from every duplicate group.
+
+    A member of a live bundle is never offered for deletion, so it is removed
+    from the group outright - the head included, because a member is not the
+    "keep" of anything. A group that keeps fewer than two paths has no
+    reclaimable bytes left and disappears. The residual is honest: an outside
+    copy whose only twin is a member is either still offered as its own archive
+    bundle (when it was the head) or was already suppressed (when it was not),
+    and the report never invites deleting a file that is part of a live bundle.
+    """
+    if not nested:
+        return tuple(groups)
+    kept: List[bundle_detect.DuplicateGroup] = []
+    for group in groups:
+        paths = tuple(path for path in group.paths if path not in nested)
+        if len(paths) < 2:
+            continue
+        kept.append(bundle_detect.DuplicateGroup(digest=group.digest, size=group.size, paths=paths))
+    return tuple(kept)
 
 
 def _twin_directory(rel_path: str, dirs_by_parent: Mapping[str, set]) -> Optional[str]:
