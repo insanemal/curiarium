@@ -1,8 +1,10 @@
 import type { UploadEntry } from "./uploadTree";
+import { isJunkZipPath } from "./zipJunk";
 
 export type ZipEntry = {
   path: string;
   size: number;
+  junk: boolean;
 };
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -55,9 +57,11 @@ export async function readZipEntries(file: File): Promise<{ entries: ZipEntry[];
     if (!normalized) continue;
     data[normalized] = content;
   }
+  // A locally picked zip is never listed server-side, so the prompt has no
+  // `junk` flag to read and has to derive it here.
   const entries = Object.keys(data)
     .sort((a, b) => a.localeCompare(b))
-    .map(path => ({ path, size: data[path].length }));
+    .map(path => ({ path, size: data[path].length, junk: isJunkZipPath(path) }));
   return { entries, data };
 }
 
@@ -73,6 +77,11 @@ export function buildUploadEntriesFromZip(
     const path = normalizeZipPath(raw);
     if (!path || seen.has(path)) continue;
     seen.add(path);
+    // The local door's half of the refusal the server does for a linked zip:
+    // these files go out through the plain upload route, so nothing downstream
+    // would stop OS metadata becoming an asset (and, from the project attacher,
+    // a member) along with the `__MACOSX` folder its path would create.
+    if (isJunkZipPath(path)) continue;
     const content = data[path];
     if (!content) continue;
     const parts = path.split("/");

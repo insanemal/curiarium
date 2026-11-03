@@ -126,8 +126,8 @@ function mockZipLink() {
   listImportZipEntriesMock.mockResolvedValue({
     filename: "bundle.zip",
     entries: [
-      { path: "ok.stl", size: 1 },
-      { path: "x.stl", size: 1 },
+      { path: "ok.stl", size: 1, junk: false },
+      { path: "x.stl", size: 1, junk: false },
     ],
   });
 }

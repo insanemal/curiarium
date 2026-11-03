@@ -16,6 +16,7 @@ export type ImportInspectInfo = {
 export type ZipEntryInfo = {
   path: string;
   size: number;
+  junk: boolean;
 };
 
 export type ImportZipResult = {
@@ -195,6 +196,8 @@ export async function importToProject(payload: {
 // take a library-relative path instead of an upload or a link, so an archive
 // that arrived by upload, import or a library scan needs no re-import to unzip.
 
+// The archive payload also carries `junk`, but no client reads it there, so it
+// stays off the type.
 export type ArchiveEntry = { path: string; size: number };
 
 export type ArchiveExtractResult = {

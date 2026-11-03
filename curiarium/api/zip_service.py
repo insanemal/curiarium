@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 
 from asset_file_service import managed_asset_file_path
 from asset_service import (
+    AssetFilenameError,
     AssetOrigin,
     cleanup_asset,
     create_asset_record,
@@ -26,6 +27,7 @@ from file_utils import mime_from_content_type, sanitize_filename, sanitize_path_
 from folder_service import validate_parent_folder
 from models import Asset, AssetFile, Folder, Project
 from schemas import ImportZipExtractRequest
+from zip_junk import is_junk_entry
 
 ATTRIBUTION_FILENAME = "ATTRIBUTION.txt"
 
@@ -94,11 +96,17 @@ class ZipSelectionPlan:
     ``declared_total`` sums the rest. The declaration is metadata a crafted
     archive can lie about, so this plan rejects the obviously-too-big before any
     write and ``stream_zip_entry`` re-checks the bytes it actually reads.
+
+    ``junk`` is every normalised member ``zip_junk.is_junk_entry`` calls OS
+    metadata. Junk is left out of ``declared_total`` (a junk-only selection must
+    not 413 on a cumulative cap) but stays in ``ordered``: the in-library archive
+    door expects ``ordered`` to carry every explicitly selected name.
     """
 
     entries: dict[str, ZipInfo]
     ordered: List[str]
     oversized: FrozenSet[str]
+    junk: FrozenSet[str]
     declared_total: int
 
 
@@ -164,6 +172,7 @@ def plan_zip_selection(zf: ZipFile, selections: List[str]) -> ZipSelectionPlan:
     them.
     """
     entries = _normalised_members(zf)
+    junk = frozenset(name for name in entries if is_junk_entry(name))
     ordered: List[str] = []
     seen: set[str] = set()
     for raw in selections:
@@ -184,6 +193,8 @@ def plan_zip_selection(zf: ZipFile, selections: List[str]) -> ZipSelectionPlan:
         if declared > IMPORT_MAX_BYTES:
             oversized.add(entry_name)
             continue
+        if entry_name in junk:
+            continue
         declared_total += declared
     if declared_total > IMPORT_ZIP_MAX_BYTES:
         raise HTTPException(
@@ -197,6 +208,7 @@ def plan_zip_selection(zf: ZipFile, selections: List[str]) -> ZipSelectionPlan:
         entries=entries,
         ordered=ordered,
         oversized=frozenset(oversized),
+        junk=junk,
         declared_total=declared_total,
     )
 
@@ -231,7 +243,7 @@ def list_zip_entries(zip_path: Path) -> List[dict]:
             name = normalize_zip_entry_path(info.filename)
             if not name:
                 continue
-            entries.append({"path": name, "size": int(info.file_size or 0)})
+            entries.append({"path": name, "size": int(info.file_size or 0), "junk": is_junk_entry(name)})
     entries.sort(key=lambda entry: entry["path"])
     return entries
 
@@ -286,7 +298,11 @@ def extract_zip_entries_to_assets(
         folder_cache: dict = {}
         for entry_name in plan.ordered:
             info = plan.entries.get(entry_name)
-            if not info or info.is_dir() or entry_name in plan.oversized:
+            # Junk (OS metadata) fails here, before any byte is decompressed and
+            # before `resolve_zip_folder_id`: it creates no Folder row, no asset
+            # row and no audit row, consumes no name slot, and can become neither
+            # a project member nor a cover.
+            if not info or info.is_dir() or entry_name in plan.oversized or entry_name in plan.junk:
                 failed.append(entry_name)
                 continue
             target_folder_id = resolve_zip_folder_id(session, body.folder_id, entry_name, folder_cache)
@@ -332,14 +348,17 @@ def extract_zip_entries_to_assets(
                 refreshed = finalize_asset_record(asset.id, size, mime)
                 assets.append(refreshed or asset)
             except HTTPException as exc:
-                # A name or path conflict is one bad entry, not a bad zip: report it
-                # in `failed` and keep extracting. Every other HTTPException (a bad
-                # storage template, say) applies to the whole request.
+                # A name conflict or an entry with no extension is one bad entry;
+                # every other HTTPException (a bad storage template, say) applies
+                # to the whole request. The check is by exception class, not by
+                # status: a storage-template failure is also a 400, and the 413
+                # overspend raise above lives inside this same `try`.
                 if asset is not None:
                     cleanup_asset(asset.id)
-                if exc.status_code != 409:
+                if exc.status_code == 409 or isinstance(exc, AssetFilenameError):
+                    failed.append(entry_name)
+                else:
                     raise
-                failed.append(entry_name)
             except Exception:
                 if asset is not None:
                     cleanup_asset(asset.id)

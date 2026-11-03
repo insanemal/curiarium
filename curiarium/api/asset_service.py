@@ -148,10 +148,29 @@ def model_name_from_filename(filename: str) -> str:
     return sanitize_path_segment(Path(filename or "model").stem, "Model")
 
 
+class AssetFilenameError(HTTPException):
+    """A name with no extension: a defect of one entry, not of the whole request.
+
+    The status and the detail are exactly what this path has always answered
+    (``400`` / ``"Asset filename must include an extension"``), because clients
+    depend on the string; only the class is new, so a caller can tell this
+    per-entry defect from every other 400.
+
+    The per-entry classifier in ``zip_service`` matches this class by identity
+    (``isinstance``), and the status code alone is not enough: a storage-template
+    failure is also a 400, and the 413 overspend raise lives inside the same
+    ``try``, so a blanket ``status_code in (400, 409)`` would swallow either one
+    into ``failed``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(status_code=400, detail="Asset filename must include an extension")
+
+
 def filename_for_model_name(name: str, current_filename: str) -> str:
     extension = Path(current_filename or "").suffix
     if not extension:
-        raise HTTPException(status_code=400, detail="Asset filename must include an extension")
+        raise AssetFilenameError()
     return sanitize_filename(f"{sanitize_path_segment(name, 'Model')}{extension}")
 
 
