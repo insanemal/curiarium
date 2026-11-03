@@ -14,8 +14,10 @@ at import time at a temp root, runs the migrations and deletes the rows a test
 created; the role fixtures are copied from ``tests/test_contributor_role.py``.
 """
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from argon2 import PasswordHasher
@@ -204,6 +206,13 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def write_zip(path: Path, entries: dict[str, bytes]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(path, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
+
+
 def moai_bundle(root: Path) -> Path:
     """The Thingiverse README/LICENSE bundle: 5 previews, 3 models, no zip."""
     bundle = root / MOAI
@@ -325,3 +334,38 @@ def test_an_unknown_key_creates_nothing_and_never_fails(client: TestClient, cont
     assert body["created"] == 0 and body["failed"] == 1
     assert body["results"][0]["reason"] == "unknown bundle"
     assert project_ids(client, contributor) == []
+
+
+# --- duplicate archives (Mf-z4vv) -------------------------------------------
+
+
+def test_a_duplicate_archive_is_reported_and_never_a_bundle_row(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """A byte-identical copy is reclaimable bytes in the report, never a second row."""
+    moai_bundle(isolated_storage)
+    entries = {
+        "README.txt": README_TEXT.encode(),
+        "LICENSE.txt": LICENSE_TEXT.encode(),
+        **{f"images/{index}.jpg": b"j" * size for index, size in enumerate(IMAGE_SIZES)},
+        **{f"files/part{index}.stl": STL_BYTES for index in range(3)},
+    }
+    write_zip(isolated_storage / f"{MOAI}.zip", entries)
+    shutil.copyfile(isolated_storage / f"{MOAI}.zip", isolated_storage / f"{MOAI} (1).zip")
+    scan()
+
+    report = report_for(client, contributor)
+
+    size = (isolated_storage / f"{MOAI}.zip").stat().st_size
+    assert len(report["duplicates"]) == 1
+    duplicate = report["duplicates"][0]
+    assert duplicate["paths"] == [f"{MOAI}.zip", f"{MOAI} (1).zip"]
+    assert duplicate["reclaimable_bytes"] == duplicate["size"] == size
+    assert len(duplicate["sha256"]) == 64
+    assert all(character in "0123456789abcdef" for character in duplicate["sha256"])
+    assert f"{MOAI} (1).zip" not in {row["key"] for row in report["bundles"]}
+    assert [row["key"] for row in report["bundles"]] == [MOAI]
+    assert report["duplicates_total_bytes"] == size
+    assert f"{MOAI}.zip" in report["duplicates_text"]
+    assert f"{MOAI} (1).zip" in report["duplicates_text"]
+    assert "duplicate" in report["duplicates_text"]

@@ -59,6 +59,14 @@ its *entry root* rather than its filename (``common_entry_root``,
 ``is_generic_container_root``) and the facts for a directory a verified archive
 owns but which no rule offers on its own (``archive_owned_facts``). It stays
 pure: the caller reads the archive's entry list and this module only judges it.
+
+Content identity is used ONLY to report duplicate archives and to suppress the
+copy as a bundle row; it never enters ``twin_verified``, pairing or an integrity
+claim. Identity is a content hash, and the grouping is size-first: an archive
+whose size is unique in the library is never read, because a byte-identical copy
+is necessarily equal-size. The worst case is a library where every archive is
+the same size - then every archive is read exactly once. The report below only
+renders text; it never deletes, renames or moves a file.
 """
 
 import re
@@ -224,6 +232,28 @@ class BundleFacts:
 
 
 @dataclass(frozen=True)
+class ArchiveIdentity:
+    """One archive's path, byte size and content digest."""
+
+    rel_path: str
+    size: int
+    digest: str
+
+
+@dataclass(frozen=True)
+class DuplicateGroup:
+    """Byte-identical archives: one bundle, the rest reclaimable bytes."""
+
+    digest: str
+    size: int
+    paths: Tuple[str, ...]  # authoritative (shortest name) first
+
+    @property
+    def reclaimable_bytes(self) -> int:
+        return self.size * (len(self.paths) - 1)
+
+
+@dataclass(frozen=True)
 class _DocMarkers:
     """The markers one document carries, whichever filename it was shipped as."""
 
@@ -260,6 +290,68 @@ _EMPTY_MARKERS = _DocMarkers(
 def _path_order(rel_path: str) -> Tuple[str, str]:
     """Sort key that never leaks readdir order into a report."""
     return rel_path.casefold(), rel_path
+
+
+def archive_order(rel_path: str) -> Tuple[int, str, str]:
+    """The order that puts the original before a browser's `` (1)`` duplicate.
+
+    A duplicate-download suffix only ever appends characters, so the shortest name
+    is the original file; ties fall back to casefolded then raw text.
+    """
+    return (len(rel_path), rel_path.casefold(), rel_path)
+
+
+def equal_size_archive_groups(archives: Iterable[Tuple[str, int]]) -> Tuple[Tuple[int, Tuple[str, ...]], ...]:
+    """Sizes shared by two or more archives - the only archives worth hashing.
+
+    Byte-identical archives are necessarily equal-size, so a size that occurs once
+    cannot be a duplicate and its bytes are never read. The cost is one hash per
+    archive in a shared-size group, never one per archive in the library.
+    """
+    by_size: Dict[int, List[str]] = {}
+    for rel_path, size in archives:
+        by_size.setdefault(size, []).append(rel_path)
+    return tuple(
+        (size, tuple(sorted(paths, key=archive_order)))
+        for size, paths in sorted(by_size.items())
+        if len(paths) > 1
+    )
+
+
+def duplicate_groups(archives: Iterable[ArchiveIdentity]) -> Tuple[DuplicateGroup, ...]:
+    """Byte-identical archives grouped once; a lone digest produces no group."""
+    by_identity: Dict[Tuple[str, int], List[str]] = {}
+    for archive in archives:
+        by_identity.setdefault((archive.digest, archive.size), []).append(archive.rel_path)
+    groups = [
+        DuplicateGroup(digest=digest, size=size, paths=tuple(sorted(paths, key=archive_order)))
+        for (digest, size), paths in by_identity.items()
+        if len(paths) > 1
+    ]
+    return tuple(sorted(groups, key=lambda group: archive_order(group.paths[0])))
+
+
+def duplicate_archive_paths(groups: Sequence[DuplicateGroup]) -> Tuple[str, ...]:
+    """Every archive a group reports as a copy: all but its authoritative path."""
+    return tuple(path for group in groups for path in group.paths[1:])
+
+
+def duplicate_report_text(groups: Sequence[DuplicateGroup]) -> str:
+    """The block an operator copies out: one tab-separated line per archive.
+
+    Header lines carry the digest and the group's reclaimable bytes; every archive
+    line carries its path and byte size, so the text is actionable with no app.
+    """
+    if not groups:
+        return ""
+    total = sum(group.reclaimable_bytes for group in groups)
+    lines = [f"# duplicate archives: {len(groups)} group(s), {total} bytes reclaimable"]
+    for group in groups:
+        lines.append(f"# sha256 {group.digest} size {group.size} reclaimable {group.reclaimable_bytes}")
+        lines.append(f"keep\t{group.size}\t{group.paths[0]}")
+        for path in group.paths[1:]:
+            lines.append(f"duplicate\t{group.size}\t{path}")
+    return "\n".join(lines)
 
 
 def _is_text(rel_path: str, size: int) -> bool:

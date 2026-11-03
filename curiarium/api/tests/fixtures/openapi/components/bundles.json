@@ -473,6 +473,38 @@
     "title": "BundleDismissResponse",
     "type": "object"
   },
+  "BundleDuplicateGroupOut": {
+    "description": "Byte-identical archives: one bundle, the rest reclaimable bytes.",
+    "properties": {
+      "paths": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Paths",
+        "type": "array"
+      },
+      "reclaimable_bytes": {
+        "title": "Reclaimable Bytes",
+        "type": "integer"
+      },
+      "sha256": {
+        "title": "Sha256",
+        "type": "string"
+      },
+      "size": {
+        "title": "Size",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "sha256",
+      "size",
+      "paths",
+      "reclaimable_bytes"
+    ],
+    "title": "BundleDuplicateGroupOut",
+    "type": "object"
+  },
   "BundleReportOut": {
     "description": "A dry-run view of the storage root. Reading it writes nothing.",
     "properties": {
@@ -486,6 +518,24 @@
       },
       "counts": {
         "$ref": "#/components/schemas/BundleDetectCountsOut"
+      },
+      "duplicates": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleDuplicateGroupOut"
+        },
+        "title": "Duplicates",
+        "type": "array"
+      },
+      "duplicates_text": {
+        "default": "",
+        "title": "Duplicates Text",
+        "type": "string"
+      },
+      "duplicates_total_bytes": {
+        "default": 0,
+        "title": "Duplicates Total Bytes",
+        "type": "integer"
       },
       "root": {
         "title": "Root",

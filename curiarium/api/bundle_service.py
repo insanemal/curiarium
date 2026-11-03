@@ -36,6 +36,16 @@ pairing condition (always true by construction; an unverified archive simply
 does not pair), where the stem path's ``twin_verified`` stays an operator remark.
 The archive attaches nothing on either path.
 
+**Duplicate archives are one bundle.** Identity for an archive is its content
+hash (sha256 over the file, read in bounded chunks). Two archives with the same
+hash are one bundle: the copy is suppressed from both archive passes - it never
+becomes a second row and can never pair a second directory - and reported in
+``duplicates`` with its ``reclaimable_bytes`` and a copyable tab-separated
+``duplicates_text``. Hashing is size-first: only archives sharing a size with
+another archive are opened, so a uniquely-sized archive is never read, and the
+worst case (every archive the same size) reads each exactly once. The report
+never deletes, renames or moves anything: it only renders text.
+
 **Interim: a paired directory no rule offers is one blocked row.** The Clockwork
 shape - models and images, no text - is not an R3 bundle, so the pair would
 render nothing. ``bundle_detect.archive_owned_facts`` supplies the row: one
@@ -92,11 +102,12 @@ were withheld. Detection itself writes nothing - no row, no file, no folder
 healing - so the report is safe on a read route.
 """
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet, Dict, List, Mapping, Optional, Sequence, Tuple
 from zipfile import BadZipFile
 
 from fastapi import HTTPException
@@ -121,6 +132,9 @@ MAX_SCAN_ENTRIES = 200_000
 # The report's own bound. ``build_report`` never truncates by accident: a caller
 # that needs every row (a create pass) asks for more than the walk can produce.
 DEFAULT_LIMIT = 200
+# Duplicate detection reads an archive in bounded chunks, never one whole file
+# into memory: a multi-gigabyte zip is hashed at this cost, not doubled.
+HASH_CHUNK_BYTES = 1024 * 1024
 
 READY = "ready"
 BLOCKED = "blocked"
@@ -174,12 +188,37 @@ class BundleCandidate:
         return self.is_archive or self.pair_only
 
 
+@dataclass(frozen=True)
+class BundleScan:
+    """One walk of the storage tree: the bundle candidates plus duplicate archives."""
+
+    candidates: List[BundleCandidate]
+    truncated: bool
+    duplicates: Tuple[bundle_detect.DuplicateGroup, ...] = ()
+
+
 def _entry_size(entry) -> int:
     """One ``stat`` per file; a file that vanished mid-walk is simply zero bytes."""
     try:
         return int(entry.stat(follow_symlinks=False).st_size)
     except OSError:
         return 0
+
+
+def _content_digest(path: Path) -> Optional[str]:
+    """The sha256 of one archive's bytes, read in bounded chunks; ``None`` on failure.
+
+    An unreadable archive is simply not evidence of a duplicate, never an
+    exception on a read route.
+    """
+    digest = hashlib.sha256()
+    try:
+        with Path(path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(HASH_CHUNK_BYTES), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 def _suffix(path: str) -> str:
@@ -287,22 +326,8 @@ def _forget_claimed_subtree(work: Mapping[str, List[bundle_detect.BundleEntry]],
         parent = _parent(parent)
 
 
-def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
-    """Every bundle under ``root``, plus whether the walk was cut short.
-
-    One deepest-first pass. ``bundle_detect.detect_bundle`` already applies R1 ->
-    R2 -> R3 strongest-first within a single directory, so the only ordering a
-    tree-wide walk needs is children before parents: a child bundle is claimed
-    before its parent is evaluated, and claiming it removes it from the parent's
-    view. A directory can therefore only ever be a bundle in its own right - it
-    never inherits a child's models, and a directory that holds nothing but child
-    bundles is not a bundle at all. A LOW candidate whose key is a strict
-    ancestor of an already-claimed bundle is a *container* and is skipped without
-    claiming, so its own files still bubble up to a legitimate ancestor; a HIGH
-    candidate is exempt because its documents sit at depth 0 and it attaches only
-    its own models.
-    """
-    root = Path(root)
+def _walk_tree(root: Path) -> Tuple[Dict[str, List[Tuple[str, int]]], Dict[str, set], bool]:
+    """One bounded walk: each directory's own files, the directory tree, truncation."""
     files_by_dir: Dict[str, List[Tuple[str, int]]] = {}
     dirs_by_parent: Dict[str, set] = {"": set()}
     directories = 0
@@ -319,7 +344,21 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
         if directories + files > MAX_SCAN_ENTRIES:
             truncated = True
             break
+    return files_by_dir, dirs_by_parent, truncated
 
+
+def _build_candidates(
+    root: Path,
+    files_by_dir: Mapping[str, Sequence[Tuple[str, int]]],
+    dirs_by_parent: Mapping[str, set],
+    suppressed: AbstractSet[str],
+) -> List[BundleCandidate]:
+    """Every bundle under ``root`` from one walk's listings.
+
+    ``suppressed`` holds the duplicate archives: a byte-identical copy is not a
+    bundle of its own, so both archive passes skip it and only the group's
+    authoritative path can be a row (or a pairing).
+    """
     folded = _subtree(files_by_dir)
     found: List[BundleCandidate] = []
     # The strict ancestors of every bundle already claimed. A LOW candidate in
@@ -362,10 +401,13 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
     # Entry-root pairing: the stem rule has first refusal, so this pass only sees
     # the archives it left behind. Each archive's common entry root must name a
     # sibling DIRECTORY (same parent only) and its entries must contain nothing
-    # the directory's post-claim listing does not hold.
+    # the directory's post-claim listing does not hold. A duplicate archive is
+    # skipped: the content hash already says which of the pair is the original.
     pairs: Dict[str, List[Tuple[str, str]]] = {}
     paired_zips: set = set()
     for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
+        if rel_path in suppressed:
+            continue
         if _twin_directory(rel_path, dirs_by_parent):
             continue
         paired = _entry_root_pair(root, rel_path, dirs_by_parent, work)
@@ -375,8 +417,11 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
         pairs.setdefault(folder, []).append((rel_path, entry_root))
         paired_zips.add(rel_path)
 
-    # Zip-only candidates: an archive whose extracted twin is not beside it.
+    # Zip-only candidates: an archive whose extracted twin is not beside it. A
+    # duplicate is skipped here too, so a copy never becomes a second bundle row.
     for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
+        if rel_path in suppressed:
+            continue
         if rel_path in paired_zips:
             continue
         twin = _twin_directory(rel_path, dirs_by_parent)
@@ -470,16 +515,76 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
             )
         )
     with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
-    return with_twins, truncated
+    return with_twins
+
+
+def scan_bundles(root: Path) -> BundleScan:
+    """One walk of the storage tree: bundle candidates plus duplicate archives.
+
+    Detection is one deepest-first pass. ``bundle_detect.detect_bundle`` applies R1 ->
+    R2 -> R3 strongest-first within a single directory, so the only ordering a
+    tree-wide walk needs is children before parents: a child bundle is claimed
+    before its parent is evaluated, and claiming it removes it from the parent's
+    view. A directory can therefore only ever be a bundle in its own right - it
+    never inherits a child's models, and a directory that holds nothing but child
+    bundles is not a bundle at all. A LOW candidate whose key is a strict
+    ancestor of an already-claimed bundle is a *container* and is skipped without
+    claiming, so its own files still bubble up to a legitimate ancestor; a HIGH
+    candidate is exempt because its documents sit at depth 0 and it attaches only
+    its own models.
+
+    Byte-identical archives are one bundle, so the walk also groups duplicates by
+    content hash and suppresses every copy from both archive passes.
+    """
+    root = Path(root)
+    files_by_dir, dirs_by_parent, truncated = _walk_tree(root)
+    duplicates = duplicate_archives(root, files_by_dir)
+    suppressed = frozenset(bundle_detect.duplicate_archive_paths(duplicates))
+    candidates = _build_candidates(root, files_by_dir, dirs_by_parent, suppressed)
+    return BundleScan(candidates=candidates, truncated=truncated, duplicates=duplicates)
+
+
+def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
+    """Every bundle under ``root``, plus whether the walk was cut short.
+
+    The signature is the callers' contract; the walk and its reasoning live in
+    ``scan_bundles``, which also reports the duplicate archives.
+    """
+    scan = scan_bundles(root)
+    return scan.candidates, scan.truncated
+
+
+def _zip_entries(files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]) -> List[Tuple[str, int]]:
+    """Every archive in the walk as ``(storage-relative path, size)``."""
+    return [
+        (f"{rel_dir}/{name}" if rel_dir else name, size)
+        for rel_dir, files in files_by_dir.items()
+        for name, size in files
+        if _suffix(name) == ".zip"
+    ]
 
 
 def _zip_files(files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]) -> List[str]:
-    return [
-        f"{rel_dir}/{name}" if rel_dir else name
-        for rel_dir, files in files_by_dir.items()
-        for name, _size in files
-        if _suffix(name) == ".zip"
-    ]
+    return [rel_path for rel_path, _size in _zip_entries(files_by_dir)]
+
+
+def duplicate_archives(
+    root: Path, files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]
+) -> Tuple[bundle_detect.DuplicateGroup, ...]:
+    """Byte-identical archives, grouped by sha256, hashing only shared-size entries.
+
+    Size-first is the bound: a byte-identical copy is necessarily equal-size, so
+    an archive whose size occurs once is never opened. The worst case is a library
+    where every archive is the same size - then each archive is read exactly once,
+    never more. An unreadable archive contributes no identity and no group.
+    """
+    identities: List[bundle_detect.ArchiveIdentity] = []
+    for size, paths in bundle_detect.equal_size_archive_groups(_zip_entries(files_by_dir)):
+        for rel_path in paths:
+            digest = _content_digest(Path(root) / rel_path)
+            if digest is not None:
+                identities.append(bundle_detect.ArchiveIdentity(rel_path=rel_path, size=size, digest=digest))
+    return bundle_detect.duplicate_groups(identities)
 
 
 def _twin_directory(rel_path: str, dirs_by_parent: Mapping[str, set]) -> Optional[str]:
@@ -542,7 +647,9 @@ def _paired_archive(pairs: Sequence[Tuple[str, str]]) -> Tuple[str, str]:
 
     The shortest name wins, ties by (casefold, raw): a browser's `` (1)``
     duplicate convention only ever appends characters, so the shortest name is the
-    original file. Hash identity for the duplicates is Mf-z4vv's, not this pass's.
+    original file. Hash identity for duplicates lives in ``duplicate_archives``;
+    this pass still picks the shortest name, because the copy is suppressed before
+    pairing and the choice only has to be deterministic.
     """
     return min(pairs, key=lambda pair: (len(pair[0]), pair[0].casefold(), pair[0]))
 
@@ -893,18 +1000,39 @@ def build_report(*, path: str = "", limit: int = DEFAULT_LIMIT, include_dismisse
     ``path`` scopes the walk (``""`` is the whole storage root) and only changes
     what is scanned: every key stays storage-root-relative, so a scoped read and
     a whole-storage read name the same bundle, and a create pass can find a row
-    a scoped report showed.
+    a scoped report showed. Duplicate archives are reported scoped the same way
+    but are never capped by ``limit``: the walk is already bounded by
+    ``MAX_SCAN_ENTRIES``, and a reclaimable-bytes total that stopped at a page
+    boundary would be a number the operator could not act on.
     """
     scope = _scope(path)
     root = STORAGE / scope if scope else STORAGE
     if not _is_inside_storage(root):
         raise HTTPException(status_code=400, detail="path must stay inside the storage root")
-    candidates, walk_truncated = iter_bundle_candidates(root)
+    return _report_from_scan(
+        scan_bundles(root), root=root, scope=scope, limit=limit, include_dismissed=include_dismissed
+    )
+
+
+def _report_from_scan(
+    scan: BundleScan,
+    *,
+    root: Path,
+    scope: str,
+    limit: int,
+    include_dismissed: bool,
+) -> dict:
+    """Turn one walk into the wire report; the disk walk has already happened.
+
+    Duplicate archives are scoped like every other key and rendered as one group
+    per content hash plus a copyable text block naming the same paths. They are
+    not capped by ``limit``: the walk is already bounded by ``MAX_SCAN_ENTRIES``.
+    """
     dismissals = get_dismissals()
     rows: List[dict] = []
     with Session(engine) as session:
         folders = _folder_index(session)
-        for candidate in candidates:
+        for candidate in scan.candidates:
             row = _report_row(
                 session, root=root, scope=scope, candidate=candidate, folders=folders, dismissals=dismissals
             )
@@ -922,13 +1050,31 @@ def build_report(*, path: str = "", limit: int = DEFAULT_LIMIT, include_dismisse
         "already_created": sum(1 for row in visible if row["existing_project_id"]),
     }
     bound = max(0, int(limit))
-    live_keys = {candidate.key for candidate in candidates}
-    live_keys = {_qualify(scope, key) for key in live_keys}
+    live_keys = {_qualify(scope, candidate.key) for candidate in scan.candidates}
+    scoped_duplicates = tuple(
+        bundle_detect.DuplicateGroup(
+            digest=group.digest,
+            size=group.size,
+            paths=tuple(_qualify(scope, path) for path in group.paths),
+        )
+        for group in scan.duplicates
+    )
     return {
         "root": root.name,
-        "truncated": walk_truncated or len(visible) > bound,
+        "truncated": scan.truncated or len(visible) > bound,
         "counts": counts,
         "bundles": visible[:bound],
+        "duplicates": [
+            {
+                "sha256": group.digest,
+                "size": group.size,
+                "paths": list(group.paths),
+                "reclaimable_bytes": group.reclaimable_bytes,
+            }
+            for group in scoped_duplicates
+        ],
+        "duplicates_total_bytes": sum(group.reclaimable_bytes for group in scoped_duplicates),
+        "duplicates_text": bundle_detect.duplicate_report_text(scoped_duplicates),
         "stale_dismissals": sorted(
             (key for key in dismissals if key not in live_keys), key=lambda key: (key.casefold(), key)
         ),
@@ -1084,12 +1230,14 @@ def create_bundles(items: Sequence[BundleCreateItem], ctx: audit.AuditContext) -
 
     The report is recomputed first and every item is looked up in it: a key the
     client sent is never trusted on its own, and a bundle that turned
-    ``blocked`` since the report was rendered creates nothing.
+    ``blocked`` since the report was rendered creates nothing. One walk serves
+    both the report and the candidate lookup, so a duplicate archive is refused
+    as ``unknown bundle`` by construction: it is suppressed from both.
     """
-    candidates, _walk_truncated = iter_bundle_candidates(STORAGE)
-    report = build_report(include_dismissed=True, limit=MAX_SCAN_ENTRIES)
+    scan = scan_bundles(STORAGE)
+    report = _report_from_scan(scan, root=STORAGE, scope="", limit=MAX_SCAN_ENTRIES, include_dismissed=True)
     rows = {row["key"]: row for row in report["bundles"]}
-    by_key = {candidate.key: candidate for candidate in candidates}
+    by_key = {candidate.key: candidate for candidate in scan.candidates}
     counters = {CREATE_CREATED: 0, CREATE_SKIPPED: 0, CREATE_BLOCKED: 0, CREATE_FAILED: 0}
     results: List[dict] = []
     for item in items:

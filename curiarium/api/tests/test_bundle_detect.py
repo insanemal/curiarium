@@ -924,3 +924,65 @@ def test_archive_owned_facts_keeps_the_depth_bound() -> None:
 
     buried = {"v1.8/older/Clockwork_Part00.stl": 100, "Clockwork_Render0.png": 400}
     assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, buried)) is None
+
+
+# --- duplicate archives (Mf-z4vv) -------------------------------------------
+
+DUPLICATE_DIGEST = "a" * 64
+
+
+def identity(rel_path: str, size: int, digest: str = DUPLICATE_DIGEST) -> bundle_detect.ArchiveIdentity:
+    return bundle_detect.ArchiveIdentity(rel_path=rel_path, size=size, digest=digest)
+
+
+def duplicate_group(paths: tuple, size: int = 500, digest: str = DUPLICATE_DIGEST) -> bundle_detect.DuplicateGroup:
+    return bundle_detect.DuplicateGroup(digest=digest, size=size, paths=paths)
+
+
+def test_equal_size_archive_groups_keeps_only_shared_sizes() -> None:
+    """A size that occurs once is never hashed: it cannot be a duplicate."""
+    groups = bundle_detect.equal_size_archive_groups([("a.zip", 10), ("b.zip", 10), ("c.zip", 11)])
+
+    assert groups == ((10, ("a.zip", "b.zip")),)
+
+
+def test_duplicate_groups_puts_the_shortest_name_first() -> None:
+    group = bundle_detect.duplicate_groups([identity("x/Copy (1).zip", 500), identity("x/Copy.zip", 500)])
+
+    assert len(group) == 1
+    assert group[0].digest == DUPLICATE_DIGEST
+    assert group[0].size == 500
+    assert group[0].paths[0] == "x/Copy.zip", "the browser duplicate appends characters, so the shortest is the original"
+    assert group[0].reclaimable_bytes == 500
+
+
+def test_duplicate_groups_ignores_a_lone_digest() -> None:
+    assert bundle_detect.duplicate_groups([identity("only.zip", 500)]) == ()
+
+
+def test_duplicate_groups_ignores_equal_sizes_with_different_digests() -> None:
+    archives = [identity("a.zip", 500, digest="a" * 64), identity("b.zip", 500, digest="b" * 64)]
+
+    assert bundle_detect.duplicate_groups(archives) == ()
+
+
+def test_duplicate_archive_paths_excludes_the_authoritative_path() -> None:
+    groups = (duplicate_group(("x/Copy.zip", "x/Copy (1).zip", "x/Copy (2).zip")),)
+
+    assert bundle_detect.duplicate_archive_paths(groups) == ("x/Copy (1).zip", "x/Copy (2).zip")
+
+
+def test_duplicate_report_text_is_empty_without_groups() -> None:
+    assert bundle_detect.duplicate_report_text(()) == ""
+
+
+def test_duplicate_report_text_keeps_one_path_and_lists_the_copies() -> None:
+    groups = (duplicate_group(("x/Copy.zip", "x/Copy (1).zip"), size=500),)
+
+    text = bundle_detect.duplicate_report_text(groups)
+    lines = text.splitlines()
+
+    assert lines[0] == "# duplicate archives: 1 group(s), 500 bytes reclaimable"
+    assert f"# sha256 {DUPLICATE_DIGEST} size 500 reclaimable 500" in lines
+    assert "keep\t500\tx/Copy.zip" in lines
+    assert "duplicate\t500\tx/Copy (1).zip" in lines

@@ -23,6 +23,10 @@ instead of editor; every decision below is unchanged - see ADR 0011).
 sibling directory pairs with that directory when the root is not a generic
 container name; the stem rule is unchanged and keeps precedence).
 
+**Extended:** ticket `Mf-z4vv` (byte-identical archives are one bundle by content
+hash, reported with reclaimable bytes and a copyable list; the copy is never a
+second row and nothing is ever deleted).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -201,7 +205,23 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    yields to the low-confidence folder candidate `Mf-t12a` will produce for the
    same key.
 
-5. **Zip-only creation is deferred to `POST /import/zip` and then a library
+5. **Duplicate archives are one bundle, and hashing never deletes.** Identity
+   for an archive is its content hash: a sha256 over the file, read in bounded
+   chunks. Two archives with the same hash are one bundle, so the copy is
+   suppressed from both archive passes - it is never a second bundle row and can
+   never pair a second directory - and reported in `duplicates` with its
+   `reclaimable_bytes` and a copyable, tab-separated `duplicates_text` naming the
+   same paths. Hashing is size-first: a byte-identical copy is necessarily
+   equal-size, so only archives sharing a size with another archive are opened,
+   and a uniquely-sized archive is never read; the worst case, a library where
+   every archive is the same size, reads each archive exactly once. Nothing here
+   hashes a zip's member entries: identity is over the archive files the walk
+   finds, so the nested-archive shape `Mf-74x5` owns is untouched and remains a
+   candidate under that change's own rule. The report never deletes, renames or
+   moves a file - it only renders text (`keep` and `duplicate` lines) an operator
+   can act on themselves.
+
+6. **Zip-only creation is deferred to `POST /import/zip` and then a library
    scan.** An archive with no extracted twin is still read - through
    `zip_service.read_zip_text_entry`, the one read path that never extracts,
    capped on the declared size *and* on the stream - so the report can show its
@@ -226,7 +246,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    an archive, and no detector changed; only the extraction no longer has to
    come from a URL.
 
-6. **Confidence and creatability are orthogonal.** The report has a `status`
+7. **Confidence and creatability are orthogonal.** The report has a `status`
    (`ready` / `blocked`) with a `blocked_reason` (`unresolved_directory`,
    `not_scanned`, `archive_only`), and it is computed from the database, never
    from the rule that matched:
@@ -249,7 +269,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    create request recomputes the report and refuses a `blocked` key outright, so
    a stale client cannot create one either.
 
-7. **Dismissals are keyed by the relative path, and a rename silently
+8. **Dismissals are keyed by the relative path, and a rename silently
    un-dismisses.** The key is the storage-root-relative directory (or the zip's
    relative path) - the same string the report shows as `key` and `rel_path` -
    because that is the identity a human sees and the one a create request
@@ -260,7 +280,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    bundle, so a dismissal that has lost its target is visible instead of looking
    like a bundle that vanished.
 
-8. **The dismissal map is one JSON value, read-modify-written, and that race is
+9. **The dismissal map is one JSON value, read-modify-written, and that race is
    accepted.** `set_dismissals` reads the map, adds or removes the requested
    keys, writes it back, and audits each key that actually changed. Two
    concurrent dismiss requests can therefore lose an entry. Household scale, one
@@ -270,7 +290,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    (`{keys, dismissed}`), so a dismissal has a visible undo rather than a second
    route.
 
-9. **Creation is audited, and that deliberately diverges from `POST /projects`
+10. **Creation is audited, and that deliberately diverges from `POST /projects`
    being exempt.** `POST /projects` stays in `audit.EXEMPT_ROUTES` with its
    existing reason ("creates a project"): the object it creates can be destroyed
    later, and `project.delete` is what is recorded. `POST /bundles/create` is
@@ -297,7 +317,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    - the row is written in its own transaction immediately after the effect and
    a failure raises, after `log.exception`, rather than being swallowed.
 
-10. **One project per bundle, and an exact casefolded name match is a skip, not a
+11. **One project per bundle, and an exact casefolded name match is a skip, not a
     suffix.** `find_existing_project` asks, in this order: the `_bundle` marker
     key of any project, then `project_service.find_project_by_source` for the
     parsed Thingiverse URL, then an exact casefolded `Project.name` match. Any
@@ -319,7 +339,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     with the reason "project name already exists" - never a 500, and never a
     half-created project.
 
-11. **`library_scan.RESERVED_DIRS` already owns `bundles/`.** The scanner prunes
+12. **`library_scan.RESERVED_DIRS` already owns `bundles/`.** The scanner prunes
     the top-level names `thumbs`, `bundles` and `.incoming`, so a top-level
     `bundles/` directory is invisible to detection - which is correct, because
     that is the app-owned store for supporting files, not a place vendor bundles
@@ -331,7 +351,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `library_scan.iter_directories`, along with hidden-name and symlinked-
     directory skipping.
 
-12. **Three commits per created bundle, and the idempotency that makes the
+13. **Three commits per created bundle, and the idempotency that makes the
     window safe.** One created bundle commits three times: the project row
     *with* its `_bundle` marker (one transaction, through
     `project_service.create_project(metadata=...)`, so a crash can never leave
@@ -349,7 +369,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `blocked` since the screen rendered creates nothing, and an unknown key is
     `failed` ("unknown bundle").
 
-13. **The report is bounded, and says so.** The walk stops at
+14. **The report is bounded, and says so.** The walk stops at
     `MAX_SCAN_ENTRIES` (200 000 entries) and each document read is capped at
     `BUNDLE_DOC_MAX_BYTES` (64 KiB) - on the declared size *and* on the stream
     for a zip member, because a crafted archive can lie about the former.
@@ -360,7 +380,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     storage-root-relative, so a scoped report and a whole-storage report name
     the same bundle and a create pass can find a row a scoped report showed.
 
-14. **A directory that contains bundles is a container, not a bundle.**
+15. **A directory that contains bundles is a container, not a bundle.**
     Claiming a child before its parent is not enough on its own: `import/` can
     hold a loose model plus an image and a text file at depth 0, so R3 accepts
     it on its *own* files even with the depth bound, and one confirmation would
@@ -391,7 +411,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     meaning database readiness (Mf-um7x), and a detection mistake must not
     masquerade as an unresolved `Folder`.
 
-15. **A document says what it is; the filename is a tie-break.** Detection was
+16. **A document says what it is; the filename is a tie-break.** Detection was
     originally keyed to file names: `README.txt` had to carry `created by
     Thingiverse user <name>` with `licensed under <token>`, and `LICENSE.txt`
     had to carry `<title> by <creator> on Thingiverse: <url>`. Real exports are
@@ -561,6 +581,10 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   compare the declared `ZipInfo.file_size` with the size on disk, which is not a
   byte comparison - it reads no bytes at all, and it decides pairing, not
   integrity. Comparing content would still be rejected for the reason above.
+  **Re-scoped by `Mf-z4vv`:** content hashing is adopted for duplicate identity
+  and reporting only - the `duplicates` list and `duplicates_text`, size-first,
+  and only within equal-size groups - and never for `twin_verified`, pairing or
+  an integrity claim.
 
 ## Rollback
 
@@ -675,6 +699,31 @@ unchanged.
   pair is never a target of the strip; and a low container holding a paired
   directory still drops the container, so the `archive_only_keys` strip fires for
   a pair-only candidate too.
+- The duplicate-archive contract (`Mf-z4vv`) is pinned at three levels. In
+  `tests/test_bundle_detect.py`, from literals: `equal_size_archive_groups` keeps
+  only sizes that occur twice; `duplicate_groups` puts the shortest name first
+  and reports `reclaimable_bytes == size`, while a lone digest and two equal-size
+  archives with different digests produce no group;
+  `duplicate_archive_paths` excludes the authoritative path; and
+  `duplicate_report_text` is empty without groups and otherwise carries one
+  `keep` line, one `duplicate` line, the digest and the reclaimable header. In
+  `tests/test_bundle_service.py`, against a temporary root: four constructed
+  duplicate groups (payloads 400/300/200/100, each original plus a `copyfile`
+  copy) report exactly four groups of two paths with
+  `reclaimable_bytes == size ==` the file's `stat` size and a primary that is the
+  shortest name, `duplicates_total_bytes` equals the sum of the four sizes, the
+  text carries `keep`/`duplicate` lines and the digest, no copy is a bundle row
+  and every original is; an equal-`stat`-size pair differing by one payload byte
+  is no duplicate and both stay candidates in the report and in
+  `iter_bundle_candidates`; a counter around `_content_digest` proves the
+  size-first filter reads only the one shared-size pair (`2` calls) while a
+  library of four same-size archives is read exactly once each (`4` calls) and
+  still yields no group; and `create_bundles` refuses the suppressed copy as
+  `unknown bundle` without writing a project. In `tests/test_bundles_api.py`,
+  end to end: a byte-identical copy beside a bundle reports one group whose
+  `paths` name both files, whose `sha256` is 64 hex characters and whose
+  `reclaimable_bytes` equals the file size, the copy is not a bundle key, and
+  `duplicates_text` names both paths.
 - `tests/test_bundles_api.py` covers the HTTP surface as a role sweep: a viewer
   can `GET /bundles/detect` (200) and both POSTs answer 403 with
   `permissions.DENY_DETAIL[CONTRIBUTE]`; the report body matches the pinned
@@ -707,7 +756,13 @@ This ADR is superseded if any of the following becomes true:
   appears beside `library_scan.IMAGE_SUFFIXES`;
 - the twin zip stops being provenance and starts attaching files, or
   `twin_verified` starts comparing content bytes - a checksum, a hash or
-  decompressed data - instead of names and declared sizes;
+  decompressed data - instead of names and declared sizes. Hashing for the
+  duplicate report does not trip this: `duplicates` / `duplicates_text` are not
+  `twin_verified` and never enter pairing, so a content hash reaching
+  `twin_verified`, the pairing decision or an integrity claim still does;
+- duplicate reporting starts deleting, renaming or moving a file, or stops being
+  size-first - an archive whose size occurs once gets hashed, or a byte-identical
+  copy becomes a second bundle row or a second `twin_verified` archive;
 - creatability starts keying on the detector or the confidence rather than on
   a resolved `Folder.storage_path` and a registered model asset;
 - a zip-only bundle becomes creatable from the report without

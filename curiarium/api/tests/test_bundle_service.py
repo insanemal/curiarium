@@ -13,6 +13,7 @@ below prove the same core contract without the request layer.
 """
 
 import json
+import shutil
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional
 from zipfile import ZipFile
@@ -1372,7 +1373,9 @@ def clockwork_pair(storage: Path) -> None:
     for rel_path, payload in entries.items():
         write_file(storage / "import" / rel_path, payload)
     write_zip(storage / CLOCKWORK_ZIP, entries)
-    write_zip(storage / CLOCKWORK_DUPLICATE_ZIP, entries)
+    # copyfile, not a second write_zip: writestr timestamps can differ across
+    # seconds, and these two archives must be byte-identical by construction.
+    shutil.copyfile(storage / CLOCKWORK_ZIP, storage / CLOCKWORK_DUPLICATE_ZIP)
 
 
 def test_service_an_archive_pairs_with_the_directory_its_entries_are_rooted_at(
@@ -1411,6 +1414,15 @@ def test_service_an_archive_pairs_with_the_directory_its_entries_are_rooted_at(
     assert candidates[0].pair_only is True
     assert candidates[0].archive_path == CLOCKWORK_ZIP
     assert candidates[0].entry_root == CLOCKWORK_ROOT
+
+    assert len(report["duplicates"]) == 1
+    duplicate = report["duplicates"][0]
+    assert duplicate["paths"] == [CLOCKWORK_ZIP, CLOCKWORK_DUPLICATE_ZIP]
+    assert duplicate["reclaimable_bytes"] == duplicate["size"]
+    assert duplicate["size"] == (isolated_storage / CLOCKWORK_ZIP).stat().st_size
+    assert CLOCKWORK_DUPLICATE_ZIP not in {row["key"] for row in report["bundles"]}, (
+        "the copy is reported in duplicates, never as a second bundle row"
+    )
 
     created = create(client, headers, [{"key": CLOCKWORK_DIR}])
 
@@ -1623,3 +1635,151 @@ def test_service_a_paired_directory_that_holds_a_nested_archive_is_still_offered
     nested_row = row_for(report, nested_zip)
     assert nested_row["status"] == "blocked"
     assert nested_row["blocked_reason"] == "archive_only"
+
+
+# --- duplicate archives (Mf-z4vv) -------------------------------------------
+
+# The four constructed duplicate groups of the fixture below. The payload sizes
+# are distinct so no group shares a size with another archive: only the copies
+# inside a group are equal-size, which is exactly the pair that gets hashed.
+DUPLICATE_GROUP_PAYLOADS = (("Big", 400), ("Medium", 300), ("Small", 200), ("Tiny", 100))
+UNIQUE_PAYLOAD_SIZES = (550, 650, 750)
+
+
+def bundle_zip_entries(model: bytes) -> Dict[str, bytes]:
+    """A zip the R3 rule offers as a bundle: one model, one image, one text, at the root."""
+    return {"part.stl": model, "preview.jpg": b"j" * 20, "notes.txt": b"print at 0.2mm\n"}
+
+
+def archive_pair(storage: Path, stem: str, model: bytes) -> tuple:
+    """One original archive plus a byte-identical browser copy, made with copyfile.
+
+    A second ``write_zip`` would usually match too, but ``writestr`` timestamps can
+    straddle a second boundary and a byte-identical fixture must not be flaky.
+    """
+    original = f"{stem}.zip"
+    duplicate = f"{stem} (1).zip"
+    write_zip(storage / original, bundle_zip_entries(model))
+    shutil.copyfile(storage / original, storage / duplicate)
+    return original, duplicate
+
+
+def duplicate_library(storage: Path) -> Dict[str, tuple]:
+    """Four duplicate groups, three unique-size zips and one one-byte-different pair."""
+    groups = {name: archive_pair(storage, f"duplicates/{name}", b"s" * size) for name, size in DUPLICATE_GROUP_PAYLOADS}
+    for index, size in enumerate(UNIQUE_PAYLOAD_SIZES):
+        write_zip(storage / f"unique/Only {index}.zip", bundle_zip_entries(b"u" * size))
+    write_zip(storage / "boundary/Diff A.zip", bundle_zip_entries(b"A" * 150))
+    write_zip(storage / "boundary/Diff B.zip", bundle_zip_entries(b"B" * 150))
+    return groups
+
+
+def test_service_four_duplicate_groups_are_reported_once_with_byte_counts(isolated_storage: Path) -> None:
+    """AC-1: four copies become four reclaimable groups, never eight bundle rows."""
+    groups = duplicate_library(isolated_storage)
+
+    report = bundle_service.build_report()
+
+    assert len(report["duplicates"]) == 4
+    rows = {row["key"] for row in report["bundles"]}
+    sizes: List[int] = []
+    for original, duplicate in groups.values():
+        group = next(group for group in report["duplicates"] if group["paths"][0] == original)
+        assert group["paths"] == [original, duplicate], "the shortest name is the authoritative original"
+        assert group["reclaimable_bytes"] == group["size"] == (isolated_storage / original).stat().st_size
+        assert len(group["sha256"]) == 64
+        assert duplicate not in rows, "a byte-identical copy is never a second bundle row"
+        assert original in rows, "the original is still a zip-only bundle"
+        sizes.append(group["size"])
+    assert len(set(sizes)) == 4, "each group has its own byte size, so no cross-group hashing"
+    assert report["duplicates_total_bytes"] == sum(sizes)
+    assert "keep\t" in report["duplicates_text"]
+    assert "duplicate\t" in report["duplicates_text"]
+    assert report["duplicates"][0]["sha256"] in report["duplicates_text"]
+    assert "boundary/Diff A.zip" in rows and "boundary/Diff B.zip" in rows, (
+        "one changed byte is not a duplicate, so both stay candidates"
+    )
+
+
+def test_service_a_one_byte_difference_is_not_a_duplicate_and_both_stay_candidates(
+    isolated_storage: Path,
+) -> None:
+    """The boundary: equal stat size, one payload byte different, two bundles."""
+    write_zip(isolated_storage / "boundary/Diff A.zip", bundle_zip_entries(b"A" * 150))
+    write_zip(isolated_storage / "boundary/Diff B.zip", bundle_zip_entries(b"B" * 150))
+    first = isolated_storage / "boundary/Diff A.zip"
+    second = isolated_storage / "boundary/Diff B.zip"
+    assert first.stat().st_size == second.stat().st_size, "the fixture must be equal-size for the test to mean anything"
+
+    report = bundle_service.build_report()
+    candidates, _truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert report["duplicates"] == []
+    assert report["duplicates_total_bytes"] == 0
+    assert {row["key"] for row in report["bundles"]} == {"boundary/Diff A.zip", "boundary/Diff B.zip"}
+    assert {candidate.key for candidate in candidates} == {"boundary/Diff A.zip", "boundary/Diff B.zip"}
+
+
+def test_service_unique_sizes_are_never_hashed(isolated_storage: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Size-first: only the equal-size pair is read, never the uniquely-sized zips."""
+    calls: List[Path] = []
+    original = bundle_service._content_digest
+
+    def counting_digest(path: Path) -> Optional[str]:
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(bundle_service, "_content_digest", counting_digest)
+    archive_pair(isolated_storage, "duplicates/Big", b"s" * 400)
+    for index, size in enumerate(UNIQUE_PAYLOAD_SIZES):
+        write_zip(isolated_storage / f"unique/Only {index}.zip", bundle_zip_entries(b"u" * size))
+
+    report = bundle_service.build_report()
+
+    assert len(report["duplicates"]) == 1
+    assert len(calls) == 2, "the pair only: a size that occurs once is never opened"
+
+
+def test_service_all_equal_size_archives_are_hashed_once(isolated_storage: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The honest worst case: four same-size archives are each read exactly once."""
+    calls: List[Path] = []
+    original = bundle_service._content_digest
+
+    def counting_digest(path: Path) -> Optional[str]:
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(bundle_service, "_content_digest", counting_digest)
+    names = [f"same/{letter}.zip" for letter in "ABCD"]
+    # Same entry names and same payload lengths, different bytes: equal stat size,
+    # four different hashes, so the size-first filter cannot exclude any of them.
+    for index, name in enumerate(names):
+        write_zip(
+            isolated_storage / name,
+            {
+                "part.stl": bytes([65 + index]) * 150,
+                "preview.jpg": b"j" * 20,
+                "notes.txt": b"print at 0.2mm\n",
+            },
+        )
+    assert len({(isolated_storage / name).stat().st_size for name in names}) == 1
+
+    scan = bundle_service.scan_bundles(isolated_storage)
+
+    assert len(calls) == 4
+    assert scan.duplicates == ()
+    assert {candidate.key for candidate in scan.candidates} == set(names), "all four are still candidates"
+
+
+def test_service_a_duplicate_is_refused_by_create(isolated_storage: Path) -> None:
+    """A copy is suppressed from both passes, so a create naming it is unknown."""
+    _original, duplicate = archive_pair(isolated_storage, "duplicates/Big", b"s" * 400)
+
+    created = bundle_service.create_bundles(
+        [bundle_service.BundleCreateItem(key=duplicate)], audit_ctx()
+    )
+
+    assert created["failed"] == 1
+    assert created["created"] == 0
+    assert created["results"][0]["reason"] == "unknown bundle"
+    assert table_counts()["projects"] == 0

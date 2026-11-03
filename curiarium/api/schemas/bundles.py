@@ -23,6 +23,7 @@ __all__ = [
   "BundleDetectItemOut",
   "BundleDismissRequest",
   "BundleDismissResponse",
+  "BundleDuplicateGroupOut",
   "BundleReportOut",
 ]
 
@@ -41,6 +42,15 @@ class BundleArchiveOut(BaseModel):
 
   rel_path: str
   twin_verified: bool
+
+
+class BundleDuplicateGroupOut(BaseModel):
+  """Byte-identical archives: one bundle, the rest reclaimable bytes."""
+
+  sha256: str
+  size: int
+  paths: List[str]
+  reclaimable_bytes: int
 
 
 class BundleDetectItemOut(BaseModel):
@@ -97,6 +107,10 @@ class BundleReportOut(BaseModel):
   truncated: bool = False
   counts: BundleDetectCountsOut
   bundles: List[BundleDetectItemOut] = []
+  # Byte-identical archives are one bundle: this list is the copies, never rows.
+  duplicates: List[BundleDuplicateGroupOut] = []
+  duplicates_total_bytes: int = 0
+  duplicates_text: str = ""
   # Dismissal keys that match no live bundle: a renamed directory un-dismisses.
   stale_dismissals: List[str] = []
 
