@@ -230,6 +230,9 @@ file.
   decision, with the reasoning behind it.
 - [curiarium/docs/guides/truenas.md](curiarium/docs/guides/truenas.md) — installing on
   TrueNAS as a Docker Compose custom app: datasets, permissions, `.env`, ZFS snapshots.
+- [curiarium/docs/guides/cosmos.md](curiarium/docs/guides/cosmos.md) — installing on
+  Cosmos Cloud: the template, the env placeholders, a route to `web:5173`, the OIDC client
+  and the claims caveat.
 
 **Repository and process**
 
@@ -250,6 +253,9 @@ file.
 
 - [curiarium/docker-compose.deploy.yml](curiarium/docker-compose.deploy.yml) — the canonical
   production manifest, running the published images.
+- [curiarium/deploy/README.md](curiarium/deploy/README.md) — the deployment-artefact
+  contract and the target index: placeholder-only templates, one per platform, each paired
+  with a walkthrough.
 - [curiarium/docker-deploy.yml](curiarium/docker-deploy.yml) — compatibility alias for
   deployments that still use the historical filename.
 - [curiarium/api/.env.example](curiarium/api/.env.example) — the environment file to copy
@@ -275,6 +281,9 @@ Step-by-step walkthroughs for specific platforms. More guides live in
 
 - [Installing on TrueNAS](curiarium/docs/guides/truenas.md) — Docker Compose custom app:
   datasets, permissions, `.env`, first-run setup and ZFS snapshots.
+- [Installing on Cosmos Cloud](curiarium/docs/guides/cosmos.md) — the Cosmos application
+  template, its env placeholders, a route to `web:5173`, the OIDC client and the claims
+  caveat. The TrueNAS guide above is the sibling example.
 
 ## Configuration
 
