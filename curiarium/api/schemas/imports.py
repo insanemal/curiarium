@@ -41,8 +41,17 @@ class ImportInspectOut(BaseModel):
 
 
 class ZipEntryOut(BaseModel):
+  """One zip member as an entries listing reports it.
+
+  `junk` is the server's verdict (`zip_junk.is_junk_entry`) that the member is
+  OS metadata - `__MACOSX/`, `.DS_Store`, `Thumbs.db`, an AppleDouble `._*` -
+  which the importer will refuse. The server decides it; the browser only uses
+  it to choose the modal's default ticks.
+  """
+
   path: str
   size: int
+  junk: bool
 
 
 class ArchiveEntriesOut(BaseModel):

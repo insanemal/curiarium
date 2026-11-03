@@ -46,6 +46,7 @@ export function useZipImportPrompt() {
   const [stage, setStage] = useState<PromptStage>("choice");
   const [entries, setEntries] = useState<ZipEntry[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [showJunk, setShowJunk] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const resolveRef = useRef<(() => void) | null>(null);
@@ -59,6 +60,7 @@ export function useZipImportPrompt() {
     setStage("choice");
     setEntries([]);
     setSelected(new Set());
+    setShowJunk(false);
     setBusy(false);
     setError(null);
   };
@@ -99,7 +101,7 @@ export function useZipImportPrompt() {
     try {
       const list = await state.config.loadEntries();
       setEntries(list);
-      setSelected(new Set(list.map(entry => entry.path)));
+      setSelected(new Set(list.filter(entry => !entry.junk).map(entry => entry.path)));
       setStage("select");
     } catch (err) {
       setError(errorMessage(err, "Unable to read zip contents"));
@@ -149,7 +151,7 @@ export function useZipImportPrompt() {
   };
 
   const selectAll = () => {
-    setSelected(new Set(entries.map(entry => entry.path)));
+    setSelected(new Set(entries.filter(entry => !entry.junk).map(entry => entry.path)));
   };
 
   const clearAll = () => {
@@ -157,7 +159,11 @@ export function useZipImportPrompt() {
   };
 
   const selectedCount = selected.size;
-  const allSelected = entries.length > 0 && selectedCount === entries.length;
+  const payloadEntries = entries.filter(entry => !entry.junk);
+  // "Select all" speaks only for importable rows: junk can be ticked by hand,
+  // but the shortcut must never sweep it up.
+  const allSelected =
+    payloadEntries.length > 0 && payloadEntries.every(entry => selected.has(entry.path));
 
   const modal = state ? (
     <ZipImportModal
@@ -167,6 +173,7 @@ export function useZipImportPrompt() {
       selected={selected}
       selectedCount={selectedCount}
       allSelected={allSelected}
+      showJunk={showJunk}
       busy={busy}
       error={error}
       onClose={close}
@@ -176,6 +183,7 @@ export function useZipImportPrompt() {
       onToggleEntry={toggleEntry}
       onSelectAll={selectAll}
       onClearAll={clearAll}
+      onToggleShowJunk={() => setShowJunk(prev => !prev)}
     />
   ) : null;
 
@@ -189,6 +197,7 @@ function ZipImportModal({
   selected,
   selectedCount,
   allSelected,
+  showJunk,
   busy,
   error,
   onClose,
@@ -198,6 +207,7 @@ function ZipImportModal({
   onToggleEntry,
   onSelectAll,
   onClearAll,
+  onToggleShowJunk,
 }: {
   label: string;
   stage: PromptStage;
@@ -205,6 +215,7 @@ function ZipImportModal({
   selected: Set<string>;
   selectedCount: number;
   allSelected: boolean;
+  showJunk: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -214,8 +225,12 @@ function ZipImportModal({
   onToggleEntry: (path: string) => void;
   onSelectAll: () => void;
   onClearAll: () => void;
+  onToggleShowJunk: () => void;
 }) {
   const entryCount = entries.length;
+  const payloadCount = entries.filter(entry => !entry.junk).length;
+  const junkCount = entryCount - payloadCount;
+  const visibleEntries = entries.filter(entry => showJunk || !entry.junk);
   const title = useMemo(() => (stage === "choice" ? "Import zip" : "Choose files"), [stage]);
   // Four prompts can coexist (the UploadBar, grid and Sidebar uploaders plus
   // the project attacher), so the ids naming this dialog must be per-instance.
@@ -358,7 +373,7 @@ function ZipImportModal({
                   <button
                     className="px-2 py-1 rounded-md border border-panel-strong text-sm disabled:opacity-60"
                     onClick={onSelectAll}
-                    disabled={busy || allSelected}
+                    disabled={busy || allSelected || payloadCount === 0}
                   >
                     Select all
                   </button>
@@ -372,8 +387,34 @@ function ZipImportModal({
                 </div>
               </div>
 
+              {junkCount > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    className="px-2 py-1 rounded-md border border-panel-strong text-sm disabled:opacity-60"
+                    onClick={onToggleShowJunk}
+                    disabled={busy}
+                  >
+                    {showJunk
+                      ? `Hide OS metadata (${junkCount})`
+                      : `Show OS metadata (${junkCount})`}
+                  </button>
+                  <span className="text-xs opacity-70">
+                    OS metadata is housekeeping the archiver added, not model content. It is
+                    unticked by default and a zip import never adds it: ticking one cannot put it
+                    in the library.
+                  </span>
+                </div>
+              )}
+
+              {payloadCount === 0 && entryCount > 0 && (
+                <p className="text-sm opacity-70">
+                  This zip holds only OS metadata (macOS/Windows housekeeping files). There are no
+                  model files to import.
+                </p>
+              )}
+
               <div className="border border-panel-strong rounded-md max-h-[360px] overflow-auto">
-                {entries.map(entry => (
+                {visibleEntries.map(entry => (
                   <label
                     key={entry.path}
                     className="flex items-center gap-3 px-3 py-2 border-b border-panel-strong last:border-b-0 text-sm"
@@ -386,6 +427,7 @@ function ZipImportModal({
                       className="w-4 h-4"
                     />
                     <span className="flex-1 truncate">{entry.path}</span>
+                    {entry.junk && <span className="text-xs opacity-70">OS metadata</span>}
                     <span className="text-xs opacity-70">{formatBytes(entry.size)}</span>
                   </label>
                 ))}

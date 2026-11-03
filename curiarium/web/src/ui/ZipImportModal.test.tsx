@@ -5,6 +5,7 @@ import React, { useState } from "react";
 
 import FolderDrawer from "./FolderDrawer";
 import { useZipImportPrompt, type ZipPromptConfig } from "./ZipImportModal";
+import type { ZipEntry } from "../lib/zipUtils";
 
 /**
  * The zip prompt is rendered un-portalled inside the folder rail, and the
@@ -89,6 +90,55 @@ function openPrompt(): HTMLElement {
 
 function promptDialog(): HTMLElement | null {
   return screen.queryByRole("dialog", { name: "Import zip pack.zip" });
+}
+
+/** The 8-entry list the server now sends, with `junk` already decided. */
+const NASTY_ENTRIES: ZipEntry[] = [
+  { path: "part.stl", size: 1, junk: false },
+  { path: "a/b/nested.stl", size: 1, junk: false },
+  { path: "a/b/deep/inner.stl", size: 1, junk: false },
+  { path: "__MACOSX/._part.stl", size: 1, junk: true },
+  { path: "__MACOSX/a/._nested.stl", size: 1, junk: true },
+  { path: ".DS_Store", size: 1, junk: true },
+  { path: "a/.DS_Store", size: 1, junk: true },
+  { path: "a/b/Thumbs.db", size: 1, junk: true },
+];
+
+const PAYLOAD_PATHS = ["part.stl", "a/b/nested.stl", "a/b/deep/inner.stl"];
+const JUNK_PATHS = [
+  "__MACOSX/._part.stl",
+  "__MACOSX/a/._nested.stl",
+  ".DS_Store",
+  "a/.DS_Store",
+  "a/b/Thumbs.db",
+];
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Rows are labels, so the checkbox's accessible name starts with its path. */
+function checkbox(prompt: HTMLElement, path: string): HTMLInputElement {
+  return within(prompt).getByRole("checkbox", {
+    name: new RegExp(`^${escapeRegExp(path)}`),
+  }) as HTMLInputElement;
+}
+
+function queryCheckbox(prompt: HTMLElement, path: string): HTMLInputElement | null {
+  return within(prompt).queryByRole("checkbox", {
+    name: new RegExp(`^${escapeRegExp(path)}`),
+  }) as HTMLInputElement | null;
+}
+
+async function openSelectStage(
+  entries: ZipEntry[],
+  config?: Partial<ZipPromptConfig>
+): Promise<HTMLElement> {
+  renderHarness({ loadEntries: async () => entries, ...config });
+  const prompt = openPrompt();
+  fireEvent.click(within(prompt).getByRole("button", { name: "Import and unzip" }));
+  await within(prompt).findByRole("button", { name: "Import selected" });
+  return prompt;
 }
 
 afterEach(() => {
@@ -244,5 +294,93 @@ describe("ZipImportModal inside the folder rail", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(promptDialog()).toBe(dialog);
     expect(onDrawerClose).not.toHaveBeenCalled();
+  });
+
+  it("pre-ticks only the payload rows and hides OS metadata by default", async () => {
+    const prompt = await openSelectStage(NASTY_ENTRIES);
+
+    expect(within(prompt).getByText("3 of 8 selected")).toBeTruthy();
+    for (const path of PAYLOAD_PATHS) {
+      expect(checkbox(prompt, path).checked).toBe(true);
+    }
+    for (const path of JUNK_PATHS) {
+      expect(queryCheckbox(prompt, path)).toBeNull();
+    }
+    expect(within(prompt).getByRole("button", { name: "Show OS metadata (5)" })).toBeTruthy();
+  });
+
+  it("leaves OS metadata unticked when Select all is used", async () => {
+    const onImportSelected = vi.fn(async () => {});
+    const prompt = await openSelectStage(NASTY_ENTRIES, { onImportSelected });
+
+    // Clear first, so the shortcut itself is what re-selects the payload.
+    fireEvent.click(within(prompt).getByRole("button", { name: "Clear" }));
+    fireEvent.click(within(prompt).getByRole("button", { name: "Select all" }));
+
+    for (const path of PAYLOAD_PATHS) {
+      expect(checkbox(prompt, path).checked).toBe(true);
+    }
+    for (const path of JUNK_PATHS) {
+      expect(queryCheckbox(prompt, path)).toBeNull();
+    }
+
+    fireEvent.click(within(prompt).getByRole("button", { name: "Import selected" }));
+    await waitFor(() => expect(onImportSelected).toHaveBeenCalledTimes(1));
+    expect(onImportSelected).toHaveBeenCalledWith(PAYLOAD_PATHS);
+  });
+
+  it("reveals OS metadata on request and lets an explicit tick reach the import", async () => {
+    const onImportSelected = vi.fn(async () => {});
+    const prompt = await openSelectStage(NASTY_ENTRIES, { onImportSelected });
+
+    fireEvent.click(within(prompt).getByRole("button", { name: "Show OS metadata (5)" }));
+
+    for (const path of JUNK_PATHS) {
+      expect(checkbox(prompt, path).checked).toBe(false);
+    }
+    const junk = checkbox(prompt, "__MACOSX/._part.stl");
+    fireEvent.click(junk);
+    expect(junk.checked).toBe(true);
+
+    fireEvent.click(within(prompt).getByRole("button", { name: "Import selected" }));
+    await waitFor(() => expect(onImportSelected).toHaveBeenCalledTimes(1));
+    expect(onImportSelected).toHaveBeenCalledWith([...PAYLOAD_PATHS, "__MACOSX/._part.stl"]);
+  });
+
+  it("explains a junk-only zip and never imports it", async () => {
+    const onImportSelected = vi.fn(async () => {});
+    const prompt = await openSelectStage(
+      [
+        { path: ".DS_Store", size: 1, junk: true },
+        { path: "__MACOSX/._a.stl", size: 1, junk: true },
+      ],
+      { onImportSelected }
+    );
+
+    expect(within(prompt).getByText(/This zip holds only OS metadata/)).toBeTruthy();
+    expect(within(prompt).getByText("0 of 2 selected")).toBeTruthy();
+
+    const importButton = within(prompt).getByRole("button", {
+      name: "Import selected",
+    }) as HTMLButtonElement;
+    expect(importButton.disabled).toBe(true);
+    fireEvent.click(importButton);
+    expect(onImportSelected).not.toHaveBeenCalled();
+  });
+
+  it("says a zip import never adds OS metadata, even when it is ticked", async () => {
+    const prompt = await openSelectStage(NASTY_ENTRIES);
+
+    expect(within(prompt).getByText(/ticking one cannot put it/)).toBeTruthy();
+  });
+
+  it("does not offer the OS metadata toggle for a plain zip", async () => {
+    const prompt = await openSelectStage([
+      { path: "part.stl", size: 1, junk: false },
+      { path: "notes.txt", size: 1, junk: false },
+    ]);
+
+    expect(within(prompt).getByText("2 of 2 selected")).toBeTruthy();
+    expect(within(prompt).queryByRole("button", { name: /OS metadata/ })).toBeNull();
   });
 });

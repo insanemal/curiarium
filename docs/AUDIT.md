@@ -183,7 +183,13 @@ change more than one fact or act on more than one target:
   with detail `{"name", "folders": 1, "assets": 0, "bytes": 0}` when the
   delete empties the folder's directory and so retires that folder's row.
 * `POST /assets/batch/folder` - one `asset.move` per moved asset.
-* `POST /import/zip` - one `asset.create` per extracted entry.
+* `POST /import/zip` - one `asset.create` per extracted entry. An entry that
+  never becomes an asset writes nothing at all: OS metadata (`__MACOSX/`,
+  `.DS_Store`, `Thumbs.db`, `desktop.ini`, an AppleDouble `._*`,
+  `.Spotlight-*`, `$RECYCLE.BIN/`) is refused before the insert, and an entry
+  whose filename has no extension fails the same way (Mf-ls9v). Both come back
+  in the response's `failed` list on a 200, not as an error, so there is no row
+  and no `folder.*` row for a directory that only junk would have created.
 * `PATCH /users/{user_id}` - one row per changed field. Changing role and
   disabling in the same request writes `user.role_change` and `user.disable`.
 * `PATCH /folder/{folder_id}` - renaming and reparenting in the same request

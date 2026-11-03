@@ -610,7 +610,12 @@
     "type": "object"
   },
   "ZipEntryOut": {
+    "description": "One zip member as an entries listing reports it.\n\n`junk` is the server's verdict (`zip_junk.is_junk_entry`) that the member is\nOS metadata - `__MACOSX/`, `.DS_Store`, `Thumbs.db`, an AppleDouble `._*` -\nwhich the importer will refuse. The server decides it; the browser only uses\nit to choose the modal's default ticks.",
     "properties": {
+      "junk": {
+        "title": "Junk",
+        "type": "boolean"
+      },
       "path": {
         "title": "Path",
         "type": "string"
@@ -622,7 +627,8 @@
     },
     "required": [
       "path",
-      "size"
+      "size",
+      "junk"
     ],
     "title": "ZipEntryOut",
     "type": "object"
