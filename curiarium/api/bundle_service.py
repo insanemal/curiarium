@@ -17,7 +17,37 @@ attaches no files. The archive is reported with ``twin_verified``: a comparison
 of the casefolded *basenames* inside the zip with the casefolded basenames of the
 folder's recursive entries. Names only, never a checksum - the archive attaches
 nothing, so a mismatch is information for the operator (``False``), not an
-assertion to raise. A zip with no extracted twin is still read, through
+assertion to raise.
+
+**Renamed extractions pair on the archive's entry root.** A vendor rename breaks
+the stem rule: ``import/17_ClockworkMonster/`` beside ``17_Fates End -
+ClockworkMonster Tower.zip`` shares nothing but an ordinal prefix. So a second
+pass reads the archives the stem rule left behind, computes each one's common
+entry root (``bundle_detect.common_entry_root``) and pairs it with a *sibling*
+directory of that name - same parent only, so a root naming an ancestor or a
+directory elsewhere never pairs - unless the root is a generic container name
+(``files``/``images``/``models``/``stl``), which would pair half a real library
+to the wrong thing. ``entry_root_verified`` then requires containment of
+(casefolded bundle-relative path, declared size) against the directory's
+post-claim listing. Containment, not equality: a lived-in directory holds more
+than its archive. Declared size is an archive header field, so this is pairing
+evidence, never an integrity claim - and on this path ``twin_verified`` is a
+pairing condition (always true by construction; an unverified archive simply
+does not pair), where the stem path's ``twin_verified`` stays an operator remark.
+The archive attaches nothing on either path.
+
+**Interim: a paired directory no rule offers is one blocked row.** The Clockwork
+shape - models and images, no text - is not an R3 bundle, so the pair would
+render nothing. ``bundle_detect.archive_owned_facts`` supplies the row: one
+candidate keyed at the DIRECTORY, ``pair_only``, reported ``blocked`` with
+``archive_only``. Be honest about two things it does not do. It reports
+``assets_total: 0`` and the archive-only remedy copy ("import the zip, scan"),
+which for a directory that may already hold registered assets is the wrong
+advice; and it is interim until Mf-t12a makes such a directory a real
+low-confidence candidate, which the pair-only row yields to by construction (a
+real folder candidate of the same key wins, and the archive attaches to it).
+
+A zip with no extracted twin is still read, through
 ``zip_service.read_zip_text_entry`` (bounded, never extracted), so the report can
 show its provenance; it is always ``blocked``/``archive_only``, because creation
 happens from registered assets. The extraction/registration door for an archive
@@ -119,7 +149,10 @@ class BundleCandidate:
 
     ``confidence`` is internal: it decides whether a candidate may claim a
     subtree. It is never returned in a report row - the row carries the facts
-    from its own detect call.
+    from its own detect call. ``entry_root`` is the archive entry root that
+    paired this bundle's archive, ``None`` when the stem rule paired it.
+    ``pair_only`` means the directory is offered only because a verified archive
+    owns it: it creates nothing.
     """
 
     key: str
@@ -127,6 +160,18 @@ class BundleCandidate:
     archive_path: Optional[str]
     is_archive: bool
     confidence: str
+    entry_root: Optional[str] = None
+    pair_only: bool = False
+
+    @property
+    def offers_archive_only(self) -> bool:
+        """Whether the row is reported ``blocked``/``archive_only``.
+
+        An archive of its own, and a directory the archive owns but no detector
+        offers, are the same answer to the operator: there is nothing here to
+        create, and the remedy is the import door.
+        """
+        return self.is_archive or self.pair_only
 
 
 def _entry_size(entry) -> int:
@@ -314,8 +359,26 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
             claimed_ancestors.add(ancestor)
             ancestor = _parent(ancestor)
 
+    # Entry-root pairing: the stem rule has first refusal, so this pass only sees
+    # the archives it left behind. Each archive's common entry root must name a
+    # sibling DIRECTORY (same parent only) and its entries must contain nothing
+    # the directory's post-claim listing does not hold.
+    pairs: Dict[str, List[Tuple[str, str]]] = {}
+    paired_zips: set = set()
+    for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
+        if _twin_directory(rel_path, dirs_by_parent):
+            continue
+        paired = _entry_root_pair(root, rel_path, dirs_by_parent, work)
+        if paired is None:
+            continue
+        folder, entry_root = paired
+        pairs.setdefault(folder, []).append((rel_path, entry_root))
+        paired_zips.add(rel_path)
+
     # Zip-only candidates: an archive whose extracted twin is not beside it.
     for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
+        if rel_path in paired_zips:
+            continue
         twin = _twin_directory(rel_path, dirs_by_parent)
         if twin:
             continue
@@ -335,28 +398,66 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
             )
         )
 
+    # A directory a verified archive owns but no rule offers (yet): one row keyed
+    # at the directory, so the pair is visible and yields to a real folder
+    # candidate of the same key when one exists.
+    for folder in sorted(pairs, key=lambda item: (item.casefold(), item)):
+        if any(candidate.key == folder for candidate in found):
+            continue
+        entries = work.get(folder) or []
+        if not entries:
+            continue
+        snapshot = _folder_snapshot(folder, entries)
+        facts = bundle_detect.archive_owned_facts(snapshot)
+        if facts is None:
+            continue
+        archive_path, entry_root = _paired_archive(pairs[folder])
+        found.append(
+            BundleCandidate(
+                key=folder,
+                snapshot=snapshot,
+                archive_path=archive_path,
+                is_archive=False,
+                confidence=facts.confidence,
+                entry_root=entry_root,
+                pair_only=True,
+            )
+        )
+
     # An archive-only bundle is still a bundle: a low folder that strictly
     # contains one is a container too, and the folder pass cannot see it because
-    # the archive is read after the directory walk.
-    zip_only_keys = [candidate.key for candidate in found if candidate.is_archive]
-    if zip_only_keys:
+    # the archive is read after the directory walk. `archive_only_keys` is the keys
+    # of both kinds of archive-only row - an archive of its own, and a pair-only
+    # directory the archive owns - because a LOW folder strictly containing either
+    # one holds nothing but another thing's payload and is therefore a container,
+    # never a bundle. A pair-only row is never a *target* of that strip: it is
+    # verified evidence rather than a guess, it claims no subtree, and the nested
+    # archive stays a row of its own either way, so dropping it would only hide
+    # the pair the operator can see on disk.
+    archive_only_keys = [candidate.key for candidate in found if candidate.offers_archive_only]
+    if archive_only_keys:
         found = [
             candidate
             for candidate in found
             if not (
                 not candidate.is_archive
+                and not candidate.pair_only
                 and candidate.confidence == bundle_detect.CONFIDENCE_LOW
-                and any(zip_key.startswith(candidate.key + "/") for zip_key in zip_only_keys)
+                and any(key.startswith(candidate.key + "/") for key in archive_only_keys)
             )
         ]
 
-    # A folder candidate's archive is provenance: reported, never a member.
+    # A folder candidate's archive is provenance: reported, never a member. A row
+    # that is already archive-only is reported as it was built.
     with_twins: List[BundleCandidate] = []
     for candidate in found:
-        if candidate.is_archive:
+        if candidate.offers_archive_only:
             with_twins.append(candidate)
             continue
         archive = _twin_archive(candidate.key, files_by_dir)
+        entry_root = None
+        if archive is None and candidate.key in pairs:
+            archive, entry_root = _paired_archive(pairs[candidate.key])
         with_twins.append(
             BundleCandidate(
                 key=candidate.key,
@@ -364,6 +465,8 @@ def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
                 archive_path=archive,
                 is_archive=candidate.is_archive,
                 confidence=candidate.confidence,
+                entry_root=entry_root,
+                pair_only=candidate.pair_only,
             )
         )
     with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
@@ -397,6 +500,51 @@ def _twin_archive(rel_dir: str, files_by_dir: Mapping[str, Sequence[Tuple[str, i
         if bundle_detect.twin_key(name) == wanted:
             return f"{parent}/{name}" if parent else name
     return None
+
+
+def _entry_root_pair(
+    root: Path,
+    rel_path: str,
+    dirs_by_parent: Mapping[str, set],
+    work: Mapping[str, Sequence[bundle_detect.BundleEntry]],
+) -> Optional[Tuple[str, str]]:
+    """``(folder_rel, entry_root)`` for an archive that pairs by its entry root.
+
+    Same-parent only: a root naming an ancestor or a directory elsewhere in the
+    library is not evidence that the two sit together, and pairing across parents
+    would attach one archive to a directory it was never extracted into. The
+    comparison set is ``work``'s post-claim listing, so pairing can never disagree
+    with the claim tree. A generic container root is refused outright (the name
+    says nothing about which thing the archive holds), and any read failure is
+    ``None`` - never an exception on a read route.
+    """
+    zip_path = Path(root) / rel_path
+    try:
+        entries = zip_service.list_zip_entries(zip_path)
+    except (BadZipFile, OSError):
+        return None
+    entry_root = bundle_detect.common_entry_root([str(entry["path"]) for entry in entries])
+    if entry_root is None or bundle_detect.is_generic_container_root(entry_root):
+        return None
+    parent = _parent(rel_path)
+    wanted = entry_root.casefold()
+    for name in sorted(dirs_by_parent.get(parent, ())):
+        if name.casefold() != wanted:
+            continue
+        folder = f"{parent}/{name}" if parent else name
+        if entry_root_verified(zip_path, entry_root, work.get(folder, ())):
+            return folder, entry_root
+    return None
+
+
+def _paired_archive(pairs: Sequence[Tuple[str, str]]) -> Tuple[str, str]:
+    """``(zip_rel, entry_root)`` to report for one directory.
+
+    The shortest name wins, ties by (casefold, raw): a browser's `` (1)``
+    duplicate convention only ever appends characters, so the shortest name is the
+    original file. Hash identity for the duplicates is Mf-z4vv's, not this pass's.
+    """
+    return min(pairs, key=lambda pair: (len(pair[0]), pair[0].casefold(), pair[0]))
 
 
 def _folder_index(session: Session) -> Dict[str, str]:
@@ -455,6 +603,51 @@ def twin_verified(zip_path: Path, folder_entries: Sequence[bundle_detect.BundleE
     archive_names = sorted({PurePath(entry["path"]).name.casefold() for entry in entries})
     folder_names = sorted({PurePath(entry.rel_path).name.casefold() for entry in folder_entries})
     return archive_names == folder_names
+
+
+def entry_root_verified(
+    zip_path: Path,
+    entry_root: str,
+    folder_entries: Sequence[bundle_detect.BundleEntry],
+) -> bool:
+    """Whether every entry of the archive sits inside ``entry_root`` and on disk.
+
+    Containment, not equality, because a lived-in directory legitimately holds more
+    than the archive that shipped it (extracted, then a second zip dropped in, then
+    a render saved by hand), and equality would refuse the very pair this exists
+    for. Declared size comes from the archive's header, so this is pairing evidence
+    and never an integrity claim: it decides which directory an archive belongs to,
+    and a lie in the header only makes a pairing wrong, never a bundle corrupt.
+
+    The first segment is split off the path rather than sliced by the length of a
+    casefolded prefix: casefolding may change a string's length, and a slice would
+    then cut the tail in the wrong place.
+
+    An ``__MACOSX/`` entry is AppleDouble cruft, not payload: it is skipped before
+    the head check and never counted in ``seen``, so an archive carrying such
+    cruft still pairs on its real entries, while an archive of cruft alone has
+    verified no entry and is refused. The skip is ``is_macosx_artifact``, the same
+    predicate ``common_entry_root`` applies, so the two layers agree on what the
+    archive's root is.
+    """
+    try:
+        entries = zip_service.list_zip_entries(Path(zip_path))
+    except (BadZipFile, OSError):
+        return False
+    wanted = (entry_root or "").casefold()
+    folder = {(entry.rel_path.casefold(), entry.size) for entry in folder_entries}
+    seen = 0
+    for entry in entries:
+        rel_path = str(entry["path"])
+        if bundle_detect.is_macosx_artifact(rel_path):
+            continue
+        head, separator, rest = rel_path.partition("/")
+        if not separator or head.casefold() != wanted:
+            return False
+        seen += 1
+        if (rest.casefold(), int(entry["size"])) not in folder:
+            return False
+    return seen > 0
 
 
 def get_dismissals() -> Dict[str, dict]:
@@ -586,6 +779,8 @@ def _qualify(scope: str, rel_path: str) -> str:
 
 
 def _candidate_facts(root: Path, candidate: BundleCandidate) -> Optional[bundle_detect.BundleFacts]:
+    if candidate.pair_only:
+        return bundle_detect.archive_owned_facts(candidate.snapshot)
     if candidate.is_archive:
         return _detect_archive(Path(root) / candidate.snapshot.rel_dir, candidate.snapshot)
     return _detect_folder(Path(root), candidate.snapshot)
@@ -619,7 +814,9 @@ def _report_row(
     suggestion = (facts.title or "").strip() or "bundle"
     assets: List[Tuple[str, str, int, str]] = []
     own_assets: List[Tuple[str, str, int, str]] = []
-    if candidate.is_archive:
+    if candidate.offers_archive_only:
+        # Nothing to create, so nothing is looked up: a pair-only directory does
+        # not even report the assets a scan may already hold under its key.
         status, blocked_reason = BLOCKED, ARCHIVE_ONLY
     else:
         assets = registered_assets(session, key)
@@ -638,7 +835,7 @@ def _report_row(
     if candidate.archive_path:
         archive = {
             "rel_path": _qualify(scope, candidate.archive_path),
-            "twin_verified": twin_verified(root / candidate.archive_path, candidate.snapshot.entries),
+            "twin_verified": _archive_twin_verified(root, candidate.archive_path, candidate),
         }
     existing = find_existing_project(session, key=key, source_url=facts.source_url, name=suggestion)
     # One row read, two derived fields: the id is the identity, the name is what
@@ -674,6 +871,20 @@ def _report_row(
         "existing_project_name": existing_project_name,
         "dismissed": key in dismissals,
     }
+
+
+def _archive_twin_verified(root: Path, archive_path: str, candidate: BundleCandidate) -> bool:
+    """``twin_verified`` for the archive this candidate attaches.
+
+    Two pairing paths, two meanings. The stem path compares basenames and reports a
+    mismatch, because the operator paired them and the answer is information. The
+    entry-root path already required containment to pair at all, so its answer is a
+    pairing condition and is always true here - a ``False`` would mean a pairing
+    that should not exist.
+    """
+    if candidate.entry_root:
+        return entry_root_verified(root / archive_path, candidate.entry_root, candidate.snapshot.entries)
+    return twin_verified(root / archive_path, candidate.snapshot.entries)
 
 
 def build_report(*, path: str = "", limit: int = DEFAULT_LIMIT, include_dismissed: bool = False) -> dict:

@@ -1347,3 +1347,279 @@ def test_a_swapped_legacy_sibling_bundle_detects_and_creates(client: TestClient,
     assert project["creator"] == "nervoussystem"
     assert project["source_url"] == CAT_URL
     assert member_count(project_id) == 1
+
+
+# --- entry-root pairing (Mf-6b82) -------------------------------------------
+
+CLOCKWORK_DIR = "import/17_ClockworkMonster"
+CLOCKWORK_ROOT = "17_ClockworkMonster"
+CLOCKWORK_ZIP = "import/17_Fates End - ClockworkMonster Tower.zip"
+CLOCKWORK_DUPLICATE_ZIP = "import/17_Fates End - ClockworkMonster Tower (1).zip"
+GENERIC_ZIP = "import/Generic Download.zip"
+
+
+def clockwork_entries(root: str = CLOCKWORK_ROOT) -> Dict[str, bytes]:
+    """The real pair: 12 models, 2 renders, no text, every entry rooted at ``root``."""
+    entries = {f"{root}/Clockwork_Part{index:02d}.stl": b"s" * (40 + index) for index in range(12)}
+    entries[f"{root}/Clockwork_Render0.png"] = b"p" * 60
+    entries[f"{root}/Clockwork_Render1.png"] = b"p" * 80
+    return entries
+
+
+def clockwork_pair(storage: Path) -> None:
+    """The directory, its archive and the byte-identical browser duplicate."""
+    entries = clockwork_entries()
+    for rel_path, payload in entries.items():
+        write_file(storage / "import" / rel_path, payload)
+    write_zip(storage / CLOCKWORK_ZIP, entries)
+    write_zip(storage / CLOCKWORK_DUPLICATE_ZIP, entries)
+
+
+def test_service_an_archive_pairs_with_the_directory_its_entries_are_rooted_at(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-1: one directory, two byte-identical zips, one blocked row for the pair.
+
+    The ``pair_only`` / ``blocked`` / ``created["blocked"] == 1`` assertions are the
+    documented INTERIM: `Mf-t12a` makes such a directory a real low-confidence
+    candidate, so exactly those three change and the pairing assertions (the row
+    key, the attached archive and its ``twin_verified``, the entry root) stay.
+    """
+    clockwork_pair(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == [CLOCKWORK_DIR], (
+        "the pair is one row, and neither zip is a row of its own"
+    )
+    row = row_for(report, CLOCKWORK_DIR)
+    assert row["archive"] == {"rel_path": CLOCKWORK_ZIP, "twin_verified": True}
+    assert row["detector"] == "generic-bundle"
+    assert row["confidence"] == "low"
+    assert row["model_count"] == 12
+    assert row["image_count"] == 2
+    assert row["text_count"] == 0
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+    assert row["assets_total"] == 0, "a pair-only row reports no assets, admitted interim"
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    assert truncated is False
+    assert [candidate.key for candidate in candidates] == [CLOCKWORK_DIR]
+    assert candidates[0].pair_only is True
+    assert candidates[0].archive_path == CLOCKWORK_ZIP
+    assert candidates[0].entry_root == CLOCKWORK_ROOT
+
+    created = create(client, headers, [{"key": CLOCKWORK_DIR}])
+
+    assert created["blocked"] == 1
+    assert created["created"] == 0
+    assert project_listing(client, headers) == {}
+
+
+def test_service_an_archive_with_macosx_cruft_still_pairs(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AppleDouble cruft is not payload, so it must not unpair a verified archive.
+
+    ``common_entry_root`` already ignores a top-level ``__MACOSX`` segment, so the
+    pure layer reports the real root; without the same skip in
+    ``entry_root_verified`` the disk layer refused the pair on the first cruft
+    entry, which made that tolerance dead code end to end. The archive is
+    rewritten in place with the real entries plus the cruft, so the genuine pair
+    is the only thing under test.
+    """
+    clockwork_pair(isolated_storage)
+    crufted = dict(clockwork_entries())
+    crufted[f"__MACOSX/{CLOCKWORK_ROOT}/._Clockwork_Part00.stl"] = b"cr" * 30
+    crufted["__MACOSX/._17_ClockworkMonster"] = b"cr" * 20
+    write_zip(isolated_storage / CLOCKWORK_ZIP, crufted)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == [CLOCKWORK_DIR], (
+        "the crufted archive still pairs, and neither zip is a row of its own"
+    )
+    assert row_for(report, CLOCKWORK_DIR)["archive"] == {"rel_path": CLOCKWORK_ZIP, "twin_verified": True}
+
+
+def test_service_a_generic_files_root_is_refused_where_a_genuine_root_pairs(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-2: the discriminator. Same containment, same sizes - only the root differs.
+
+    Both fixtures are built in one storage, so the generic archive is refused AND
+    the Clockwork pair still pairs in the same report. The generic archive's
+    payloads are byte-identical to the directory it is rooted at, so the name
+    guard is the only thing that can reject it.
+    """
+    generic_payloads = {"a.stl": b"s" * 40, "b.stl": b"s" * 41, "preview.jpg": b"j" * 50, "notes.txt": b"print 0.2mm"}
+    for name, payload in generic_payloads.items():
+        write_file(isolated_storage / "import" / "files" / name, payload)
+    write_zip(
+        isolated_storage / GENERIC_ZIP,
+        {f"files/{name}": payload for name, payload in generic_payloads.items()},
+    )
+    clockwork_pair(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    generic = row_for(report, GENERIC_ZIP)
+    assert generic["archive"] is None
+    assert generic["status"] == "blocked"
+    assert generic["blocked_reason"] == "archive_only"
+    assert not any((row["archive"] or {}).get("rel_path") == GENERIC_ZIP for row in report["bundles"]), (
+        "no row may claim the generic-rooted archive"
+    )
+    assert row_for(report, CLOCKWORK_DIR)["archive"] == {"rel_path": CLOCKWORK_ZIP, "twin_verified": True}
+    assert {row["key"] for row in report["bundles"]} == {"import/files", GENERIC_ZIP, CLOCKWORK_DIR}, (
+        "the generic-rooted directory keeps its own row and pairs with nothing"
+    )
+    assert row_for(report, "import/files")["archive"] is None
+
+
+# The ten constructed pairs of the mini-library below: six roots that say nothing
+# about their bundle, four that do. Both numbers are THIS fixture's, not the
+# owner's library (where 51 of 57 measured entry roots were generic).
+ENTRY_ROOT_CASES = (
+    "files",
+    "Files",
+    "images",
+    "models",
+    "stl",
+    "STL",
+    "17_ClockworkMonster",
+    "LittleTup",
+    "Taffi",
+    "GavinIsABot",
+)
+
+
+def test_service_the_generic_container_guard_rejects_six_of_ten_entry_roots(isolated_storage: Path) -> None:
+    """A constructed mini-library of ten real bundles, identical in every pair.
+
+    Each directory holds a model, an image and a text file, so all ten are
+    ``generic-bundle``/``low`` candidates and each ``<name> Download.zip`` is an R3
+    archive of its own. The payloads are byte-identical inside a pair, so
+    containment would verify for all ten; only ``GENERIC_CONTAINER_ROOTS`` decides.
+    Both numbers are measured from this fixture's candidate list rather than by
+    subtraction, and they are this fixture's, not the owner's library's (where 51
+    of 57 measured entry roots were generic).
+    """
+    generic_names = {"files", "Files", "images", "models", "stl", "STL"}
+    for index, name in enumerate(ENTRY_ROOT_CASES):
+        payloads = {
+            f"{name}/part.stl": b"s" * (40 + index),
+            f"{name}/preview.jpg": b"j" * (100 + index),
+            f"{name}/notes.txt": b"n" * (10 + index),
+        }
+        for rel_path, payload in payloads.items():
+            write_file(isolated_storage / "Mini" / rel_path, payload)
+        write_zip(isolated_storage / "Mini" / f"{name} Download.zip", payloads)
+
+    candidates, _truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    paired = sorted(candidate.key for candidate in candidates if candidate.entry_root)
+    unpaired = sorted(
+        candidate.key
+        for candidate in candidates
+        if candidate.archive_path is None and "/" in candidate.key and not candidate.key.endswith(".zip")
+    )
+    own_archive_rows = sorted(candidate.key for candidate in candidates if candidate.is_archive)
+
+    assert (len(paired), len(unpaired)) == (4, 6), (
+        f"accepted={len(paired)} rejected={len(unpaired)} of {len(ENTRY_ROOT_CASES)}"
+    )
+    assert paired == sorted(f"Mini/{name}" for name in ENTRY_ROOT_CASES if name not in generic_names)
+    assert unpaired == sorted(f"Mini/{name}" for name in ENTRY_ROOT_CASES if name in generic_names)
+    assert own_archive_rows == sorted(f"Mini/{name} Download.zip" for name in ENTRY_ROOT_CASES if name in generic_names), (
+        "a refused archive stays a candidate of its own; a consumed pairing would hide it"
+    )
+
+
+def test_service_a_bundle_pairs_with_its_entry_root_archive_and_attaches_nothing_from_it(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The same shape as the Clockwork pair, but a real bundle: models + images + text."""
+    payloads = {
+        "Gizmo Kit/part-a.stl": b"s" * 40,
+        "Gizmo Kit/part-b.stl": b"s" * 41,
+        "Gizmo Kit/preview.jpg": b"j" * 50,
+        "Gizmo Kit/notes.txt": b"print at 0.2mm",
+    }
+    for rel_path, payload in payloads.items():
+        write_file(isolated_storage / "import" / rel_path, payload)
+    write_zip(isolated_storage / "import" / "Gizmo Assembly.zip", payloads)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == ["import/Gizmo Kit"], "the archive is provenance only"
+    row = row_for(report, "import/Gizmo Kit")
+    assert row["archive"] == {"rel_path": "import/Gizmo Assembly.zip", "twin_verified": True}
+    assert row["confidence"] == "low"
+
+    created = create(client, headers, [{"key": "import/Gizmo Kit"}])
+
+    assert created["created"] == 1
+    project_id = created["results"][0]["project_id"]
+    assert len(project_asset_ids(client, headers, project_id)) == 2, "the archive attaches nothing"
+
+
+def test_service_a_container_of_a_paired_directory_is_still_not_a_bundle(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The zip-only container strip fires for a pair-only candidate too."""
+    write_file(isolated_storage / "Collection" / "loose.stl", STL_BYTES)
+    write_file(isolated_storage / "Collection" / "loose.jpg", b"j" * 60)
+    write_text(isolated_storage / "Collection" / "notes.txt", "a loose trio")
+    payloads = {"17_Thing/a.stl": STL_BYTES, "17_Thing/b.stl": STL_BYTES, "17_Thing/preview.jpg": b"j" * 50}
+    for rel_path, payload in payloads.items():
+        write_file(isolated_storage / "Collection" / rel_path, payload)
+    write_zip(isolated_storage / "Collection" / "Thing Download.zip", payloads)
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == ["Collection/17_Thing"]
+    row = row_for(report, "Collection/17_Thing")
+    assert row["archive"] == {"rel_path": "Collection/Thing Download.zip", "twin_verified": True}
+    assert row["blocked_reason"] == "archive_only"
+
+
+def test_service_a_paired_directory_that_holds_a_nested_archive_is_still_offered(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The container strip may never swallow a verified pair.
+
+    The Clockwork shape (models and images, no text) with a real archive dropped in
+    *inside* the directory - the shape `Mf-74x5` exists for. That nested archive is
+    a member of the outer pair once `Mf-74x5` lands, but until then it is a row of
+    its own, and its presence must not make the outer pair look like a container: a
+    pair-only row claims no subtree, so stripping it would hide verified evidence.
+    What this test protects is exactly that - the verified PAIR is still offered.
+    """
+    clockwork_pair(isolated_storage)
+    nested = {"inner/part.stl": STL_BYTES, "inner/preview.jpg": b"j" * 50, "inner/notes.txt": b"n" * 20}
+    nested_zip = f"{CLOCKWORK_DIR}/Clockwork_v1.8.zip"
+    write_zip(isolated_storage / nested_zip, nested)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert {row["key"] for row in report["bundles"]} == {CLOCKWORK_DIR, nested_zip}
+    pair = row_for(report, CLOCKWORK_DIR)
+    assert pair["archive"] == {"rel_path": CLOCKWORK_ZIP, "twin_verified": True}, (
+        "the verified pair survives the archive-only container strip"
+    )
+    nested_row = row_for(report, nested_zip)
+    assert nested_row["status"] == "blocked"
+    assert nested_row["blocked_reason"] == "archive_only"

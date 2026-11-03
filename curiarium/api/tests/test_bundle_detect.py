@@ -809,3 +809,118 @@ def test_all_four_named_documents_fit_the_candidate_cap() -> None:
     # At the old cap of three the fourth named document was dropped, which starved
     # the sibling merge whenever the root pair could not complete.
     assert "Mixed_LICENSE" not in candidates[:3]
+
+
+# --- entry-root pairing vocabulary (Mf-6b82) --------------------------------
+
+CLOCKWORK_ROOT = "17_ClockworkMonster"
+
+
+def test_common_entry_root_is_the_one_top_level_directory() -> None:
+    paths = [f"{CLOCKWORK_ROOT}/Clockwork_Part{index:02d}.stl" for index in range(3)]
+
+    root = bundle_detect.common_entry_root(paths)
+
+    assert root == CLOCKWORK_ROOT
+
+
+def test_common_entry_root_carries_the_first_seen_casing() -> None:
+    assert bundle_detect.common_entry_root(["17_ClockworkMonster/a.stl", "17_clockworkmonster/b.stl"]) == (
+        "17_ClockworkMonster"
+    )
+
+
+def test_common_entry_root_of_mixed_roots_is_none() -> None:
+    assert bundle_detect.common_entry_root(["17_Thing/a.stl", "Other Thing/b.stl"]) is None
+
+
+def test_common_entry_root_of_a_top_level_file_is_none() -> None:
+    assert bundle_detect.common_entry_root(["17_Thing/a.stl", "README.txt"]) is None
+
+
+def test_common_entry_root_of_no_entries_is_none() -> None:
+    assert bundle_detect.common_entry_root([]) is None
+
+
+def test_common_entry_root_ignores_the_macosx_artifact() -> None:
+    paths = [
+        "__MACOSX/17_Thing/._a.stl",
+        "__MACOSX/17_Thing/._preview.jpg",
+        "17_Thing/a.stl",
+        "17_Thing/preview.jpg",
+    ]
+
+    assert bundle_detect.common_entry_root(paths) == "17_Thing"
+
+
+def test_common_entry_root_of_only_macosx_entries_is_none() -> None:
+    assert bundle_detect.common_entry_root(["__MACOSX/17_Thing/._a.stl"]) is None
+
+
+@pytest.mark.parametrize("name", ["files", "Files", "images", "models", "stl", "STL"])
+def test_generic_container_roots_are_the_four_names_casefolded(name: str) -> None:
+    assert bundle_detect.is_generic_container_root(name) is True
+
+
+@pytest.mark.parametrize("name", ["files_and_docs", "my files", "FileShare", CLOCKWORK_ROOT])
+def test_a_genuine_root_is_not_a_generic_container(name: str) -> None:
+    """An exact set, not a prefix test: these are real bundle roots in the library."""
+    assert bundle_detect.is_generic_container_root(name) is False
+
+
+def clockwork_files() -> Dict[str, int]:
+    files = {f"Clockwork_Part{index:02d}.stl": 100 + index for index in range(12)}
+    files["Clockwork_Render0.png"] = 400
+    files["Clockwork_Render1.png"] = 500
+    return files
+
+
+def test_archive_owned_facts_renders_a_low_generic_row() -> None:
+    snapshot_ = snapshot(CLOCKWORK_ROOT, clockwork_files())
+
+    facts = bundle_detect.archive_owned_facts(snapshot_)
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_GENERIC
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+    assert facts.metadata_shape == bundle_detect.SHAPE_GENERIC
+    assert facts.counts.model == 12
+    assert facts.counts.image == 2
+    assert facts.counts.text == 0
+    assert facts.cover_entry == "Clockwork_Render1.png", "the largest image, ties broken by path"
+    assert set(facts.model_entries) == {f"Clockwork_Part{index:02d}.stl" for index in range(12)}
+    assert facts.model_entries == tuple(sorted(facts.model_entries)), "path order, never readdir order"
+    assert (
+        facts.creator,
+        facts.licence,
+        facts.licence_url,
+        facts.source_url,
+        facts.thing_id,
+        facts.description,
+    ) == (None, None, None, None, None, None)
+
+
+def test_archive_owned_facts_refuses_a_directory_with_text() -> None:
+    files = {**clockwork_files(), "notes.txt": 20}
+
+    assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, files)) is None
+
+
+def test_archive_owned_facts_refuses_a_directory_without_an_image() -> None:
+    files = {f"Clockwork_Part{index:02d}.stl": 100 for index in range(12)}
+
+    assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, files)) is None
+
+
+def test_archive_owned_facts_keeps_the_depth_bound() -> None:
+    """The Mf-h0p8 bound still holds: models at depth 2 are not this bundle's."""
+    files = {
+        "Clockwork_Part00.stl": 100,
+        "v1.8/older/Clockwork_Part01.stl": 100,
+        "Clockwork_Render0.png": 400,
+    }
+
+    assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, files)) is not None, "one model at depth 0 is enough"
+
+    buried = {"v1.8/older/Clockwork_Part00.stl": 100, "Clockwork_Render0.png": 400}
+    assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, buried)) is None

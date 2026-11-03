@@ -53,12 +53,18 @@ suffix table, the shared image-suffix constant, both parser shapes and their
 negative cases, the licence table, the display name, the twin key, the cover
 pick, and the rule precedence including the marker-less README falling to low
 confidence.
+
+The module also owns the vocabulary for pairing an archive with a directory by
+its *entry root* rather than its filename (``common_entry_root``,
+``is_generic_container_root``) and the facts for a directory a verified archive
+owns but which no rule offers on its own (``archive_owned_facts``). It stays
+pure: the caller reads the archive's entry list and this module only judges it.
 """
 
 import re
 from dataclasses import dataclass
 from pathlib import PurePath
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from config import IMPORT_ALLOWED_EXTS
 from import_resolvers import thingiverse_thing_id_from_url
@@ -76,6 +82,18 @@ MODEL_SUFFIXES = frozenset(IMPORT_ALLOWED_EXTS - {".zip"})
 # Without the bound every ancestor of a bundle qualifies on its descendants'
 # models.
 R3_MODEL_DIRS = frozenset({"files"})
+# Directory names that say nothing about what a bundle IS: they are the shape a
+# download or a hand extraction lands in, not a name a vendor chose. The live
+# library measured 51 of 57 archive entry roots pointing at one of these, so a
+# root-matching rule without this guard would pair half the library to the wrong
+# directory. An EXACT casefolded set, never a prefix or a fuzzy match: `my files/`
+# and `files_and_docs/` are real bundle roots, and loose matching is exactly the
+# mis-pairing the guard exists to stop.
+GENERIC_CONTAINER_ROOTS = frozenset({"files", "images", "models", "stl"})
+# The directory rsync and hand extraction leave behind: an AppleDouble artifact,
+# never a vendor's choice. Named rather than grown into a junk list, because the
+# next junk name would be a guess.
+_MACOSX_ROOT = "__macosx"
 # Prose that can carry provenance. Deliberately short: a `.pdf` is a document,
 # not a sibling README.
 BUNDLE_TEXT_EXTS = frozenset({".txt", ".md", ".pdf", ".html", ".htm", ".rtf"})
@@ -289,6 +307,51 @@ def twin_key(name: str) -> str:
     if key.endswith(".zip"):
         key = key[: -len(".zip")]
     return key
+
+
+def is_macosx_artifact(rel_path: str) -> bool:
+    """Whether this entry is AppleDouble cruft rather than a file of the bundle.
+
+    Only the first ``/`` segment decides, so ``__MACOSX/17_Thing/._a.stl`` and a
+    bare top-level ``__MACOSX`` both count. The one place this vocabulary lives:
+    both the pure root rule and the disk-side pairing rule skip through it, so
+    they cannot disagree about what an archive's payload is.
+    """
+    head, _separator, _rest = (rel_path or "").partition("/")
+    return head.casefold() == _MACOSX_ROOT
+
+
+def common_entry_root(rel_paths: Iterable[str]) -> Optional[str]:
+    """The one top-level directory every entry sits under, or ``None``.
+
+    The root carries the first casing seen, so the value can name a directory on
+    disk without a second lookup. ``None`` when there is no single answer: empty
+    input, an entry at the top level (a loose file is not a bundle's wrapper), or
+    two different first segments. Segments are compared casefolded.
+
+    A top-level ``__MACOSX`` segment and everything beneath it is ignored
+    (``is_macosx_artifact``): it is a deterministic artifact of the
+    rsync/hand-extraction workflow this report exists for, so counting it would
+    make every such archive rootless. Entries are files only; a directory entry
+    never reaches this function.
+    """
+    root: Optional[str] = None
+    for rel_path in rel_paths:
+        if is_macosx_artifact(rel_path):
+            continue
+        head, separator, _rest = (rel_path or "").partition("/")
+        if not separator:
+            return None
+        if root is None:
+            root = head
+        elif head.casefold() != root.casefold():
+            return None
+    return root
+
+
+def is_generic_container_root(name: str) -> bool:
+    """Whether ``name`` says nothing about which bundle an archive holds."""
+    return (name or "").strip().casefold() in GENERIC_CONTAINER_ROOTS
 
 
 def _trim_marker_value(value: Optional[str]) -> Optional[str]:
@@ -670,3 +733,28 @@ def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional
     if _own_depth_model_count(snapshot) >= 1 and counts.image >= 1 and counts.text >= 1:
         return _generic_facts(snapshot, counts, cover, models)
     return None
+
+
+def archive_owned_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
+    """The facts for a directory a verified archive owns but which has no text.
+
+    A vendor extraction can lose its README and still be one thing: twelve models
+    and two renders, no ``.txt`` anywhere. R3 needs all three roles, so it refuses
+    that tree and the directory would otherwise render no row at all even though
+    the archive beside it proves what it is. This is R3's evidence with the text
+    requirement dropped, rendered as the same ``generic-bundle`` / ``low`` row so
+    ``blocked``/``archive_only`` reads the same way it does for an archive.
+
+    ``_own_depth_model_count`` is reused deliberately: the Mf-h0p8 container bound
+    and the Mf-snd8 cardinality rule then apply here for free, and an ancestor
+    can never qualify on its children's models. Every provenance field stays
+    ``None`` - an entry root is evidence of WHICH thing this is, never of who made
+    it.
+
+    This function does NOT make a directory creatable, does NOT claim a subtree
+    and does NOT touch the store: it turns a listing into facts and stops there.
+    """
+    counts = _counts(snapshot)
+    if _own_depth_model_count(snapshot) < 1 or counts.image < 1 or counts.text:
+        return None
+    return _generic_facts(snapshot, counts, _cover_entry(snapshot), _model_entries(snapshot))

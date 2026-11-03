@@ -19,6 +19,10 @@ is no longer a URL fetch).
 rather than a Settings card, and the UI gate is the route's CONTRIBUTE threshold
 instead of editor; every decision below is unchanged - see ADR 0011).
 
+**Extended:** ticket `Mf-6b82` (an archive whose entries are all rooted at a
+sibling directory pairs with that directory when the root is not a generic
+container name; the stem rule is unchanged and keeps precedence).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -171,6 +175,31 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    archive attaches nothing, so a mismatch is information for the operator
    (`false`), not a failure to raise; and any read error is `false` too, because
    a `READ` route may not 500 over a corrupt zip.
+
+   **Amended by `Mf-6b82`.** The stem rule is unchanged: casefolded basenames,
+   unordered set equality, a mismatch reported as `false`. A non-stem archive now
+   also pairs with a *same-parent* directory named by its own common entry root,
+   and only when that root is not one of `files` / `images` / `models` / `stl` -
+   in the owner's library 51 of the 57 measured entry-root matches were one of
+   `files` / `images` / `models` / `stl`, most of them `files/`, so a rule without
+   that guard pairs half the library to the wrong directory.
+   Verification on this path is **containment**, not equality: every entry's
+   bundle-relative path (casefolded) and *declared* size must be present in the
+   directory's post-claim listing. A lived-in directory legitimately holds more
+   than its archive, so equality would refuse the very pair this exists for; and
+   the declared size is a zip header field, so this decides pairing and is never
+   an integrity claim. `twin_verified` therefore means two things by path: on the
+   stem path it is an operator remark (either answer is information), while on
+   the entry-root path it is a *pairing condition* and is always true by
+   construction - an archive that fails containment simply does not pair. The
+   archive attaches nothing on either path. **Interim, until `Mf-t12a`:** a
+   directory no detector offers (models and images, no text) is reported as one
+   `blocked` / `archive_only` row keyed at the *directory*, so the pair is
+   visible rather than the directory vanishing and the archive standing alone.
+   That row reports `assets_total: 0` and carries the archive-only remedy copy,
+   both wrong for a directory that may already hold registered assets, and it
+   yields to the low-confidence folder candidate `Mf-t12a` will produce for the
+   same key.
 
 5. **Zip-only creation is deferred to `POST /import/zip` and then a library
    scan.** An archive with no extracted twin is still read - through
@@ -525,9 +554,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 - **A table for dismissals.** Rejected: a working set of tens of keys, never
   read one row at a time, and the one thing this product does not need is
   another migration for a UI toggle.
-- **A byte-level `twin_verified` (checksums or sizes).** Rejected: the archive
-  attaches nothing, so the check would exist to assert something nobody acts on,
-  at the cost of hashing every byte of every twin zip on a `READ` route.
+- **A byte-level `twin_verified` (checksums, hashes or decompressed bytes).**
+  Rejected: the archive attaches nothing, so the check would exist to assert
+  something nobody acts on, at the cost of hashing every byte of every twin zip
+  on a `READ` route. **Re-scoped by `Mf-6b82`:** the entry-root fallback does
+  compare the declared `ZipInfo.file_size` with the size on disk, which is not a
+  byte comparison - it reads no bytes at all, and it decides pairing, not
+  integrity. Comparing content would still be rejected for the reason above.
 
 ## Rollback
 
@@ -610,6 +643,38 @@ unchanged.
   created-by document as its description; a swapped zip is `high` and
   `blocked`/`archive_only` and creates nothing; and a mixed layout completes
   only because the fourth document is read.
+- The same two files also pin entry-root pairing (`Mf-6b82`). In
+  `tests/test_bundle_detect.py`, from literals: `common_entry_root` returns the one
+  top-level segment with its first-seen casing, and `None` for mixed roots, a
+  top-level file, empty input and an all-`__MACOSX` archive, while ignoring a
+  `__MACOSX/` prefix over real entries; `is_generic_container_root` accepts
+  exactly `files`/`images`/`models`/`stl` casefolded and refuses
+  `files_and_docs`, `my files`, `FileShare` and `17_ClockworkMonster`; and
+  `archive_owned_facts` renders the 12-model, 2-render Clockwork listing as a
+  `generic-bundle` / `low` generic row with the largest render as its cover and
+  every provenance field `None`, while refusing a directory that holds text, that
+  has no image, or whose only models sit at depth 2 (the `Mf-h0p8` bound still
+  holds). In `tests/test_bundle_service.py`, against a temporary root: the real
+  Clockwork pair - `import/17_ClockworkMonster/` (12 STL, 2 PNG, no text),
+  `17_Fates End - ClockworkMonster Tower.zip` and its byte-identical ` (1)`
+  duplicate - is exactly one row keyed at the directory, with
+  `twin_verified: true` and the non-duplicate name as `archive.rel_path`, neither
+  zip a row of its own, and `create` `blocked` with no project written; a generic
+  archive rooted at `files/` beside a directory holding the same four payloads is
+  refused - its own `blocked`/`archive_only` row, no row claiming it, and its
+  directory still offered - while the Clockwork pair pairs in the same report,
+  which is the test that discriminates; a constructed mini-library of ten pairs
+  with identical contents reports `accepted=4, rejected=6`, so the name guard and
+  not the containment check is what refuses the generic roots; a real bundle
+  (models + images + `notes.txt`) beside an archive rooted at its directory but
+  named differently is an ordinary folder bundle with `twin_verified: true`, and
+  create attaches its two models and nothing from the archive; an archive that
+  also carries `__MACOSX/` AppleDouble cruft still pairs on its real entries,
+  because both layers skip it through the one `is_macosx_artifact` predicate; a
+  pair-only directory holding a nested archive is still offered, so the verified
+  pair is never a target of the strip; and a low container holding a paired
+  directory still drops the container, so the `archive_only_keys` strip fires for
+  a pair-only candidate too.
 - `tests/test_bundles_api.py` covers the HTTP surface as a role sweep: a viewer
   can `GET /bundles/detect` (200) and both POSTs answer 403 with
   `permissions.DENY_DETAIL[CONTRIBUTE]`; the report body matches the pinned
@@ -641,8 +706,8 @@ This ADR is superseded if any of the following becomes true:
 - `classify_entry` starts consulting a stem, or a second image-suffix table
   appears beside `library_scan.IMAGE_SUFFIXES`;
 - the twin zip stops being provenance and starts attaching files, or
-  `twin_verified` starts asserting a byte comparison instead of comparing
-  basenames;
+  `twin_verified` starts comparing content bytes - a checksum, a hash or
+  decompressed data - instead of names and declared sizes;
 - creatability starts keying on the detector or the confidence rather than on
   a resolved `Folder.storage_path` and a registered model asset;
 - a zip-only bundle becomes creatable from the report without
