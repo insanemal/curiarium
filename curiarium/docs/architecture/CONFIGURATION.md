@@ -308,7 +308,10 @@ not a follow-up. The design and its residual risks are in
 These are Cosmos Cloud's own figures, taken from its published discovery document
 and its source. They are recorded because the operator-facing advice for
 self-hosted OIDC and what Cosmos actually emits disagree in three places, and each
-disagreement shows up here as a boot refusal or a login that stalls.
+disagreement shows up here as a boot refusal or a login that stalls. The
+step-by-step deployment walkthrough is
+[the Cosmos guide](../guides/cosmos.md); this section is the configuration
+reference behind it.
 
 - **`OIDC_ISSUER` is the bare origin, not the discovery URL.** Set
   `https://<cosmos-host>` — no path, no trailing slash. The API fetches discovery
@@ -325,39 +328,49 @@ disagreement shows up here as a boot refusal or a login that stalls.
 - **Cosmos emits no `groups` claim in any version, and there is no UI, API or
   Terraform field that adds one.** Its discovery advertises `claims_supported` =
   `aud, email, email_verified, exp, iat, iss, locale, name, sub` and
-  `scopes_supported` = `openid, offline, profile, email, address, phone`. With
-  the default `OIDC_GROUPS_CLAIM=groups`, **`OIDC_EDITOR_GROUPS` is inert on
-  Cosmos**, so `OIDC_DEFAULT_ROLE` is the only reliable lever: a household whose
-  Cosmos users should be able to upload sets `OIDC_DEFAULT_ROLE=contributor` (or
-  `editor`) and every provisioned account lands at that level.
-- **Do not set `OIDC_ALLOWED_GROUPS` against Cosmos.** The claim is absent, so
-  every login would be refused by the group axis. Use `OIDC_ALLOWED_DOMAINS`.
-- **A caveat, to be verified rather than assumed.** Cosmos does emit a singular
-  `role` claim with the values `admin` / `user`, which its discovery document does
-  not advertise. That makes a coarse, two-bucket mapping possible —
-  `OIDC_GROUPS_CLAIM=role` with `OIDC_EDITOR_GROUPS=admin` lands Cosmos
-  administrators as `editor` and everybody else at `OIDC_DEFAULT_ROLE` — but it is
-  coarse, it is **not** the Pro "groups" feature, and it must be confirmed from a
-  decoded `id_token` of the operator's own realm before anything depends on it.
-  How to confirm it: decode an `id_token` (`jwt decode`, or jwt.io) and/or call
-  `/oauth2/userinfo`, and trust the decoded token over the discovery document —
-  that document both advertises claims Cosmos never emits (`email_verified`,
-  `locale`) and hides claims it does emit (`role`, `preferred_username`).
+  `scopes_supported` = `openid, offline, profile, email, address, phone`. It does
+  emit a **singular `role` claim** with the values `admin` / `user` — a claim that
+  same discovery document does not advertise — so the setting is
+  `OIDC_GROUPS_CLAIM=role`. The mapping is coarse, two buckets rather than the Pro
+  "groups" feature, but it is the only group-shaped signal Cosmos sends.
+- **The levers are `OIDC_ALLOWED_GROUPS` and `OIDC_EDITOR_GROUPS`, and each
+  carries both encodings.** List `admin` and `user` **and** `1` and `2`, because
+  Cosmos versions differ in which they emit. Matching is exact and
+  case-sensitive: `allowed_domains()` and `email_from()` lowercase before
+  comparing, but `allowed_groups()` and `groups_from()` do not, so `Admin` does
+  not match `admin`.
+- **The mechanism decides whether the group axis works at all.** `groups_from()`
+  reads the configured claim and accepts only a `str` (split on commas) or a
+  `list`; anything else — an integer, an object, a boolean, an absent claim —
+  falls through to an empty tuple. On a version that emits `role` as a **bare
+  numeric**, nothing matches: no principal is admitted by group, and none
+  escalates to `editor`. The axis is dead on that version, so
+  `OIDC_ALLOWED_GROUPS` must be left **empty** — a non-empty list against a dead
+  axis admits nobody, because `evaluate_allow_list()` checks the group axis first
+  and ANDs it with the domain axis — and the fallback is `OIDC_ALLOWED_DOMAINS`
+  plus `OIDC_DEFAULT_ROLE`. That default is applied at provisioning only, and
+  `editor` is the highest a claim set can reach: a non-empty `OIDC_ADMIN_GROUPS`
+  and `OIDC_DEFAULT_ROLE=admin` are both boot refusals.
+- **Decode your own `id_token`; the token is the authority, not the discovery
+  document.** Use `jwt decode` or jwt.io, and/or call `/oauth2/userinfo`. The
+  discovery document both advertises claims Cosmos never emits
+  (`email_verified`, `locale`) and hides claims it does emit (`role`,
+  `preferred_username`), so it cannot tell you which encoding your realm sends.
+  Confirm the shape — string or number — before either list depends on it.
 - **The redirect URI is matched literally.** The code derives
   `${PUBLIC_URL}/auth/oidc/callback`, and `PUBLIC_URL` is the origin browsers
   reach this deployment at - on the household install that is the Cosmos host -
   so register exactly `${PUBLIC_URL}/auth/oidc/callback` with Cosmos. Cosmos
   compares redirect URIs by literal string, comma-separated with no spaces.
   `${PUBLIC_URL}/api/auth/oidc/callback` is **not** what the code sends.
-- **Operational caveat: nothing in front may hide the callback path.** The bundled
-  web Nginx proxies only `/api/` (`curiarium/web/nginx.conf:81-84`), so
-  `/auth/oidc/callback` would be served by the SPA and the login would stall
-  silently. The front proxy must forward `/auth/` to the API, or `PUBLIC_URL`
-  must be an origin that does. That gap is **deferred** to the existing deployment
-  tickets `Mf-lh1z` / `Mf-60nl` and is not fixed here, because changing the
-  callback path or the proxy is a route-shape decision that amends
-  [ADR 0006](../adr/0006-oidc-sso-flow-and-role-policy.md) decision 13 and can
-  invalidate IdP clients operators have already registered.
+- **The callback path must reach the API.** The bundled web container serves both
+  prefixes: `location /api/` rewrites the prefix away, and `location /auth/`
+  passes through untouched to `http://api:8000`, so
+  `<PUBLIC_URL>/auth/oidc/callback` reaches FastAPI through the shipped container
+  with nothing extra configured. A **replacement** front proxy must forward
+  `/auth/` as well: one that routes only `/api/` to the API serves the callback
+  from the SPA and the login stalls silently. The same holds for `PUBLIC_URL` — it
+  must be an origin whose proxy forwards `/auth/`.
 
 ### Bootstrap sequence
 
