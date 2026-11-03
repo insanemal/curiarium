@@ -142,6 +142,11 @@ function cardFor(assetId: string): HTMLElement {
   return card;
 }
 
+/** The card's own selection box, scoped so two cards can never be confused. */
+function checkboxFor(assetId: string): HTMLInputElement {
+  return within(cardFor(assetId)).getByRole("checkbox", { name: "Select" }) as HTMLInputElement;
+}
+
 function openCardMenu(assetId: string): HTMLElement {
   fireEvent.click(within(cardFor(assetId)).getByRole("button", { name: "More actions" }));
   return screen.getByRole("menu");
@@ -579,5 +584,129 @@ describe("AssetGrid project membership", () => {
     // The failed membership is still there, so the row must come back.
     expect(screen.getByText("Calibration cube")).toBeTruthy();
     expect(getToasts().some(toast => /nope/.test(toast.message))).toBe(true);
+  });
+
+  it("keeps the survivors of a partially failed bulk unlink selected for a retry", async () => {
+    // A per-asset partial outcome is legal: the server unlinked one membership
+    // and rejected the other, so one row really left and one came back.
+    removeProjectAssetsMock.mockResolvedValue({
+      removed: ["a1"],
+      skipped: [],
+      failed: [{ id: "b2", code: "error", status: 500, error: "lock timeout" }],
+    });
+
+    renderProjectGrid();
+    await screen.findByText("Calibration cube");
+
+    fireEvent.click(checkboxFor("a1"));
+    fireEvent.click(checkboxFor("b2"));
+
+    fireEvent.click(
+      within(screen.getByTestId("bulk-action-bar")).getByRole("button", {
+        name: "Remove from project",
+      }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Remove 2 files from this project?",
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove from project" }));
+
+    await waitFor(() => expect(removeProjectAssetsMock).toHaveBeenCalledTimes(1));
+    const [projectId, ids] = removeProjectAssetsMock.mock.calls[0];
+    expect(projectId).toBe("p1");
+    expect([...ids].sort()).toEqual(["a1", "b2"]);
+
+    await waitFor(() => expect(screen.queryByText("Calibration cube")).toBeNull());
+    expect(screen.getByText("Spool holder")).toBeTruthy();
+
+    // The retry selection is the point of this test. A survivor restored by a
+    // per-asset failure stays ticked, because the bar's failure report is only
+    // useful if the user can retry exactly the rows that did not move.
+    expect(checkboxFor("b2").checked).toBe(true);
+    const retryBar = within(screen.getByTestId("bulk-action-bar"));
+    expect(retryBar.getByText("1 selected")).toBeTruthy();
+
+    // And the bar acts on exactly those survivors: the retry is one single
+    // membership, so it takes the single-asset wording and call shape.
+    fireEvent.click(retryBar.getByRole("button", { name: "Remove from project" }));
+    const retryDialog = screen.getByRole("dialog", {
+      name: 'Remove "Spool holder" from this project?',
+    });
+    fireEvent.click(within(retryDialog).getByRole("button", { name: "Remove from project" }));
+
+    await waitFor(() => expect(removeProjectAssetsMock).toHaveBeenCalledTimes(2));
+    const [retryProjectId, retryIds] = removeProjectAssetsMock.mock.calls[1];
+    expect(retryProjectId).toBe("p1");
+    expect([...retryIds]).toEqual(["b2"]);
+
+    // Membership removal is never deletion, whatever the outcome.
+    expect(deleteAssetMock).not.toHaveBeenCalled();
+    expect(batchDeleteAssetsMock).not.toHaveBeenCalled();
+  });
+
+  it("reaches Remove from project from the card menu with the keyboard", async () => {
+    renderProjectGrid({ canContribute: true, canDelete: true });
+    await screen.findByText("Calibration cube");
+
+    // Keyboard path: the trigger opens the menu, which focuses its first enabled
+    // item; arrows walk it. jsdom does not synthesise a browser's Enter->click
+    // activation on a focused native button, so the choice is driven by clicking
+    // the item the keyboard actually focused.
+    const trigger = within(cardFor("a1")).getByRole("button", { name: "More actions" });
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+    fireEvent.click(trigger);
+
+    const menu = screen.getByRole("menu");
+    expect((document.activeElement as HTMLElement).getAttribute("role")).toBe("menuitem");
+
+    // Removing a membership is not the first entry, so the walk has to cross
+    // the download and edit sections to reach it. The menu's own item count is
+    // the bound: a menu that lost the entry fails the assertion below instead
+    // of spinning the loop forever.
+    const itemCount = within(menu).getAllByRole("menuitem").length;
+    for (
+      let step = 0;
+      step < itemCount && document.activeElement?.textContent !== "Remove from project";
+      step += 1
+    ) {
+      fireEvent.keyDown(menu, { key: "ArrowDown" });
+    }
+    const focused = document.activeElement as HTMLElement;
+    expect(focused.textContent).toBe("Remove from project");
+
+    // It sits in the Project section, not in the per-file actions above it.
+    const group = within(menu).getByRole("group", { name: "Project" });
+    expect(group.contains(focused)).toBe(true);
+
+    fireEvent.click(focused);
+    expect(
+      screen.getByRole("dialog", { name: 'Remove "Calibration cube" from this project?' }),
+    ).toBeTruthy();
+    expect(deleteAssetMock).not.toHaveBeenCalled();
+  });
+
+  it("selects all loaded members and clears them again", async () => {
+    renderProjectGrid();
+    await screen.findByText("Calibration cube");
+
+    // The bar only renders with a non-empty selection, so surface it with one
+    // card first; Select all then fills in the rest of the loaded window.
+    fireEvent.click(checkboxFor("a1"));
+    const bar = within(screen.getByTestId("bulk-action-bar"));
+    fireEvent.click(bar.getByRole("button", { name: "Select all" }));
+
+    await waitFor(() => expect(bar.getByText("2 selected")).toBeTruthy());
+    expect(checkboxFor("a1").checked).toBe(true);
+    expect(checkboxFor("b2").checked).toBe(true);
+
+    fireEvent.click(bar.getByRole("button", { name: "Clear" }));
+
+    await waitFor(() => expect(screen.queryByTestId("bulk-action-bar")).toBeNull());
+    expect(checkboxFor("a1").checked).toBe(false);
+    expect(checkboxFor("b2").checked).toBe(false);
+
+    // Selection is pure UI state: no membership or delete route may be touched.
+    expectNoWriteCalls();
   });
 });

@@ -56,6 +56,13 @@ export type BulkActionsApi = {
   toggleSelected: (id: string) => void;
   clearSelection: () => void;
   selectAllLoaded: () => void;
+  /**
+   * Unions exactly these ids into the selection for an immediate retry, never
+   * removing anything. Callers must invoke it AFTER the rows are back in
+   * `items`: the selection is pruned against `items` by an effect, so adding an
+   * id for a row the list does not contain yet gets that id deleted again.
+   */
+  selectIds: (ids: string[]) => void;
   bulkBusy: { label: string; count: number } | null;
   bulkFailures: BatchFailure[] | null;
   bulkRequestError: string | null;
@@ -131,6 +138,14 @@ export function useBulkActions({
     setSelectedIds(new Set(items.map(item => item.id)));
   });
 
+  // The single implementation of the "failed rows stay selected for a retry"
+  // contract; callers must have their rows in `items` already (see the API
+  // doc comment).
+  const selectIds = useStableCallback((ids: string[]) => {
+    if (!ids.length) return;
+    setSelectedIds(prev => new Set([...prev, ...ids]));
+  });
+
   const dismissBulkFailures = useStableCallback(() => {
     setBulkFailures(null);
     setBulkRequestError(null);
@@ -150,9 +165,7 @@ export function useBulkActions({
     const failedIds = outcome.failed
       .map(failure => failure.id)
       .filter(id => next.some(item => item.id === id));
-    if (failedIds.length) {
-      setSelectedIds(prev => new Set([...prev, ...failedIds]));
-    }
+    selectIds(failedIds);
   };
 
   // A whole-request failure (bad body, 400, network) rewinds to the snapshot and
@@ -360,6 +373,7 @@ export function useBulkActions({
     toggleSelected,
     clearSelection,
     selectAllLoaded,
+    selectIds,
     bulkBusy,
     bulkFailures,
     bulkRequestError,

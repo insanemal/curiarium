@@ -198,6 +198,7 @@ export default function AssetGrid({
     toggleSelected,
     clearSelection,
     selectAllLoaded,
+    selectIds,
     bulkBusy,
     bulkFailures,
     bulkRequestError,
@@ -308,6 +309,14 @@ export default function AssetGrid({
       );
       setItems(remaining);
       setOffset(Math.max(0, startOffset - (before.length - remaining.length)));
+      // Failed rows stay selected so the bar's per-asset lines have something to
+      // retry. This must run after `setItems(remaining)` and never from
+      // `finally`: selection is pruned against `items` by an effect, so adding
+      // an id while the optimistic drop still hides that row would let the
+      // prune delete it again.
+      selectIds(
+        remaining.filter(item => failedIds.has(item.id)).map(item => item.id),
+      );
       if (result.failed.length) {
         if (targets.length > 1) {
           setUnlinkFailures(result.failed);
