@@ -20,9 +20,13 @@ import {
  * to `ESTIMATED_ROW_HEIGHT` until a real measurement exists.
  *
  * The scroll container is either an explicit `scrollElementRef` (the app's
- * `<main>`), or the window when the ref is absent/null. The offset is derived
- * from element rects only — never from `scrollTop + rect delta` — because that
- * combination cannot be reproduced faithfully in jsdom.
+ * `<main>`), or the window when the ref is absent/null. The listener is not
+ * bound to that node: it observes scrolls through a capture-phase listener on
+ * `document` and reads the ref fresh at compute time, so a scroller attached
+ * after the first commit (or replaced later) still drives the window. The
+ * offset is derived from element rects only — never from
+ * `scrollTop + rect delta` — because that combination cannot be reproduced
+ * faithfully in jsdom.
  *
  * The window fallback is for callers/embedders that do not own a scroll
  * container (the app always passes the `<main>` ref); it has no scroll
@@ -76,6 +80,20 @@ function viewportHeightFor(scrollElement: HTMLElement | null): number {
     return scrollElement.clientHeight || windowHeight();
   }
   return windowHeight();
+}
+
+/**
+ * Whether a scroll event can move this grid. Scroll events do not bubble, but
+ * the capture phase still visits every ancestor, so one capture listener on
+ * `document` observes the scroll of *any* element. Only the grid's own scroll
+ * containers qualify: an ancestor of the rendered grid wrapper moves it, while
+ * a scroll inside the wrapper (a card's own overflow) cannot. Non-element
+ * targets are the window's scroll and resize, which always count.
+ */
+function scrollsTheGrid(event: Event, gridWrap: HTMLElement | null): boolean {
+  const target = event.target;
+  if (!(target instanceof Element)) return true;
+  return gridWrap !== null && target.contains(gridWrap);
 }
 
 /**
@@ -243,23 +261,34 @@ export function useVirtualRows({
 
   useEffect(() => cancelScheduled, [cancelScheduled]);
 
+  // A scroll listener bound to one node dies with that node. The app's `<main>`
+  // may not exist yet when this effect first runs, and a scroller that is
+  // replaced later would leave the window frozen: assets below the first
+  // viewport become unreachable while every test stays green. Element scroll
+  // events do not bubble, so a capture-phase listener on `document` observes
+  // the scroll of whichever element actually scrolls, and the node behind the
+  // offset math is read fresh from the ref at compute time. Resize and window
+  // scrolling stay on `window`.
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const scrollElement = scrollElementRef?.current ?? null;
-    const scrollTarget: HTMLElement | Window = scrollElement ?? window;
-    const onScroll = () => schedule();
-    scrollTarget.addEventListener("scroll", onScroll, { passive: true });
+    const onScroll = (event: Event) => {
+      if (!scrollsTheGrid(event, gridWrapRef.current)) return;
+      schedule();
+    };
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", onScroll);
     // Re-run once here: the parent's ref may have been attached after this
     // hook's layout effects, which would have left `computeNow` on the window
     // fallback for the very first paint.
     computeRef.current();
     return () => {
-      scrollTarget.removeEventListener("scroll", onScroll);
+      document.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
       cancelScheduled();
     };
-  }, [cancelScheduled, schedule, scrollElementRef]);
+  }, [cancelScheduled, schedule]);
 
   // ---- row height measurement --------------------------------------------
 

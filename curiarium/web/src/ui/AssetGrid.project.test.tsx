@@ -70,6 +70,7 @@ import {
   uploadAsset,
 } from "../lib/api";
 import { getToasts, resetToasts } from "../lib/toast";
+import { ESTIMATED_ROW_HEIGHT, GRID_GAP_PX, colsForWidth } from "../lib/virtualGrid";
 
 const listAssetsMock = vi.mocked(listAssets);
 const listProjectAssetsMock = vi.mocked(listProjectAssets);
@@ -485,6 +486,58 @@ describe("AssetGrid project membership", () => {
     const topSpacer = document.querySelector<HTMLElement>('[data-virtual-spacer="top"]');
     expect(Number.parseFloat(topSpacer?.style.height ?? "0")).toBeGreaterThan(0);
     expect(document.querySelectorAll("[data-asset-id]").length).toBeLessThan(total);
+  });
+
+  it("renders the final member rows at the bottom of a 200-member project (Mf-d8vc)", async () => {
+    const total = 200;
+    listProjectAssetsMock.mockResolvedValue({
+      items: Array.from({ length: total }, (_, index) => makeSyntheticAsset(index + 1)),
+      hasMore: false,
+    });
+    const scrollElementRef = createRef<HTMLDivElement>();
+
+    render(
+      <div ref={scrollElementRef} data-testid="project-scroller">
+        <AssetGrid
+          canContribute
+          canDelete
+          theme="dark"
+          projectId="p1"
+          projectName="Hydra"
+          scrollElementRef={scrollElementRef}
+        />
+      </div>,
+    );
+    await screen.findByText("Asset 1");
+
+    const scroller = scrollElementRef.current;
+    if (!scroller) throw new Error("scroll harness did not mount");
+    Object.defineProperty(scroller, "clientHeight", { value: 768, configurable: true });
+    vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue(rectOf(0, 768));
+    const gridWrap = document.querySelector<HTMLElement>("[data-virtual-grid]");
+    if (!gridWrap) throw new Error("virtual grid wrapper not rendered");
+    vi.spyOn(gridWrap, "getBoundingClientRect").mockImplementation(() =>
+      rectOf(-scroller.scrollTop, 0),
+    );
+
+    const rowCount = Math.ceil(total / colsForWidth(window.innerWidth));
+    const lastRow = rowCount - 1;
+    // The scroll height the shipped geometry implies: one row height per row
+    // plus one gap between neighbours.
+    scroller.scrollTop = rowCount * ESTIMATED_ROW_HEIGHT + lastRow * GRID_GAP_PX;
+    fireEvent.scroll(scroller);
+
+    // The listener is on `document` capture and the offset math follows the
+    // live scroller, so the very bottom of the project is reachable.
+    await waitFor(() =>
+      expect(document.querySelector('[data-asset-id="asset-200"]')).toBeTruthy(),
+    );
+    const rows = Array.from(document.querySelectorAll("[data-row-index]")).map(element =>
+      Number(element.getAttribute("data-row-index")),
+    );
+    expect(rows[0]).toBeGreaterThan(0);
+    expect(lastRow - rows[0]).toBeLessThan(6);
+    expect(rows[rows.length - 1]).toBe(lastRow);
   });
 
   it("reverses a failed unlink, keeping the row and reporting it", async () => {

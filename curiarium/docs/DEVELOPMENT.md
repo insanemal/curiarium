@@ -163,6 +163,40 @@ compose manifest. Only the manifest half is guarded: a forwarded key that nothin
 reads fails `tests/test_deploy_manifest_env.py`. An extra `.env.example` key
 fails nothing, so that half is documentation discipline, not a gate.
 
+### The virtual grid's scroll container (no browser harness)
+
+jsdom does not scroll, so the scroll-container contract is the one part of the
+grid that unit tests can only model: `useVirtualRows` listens for `scroll` on
+`document` in the capture phase (element scroll events do not bubble) and reads
+`<main>` fresh on every compute, so a late-attached or replaced scroller still
+drives the window. The browser is the truth for Mf-d8vc and CI has none, so
+that pass is manual after touching the grid.
+
+Open the app at 1000x800, Files mode, a library with 47 assets (three columns,
+so 16 rows), then paste this into the devtools console:
+
+```js
+const main = document.querySelector("main");
+const rows = () => [...document.querySelectorAll("[data-row-index]")].map(el => +el.dataset.rowIndex);
+({ scrollHeight: main.scrollHeight, clientHeight: main.clientHeight, scrollTop: main.scrollTop });
+({ first: rows()[0], last: rows().at(-1), cards: document.querySelectorAll("[data-asset-id]").length });
+main.scrollTop = main.scrollHeight;
+await new Promise(r => requestAnimationFrame(r));
+({ scrollTop: main.scrollTop, first: rows()[0], last: rows().at(-1) });
+document.querySelectorAll("[data-asset-id]").at(-1)?.click();
+```
+
+Expected before scrolling: `clientHeight` about 745, `scrollTop` 0, the first
+`data-row-index` 0 and the last in single digits - a window, never all 16 rows.
+`scrollHeight` is 16 rows tall (16 x the measured row height plus 15 gaps; the
+estimate is 344 per row until the cards are measured, so the number lands
+anywhere from ~2.2k to ~5.7k and is not itself the assertion). After the scroll:
+`scrollTop` equals `scrollHeight - clientHeight`, the first rendered index is
+well above 0 (the last rows, near 15), the last rendered index is 15 and the
+47th asset's card is in the DOM. The click opens that asset's card/menu without
+an error. If the last report still says `first: 0` and there is no 47th card,
+the listener is dead again.
+
 ## Build warnings in the web bundle
 
 `npm run build` in `curiarium/web` is expected to emit exactly the warnings below,

@@ -155,6 +155,7 @@ import {
 } from "../lib/api/settings";
 import { storeToken, type Role } from "../lib/auth";
 import { MODE_STORAGE_KEY } from "../lib/mode";
+import { ESTIMATED_ROW_HEIGHT, GRID_GAP_PX, colsForWidth } from "../lib/virtualGrid";
 import { describeQueueCount } from "./review/useReviewCounts";
 
 const getAssetCountsMock = vi.mocked(getAssetCounts);
@@ -317,6 +318,53 @@ async function flush(): Promise<void> {
   await act(async () => {
     for (let tick = 0; tick < 12; tick += 1) await Promise.resolve();
   });
+}
+
+/** Flushes the grid's rAF-throttled recompute and the React work it schedules. */
+async function flushFrame(): Promise<void> {
+  await act(async () => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  });
+}
+
+/** jsdom has no layout: supply the DOMRect-shaped value the offset math reads. */
+function rectOf(top: number, height: number): DOMRect {
+  return {
+    top,
+    bottom: top + height,
+    height,
+    left: 0,
+    right: 0,
+    width: 0,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+function mainElement(): HTMLElement {
+  const main = document.querySelector<HTMLElement>("main");
+  if (!main) throw new Error("App rendered no <main>");
+  return main;
+}
+
+/**
+ * Gives jsdom the two numbers a browser would provide for `<main>`: a 768px
+ * viewport and a scroll position, then makes the grid wrapper's rect track it.
+ */
+function armVirtualiser(main: HTMLElement): void {
+  Object.defineProperty(main, "clientHeight", { value: 768, configurable: true });
+  vi.spyOn(main, "getBoundingClientRect").mockReturnValue(rectOf(0, 768));
+  const wrap = document.querySelector<HTMLElement>("[data-virtual-grid]");
+  if (!wrap) throw new Error("virtual grid wrapper not rendered");
+  vi.spyOn(wrap, "getBoundingClientRect").mockImplementation(() => rectOf(-main.scrollTop, 0));
+}
+
+function mountedRowIndexes(): number[] {
+  return Array.from(document.querySelectorAll("[data-row-index]")).map(element =>
+    Number(element.getAttribute("data-row-index")),
+  );
 }
 
 beforeEach(() => {
@@ -858,5 +906,43 @@ describe("App missing queue roles (Mf-1tx3)", () => {
 
     // `GET /library/scan` is READ, so a viewer still reads the status, once.
     expect(getQueueStatusMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("App missing queue virtualisation (Mf-d8vc)", () => {
+  it("reaches the final rows of a 47-asset missing queue", async () => {
+    const missingAssets: Asset[] = Array.from({ length: 47 }, (_, index) => ({
+      ...missingAsset,
+      id: `missing-${index + 1}`,
+      name: `Missing ${index + 1}`,
+      filename: `missing-${index + 1}.stl`,
+      url: `/api/assets/missing-${index + 1}/file`,
+    }));
+    listAssetsMock.mockImplementation(async params => ({
+      items: params?.missing === true ? missingAssets : [],
+      hasMore: false,
+    }));
+    getAssetCountsMock.mockResolvedValue({ total: 47, unfiled: 0, missing: 47 });
+
+    await renderApp();
+    await openQueue();
+    expect(await findCard("missing-1")).toBeTruthy();
+
+    const main = mainElement();
+    armVirtualiser(main);
+    const rowCount = Math.ceil(missingAssets.length / colsForWidth(window.innerWidth));
+    // The scroll height the shipped geometry implies: one row height per row
+    // plus one gap between neighbours.
+    main.scrollTop = rowCount * ESTIMATED_ROW_HEIGHT + (rowCount - 1) * GRID_GAP_PX;
+    fireEvent.scroll(main);
+    await flushFrame();
+
+    // The queue's grid sits inside <main>, so one document-capture listener
+    // sees the scroll of the node the offset math reads fresh: the bottom of
+    // the queue is reachable.
+    const rows = mountedRowIndexes();
+    expect(rows[0]).toBeGreaterThan(0);
+    expect(rows[rows.length - 1]).toBe(rowCount - 1);
+    expect(document.querySelector('[data-asset-id="missing-47"]')).toBeTruthy();
   });
 });

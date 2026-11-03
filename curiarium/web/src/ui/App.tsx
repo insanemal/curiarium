@@ -861,10 +861,11 @@ export default function App({ initialMode }: AppProps = {}) {
         {/* App's conditional children are only ever APPENDED after <main> in
             this array. React reconciles an unkeyed children array by index, so a
             child inserted before <main> (a scrim between the rail and it) takes
-            a slot in front of it and can remount <main>; `useVirtualRows`'
-            scroll listener is keyed on the stable ref object and would never
-            re-subscribe to the new node, so virtualisation would die silently
-            with every test still green. */}
+            a slot in front of it and remounts <main>. `useVirtualRows` now
+            observes element scrolls through a `document` capture listener and
+            reads the ref fresh, so it survives a late-attached or replaced
+            scroller; a remount is still a real loss, because it throws away the
+            grid's search, selection and loaded pages. */}
         {narrow && drawerOpen && <div className="folder-drawer-scrim" aria-hidden="true" />}
       </div>
       {confirmingLogout && (
