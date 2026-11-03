@@ -47,8 +47,9 @@ updates:
         applies-to: version-updates
         update-types: ["minor", "patch"]
     ignore:
-      # deferred as tickets: Tailwind 4 and React 19 (Mf-chp6), vitest 4 ->
-      # vite 7 (Mf-qj7j). Re-proposing them before those land is pure noise.
+      # deferred as tickets: Tailwind 4 and React 19 (Mf-chp6). Re-proposing
+      # them before those land is pure noise. vitest's semver-major ignore was
+      # removed in Mf-qj7j, which landed vitest 5 + vite 8.
       - dependency-name: tailwindcss
         update-types: ["version-update:semver-major"]
       - dependency-name: react
@@ -58,8 +59,6 @@ updates:
       - dependency-name: "@types/react"
         update-types: ["version-update:semver-major"]
       - dependency-name: "@types/react-dom"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: vitest
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: gomod

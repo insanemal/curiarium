@@ -121,7 +121,9 @@ Runs ruff + pytest (API), eslint + tsc + vitest (web, no production build) and
 `go test ./...` (bridge) on the host toolchains in about a minute. It needs a
 repo-local `.venv` (created with `uv venv --python 3.12 .venv`, then
 `uv pip install -r requirements.lock -r requirements-dev.lock ruff` from
-`curiarium/api/`) and `npm ci` once in `curiarium/web/`. Use it per ticket,
+`curiarium/api/`) and `npm ci` once in `curiarium/web/`. The web toolchain
+(vite 8, vitest 5) needs Node ≥ 22.12 on the host, so a host on an older Node
+has to fall back to `make verify`, which runs the same steps in the containers. Use it per ticket,
 then `make verify` exactly once per batch, on integrated main before the CI
 dispatch. There are no per-ticket, per-merge or per-fix-forward full gates: a
 ticket touching migrations, Dockerfiles, nginx, compose manifests or locks is
@@ -206,9 +208,9 @@ nothing else. Anything else is new and needs a disposition before it ships.
 | --- | --- |
 | `[baseline-browser-mapping] The data in this module is over two months old.` | Informational. Comes from a dev dependency used by the Browserslist toolchain; no application code is shipped from it. Update with `npm i baseline-browser-mapping@latest -D` when it gets noisy. |
 | `Browserslist: browsers data (caniuse-lite) is 12 months old.` | Dev-time staleness notice from Browserslist; not shipped. The fix is `npx update-browserslist-db@latest`. |
-| `node_modules/lucide-react/dist/esm/context.mjs (2:0): Module level directives cause errors when bundled, "use client" ... was ignored.` and the same line for `Icon.mjs`. | Accepted. A `"use client"` directive is meaningless in an ESM browser build; the only consumer is the Vite client bundle, which has no server/client boundary. |
-| `Module "path" has been externalized for browser compatibility, imported by ".../node_modules/occt-import-js/dist/occt-import-js.js"` (and the same for `crypto`). | Filtered by `build.rollupOptions.onwarn` in `curiarium/web/vite.config.js`. `occt-import-js` ships an emscripten bundle that contains Node-only code paths for `path`/`crypto`; only its WASM entry point is used, and it runs inside a worker, so the externalized browser stubs are never touched at runtime. The filter matches only these two messages from that one importer and forwards every other warning to Vite's default handler. |
-| The Rollup chunk-size warning. | Not expected: `build.chunkSizeWarningLimit` is 600 kB. The entry measured react-dom ~129.8 kB + app shell ~262 kB + markdown stack (`react-markdown` + `rehype-sanitize` + `remark-gfm`) ~178.9 kB + `lucide-react` ~22 kB, i.e. just under the limit. If the entry crosses 600 kB again, split it rather than raising the limit. |
+| `[MODULE_LEVEL_DIRECTIVE] The semantics of the module level directive "use client" in "node_modules/lucide-react/dist/esm/context.mjs" may not be preserved when bundling.` and the same warning for `Icon.mjs`. | Accepted. A `"use client"` directive is meaningless in an ESM browser build; the only consumer is the Vite client bundle, which has no server/client boundary. Rolldown reports this with a code frame; Rollup printed the same condition as `Module level directives cause errors when bundled`. |
+| `Module "path" has been externalized for browser compatibility, imported by ".../node_modules/occt-import-js/dist/occt-import-js.js"` (and the same for `crypto`). | Filtered by `build.rolldownOptions.onwarn` in `curiarium/web/vite.config.js`. `occt-import-js` ships an emscripten bundle that contains Node-only code paths for `path`/`crypto`; only its WASM entry point is used, and it runs inside a worker, so the externalized browser stubs are never touched at runtime. The filter matches only these two messages from that one importer and forwards every other warning to Vite's default handler. Under Rolldown the emitting plugin is identified by `warning.plugin` (`rolldown:vite-resolve`) and the `[plugin ...]` prefix is no longer part of `warning.message`, which the filter tolerates. |
+| The Rolldown chunk-size warning for `assets/index-*.js`. | Known and accepted, and **not** caused by this toolchain: it fired under Vite 5 too. Measured after the Vite 8 upgrade (Mf-qj7j): entry `index-*.js` 628.03 kB, with `jsx-runtime-*.js` (26.28 kB) and `rolldown-runtime-*.js` (0.72 kB) split out alongside it; under Vite 5 the same entry was 670.57 kB. `build.chunkSizeWarningLimit` stays at 600 kB, so the warning keeps firing until the entry is actually split. To bring it back under the limit, split the entry rather than raising the limit. |
 
 Three.js and the settings page are not in the entry chunk. `preview.tsx`
 reaches the viewer and the snapshot renderer through `React.lazy(() => import(...))`,

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 import type { Folder } from "../lib/api";
@@ -110,12 +110,13 @@ const DEEP: Folder[] = [
   ...FILLER,
 ];
 
-type ScrollPrototype = { scrollIntoView?: (options?: ScrollIntoViewOptions) => void };
+type ScrollHandler = (options?: ScrollIntoViewOptions) => void;
+type ScrollPrototype = { scrollIntoView?: ScrollHandler };
 
-let scrollSpy: ReturnType<typeof vi.fn>;
+let scrollSpy: Mock<ScrollHandler>;
 
 beforeEach(() => {
-  scrollSpy = vi.fn();
+  scrollSpy = vi.fn<ScrollHandler>();
   // jsdom has no scrollIntoView; the component's `?.` is the whole shiv.
   (Element.prototype as ScrollPrototype).scrollIntoView = scrollSpy;
 });
