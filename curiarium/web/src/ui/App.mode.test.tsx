@@ -5,6 +5,14 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 
 // The children are mocked: these tests cover App's mode state, persistence and
 // the lazy mount/hide contract, not the panes' own rendering.
+//
+// ONE spy serves both the barrel and the domain module below: `modeBootstrap`
+// imports `listProjects` from `../lib/api/projects` while App imports it from
+// the `../lib/api` barrel, and the acceptance counts both halves of the boot
+// (the probe AND App's own effect). Two spies would let one of those calls hide
+// from the assertion.
+const { listProjectsSpy } = vi.hoisted(() => ({ listProjectsSpy: vi.fn() }));
+
 vi.mock("../lib/api", () => ({
   UnauthorizedError: class UnauthorizedError extends Error {},
   FORBIDDEN_MESSAGE: "Your role does not allow this action.",
@@ -22,10 +30,12 @@ vi.mock("../lib/api", () => ({
     disabled: false,
     kind: "local",
   })),
-  listProjects: vi.fn(async () => []),
+  listProjects: listProjectsSpy,
   logout: vi.fn(async () => {}),
   refreshToken: vi.fn(),
 }));
+
+vi.mock("../lib/api/projects", () => ({ listProjects: listProjectsSpy }));
 
 // The queue's own hook runs when the queue opens it; an empty run list keeps
 // this file's subject (mode state) off the network.
@@ -98,12 +108,26 @@ vi.mock("./ProjectView", async () => {
   const react = await import("react");
   // A stateful stand-in: the lazy-mount contract is "a visited pane stays
   // mounted (only hidden)", so the pane must own state that a switch preserves.
-  function ProjectViewStandIn() {
+  // It also prints the project count it was handed and offers the assets-change
+  // callback App wires to the `assetsVersion` bump (AC-5).
+  function ProjectViewStandIn({
+    projects,
+    onAssetsChanged,
+  }: {
+    projects?: Project[] | null;
+    onAssetsChanged?: () => void;
+  }) {
     const [query, setQuery] = react.useState("");
     return react.createElement(
       "div",
       { "data-testid": "project-view" },
       react.createElement("p", null, "Project view"),
+      react.createElement(
+        "p",
+        { "data-testid": "project-count" },
+        projects == null ? "none" : String(projects.length),
+      ),
+      react.createElement("button", { type: "button", onClick: onAssetsChanged }, "Bump assets"),
       react.createElement("input", {
         "aria-label": "Project search stand-in",
         value: query,
@@ -161,6 +185,7 @@ import App, { SettingsLoading } from "./App";
 import { getAssetCounts, listProjects } from "../lib/api";
 import { storeToken } from "../lib/auth";
 import { MODE_STORAGE_KEY } from "../lib/mode";
+import { resetInitialMode, resolveInitialMode } from "../lib/modeBootstrap";
 import type { Project } from "../lib/api/projects";
 
 const listProjectsMock = vi.mocked(listProjects);
@@ -194,7 +219,11 @@ function installMemoryStorage(): void {
 
 beforeEach(() => {
   installMemoryStorage();
-  listProjectsMock.mockClear();
+  // The boot decision is memoised module-wide, so one test's probe would
+  // otherwise answer the next test's `resolveInitialMode()`.
+  resetInitialMode();
+  listProjectsSpy.mockReset();
+  listProjectsSpy.mockResolvedValue([]);
   getAssetCountsMock.mockReset();
   getAssetCountsMock.mockResolvedValue({ total: 0, unfiled: 0, missing: 0 });
   storeToken("access-token");
@@ -383,5 +412,44 @@ describe("App library mode switch", () => {
       ).toBe("true"),
     );
     expect(listProjectsMock).not.toHaveBeenCalled();
+  });
+
+  // The fresh-boot path: modeBootstrap already paid for `GET /projects`, and
+  // App seeds its state from that list. Under StrictMode a take-once read in a
+  // useState initialiser would ALSO show 2 items - but only because two fetches
+  // happened - so this test is what pins purity: the count below includes the
+  // boot probe, and it must stay at one.
+  it("seeds the grid from the boot list, so a fresh boot costs one GET /projects", async () => {
+    listProjectsSpy.mockResolvedValue([{ id: "p1" }, { id: "p2" }] as unknown as Project[]);
+
+    const boot = await resolveInitialMode();
+    expect(boot.mode).toBe("projects");
+    expect(listProjectsSpy).toHaveBeenCalledTimes(1);
+
+    render(
+      <React.StrictMode>
+        <App initialMode={boot.mode} initialProjects={boot.projects} />
+      </React.StrictMode>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("project-count").textContent).toBe("2"));
+    // One call total: the boot probe. App did not read the list a second time.
+    expect(listProjectsSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // AC-5: the seed guard must not freeze the list. A mutation bumps
+  // `assetsVersion`, which makes the seeded list stale, so the effect refetches.
+  it("refetches the project list after an assets bump, despite the seed", async () => {
+    listProjectsSpy.mockResolvedValue([{ id: "p1" }] as unknown as Project[]);
+
+    const boot = await resolveInitialMode();
+    render(<App initialMode={boot.mode} initialProjects={boot.projects} />);
+
+    await waitFor(() => expect(screen.getByTestId("project-count").textContent).toBe("1"));
+    expect(listProjectsSpy).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Bump assets" }));
+
+    await waitFor(() => expect(listProjectsSpy).toHaveBeenCalledTimes(2));
   });
 });

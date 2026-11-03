@@ -124,9 +124,17 @@ type AppProps = {
    * which case the stored mode is read on mount.
    */
   initialMode?: LibraryMode;
+  /**
+   * The boot probe's project list, already fetched by `lib/modeBootstrap.ts`,
+   * so seeding the grid from it costs no second request. It must be read as a
+   * prop, never consumed (no take-once read in a `useState` initialiser): that
+   * initialiser is impure under StrictMode. `null`/omitted means "no list", and
+   * the project-list effect fetches one.
+   */
+  initialProjects?: Project[] | null;
 };
 
-export default function App({ initialMode }: AppProps = {}) {
+export default function App({ initialMode, initialProjects }: AppProps = {}) {
   const [token, setToken] = React.useState<string | null>(() => readToken());
   // Generation counter for "assets changed". The grid consumes it to refetch in
   // place; it no longer remounts the grid, so view state (search, sort,
@@ -154,7 +162,21 @@ export default function App({ initialMode }: AppProps = {}) {
     projects: mode === "projects",
   }));
   const [openProjectId, setOpenProjectId] = React.useState<string | null>(null);
-  const [projects, setProjects] = React.useState<Project[] | null>(null);
+  const [projects, setProjects] = React.useState<Project[] | null>(() => initialProjects ?? null);
+  // The `assetsVersion` the seeded list is valid for; `null` when there is no
+  // seed. A boot list is current as of version 0, which is what keeps the list
+  // effect below from re-fetching it - while a later mutation bump still
+  // refetches.
+  //
+  // Captured once, like the seed itself, and never updated: it describes the
+  // list `projects` started with, so reading it from a later prop (or stamping
+  // it after a fetch) would make the guard describe a list App no longer holds.
+  // Never moving off the seed's version is deliberate - past it the effect
+  // behaves exactly as it did before the seed existed, which is how a re-login
+  // still refreshes the list.
+  const [projectsAsOf] = React.useState<number | null>(() =>
+    initialProjects != null ? 0 : null,
+  );
   const [health, setHealth] = React.useState<HealthInfo | null>(null);
   const [tokenTtl, setTokenTtl] = React.useState<number | null>(null);
   const [sessionExpired, setSessionExpired] = React.useState(false);
@@ -499,6 +521,11 @@ export default function App({ initialMode }: AppProps = {}) {
   // from it, and a mutation elsewhere (`assetsVersion`) can change its counts.
   React.useEffect(() => {
     if (!visitedModes.projects) return;
+    // The boot list is current as of this version -> no second request. A
+    // mutation bump changes `assetsVersion` past it, so the list refetches from
+    // then on - as does anything else that re-runs this effect (a re-login, via
+    // `handleUnauthorized`), because the seed's stamp never moves.
+    if (projectsAsOf === assetsVersion) return;
     let cancelled = false;
     (async () => {
       try {
@@ -517,7 +544,7 @@ export default function App({ initialMode }: AppProps = {}) {
     return () => {
       cancelled = true;
     };
-  }, [visitedModes.projects, assetsVersion, handleUnauthorized]);
+  }, [visitedModes.projects, assetsVersion, projectsAsOf, handleUnauthorized]);
 
   const handleLogout = () => {
     const refresh = readRefreshToken();
