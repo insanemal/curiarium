@@ -66,7 +66,10 @@ confidence.
 The module also owns the vocabulary for pairing an archive with a directory by
 its *entry root* rather than its filename (``common_entry_root``,
 ``is_generic_container_root``) and the facts for a directory a verified archive
-owns but which no rule offers on its own (``archive_owned_facts``). It stays
+owns but which no rule offers on its own (``archive_owned_facts``). Those facts
+are what ``bundle_service`` now offers as a LOW candidate: the archive supplies
+the directory's identity and the confidence says the shape was inferred. This
+module still only judges a listing; the service decides creatability. It stays
 pure: the caller reads the archive's entry list and this module only judges it.
 
 Content identity is used ONLY to report duplicate archives and to suppress the
@@ -861,8 +864,10 @@ def archive_owned_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
     and two renders, no ``.txt`` anywhere. R3 needs all three roles, so it refuses
     that tree and the directory would otherwise render no row at all even though
     the archive beside it proves what it is. This is R3's evidence with the text
-    requirement dropped, rendered as the same ``generic-bundle`` / ``low`` row so
-    ``blocked``/``archive_only`` reads the same way it does for an archive.
+    requirement dropped, rendered as the same ``generic-bundle`` / ``low`` row as
+    any other guess, so a promoted directory is creatable exactly like one; only a
+    directory the container rule refuses comes back as ``blocked`` /
+    ``archive_only``.
 
     ``_own_depth_model_count`` is reused deliberately: the Mf-h0p8 container bound
     and the Mf-snd8 cardinality rule then apply here for free, and an ancestor
@@ -870,8 +875,12 @@ def archive_owned_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
     ``None`` - an entry root is evidence of WHICH thing this is, never of who made
     it.
 
-    This function does NOT make a directory creatable, does NOT claim a subtree
-    and does NOT touch the store: it turns a listing into facts and stops there.
+    This function does NOT make a directory creatable and does NOT let R3 through:
+    it only turns a listing into facts, and the service decides what to do with
+    them - a directory offered this way has to be a resolved ``Folder`` with
+    registered model assets, exactly like any other LOW row. It also does NOT
+    claim a subtree and does NOT touch the store: it turns a listing into facts
+    and stops there.
     """
     counts = _counts(snapshot)
     if _own_depth_model_count(snapshot) < 1 or counts.image < 1 or counts.text:

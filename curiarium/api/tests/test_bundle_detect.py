@@ -900,6 +900,20 @@ def test_archive_owned_facts_renders_a_low_generic_row() -> None:
     ) == (None, None, None, None, None, None)
 
 
+def test_detect_bundle_still_refuses_the_snapshot_archive_owned_facts_offers() -> None:
+    """AC-6: the rule change is the service's verified pairing, never a looser R3.
+
+    The same listing is refused by ``detect_bundle`` and offered by
+    ``archive_owned_facts``. Only ``bundle_service`` may act on the second one,
+    and only when an archive's entry root names that directory - so R3 itself has
+    not moved, and a models-and-images directory with no archive stays silent.
+    """
+    snapshot_ = snapshot(CLOCKWORK_ROOT, clockwork_files())
+
+    assert bundle_detect.detect_bundle(snapshot_, {}) is None
+    assert bundle_detect.archive_owned_facts(snapshot_) is not None
+
+
 def test_archive_owned_facts_refuses_a_directory_with_text() -> None:
     files = {**clockwork_files(), "notes.txt": 20}
 

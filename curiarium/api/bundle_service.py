@@ -29,7 +29,7 @@ inside it is read as evidence and nothing is ever extracted.
 ``bundle_detect.is_bundle_member`` is the one predicate for that membership; the
 container strip still runs first, so a LOW folder that holds only a zip-only bundle is a
 container rather than a bundle and that zip is not "nested" at all. The member
-filter runs after the strip on purpose - see the Mf-t12a note at the strip.
+filter runs after the strip on purpose - see the note at the strip.
 
 **Renamed extractions pair on the archive's entry root.** A vendor rename breaks
 the stem rule: ``import/17_ClockworkMonster/`` beside ``17_Fates End -
@@ -65,16 +65,25 @@ still offered as its own archive bundle (when it was the group's keep) or was
 already suppressed (when it was not); the report never invites deleting part of a
 live bundle.
 
-**Interim: a paired directory no rule offers is one blocked row.** The Clockwork
-shape - models and images, no text - is not an R3 bundle, so the pair would
-render nothing. ``bundle_detect.archive_owned_facts`` supplies the row: one
-candidate keyed at the DIRECTORY, ``pair_only``, reported ``blocked`` with
-``archive_only``. Be honest about two things it does not do. It reports
-``assets_total: 0`` and the archive-only remedy copy ("import the zip, scan"),
-which for a directory that may already hold registered assets is the wrong
-advice; and it is interim until Mf-t12a makes such a directory a real
-low-confidence candidate, which the pair-only row yields to by construction (a
-real folder candidate of the same key wins, and the archive attaches to it).
+**A verified pairing makes a no-text directory a low bundle.** The Clockwork
+shape - models and images, no text - is not an R3 bundle, so a rule that only
+read the listing would render nothing for it. When the entry-root pass has
+proved that an archive beside a directory owns that directory, the archive
+supplies what the listing cannot: its identity. The directory is therefore
+offered as a real ``generic-bundle`` / ``low`` candidate keyed at the
+DIRECTORY, with that archive reported as its ``archive`` and no file attached
+from it - the archive is provenance, the low confidence says the shape was
+inferred. It is then creatable exactly like any other low candidate: a resolved
+``Folder`` and registered model assets, nothing about the detector.
+
+Be honest about the two bounds. **Without a pairing the shape is silent**: model
+files and a render are too weak on their own, so nothing is offered and nothing
+can be created. And **the pairing never overrides the container rule**: a
+directory that holds bundles keeps the blocked ``archive_only`` row and creates
+nothing, so a pile of models with one zip somewhere inside it is still a pile;
+and the entry root has to name the directory itself, so a pairing can never
+qualify a descendant. A refused pair stays visible rather than vanishing, which
+is why it keeps the archive-only row.
 
 A zip with no extracted twin is still read, through
 ``zip_service.read_zip_text_entry`` (bounded, never extracted), so the report can
@@ -184,8 +193,11 @@ class BundleCandidate:
     subtree. It is never returned in a report row - the row carries the facts
     from its own detect call. ``entry_root`` is the archive entry root that
     paired this bundle's archive, ``None`` when the stem rule paired it.
-    ``pair_only`` means the directory is offered only because a verified archive
-    owns it: it creates nothing.
+    ``pair_only`` means a paired directory the container rule refuses: it is
+    shown, never creatable. ``archive_owned`` means a verified entry-root pairing
+    owns this directory: the archive supplies its identity and the low confidence
+    says the shape was inferred, so it is offered at LOW even when no rule finds
+    text and it is creatable like any other LOW candidate.
     """
 
     key: str
@@ -195,14 +207,15 @@ class BundleCandidate:
     confidence: str
     entry_root: Optional[str] = None
     pair_only: bool = False
+    archive_owned: bool = False
 
     @property
     def offers_archive_only(self) -> bool:
         """Whether the row is reported ``blocked``/``archive_only``.
 
-        An archive of its own, and a directory the archive owns but no detector
-        offers, are the same answer to the operator: there is nothing here to
-        create, and the remedy is the import door.
+        An archive of its own, and a paired directory the container rule refuses,
+        are the same answer to the operator: there is nothing here to create, and
+        the remedy is the import door.
         """
         return self.is_archive or self.pair_only
 
@@ -462,11 +475,21 @@ def _build_candidates(
             )
         )
 
-    # A directory a verified archive owns but no rule offers (yet): one row keyed
-    # at the directory, so the pair is visible and yields to a real folder
-    # candidate of the same key when one exists. The facts are computed now but
-    # the row is appended after the member filter, because a pair-only directory
-    # is itself a bundle directory for that filter.
+    # A directory a verified archive owns and no rule offers on its own: models
+    # and images, no text. The archive supplies the identity, so this is a real
+    # LOW candidate keyed at the DIRECTORY. The container rule applies to a
+    # pairing exactly as it does to any other guess - a pairing that names a
+    # directory holding a claimed bundle is a pile and proves nothing - and a
+    # refused pairing keeps the blocked row instead, so the pair stays visible and
+    # creates nothing.
+    #
+    # A pairing that names a directory INSIDE an already-claimed bundle never
+    # reaches a row of its own, and needs no extra refusal here: the archive it
+    # paired with sits inside that bundle too, so the member filter at the end
+    # prunes the pairing and the promoted candidate with it. A containing LOW
+    # guess is the mirror case and loses deliberately: promoting this directory
+    # puts its key in `contained_keys`, so the strip below drops the guess rather
+    # than the archived evidence.
     pair_only_specs: Dict[str, Tuple[bundle_detect.BundleSnapshot, bundle_detect.BundleFacts]] = {}
     for folder in sorted(pairs, key=lambda item: (item.casefold(), item)):
         if any(candidate.key == folder for candidate in found):
@@ -478,36 +501,51 @@ def _build_candidates(
         facts = bundle_detect.archive_owned_facts(snapshot)
         if facts is None:
             continue
-        pair_only_specs[folder] = (snapshot, facts)
+        if folder in claimed_ancestors:
+            pair_only_specs[folder] = (snapshot, facts)
+            continue
+        found.append(
+            BundleCandidate(
+                key=folder,
+                snapshot=snapshot,
+                archive_path=None,
+                is_archive=False,
+                confidence=facts.confidence,
+                archive_owned=True,
+            )
+        )
 
     # An archive-only bundle is still a bundle: a low folder that strictly
     # contains one is a container too, and the folder pass cannot see it because
-    # the archive is read after the directory walk. `archive_only_keys` is the keys
-    # of both kinds of archive-only row - an archive of its own, and a pair-only
-    # directory the archive owns - because a LOW folder strictly containing either
-    # one holds nothing but another thing's payload and is therefore a container,
-    # never a bundle. A pair-only row is never a *target* of that strip: it is
-    # verified evidence rather than a guess, it claims no subtree, and the
-    # archive's membership does not depend on the row, so dropping it would only
-    # hide the pair the operator can see on disk.
+    # the archive is read after the directory walk. `contained_keys` is the keys of
+    # both kinds of archive-only row - an archive of its own, and a paired
+    # directory the container rule refuses - plus every directory a verified
+    # pairing promoted, because a promoted candidate is a bundle in its own right.
+    # A LOW folder strictly containing any of them holds nothing but another
+    # thing's payload and is therefore a container, never a bundle.
     #
-    # Mf-t12a collision, recorded here because this order is deliberate: when
-    # t12a makes an archive-owned directory a real LOW candidate, this strip will
-    # drop the Clockwork directory because its nested zip is archive-only at strip
-    # time, and the member filter below will then have no bundle to nest it
-    # under. t12a must exempt a LOW candidate carrying a verified archive pair,
-    # the same way this strip already exempts HIGH and pair_only rows.
-    archive_only_keys = [candidate.key for candidate in found if candidate.offers_archive_only]
-    archive_only_keys.extend(pair_only_specs)
-    if archive_only_keys:
+    # None of those rows is ever a *target* of the strip. A pair-only directory
+    # and a promoted one are verified evidence rather than a guess, and the
+    # archive's membership does not depend on the row, so dropping one would only
+    # hide the pair the operator can see on disk. The exemption swallows nothing:
+    # a guess that contains a promoted candidate is still dropped, which is the
+    # container rule applied to this pass. The promoted exemption is Decision 17's
+    # obligation: the Clockwork directory owns its nested zip, that zip is
+    # archive-only at this point, so without the exemption the directory would
+    # vanish and the zip would be the only row.
+    contained_keys = [candidate.key for candidate in found if candidate.offers_archive_only]
+    contained_keys.extend(pair_only_specs)
+    contained_keys.extend(candidate.key for candidate in found if candidate.archive_owned)
+    if contained_keys:
         found = [
             candidate
             for candidate in found
             if not (
                 not candidate.is_archive
                 and not candidate.pair_only
+                and not candidate.archive_owned
                 and candidate.confidence == bundle_detect.CONFIDENCE_LOW
-                and any(key.startswith(candidate.key + "/") for key in archive_only_keys)
+                and any(key.startswith(candidate.key + "/") for key in contained_keys)
             )
         ]
 
@@ -532,6 +570,15 @@ def _build_candidates(
         pair_only_specs = {
             folder: spec for folder, spec in pair_only_specs.items() if folder in pairs
         }
+        # A promoted candidate whose pairing was just pruned is no longer
+        # archive-owned: a zip inside a bundle proved nothing about a sibling
+        # directory. The residual is silence - that directory is simply not
+        # offered - which is never a wrong project and never a delete invitation.
+        found = [
+            candidate
+            for candidate in found
+            if not (candidate.archive_owned and candidate.key not in pairs)
+        ]
 
     for folder in sorted(pair_only_specs, key=lambda item: (item.casefold(), item)):
         snapshot, facts = pair_only_specs[folder]
@@ -568,6 +615,7 @@ def _build_candidates(
                 confidence=candidate.confidence,
                 entry_root=entry_root,
                 pair_only=candidate.pair_only,
+                archive_owned=candidate.archive_owned,
             )
         )
     with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
@@ -993,7 +1041,7 @@ def _qualify(scope: str, rel_path: str) -> str:
 
 
 def _candidate_facts(root: Path, candidate: BundleCandidate) -> Optional[bundle_detect.BundleFacts]:
-    if candidate.pair_only:
+    if candidate.pair_only or candidate.archive_owned:
         return bundle_detect.archive_owned_facts(candidate.snapshot)
     if candidate.is_archive:
         return _detect_archive(Path(root) / candidate.snapshot.rel_dir, candidate.snapshot)

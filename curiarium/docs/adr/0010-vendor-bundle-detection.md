@@ -200,14 +200,15 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    stem path it is an operator remark (either answer is information), while on
    the entry-root path it is a *pairing condition* and is always true by
    construction - an archive that fails containment simply does not pair. The
-   archive attaches nothing on either path. **Interim, until `Mf-t12a`:** a
-   directory no detector offers (models and images, no text) is reported as one
-   `blocked` / `archive_only` row keyed at the *directory*, so the pair is
-   visible rather than the directory vanishing and the archive standing alone.
-   That row reports `assets_total: 0` and carries the archive-only remedy copy,
-   both wrong for a directory that may already hold registered assets, and it
-   yields to the low-confidence folder candidate `Mf-t12a` will produce for the
-   same key.
+   archive attaches nothing on either path. **A verified pair also makes the
+   directory an offer.** A directory no detector offers on its own - models and
+   images, no text - is a real `generic-bundle` / `low` candidate keyed at the
+   *directory*, with that archive reported as its `archive` and nothing attached
+   from it: the archive supplies the identity, the low confidence says the shape
+   was inferred. It is creatable exactly like any other low row, because
+   creatability is still a resolved `Folder` plus registered model assets and
+   never a detector name. Without a pairing the same shape stays silent
+   (Decision 18).
 
 5. **Duplicate archives are one bundle, and hashing never deletes.** Identity
    for an archive is its content hash: a sha256 over the file, read in bounded
@@ -501,12 +502,19 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     own. The member filter runs AFTER the archive-only container strip on
     purpose: a LOW folder that holds only a zip-only bundle is a container, not
     a bundle, so that zip is not "inside a detected bundle" and stays its own
-    row. **Forward obligation for `Mf-t12a`:** when t12a makes an archive-owned
-    directory a real LOW candidate, the strip will see its nested zip as
-    archive-only and drop the directory, inverting this decision. t12a must
-    exempt a LOW candidate carrying a verified archive pair, the same
-    justification that already exempts HIGH and `pair_only` rows, or the
-    Clockwork directory vanishes and its nested zip becomes the only row.
+    row. **The strip exempts a paired LOW candidate (Decision 18).** The Clockwork
+    directory is a real LOW candidate, and its own nested zip is archive-only at
+    strip time, so a strip that treated it as any other LOW row would drop the
+    directory and leave the zip as the only row - this decision inverted. A
+    promoted candidate is therefore never a strip *target*, on the same
+    justification that already exempts HIGH and `pair_only` rows: it is verified
+    evidence, and the archive's membership does not depend on the row. It does
+    not swallow a subtree either - a guess that *contains* a promoted candidate is
+    still dropped below - so the exemption costs no container. The member filter
+    then removes the zip, because the directory it now belongs to is one
+    `bundle_dirs` names, and it also prunes a promotion whose own pairing archive
+    turned out to be a member of another bundle.
+    `test_service_a_nested_archive_is_a_member_not_a_second_bundle` pins it.
     Duplicate identity still sees a member (its bytes are bytes the walk finds),
     but a member is never on the deletable side: it is removed from the group,
     and a group left with fewer than two non-member paths disappears. The
@@ -514,6 +522,33 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     still offered as its own archive bundle (when it was the keep) or was
     already suppressed (when it was not). The report never invites deleting a
     file that is part of a live bundle, and nothing is extracted or written.
+
+18. **A verified archive makes a no-text directory a low bundle, and only that
+    directory.** Models and images with no text file are offered at
+    `generic-bundle` / `low` only when the entry-root pairing has proved that an
+    archive beside the directory owns *this* directory. The archive supplies what
+    the listing cannot - the identity of the thing - and the confidence badge says
+    the shape was inferred rather than read. Every provenance field the project
+    would carry (creator, licence, source URL, description) stays `None`, because
+    an entry root is evidence of which thing this is, never of who made it; the
+    row's `archive` field is the identity, not a claim about authorship. Without
+    a pairing the shape stays silent, because a pile of models and a
+    render is also what a half-extracted import looks like. Two refusals bound
+    the rule. The container rule still wins: a directory that *holds* bundles
+    keeps the blocked `archive_only` row and creates nothing, so a pile of models
+    with one zip somewhere inside it never qualifies. And a pairing qualifies the
+    directory its entry root names and no descendant. The two orders cover the
+    containment cases: a containing guess loses to the promoted candidate (the
+    strip drops it), and a promoted candidate inside a bundle never becomes a row
+    at all, because the archive it paired with is a member of that bundle and the
+    member filter prunes both. Both failure modes are stated plainly rather than
+    argued away: a false positive invites a project
+    for something that is not a bundle and attaches its models to it; a false
+    negative leaves the owner hand-making a project, which is exactly what
+    happened for the Clockwork directory. Duplicate suppression (Decision 5)
+    stays upstream, so a byte-identical copy can never promote a second bundle.
+    The fixture-built numbers below belong to the fixtures; the owner's library
+    figure is his measurement, not this repository's.
 
 ## Consequences
 
@@ -725,12 +760,26 @@ unchanged.
   `generic-bundle` / `low` generic row with the largest render as its cover and
   every provenance field `None`, while refusing a directory that holds text, that
   has no image, or whose only models sit at depth 2 (the `Mf-h0p8` bound still
-  holds). In `tests/test_bundle_service.py`, against a temporary root: the real
+  holds); and `detect_bundle` still returns `None` for the very listing
+  `archive_owned_facts` offers, which pins that the low offer is the service's
+  verified pairing and never a looser R3. In `tests/test_bundle_service.py`,
+  against a temporary root: the real
   Clockwork pair - `import/17_ClockworkMonster/` (12 STL, 2 PNG, no text),
   `17_Fates End - ClockworkMonster Tower.zip` and its byte-identical ` (1)`
-  duplicate - is exactly one row keyed at the directory, with
+  duplicate - is exactly one row keyed at the directory, `generic-bundle` /
+  `low`, `ready`, `assets_total` 14 (the scan registers every file, so a preview
+  is an asset even though the import door would not take it), with
   `twin_verified: true` and the non-duplicate name as `archive.rel_path`, neither
-  zip a row of its own, and `create` `blocked` with no project written; a generic
+  zip a row of its own, and `create` writing one project with the directory's 12
+  models attached (Decision 18); the same 14 files with no archive beside them
+  are offered by nothing, `iter_bundle_candidates` is empty and `create` answers
+  `unknown bundle` with no project - the silence the rule needs; a pile of two
+  real bundles plus its own loose model and render, paired with an archive rooted
+  at the pile and containing exactly those two loose files, is refused: the
+  children are `ready` rows and the pile is one `blocked`/`archive_only` row that
+  creates nothing, so create-all makes two projects and none named `Pile`; and a
+  pairing rooted at `Pile` never offers `Pile/Sub`, a models-and-images directory
+  of its own with no archive; a generic
   archive rooted at `files/` beside a directory holding the same four payloads is
   refused - its own `blocked`/`archive_only` row, no row claiming it, and its
   directory still offered - while the Clockwork pair pairs in the same report,
@@ -742,11 +791,12 @@ unchanged.
   create attaches its two models and nothing from the archive; an archive that
   also carries `__MACOSX/` AppleDouble cruft still pairs on its real entries,
   because both layers skip it through the one `is_macosx_artifact` predicate; a
-  pair-only directory holding a nested archive is one row with that archive as a
-  member (never a second row, never a pairing, never a duplicate-to-delete); and
-  a low container holding a paired
-  directory still drops the container, so the `archive_only_keys` strip fires for
-  a pair-only candidate too.
+  promoted directory holding a nested archive is one row with that archive as a
+  member (never a second row, never a pairing, never a duplicate-to-delete), and
+  the directory survives a strip that would otherwise see only that member; a
+  LOW container holding a promoted directory is still dropped - the container
+  strip fires for a promoted candidate too, so `Collection` disappears while the
+  paired directory it wraps is offered.
 - The duplicate-archive contract (`Mf-z4vv`) is pinned at three levels. In
   `tests/test_bundle_detect.py`, from literals: `equal_size_archive_groups` keeps
   only sizes that occur twice; `duplicate_groups` puts the shortest name first
@@ -804,7 +854,8 @@ unchanged.
   itself is offered; a byte-identical shorter-named copy outside the bundle does
   not make the member deletable, and the outside copy is still offered; and a
   nested `Clockwork v1.8 Download.zip` rooted at a subdirectory of the bundle
-  produces no second `pair_only` row.
+  produces no second row at all, because the member filter drops the candidate
+  the pairing had just promoted.
 
 ## Superseding conditions
 

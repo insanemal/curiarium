@@ -1367,11 +1367,16 @@ def clockwork_entries(root: str = CLOCKWORK_ROOT) -> Dict[str, bytes]:
     return entries
 
 
+def clockwork_directory(storage: Path) -> None:
+    """The directory alone: 12 models and 2 renders, no text and no archive."""
+    for rel_path, payload in clockwork_entries().items():
+        write_file(storage / "import" / rel_path, payload)
+
+
 def clockwork_pair(storage: Path) -> None:
     """The directory, its archive and the byte-identical browser duplicate."""
+    clockwork_directory(storage)
     entries = clockwork_entries()
-    for rel_path, payload in entries.items():
-        write_file(storage / "import" / rel_path, payload)
     write_zip(storage / CLOCKWORK_ZIP, entries)
     # copyfile, not a second write_zip: writestr timestamps can differ across
     # seconds, and these two archives must be byte-identical by construction.
@@ -1381,12 +1386,13 @@ def clockwork_pair(storage: Path) -> None:
 def test_service_an_archive_pairs_with_the_directory_its_entries_are_rooted_at(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """AC-1: one directory, two byte-identical zips, one blocked row for the pair.
+    """AC-1: one directory, two byte-identical zips, one creatable low bundle.
 
-    The ``pair_only`` / ``blocked`` / ``created["blocked"] == 1`` assertions are the
-    documented INTERIM: `Mf-t12a` makes such a directory a real low-confidence
-    candidate, so exactly those three change and the pairing assertions (the row
-    key, the attached archive and its ``twin_verified``, the entry root) stay.
+    The vendor rename means the stem rule cannot see the pair; the archive's
+    entry root does. The archive supplies the directory's identity - the listing
+    has 12 models and 2 renders and no text, so no rule of its own offers it -
+    and the low confidence says the shape was inferred. The duplicate zip is
+    reported in ``duplicates`` and is neither a row nor a second pairing.
     """
     clockwork_pair(isolated_storage)
     scan()
@@ -1404,14 +1410,18 @@ def test_service_an_archive_pairs_with_the_directory_its_entries_are_rooted_at(
     assert row["model_count"] == 12
     assert row["image_count"] == 2
     assert row["text_count"] == 0
-    assert row["status"] == "blocked"
-    assert row["blocked_reason"] == "archive_only"
-    assert row["assets_total"] == 0, "a pair-only row reports no assets, admitted interim"
+    assert row["status"] == "ready"
+    assert row["blocked_reason"] is None
+    assert row["assets_total"] == 14, (
+        "the 12 STL models and the 2 PNG renders: the library scan registers every "
+        "file, so a preview is an asset even though the import door would not take it"
+    )
 
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
     assert truncated is False
     assert [candidate.key for candidate in candidates] == [CLOCKWORK_DIR]
-    assert candidates[0].pair_only is True
+    assert candidates[0].pair_only is False
+    assert candidates[0].archive_owned is True, "the pairing owns this directory"
     assert candidates[0].archive_path == CLOCKWORK_ZIP
     assert candidates[0].entry_root == CLOCKWORK_ROOT
 
@@ -1426,9 +1436,13 @@ def test_service_an_archive_pairs_with_the_directory_its_entries_are_rooted_at(
 
     created = create(client, headers, [{"key": CLOCKWORK_DIR}])
 
-    assert created["blocked"] == 1
-    assert created["created"] == 0
-    assert project_listing(client, headers) == {}
+    assert created["created"] == 1
+    assert created["blocked"] == 0
+    project_id = created["results"][0]["project_id"]
+    assert len(project_listing(client, headers)) == 1
+    assert len(project_asset_ids(client, headers, project_id)) == 12, (
+        "the directory's own models, attached from the store like any LOW bundle"
+    )
 
 
 def test_service_an_archive_with_macosx_cruft_still_pairs(
@@ -1588,7 +1602,15 @@ def test_service_a_bundle_pairs_with_its_entry_root_archive_and_attaches_nothing
 def test_service_a_container_of_a_paired_directory_is_still_not_a_bundle(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """The zip-only container strip fires for a pair-only candidate too."""
+    """A LOW container of a promoted directory is dropped; the pair is offered.
+
+    ``Collection`` is a low bundle in its own right (a loose trio at its own
+    depth), so the folder pass claims it. It also strictly contains a directory a
+    verified archive owns, and a promoted candidate is a bundle: ``Collection``
+    holds another thing's payload, so the container strip drops it. The paired
+    directory stays, and because this test never scans it has no ``Folder`` row
+    yet - ``unresolved_directory``, the ordinary refusal, not an archive-only row.
+    """
     write_file(isolated_storage / "Collection" / "loose.stl", STL_BYTES)
     write_file(isolated_storage / "Collection" / "loose.jpg", b"j" * 60)
     write_text(isolated_storage / "Collection" / "notes.txt", "a loose trio")
@@ -1600,10 +1622,17 @@ def test_service_a_container_of_a_paired_directory_is_still_not_a_bundle(
 
     report = detect(client, headers)
 
-    assert [row["key"] for row in report["bundles"]] == ["Collection/17_Thing"]
+    assert [row["key"] for row in report["bundles"]] == ["Collection/17_Thing"], (
+        "the container Collection is dropped, the paired directory is offered"
+    )
     row = row_for(report, "Collection/17_Thing")
     assert row["archive"] == {"rel_path": "Collection/Thing Download.zip", "twin_verified": True}
-    assert row["blocked_reason"] == "archive_only"
+    assert row["blocked_reason"] == "unresolved_directory"
+
+    candidates, _truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    assert [candidate.key for candidate in candidates] == ["Collection/17_Thing"]
+    assert candidates[0].archive_owned is True
+    assert candidates[0].pair_only is False
 
 
 def test_service_a_nested_archive_is_a_member_not_a_second_bundle(
@@ -1611,10 +1640,11 @@ def test_service_a_nested_archive_is_a_member_not_a_second_bundle(
 ) -> None:
     """AC-1: the real Clockwork shape with the nested archive inside it.
 
-    The directory is one bundle and the nested zip is a supporting file: no
-    second row, no second project, and it is never read as a model. The
-    pair_only/blocked assertions are the documented pre-Mf-t12a INTERIM; the
-    one-row and member assertions are the decision this ticket owns.
+    The directory is one creatable bundle and the nested zip is a supporting
+    file: no second row, no second project, and it is never read as a model. The
+    directory survives the container strip even though its own member is
+    archive-only at strip time, and the member filter then removes the zip - the
+    two orders this decision owns.
     """
     clockwork_pair(isolated_storage)
     nested = {"inner/part.stl": STL_BYTES, "inner/preview.jpg": b"j" * 50, "inner/notes.txt": b"n" * 20}
@@ -1631,8 +1661,10 @@ def test_service_a_nested_archive_is_a_member_not_a_second_bundle(
     row = row_for(report, CLOCKWORK_DIR)
     assert row["archive"] == {"rel_path": CLOCKWORK_ZIP, "twin_verified": True}
     assert row["model_count"] == 12, "the nested zip is an archive, never a model"
-    assert row["status"] == "blocked" and row["blocked_reason"] == "archive_only", (
-        "pre-Mf-t12a interim: the pair-only row is not creatable yet"
+    assert row["status"] == "ready"
+    assert row["blocked_reason"] is None
+    assert row["assets_total"] == 15, (
+        "the 12 STL models, the 2 PNG renders and the nested zip, which the scan registers"
     )
     duplicate_paths = {path for group in report["duplicates"] for path in group["paths"]}
     assert nested_zip not in duplicate_paths, "a member is never offered for deletion"
@@ -1641,8 +1673,156 @@ def test_service_a_nested_archive_is_a_member_not_a_second_bundle(
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
     assert truncated is False
     assert [candidate.key for candidate in candidates] == [CLOCKWORK_DIR]
+    assert candidates[0].archive_owned is True
     assert any(entry.rel_path == "Clockwork_v1.8.zip" for entry in candidates[0].snapshot.entries), (
         "the nested archive is a file of the bundle's own listing"
+    )
+
+
+def test_service_a_no_docs_directory_without_its_archive_is_not_a_bundle(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-2 (b): the same 14 files without the archive are offered by nothing.
+
+    This is the whole safety argument for the rule: 12 models and 2 renders and
+    no text is too weak to call a bundle, so the shape is silent unless a
+    verified pairing names the directory. It is also the silence the owner's
+    117-LOW measurement argues for - his number, not ours, and not a number this
+    fixture can re-measure. Under "treat the shape as a bundle regardless" the
+    report here would offer a row and create a project, and this test fails.
+    """
+    clockwork_directory(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    assert bundle_service.build_report()["bundles"] == []
+    assert bundle_service.iter_bundle_candidates(isolated_storage) == ([], False)
+
+    created = create(client, headers, [{"key": CLOCKWORK_DIR}])
+
+    assert created["created"] == 0
+    assert created["failed"] == 1
+    assert created["results"][0]["reason"] == "unknown bundle"
+    assert project_listing(client, headers) == {}
+
+
+def test_service_a_pile_of_bundles_and_a_zip_is_still_not_a_bundle(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-3 (c): the container rule still refuses a pile, pairing or not.
+
+    ``import/Pile`` holds two real bundles plus its own loose model and render,
+    and ``import/Pile Download.zip`` is rooted at ``Pile`` and contains exactly
+    those two loose files - so containment verifies and only the container rule
+    can refuse the promotion. The refused pair keeps the blocked
+    ``archive_only`` row: visible on disk, unable to create. Under "promote any
+    directory whose archive facts exist" ``Pile`` would be ``ready`` and this
+    test fails.
+    """
+    loose_stl, loose_png = STL_BYTES, b"p" * 70
+    write_file(isolated_storage / "import" / "Pile" / "loose.stl", loose_stl)
+    write_file(isolated_storage / "import" / "Pile" / "render.png", loose_png)
+    for name, model in (("Alpha", "a.stl"), ("Beta", "b.stl")):
+        write_file(isolated_storage / "import" / "Pile" / name / model, b"s" * 41)
+        write_file(isolated_storage / "import" / "Pile" / name / f"{name.lower()}.png", b"p" * 50)
+        write_text(isolated_storage / "import" / "Pile" / name / "notes.txt", "print at 0.2mm")
+    write_zip(
+        isolated_storage / "import" / "Pile Download.zip",
+        {"Pile/loose.stl": loose_stl, "Pile/render.png": loose_png},
+    )
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    keys = [row["key"] for row in report["bundles"]]
+    assert "import/Pile/Alpha" in keys and "import/Pile/Beta" in keys, "the two child bundles are rows"
+    pile = row_for(report, "import/Pile")
+    assert pile["status"] == "blocked"
+    assert pile["blocked_reason"] == "archive_only", "a refused pair stays visible and creates nothing"
+
+    created = create(client, headers, [{"key": key} for key in keys])
+
+    assert created["created"] == 2
+    assert created["blocked"] == 1
+    assert created["failed"] == 0
+    names = {project["name"] for project in project_listing(client, headers).values()}
+    assert "Pile" not in names, "the pile is refused, never made into a project"
+
+
+def test_service_a_pairing_names_the_directory_not_its_descendants(isolated_storage: Path) -> None:
+    """AC-4: a pairing qualifies the directory its entry root names, no deeper.
+
+    ``import/Pile/Sub`` is a models-and-images directory of its own and holds no
+    archive, so only a descendant rule could offer it: the pairing names ``Pile``.
+    Under "a paired root also qualifies strict descendants" both rows would
+    appear and this test fails.
+    """
+    loose_stl, loose_png = STL_BYTES, b"p" * 70
+    write_file(isolated_storage / "import" / "Pile" / "loose.stl", loose_stl)
+    write_file(isolated_storage / "import" / "Pile" / "render.png", loose_png)
+    write_file(isolated_storage / "import" / "Pile" / "Sub" / "sub.stl", b"s" * 41)
+    write_file(isolated_storage / "import" / "Pile" / "Sub" / "sub.png", b"p" * 50)
+    write_zip(
+        isolated_storage / "import" / "Pile Download.zip",
+        {"Pile/loose.stl": loose_stl, "Pile/render.png": loose_png},
+    )
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert [candidate.key for candidate in candidates] == ["import/Pile"], (
+        "the pairing named the parent; the child is offered by nothing"
+    )
+    assert bundle_service.build_report()["bundles"][0]["archive"] == {
+        "rel_path": "import/Pile Download.zip",
+        "twin_verified": True,
+    }
+
+
+def test_service_a_paired_extraction_inside_a_bundle_is_not_a_second_row(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The mirror case of the pile: payload inside a claimed bundle stays payload.
+
+    ``Parent Thing`` is a high bundle, so the member filter removes its nested
+    archive from the pairing pass; the extraction that archive would have owned is
+    inside that bundle and must not become a row of its own, exactly as before the
+    rule landed. The high row keeps the whole subtree in its own listing, so its
+    models are attached to the one project and no archive can double-attach them.
+    """
+    title = "Wall Mount Bracket"
+    parent = isolated_storage / "Parent Thing"
+    write_text(parent / "README.txt", f"{title}\nCreated by Thingiverse user bracket_maker\nLicensed under CC BY-NC\n")
+    write_text(
+        parent / "LICENSE.txt",
+        f"{title} by bracket_maker on Thingiverse: https://www.thingiverse.com/thing:111111\n",
+    )
+    write_file(parent / "parent_part.stl", STL_BYTES)
+    extraction = "Nested Export"
+    write_file(parent / extraction / "part.stl", b"s" * 41)
+    write_file(parent / extraction / "render.png", b"p" * 60)
+    write_zip(
+        parent / "Nested Download.zip",
+        {f"{extraction}/part.stl": b"s" * 41, f"{extraction}/render.png": b"p" * 60},
+    )
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == ["Parent Thing"]
+    parent_row = row_for(report, "Parent Thing")
+    assert parent_row["confidence"] == "high"
+    assert parent_row["archive"] is None, "the nested archive is a member, not this bundle's provenance"
+
+    created = create(client, headers, [{"key": "Parent Thing"}])
+
+    assert created["created"] == 1
+    assert created["failed"] == 0
+    project_id = created["results"][0]["project_id"]
+    assert len(project_asset_ids(client, headers, project_id)) == 2, (
+        "the parent's own model and the unclaimed extraction's model: one project, never two"
     )
 
 
