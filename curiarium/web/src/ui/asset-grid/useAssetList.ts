@@ -128,6 +128,23 @@ export function useAssetList({
     if (typeof window === "undefined") return ROWS_PER_BATCH;
     return rowsBatchSizeForWidth(window.innerWidth);
   });
+  // Newest request wins: `refresh` and `loadMore` both rebuild their request
+  // from this render's closure and then write `items`/`offset`/`hasMore`, so a
+  // response that started earlier must never land after one that started later.
+  // One counter for both, incremented by each: the last request to start owns
+  // the list and the loser is dropped whichever order the two settle in. Not
+  // cancellation - `fetchAssetPage` takes no AbortSignal.
+  const seq = useRef(0);
+  // Which request raised `loading`. Two requests can be in flight with
+  // different flags (`refresh` raises `loading`, `loadMore` raises
+  // `loadingMore`), so the queue hooks' `if (id === seq.current) setX(false)`
+  // would strand `loading` forever when a Load more supersedes a refresh. The
+  // raiser lowers its own flag; a superseded request never lowers a newer one's.
+  const loadingOwner = useRef(0);
+  // `loadingMore` is state, so two Load more clicks in one tick both read the
+  // pre-update `false` and both fetch the same offset, appending that page
+  // twice. The latch is the guard; the state stays for rendering.
+  const inFlightMore = useRef(false);
 
   const handleApiError = useStableCallback((err: unknown, message?: string) => {
     if (err instanceof UnauthorizedError) {
@@ -140,6 +157,8 @@ export function useAssetList({
   });
 
   const refresh = useStableCallback(async (opts: RefreshOpts = {}) => {
+    const id = ++seq.current;
+    loadingOwner.current = id;
     setLoading(true);
     setError(null);
     if (!opts.keepLoadedPages) {
@@ -159,75 +178,89 @@ export function useAssetList({
     const effectiveSortKey = opts.sortKey ?? sortKey;
     const effectiveSortDir = opts.sortDir ?? sortDir;
     const paging = refreshWindow(offset, pageSize, opts.keepLoadedPages);
-    const [assetsResult, tagsResult, creatorsResult] = await Promise.allSettled([
-      fetchAssetPage({
-        projectId,
-        q: search,
-        tags,
-        folderId: targetFolderId,
-        unfiled: effectiveUnfiled,
-        missing: missingOnly,
-        notInProject: effectiveNotInProject,
-        creator: creator ?? undefined,
-        sort: serverSortKey(effectiveSortKey) ?? undefined,
-        order: effectiveSortDir,
-        limit: paging.limit,
-        offset: paging.offset,
-      }),
-      // The facets must describe the same pinned set as the listing, or the
-      // chips and the creator dropdown lie about the rest of the library.
-      listTags({
-        q: search,
-        folder_id: isProject || effectiveUnfiled ? undefined : targetFolderId,
-        unfiled: isProject ? undefined : effectiveUnfiled,
-        project_id: projectId ?? undefined,
-        not_in_project: isProject ? undefined : effectiveNotInProject,
-        missing: missingOnly,
-      }),
-      listCreators({
-        q: search,
-        tags,
-        folder_id: isProject || effectiveUnfiled ? undefined : targetFolderId,
-        unfiled: isProject ? undefined : effectiveUnfiled,
-        project_id: projectId ?? undefined,
-        not_in_project: isProject ? undefined : effectiveNotInProject,
-        missing: missingOnly,
-      }),
-    ]);
+    try {
+      const [assetsResult, tagsResult, creatorsResult] = await Promise.allSettled([
+        fetchAssetPage({
+          projectId,
+          q: search,
+          tags,
+          folderId: targetFolderId,
+          unfiled: effectiveUnfiled,
+          missing: missingOnly,
+          notInProject: effectiveNotInProject,
+          creator: creator ?? undefined,
+          sort: serverSortKey(effectiveSortKey) ?? undefined,
+          order: effectiveSortDir,
+          limit: paging.limit,
+          offset: paging.offset,
+        }),
+        // The facets must describe the same pinned set as the listing, or the
+        // chips and the creator dropdown lie about the rest of the library.
+        listTags({
+          q: search,
+          folder_id: isProject || effectiveUnfiled ? undefined : targetFolderId,
+          unfiled: isProject ? undefined : effectiveUnfiled,
+          project_id: projectId ?? undefined,
+          not_in_project: isProject ? undefined : effectiveNotInProject,
+          missing: missingOnly,
+        }),
+        listCreators({
+          q: search,
+          tags,
+          folder_id: isProject || effectiveUnfiled ? undefined : targetFolderId,
+          unfiled: isProject ? undefined : effectiveUnfiled,
+          project_id: projectId ?? undefined,
+          not_in_project: isProject ? undefined : effectiveNotInProject,
+          missing: missingOnly,
+        }),
+      ]);
+      // A newer request owns the list now; this result must not repaint it.
+      if (id !== seq.current) return;
 
-    if (assetsResult.status === "fulfilled") {
-      setItems(assetsResult.value.items);
-      setOffset(assetsResult.value.items.length);
-      setHasMore(assetsResult.value.hasMore);
-      setError(null);
-    } else {
-      handleApiError(assetsResult.reason, "Failed to load assets. Please sign in again or refresh.");
-      // An auth failure signs the operator out, so an inline retry would be
-      // nonsense; every other failure is retryable in place.
-      if (!(assetsResult.reason instanceof UnauthorizedError)) {
-        setError("Failed to load assets.");
+      if (assetsResult.status === "fulfilled") {
+        setItems(assetsResult.value.items);
+        setOffset(assetsResult.value.items.length);
+        setHasMore(assetsResult.value.hasMore);
+        setError(null);
+      } else {
+        handleApiError(
+          assetsResult.reason,
+          "Failed to load assets. Please sign in again or refresh.",
+        );
+        // An auth failure signs the operator out, so an inline retry would be
+        // nonsense; every other failure is retryable in place.
+        if (!(assetsResult.reason instanceof UnauthorizedError)) {
+          setError("Failed to load assets.");
+        }
+      }
+
+      if (tagsResult.status === "fulfilled") {
+        setAllTags(tagsResult.value);
+      } else {
+        setAllTags([]);
+        handleApiError(tagsResult.reason);
+      }
+
+      if (creatorsResult.status === "fulfilled") {
+        setCreators(creatorsResult.value);
+      } else {
+        setCreators([]);
+        handleApiError(creatorsResult.reason);
+      }
+    } finally {
+      // The raiser lowers its own flag: a superseded refresh must not clear the
+      // spinner of the request that replaced it.
+      if (loadingOwner.current === id) {
+        loadingOwner.current = 0;
+        setLoading(false);
       }
     }
-
-    if (tagsResult.status === "fulfilled") {
-      setAllTags(tagsResult.value);
-    } else {
-      setAllTags([]);
-      handleApiError(tagsResult.reason);
-    }
-
-    if (creatorsResult.status === "fulfilled") {
-      setCreators(creatorsResult.value);
-    } else {
-      setCreators([]);
-      handleApiError(creatorsResult.reason);
-    }
-
-    setLoading(false);
   });
 
   const loadMore = useStableCallback(async () => {
-    if (loadingMore || !hasMore) return;
+    if (inFlightMore.current || !hasMore) return;
+    inFlightMore.current = true;
+    const id = ++seq.current;
     setLoadingMore(true);
     try {
       const data = await fetchAssetPage({
@@ -244,22 +277,37 @@ export function useAssetList({
         limit: pageSize,
         offset,
       });
+      // Superseded by a newer request: appending here would splice a stale page
+      // onto a list it no longer describes.
+      if (id !== seq.current) return;
       setItems(prev => [...prev, ...data.items]);
       setOffset(offset + data.items.length);
       setHasMore(data.hasMore);
     } catch (err) {
+      // A stale failure belongs to a list nobody is showing any more.
+      if (id !== seq.current) return;
       handleApiError(err, "Failed to load more assets.");
     } finally {
+      inFlightMore.current = false;
       setLoadingMore(false);
     }
   });
 
+  // One entry refresh per pile. Folder, Unfiled, missing-only and project are
+  // four separate piles, so the key carries all four - a boolean guard would
+  // stop refetching on a filter change. The refetch starts at the first page,
+  // like every other pile change.
+  const pileKey = `${projectId ?? ""}|${folderId ?? ""}|${unfiled ? 1 : 0}|${missingOnly ? 1 : 0}`;
+  // React.StrictMode invokes this effect twice for the same mount; a second
+  // (list + tags + creators) request would be a real double fetch of the same
+  // first page. Guarding here rather than from the cleanup keeps the first
+  // request alive: a cleanup-driven reset would discard its only result.
+  const walked = useRef<string | null>(null);
   useEffect(() => {
-    // A switch between All files and Unfiled is a new pile, so it refetches from
-    // the first page like a folder change. Entering or leaving the pinned
-    // missing-files mode is likewise a new pile.
-    refresh();
-  }, [folderId, unfiled, missingOnly, projectId, refresh]);
+    if (walked.current === pileKey) return;
+    walked.current = pileKey;
+    void refresh();
+  }, [pileKey, refresh]);
   // `assetsVersion` bumps when another view (upload, folder scan) changed
   // assets. Refetch in place instead of remounting: the ref is seeded with the
   // current version so mounting performs no extra fetch, and comparing values

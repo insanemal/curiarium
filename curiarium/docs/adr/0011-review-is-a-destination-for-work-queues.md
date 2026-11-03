@@ -440,18 +440,30 @@ destination model, the count rule, the role threshold and the fetch policy.
   is file-level: move an entry back into the storage folder, then rescan the
   library." - and a grep for "Settings → Storage" under `curiarium/web/src` now
   finds only the two test files that assert it is gone.
-- Two limitations are inherited and recorded rather than claimed fixed. The
-  shared `useAssetList` has no newest-wins request sequence and no
-  React.StrictMode guard, so under StrictMode the missing queue issues two list
-  fetches; the library behaves the same way and this slice did not touch that
-  hook's fetch policy, so a follow-up is owed. The StrictMode claim this ADR does
-  make is narrower than it sounds: it covers the four queue hooks' own `walked`
-  refs - `useBundleDetect`, `useImportRuns`, `useLibraryScan` and `useTrash` -
-  each of which keeps its own entry read to one per activation. The shared
-  `useAssetList` above is the exception.
-  And only the flat branch of the grid is virtualised: the grouped (folder/type)
-  branch remains a 24-card cap with a "Show all N" control, preserved as it was
-  at HEAD, because retrofitting group virtualisation is a different ticket.
+- The shared fetch policy was an inherited limitation and is now closed. This
+  slice recorded a `useAssetList` with no newest-wins request sequence and no
+  React.StrictMode guard, so under StrictMode the missing queue issued two list
+  fetches. Ticket `Mf-m45p` fixed that hook instead of leaving it to a follow-up.
+  `refresh` and `loadMore` now share one newest-wins sequence: a response that
+  started earlier is dropped whichever order the two settle in, so the last
+  request to start owns the list. That is invalidation, not cancellation - the
+  listing call takes no AbortSignal. The entry effect is guarded by a walked ref
+  keyed on the pile (folder, Unfiled, missing-only, project), so one entry issues
+  one list request, one tags request and one creators request, while a pile
+  change still refetches because the key changes with it. Two Load more clicks in
+  one tick are collapsed by a ref latch, since both would otherwise read the
+  pre-update `loadingMore` state and append the same page twice. The StrictMode
+  claim this ADR makes is therefore uniform rather than narrower than it sounds:
+  the four queue hooks keep their own `walked` refs - `useBundleDetect`,
+  `useImportRuns`, `useLibraryScan` and `useTrash`, each holding its entry read to
+  one per activation - and the shared `useAssetList` now does the same. Two
+  caveats sit outside that claim: it does not cover the hook's folder-tree read,
+  and offset paging is not cursor paging, so a `limit`/`offset` listing can still
+  skip or repeat a row when the underlying set changes under it.
+- One limitation stays inherited and unchanged: only the flat branch of the grid
+  is virtualised. The grouped (folder/type) branch remains a 24-card cap with a
+  "Show all N" control, preserved as it was at HEAD, because retrofitting group
+  virtualisation is a different ticket.
 - An untouched, pre-existing heuristic remains a known sharp edge. A successful
   walk over a partially mounted storage root can flag present files as missing,
   because presence falls through to `(root/managed_rel).exists()`, which is

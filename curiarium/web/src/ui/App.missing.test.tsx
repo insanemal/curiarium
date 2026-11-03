@@ -467,9 +467,11 @@ describe("App missing queue entry policy and pin (Mf-1tx3)", () => {
     await settle(30);
 
     expect(getQueueStatusMock).toHaveBeenCalledTimes(1);
-    // No `listAssets` count is asserted on purpose: the shared `useAssetList`
-    // has no StrictMode guard yet. That is a recorded follow-up, not a claim
-    // this ticket makes.
+    // No `listAssets` count is asserted on purpose: this test owns the scan
+    // status, not the listing. The shared `useAssetList` now does have a
+    // StrictMode entry guard - a walked ref keyed on the pile, added by ticket
+    // `Mf-m45p` - so a one-list-fetch count here would hold; it is simply the
+    // claim `asset-grid/useAssetList.test.tsx` already makes.
   });
 
   it("keeps the queue open across a Files/Projects mode switch without re-reading the status", async () => {
