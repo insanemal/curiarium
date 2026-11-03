@@ -258,6 +258,11 @@ export function useAssetList({
   });
 
   const loadMore = useStableCallback(async () => {
+    // The latch, not the `loadingMore` state: a burst of programmatic clicks in
+    // one task all read the pre-update `false`, so only this ref can collapse
+    // them into one append. Real input is stopped a step earlier by the button's
+    // `disabled={loadingMore}`. Residual (Mf-m45p): offset paging can still
+    // repeat or skip one row if the server's set shifts between pages.
     if (inFlightMore.current || !hasMore) return;
     inFlightMore.current = true;
     const id = ++seq.current;
