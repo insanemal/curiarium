@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import type { AssetFile } from "../../lib/api";
 import WorkspaceHeader from "../WorkspaceHeader";
+import ConfirmDialog from "../ConfirmDialog";
 import AssetFilePreview from "./AssetFilePreview";
 
 vi.mock("../../lib/api", async importOriginal => ({
@@ -37,6 +38,28 @@ function Host(): ReactElement {
   );
 }
 
+const PREVIEW_UNAVAILABLE = "Preview is not available for this file type.";
+
+function Stacked({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}): ReactElement {
+  const [open, setOpen] = useState(true);
+  return (
+    <>
+      {open && <AssetFilePreview assetId="a1" file={FILE} onClose={() => setOpen(false)} />}
+      <ConfirmDialog
+        title="Remove instructions.pdf from this model?"
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />
+    </>
+  );
+}
+
 describe("AssetFilePreview Escape ownership", () => {
   it("one Escape closes only the innermost surface", async () => {
     render(<Host />);
@@ -54,5 +77,27 @@ describe("AssetFilePreview Escape ownership", () => {
     // Nothing in the tree claims the second one, so it reaches the document.
     fireEvent.keyDown(document.body, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps the preview open when a sibling ConfirmDialog consumes Escape", async () => {
+    const onCancel = vi.fn();
+    const onConfirm = vi.fn();
+    render(<Stacked onCancel={onCancel} onConfirm={onConfirm} />);
+    await screen.findByText(PREVIEW_UNAVAILABLE);
+
+    // Two dialogs are mounted, so target the confirmation by its accessible name.
+    fireEvent.keyDown(
+      screen.getByRole("dialog", { name: "Remove instructions.pdf from this model?" }),
+      { key: "Escape" },
+    );
+
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+    // The dialog claimed the key, so the preview underneath must stay.
+    expect(screen.getByText(PREVIEW_UNAVAILABLE)).toBeTruthy();
+
+    // Nothing in the tree claims the second one, so it reaches the document.
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.queryByText(PREVIEW_UNAVAILABLE)).toBeNull();
   });
 });

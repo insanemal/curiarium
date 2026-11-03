@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, createEvent, fireEvent, render, screen } from "@testing-library/react";
 
 import ConfirmDialog from "./ConfirmDialog";
 
@@ -45,9 +45,13 @@ describe("ConfirmDialog", () => {
 
   it("calls onCancel when Escape is pressed", () => {
     const { props } = renderDialog();
+    const dialog = screen.getByRole("dialog");
 
-    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    const event = createEvent.keyDown(dialog, { key: "Escape" });
+    fireEvent(dialog, event);
 
+    // The consumption signal the document-bubble surfaces below read.
+    expect(event.defaultPrevented).toBe(true);
     expect(props.onCancel).toHaveBeenCalledTimes(1);
   });
 
@@ -59,8 +63,12 @@ describe("ConfirmDialog", () => {
     for (const button of buttons) expect(button.disabled).toBe(true);
 
     fireEvent.click(buttons[1]);
-    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    const dialog = screen.getByRole("dialog");
+    const event = createEvent.keyDown(dialog, { key: "Escape" });
+    fireEvent(dialog, event);
 
+    // Consumed but not acted on: the dialog still owns Escape while busy.
+    expect(event.defaultPrevented).toBe(true);
     expect(props.onConfirm).not.toHaveBeenCalled();
     expect(props.onCancel).not.toHaveBeenCalled();
   });
