@@ -14,6 +14,13 @@ header).
 group is no longer rendered by both sidebars, it is a tablist inside the Review
 destination reached from a single shared header.
 
+**Amended:** 2026-11-03 - ticket `Mf-en7k` corrects this record's file
+inventory. `Mf-vinb` deleted `ui/review/ReviewNav.tsx` and its test and
+`Mf-x1p4` deleted `ui/ProjectSidebar.tsx`, so every passage naming them is now
+stated as history, and each REVIEW role gate is pointed at the test that pins it
+today: `ui/review/ReviewQueueTabs.test.tsx` for the rows, one by one, and
+`ui/WorkspaceHeader.test.tsx` for the Review entry. No decision changes.
+
 **Extended:** ADR 0010, whose report is the first tenant of this surface.
 
 ## Context
@@ -60,14 +67,15 @@ destination model, the count rule, the role threshold and the fetch policy.
    inside this slice would have meant inventing a routing model for four surfaces
    at once.
 
-2. **REVIEW is one group, rendered by both sidebars.** `ui/review/ReviewNav.tsx`
-   is rendered by `Sidebar.tsx` and `ProjectSidebar.tsx` with identical props,
-   immediately above the shared footer, so the group is present in Files and
-   Projects mode and the two sidebars cannot drift apart. Switching mode does
-   **not** close an open queue (the group is shared, so the operator's place
-   survives); library navigation - selecting a folder or the unfiled pile,
-   opening a project, Imports running's "Scan now" - still returns to the
-   library, because those are browsing actions.
+2. **REVIEW is one group.** As accepted, both sidebars rendered a copy of it:
+   `ui/review/ReviewNav.tsx` was rendered by `Sidebar.tsx` and
+   `ProjectSidebar.tsx` with identical props, immediately above the shared
+   footer, so the group was present in Files and Projects mode and the two
+   sidebars could not drift apart. Switching mode does **not** close an open
+   queue (the group is shared, so the operator's place survives); library
+   navigation - selecting a folder or the unfiled pile, opening a project,
+   Imports running's "Scan now" - still returns to the library, because those
+   are browsing actions.
 
    **Superseded by `Mf-vinb` (2026-11-02).** The paragraph above is the decision
    as accepted, kept as its history; the two sidebar copies it describes are
@@ -493,7 +501,8 @@ no API, permission, audit, migration or schema change is involved.
 ## Verification
 
 - `ui/App.review.test.tsx` proves the destination and the fetch policy through the
-  real `ReviewNav` and the real `BundleReviewView`: no `GET /bundles/detect` before
+  real `App` - the header's Review entry and the destination's own tab row - and
+  the real `BundleReviewView`: no `GET /bundles/detect` before
   the queue is opened, exactly one on entry with `{includeDismissed: true, limit:
   1000}`, one refetch after a create and one after a dismiss with the badge and the
   view both updating from that single new report, no timer firing while the
@@ -519,14 +528,20 @@ no API, permission, audit, migration or schema change is involved.
   truncated report whose rows look complete is `null`, a dismissed row and an
   already-created row are each excluded once, a row that is both is not subtracted
   twice, and blocked rows count.
-- `ui/review/ReviewNav.test.tsx` pins each row's own role gate - `contributor`
-  for bundles, `viewer` for imports, missing and trash - the dash for an
-  unknown count, and `aria-current` on exactly the open queue;
-  the group is proven by `WorkspaceHeader.test.tsx` (the Review entry exists
-  exactly once for every role that has a queue, and never for a role that has
-  none) and by `ReviewQueueTabs.test.tsx` (the destination's tab row, its role
-  thresholds and its counts), not by a per-mode sidebar: `Mf-x1p4` removed
-  `ProjectSidebar.tsx` and its test, and `Sidebar.tsx` no longer carries the
+- `ui/review/ReviewQueueTabs.test.tsx` pins each row's own role gate, row by row:
+  bundles from `contributor` up (a viewer gets no bundle row), imports, missing
+  and trash from `viewer` up, no tablist at all while the role is unknown, the
+  dash for an unknown count, and exactly one `aria-selected` tab. It is the pin
+  that replaces the one that went with the deleted component: `Mf-vinb` removed
+  `ui/review/ReviewNav.tsx` and its test, and the open-queue marker is
+  `aria-selected` on the tabs, not `aria-current`, which is the header Review
+  entry's own attribute (`WorkspaceHeader.test.tsx`, "marks the Review entry
+  current only while Review is the open view"). The group's single entry is
+  proven there too (the Review entry exists exactly once for every role that has
+  a queue, and never for a role that has none) and end to end by
+  `ui/App.review.test.tsx` ("gives a viewer no bundle tab and never walks the
+  library"), not by a per-mode sidebar: `Mf-x1p4` removed
+  `ProjectSidebar.tsx` and its test, and `Sidebar.tsx` carries no part of the
   group.
 - `ui/Settings.test.tsx` is the removal proof: for an editor, a contributor and a
   viewer, opening Imports and Import sources renders no bundle surface and no run
@@ -549,10 +564,13 @@ no API, permission, audit, migration or schema change is involved.
   control, label and status string, and `ui/App.imports.test.tsx` proves an
   upload from the queue creates the folder, fires both change signals and
   navigates.
-- `ui/App.imports.test.tsx` also proves the coordinator: the sidebar badge text
-  equals the queue header count on one fetch, the badge is a dash before entry,
+- `ui/App.imports.test.tsx` also proves the coordinator: the imports tab's badge
+  (the `.sidebar-count` span inside `review-count-imports`) is worded from the
+  same count as the queue header on one fetch, the badge is a dash before entry,
   1 while a run is running and 0 once it is finished, and the Imports row renders
-  for a viewer as well as an editor while no bundle row appears for a viewer.
+  for a viewer as well as an editor. The viewer's missing bundle row is not this
+  file's claim: `ui/App.review.test.tsx` and `ui/review/ReviewQueueTabs.test.tsx`
+  pin it, the latter row by row.
 - `src/lib/noNativeDialogs.test.ts` and `src/lib/palette.test.ts` stay green: the
   queues raise no native dialog - the queue-native confirmations are
   `ConfirmDialog`, and asset deletion keeps its own typed `AssetDeleteDialog` -
@@ -616,16 +634,16 @@ one per activation including under `React.StrictMode`, a refetch on re-entry, no
 timer however long the queue stays open, the newest response winning, a 401
 signing out instead of reporting an error, one refetch after a successful purge,
 and a failed purge that sets only `purgeError` and keeps the rows.
-`ui/App.trash.test.tsx` (10) proves the destination end to end: the Trash row in
-both sidebars, the en dash before entry and the header number after it, no read
-at app load, one read per entry including under `React.StrictMode`, the queue
-surviving a Files/Projects switch, and - for an admin alone - a purge that
-refetches exactly once and moves the badge and the header to zero, against a
-viewer who gets the queue, its rows, its sizes and Refresh but no path to a
-purge. `ui/ConfirmDialog.test.tsx`
+`ui/App.trash.test.tsx` (10) proves the destination end to end: one Trash tab
+in one tablist whichever mode is showing, the en dash before entry and the
+header number after it, no read at app load, one read per entry including under
+`React.StrictMode`, the queue surviving a Files/Projects switch, and - for an
+admin alone - a purge that refetches exactly once and moves the badge and the
+header to zero, against a viewer who gets the queue, its rows, its sizes and
+Refresh but no path to a purge. `ui/ConfirmDialog.test.tsx`
 grew three cases for `body`, `confirmDisabled` and `busyLabel` - Escape still
 closes, and autofocus lands on Cancel when confirming is refused - while
-`ui/review/ReviewNav.test.tsx` pins the Trash row for all four roles,
+`ui/review/ReviewQueueTabs.test.tsx` pins the Trash row for all four roles,
 `ui/review/useReviewCounts.test.ts` pins `trashBadgeCount` and the wordings that
 read it, `ui/settings/StorageSection.test.tsx` proves no trash surface is left
 there, and `ui/Settings.test.tsx` is the removal proof by call: no request to
@@ -646,8 +664,9 @@ This ADR is superseded if any of the following becomes true:
   entry and never polls);
 - an unknown count starts rendering as `0`, or a truncated report starts
   producing a number;
-- the REVIEW group is rendered differently by the two sidebars, or one mode stops
-  showing it;
+- the REVIEW group gains a second carrier beside the header - a sidebar or a mode
+  pane rendering its own copy of it - or one mode stops reaching it from the
+  header;
 - a bundle row becomes creatable while blocked or already a project, or blocked
   rows stop counting toward the badge;
 - the UI gate for a bundle write moves away from the route's CONTRIBUTE
