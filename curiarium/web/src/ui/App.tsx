@@ -8,6 +8,7 @@ import FolderDrawer from "./FolderDrawer";
 import Login from "./Login";
 import AuditLog from "./AuditLog";
 import NotPermitted from "./NotPermitted";
+import ErrorBoundary from "./ErrorBoundary";
 import UploadQueuePanel from "./UploadQueuePanel";
 import {
   UnauthorizedError,
@@ -763,127 +764,134 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
               </button>
             </div>
           </header>
-          {/* Same lazy-mount rule as the rail: each mode's grid is created on
-              first visit and then stays mounted (only hidden), so search, sort,
-              selection and loaded pages survive a mode switch. */}
-          {activeView === "library" && visitedModes.files && (
-            <div hidden={mode !== "files"}>
-              <AssetGrid
-                canContribute={canContribute}
-                canDelete={canDelete}
-                folderId={folderId}
-                unfiled={unfiled}
-                foldersVersion={folderVersion}
-                assetsVersion={assetsVersion}
-                countsVersion={countsVersion}
-                onAssetsFiled={handleAssetsFiled}
-                onUnauthorized={handleUnauthorized}
-                slicerSettings={settings.slicer}
-                engravingSettings={settings.engraving}
-                previewSettings={settings.previews}
-                theme={resolvedTheme}
-                scrollElementRef={mainScrollRef}
-                onNavigateFolder={handleSelectFolder}
-                onProjectsChanged={handleAssetsChanged}
-              />
-            </div>
-          )}
-          {activeView === "library" && visitedModes.projects && (
-            <div hidden={mode !== "projects"}>
-              <ProjectView
-                canContribute={canContribute}
-                canDelete={canDelete}
-                projects={projects}
-                selectedProjectId={openProjectId}
-                onOpenProject={handleOpenProject}
-                onCloseProject={handleCloseProject}
-                onProjectCreated={handleProjectCreated}
-                onProjectUpdated={handleProjectUpdated}
-                onProjectDeleted={handleProjectDeleted}
-                onAssetsChanged={handleAssetsChanged}
-                assetsVersion={assetsVersion}
-                onUnauthorized={handleUnauthorized}
-                slicerSettings={settings.slicer}
-                engravingSettings={settings.engraving}
-                previewSettings={settings.previews}
-                theme={resolvedTheme}
-                scrollElementRef={mainScrollRef}
-              />
-            </div>
-          )}
-          {activeView === "settings" && (
-            <React.Suspense fallback={<SettingsLoading />}>
-              <Settings
-                settings={settings}
-                onChange={setSettings}
-                onUnauthorized={handleUnauthorized}
-                role={role}
-                username={identity.username}
-                kind={identity.kind}
-              />
-            </React.Suspense>
-          )}
-          {activeView === "review" && (
-            <>
-              <ReviewQueueTabs
-                activeQueue={resolvedQueue}
-                counts={reviewCounts}
-                onSelect={handleOpenReview}
-                role={role}
-              />
-              {/* One tabpanel for whichever queue the role may actually open: a
-                  stored key the role cannot see is resolved away, so the panel
-                  and the selected tab always name the same queue - the row reads
-                  the resolved key too, because a tablist with no selected tab
-                  would leave the panel labelled by an unselected one. */}
-              {resolvedQueue !== null && (
-                <div
-                  role="tabpanel"
-                  id={`review-tabpanel-${resolvedQueue}`}
-                  aria-labelledby={`review-tab-${resolvedQueue}`}
-                >
-                  {resolvedQueue === "bundles" && (
-                    <BundleReviewView state={bundleReview} canContribute={canContribute} />
-                  )}
-                  {resolvedQueue === "imports" && (
-                    <ImportsReviewView
-                      state={importsReview}
-                      canWrite={canDelete}
-                      onAssetsChanged={handleAssetsChanged}
-                      onFoldersChanged={handleFoldersChanged}
-                      onUnauthorized={handleUnauthorized}
-                      onSelectFolder={handleSelectFolder}
-                    />
-                  )}
-                  {resolvedQueue === "missing" && (
-                    <MissingFilesReviewView
-                      state={missingReview}
-                      canWrite={canDelete}
-                      canContribute={canContribute}
-                      canDelete={canDelete}
-                      missingCount={counts ? counts.missing : null}
-                      assetsVersion={assetsVersion}
-                      onRefresh={handleAssetsChanged}
-                      onAssetsFiled={handleAssetsFiled}
-                      onUnauthorized={handleUnauthorized}
-                      slicerSettings={settings.slicer}
-                      engravingSettings={settings.engraving}
-                      previewSettings={settings.previews}
-                      theme={resolvedTheme}
-                      scrollElementRef={mainScrollRef}
-                    />
-                  )}
-                  {resolvedQueue === "trash" && (
-                    <TrashQueueView state={trashReview} canPurge={canPurgeTrash} />
-                  )}
-                </div>
-              )}
-            </>
-          )}
-          {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}
-          {activeView === "audit" && roleAtLeast(role, "admin") && (
-            <AuditLog onUnauthorized={handleUnauthorized} />
-          )}
+          {/* A rejected lazy chunk throws during render and React unwinds to
+              the nearest boundary. Keying by `activeView` means navigating to
+              another view (or back) recovers without a reload, and the shell
+              (rail, header, log out) sits outside the boundary so the screen is
+              never blank. */}
+          <ErrorBoundary key={activeView}>
+            {/* Same lazy-mount rule as the rail: each mode's grid is created on
+                first visit and then stays mounted (only hidden), so search, sort,
+                selection and loaded pages survive a mode switch. */}
+            {activeView === "library" && visitedModes.files && (
+              <div hidden={mode !== "files"}>
+                <AssetGrid
+                  canContribute={canContribute}
+                  canDelete={canDelete}
+                  folderId={folderId}
+                  unfiled={unfiled}
+                  foldersVersion={folderVersion}
+                  assetsVersion={assetsVersion}
+                  countsVersion={countsVersion}
+                  onAssetsFiled={handleAssetsFiled}
+                  onUnauthorized={handleUnauthorized}
+                  slicerSettings={settings.slicer}
+                  engravingSettings={settings.engraving}
+                  previewSettings={settings.previews}
+                  theme={resolvedTheme}
+                  scrollElementRef={mainScrollRef}
+                  onNavigateFolder={handleSelectFolder}
+                  onProjectsChanged={handleAssetsChanged}
+                />
+              </div>
+            )}
+            {activeView === "library" && visitedModes.projects && (
+              <div hidden={mode !== "projects"}>
+                <ProjectView
+                  canContribute={canContribute}
+                  canDelete={canDelete}
+                  projects={projects}
+                  selectedProjectId={openProjectId}
+                  onOpenProject={handleOpenProject}
+                  onCloseProject={handleCloseProject}
+                  onProjectCreated={handleProjectCreated}
+                  onProjectUpdated={handleProjectUpdated}
+                  onProjectDeleted={handleProjectDeleted}
+                  onAssetsChanged={handleAssetsChanged}
+                  assetsVersion={assetsVersion}
+                  onUnauthorized={handleUnauthorized}
+                  slicerSettings={settings.slicer}
+                  engravingSettings={settings.engraving}
+                  previewSettings={settings.previews}
+                  theme={resolvedTheme}
+                  scrollElementRef={mainScrollRef}
+                />
+              </div>
+            )}
+            {activeView === "settings" && (
+              <React.Suspense fallback={<SettingsLoading />}>
+                <Settings
+                  settings={settings}
+                  onChange={setSettings}
+                  onUnauthorized={handleUnauthorized}
+                  role={role}
+                  username={identity.username}
+                  kind={identity.kind}
+                />
+              </React.Suspense>
+            )}
+            {activeView === "review" && (
+              <>
+                <ReviewQueueTabs
+                  activeQueue={resolvedQueue}
+                  counts={reviewCounts}
+                  onSelect={handleOpenReview}
+                  role={role}
+                />
+                {/* One tabpanel for whichever queue the role may actually open: a
+                    stored key the role cannot see is resolved away, so the panel
+                    and the selected tab always name the same queue - the row reads
+                    the resolved key too, because a tablist with no selected tab
+                    would leave the panel labelled by an unselected one. */}
+                {resolvedQueue !== null && (
+                  <div
+                    role="tabpanel"
+                    id={`review-tabpanel-${resolvedQueue}`}
+                    aria-labelledby={`review-tab-${resolvedQueue}`}
+                  >
+                    {resolvedQueue === "bundles" && (
+                      <BundleReviewView state={bundleReview} canContribute={canContribute} />
+                    )}
+                    {resolvedQueue === "imports" && (
+                      <ImportsReviewView
+                        state={importsReview}
+                        canWrite={canDelete}
+                        onAssetsChanged={handleAssetsChanged}
+                        onFoldersChanged={handleFoldersChanged}
+                        onUnauthorized={handleUnauthorized}
+                        onSelectFolder={handleSelectFolder}
+                      />
+                    )}
+                    {resolvedQueue === "missing" && (
+                      <MissingFilesReviewView
+                        state={missingReview}
+                        canWrite={canDelete}
+                        canContribute={canContribute}
+                        canDelete={canDelete}
+                        missingCount={counts ? counts.missing : null}
+                        assetsVersion={assetsVersion}
+                        onRefresh={handleAssetsChanged}
+                        onAssetsFiled={handleAssetsFiled}
+                        onUnauthorized={handleUnauthorized}
+                        slicerSettings={settings.slicer}
+                        engravingSettings={settings.engraving}
+                        previewSettings={settings.previews}
+                        theme={resolvedTheme}
+                        scrollElementRef={mainScrollRef}
+                      />
+                    )}
+                    {resolvedQueue === "trash" && (
+                      <TrashQueueView state={trashReview} canPurge={canPurgeTrash} />
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+            {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}
+            {activeView === "audit" && roleAtLeast(role, "admin") && (
+              <AuditLog onUnauthorized={handleUnauthorized} />
+            )}
+          </ErrorBoundary>
         </main>
         {/* App's conditional children are only ever APPENDED after <main> in
             this array. React reconciles an unkeyed children array by index, so a

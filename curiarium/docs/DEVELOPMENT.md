@@ -223,6 +223,22 @@ for three.js again. `dist/index.html` therefore carries no
 `<link rel="modulepreload">` at all — if one appears, something started eagerly
 importing the split modules again.
 
+A rejected split chunk no longer blanks the page. `src/ui/ErrorBoundary.tsx` is
+mounted inside `<main>` in `App.tsx` around the routed views (keyed by the active
+view, so switching views recovers) and reused compactly around the two 3D
+previews in `preview.tsx`, so a failed `ModelViewer-*.js` replaces one preview
+cell or modal rather than the whole library view. A rejected lazy `import()`
+renders a recoverable screen with "Reload app" instead of an empty shell; a
+rejected lazy loader stays rejected for the page's lifetime, so the chunk path
+offers no retry, while an ordinary render failure also offers "Try again".
+"Reload app" goes through `src/lib/reload.ts`, whose `?reload=<now>`
+parameter makes the document URL a fresh cache key: nginx serves `index.html` with
+`no-cache` and the hashed `/assets/*` files with `immutable`, so the fresh
+document names the current chunk graph. That cache-buster guarantees a fresh
+document request; it cannot invalidate old hashed chunks (harmless — nothing
+references them any more), and no client-side action helps if the server itself
+still serves a stale `index.html`.
+
 ## Schema migration rules
 
 - Add the next immutable `Migration` entry in `api/migrations.py`.
