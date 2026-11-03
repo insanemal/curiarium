@@ -409,6 +409,21 @@ describe("ProjectView", () => {
     );
   });
 
+  it("moves focus to Back when the open project lands with a list still loading", () => {
+    const { rerender } = render(
+      <ProjectView {...viewProps({ projects: null, selectedProjectId: "p1" })} />,
+    );
+    // The import sets the open id before the first list resolves, so this render
+    // has no Back button for the effect to focus.
+    expect(screen.getByText("Loading projects…")).toBeTruthy();
+
+    rerender(<ProjectView {...viewProps({ selectedProjectId: "p1" })} />);
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Back to projects" }),
+    );
+  });
+
   it("Escape also returns focus to the originating card", () => {
     function Harness() {
       const [selected, setSelected] = useState<string | null>("p1");

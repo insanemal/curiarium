@@ -153,7 +153,9 @@ export default function ProjectView({
   scrollElementRef,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const backButtonRef = useRef<HTMLButtonElement | null>(null);
+  // State, not a ref: an import can set the open id before the first project
+  // list resolves, so the open-side focus has to re-run when Back appears.
+  const [backButton, setBackButton] = useState<HTMLButtonElement | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const noticeRef = useRef<HTMLParagraphElement | null>(null);
@@ -173,12 +175,14 @@ export default function ProjectView({
 
   // Open → Back; close → the card that was open, or the search box when a live
   // filter hides it. A created or deleted card is handled by the effects below,
-  // which own their own landing target.
+  // which own their own landing target. The open side is keyed on the button's
+  // presence, not on the id alone: an import can set the id before the first
+  // list resolves, and Back only mounts with that list.
   useEffect(() => {
     const previous = previousSelectedId.current;
     previousSelectedId.current = selectedProjectId;
     if (selectedProjectId) {
-      backButtonRef.current?.focus();
+      backButton?.focus();
       return;
     }
     if (!previous) return;
@@ -196,7 +200,7 @@ export default function ProjectView({
     // `selectedProjectId` is null, and App never returns `projects` to null after
     // the first load, so `Loading projects…` is unreachable from a close.
     searchInputRef.current?.focus();
-  }, [selectedProjectId, cardFor]);
+  }, [selectedProjectId, cardFor, backButton]);
 
   // A project deleted elsewhere cannot stay open: the detail view would be a
   // dead end. The list owns the truth, so close back to it.
@@ -315,7 +319,7 @@ export default function ProjectView({
         </nav>
         <div>
           <button
-            ref={backButtonRef}
+            ref={setBackButton}
             type="button"
             onClick={handleBack}
             aria-label="Back to projects"
