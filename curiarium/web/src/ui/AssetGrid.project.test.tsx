@@ -61,6 +61,7 @@ import {
   batchSetTags,
   deleteAsset,
   listAssets,
+  listCreators,
   listFolders,
   listProjectAssets,
   listTags,
@@ -73,6 +74,7 @@ import { getToasts, resetToasts } from "../lib/toast";
 import { ESTIMATED_ROW_HEIGHT, GRID_GAP_PX, colsForWidth } from "../lib/virtualGrid";
 
 const listAssetsMock = vi.mocked(listAssets);
+const listCreatorsMock = vi.mocked(listCreators);
 const listProjectAssetsMock = vi.mocked(listProjectAssets);
 const listFoldersMock = vi.mocked(listFolders);
 const listTagsMock = vi.mocked(listTags);
@@ -196,6 +198,7 @@ function rectOf(top: number, height: number): DOMRect {
 
 beforeEach(() => {
   listAssetsMock.mockReset();
+  listCreatorsMock.mockReset();
   listProjectAssetsMock.mockReset();
   listFoldersMock.mockReset();
   listTagsMock.mockReset();
@@ -203,6 +206,7 @@ beforeEach(() => {
   resetToasts();
 
   listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+  listCreatorsMock.mockResolvedValue([]);
   listProjectAssetsMock.mockResolvedValue({ items: assets, hasMore: false });
   listFoldersMock.mockResolvedValue([]);
   listTagsMock.mockResolvedValue([]);
@@ -317,6 +321,55 @@ describe("AssetGrid in project mode", () => {
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
 
     await waitFor(() => expect(screen.queryByText("This project has no files yet.")).toBeNull());
+  });
+
+  it("does not claim an empty project when a creator filter is active", async () => {
+    listProjectAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+    listCreatorsMock.mockResolvedValue(["Ada"]);
+
+    projectGrid();
+
+    // The creator select is mounted in project mode too, so a creator that
+    // matches nothing in this project is an empty result, not an empty project.
+    const creatorSelect = await screen.findByRole("combobox", { name: "Creator" });
+    expect(await screen.findByText("This project has no files yet.")).toBeTruthy();
+    fireEvent.change(creatorSelect, { target: { value: "Ada" } });
+
+    const filterBlock = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>("[data-project-empty-filter]");
+      if (!found) throw new Error("project filtered-empty state not rendered");
+      return found;
+    });
+    expect(
+      within(filterBlock).getByText("No files in this project match this filter"),
+    ).toBeTruthy();
+    expect(document.querySelector("[data-project-empty]")).toBeNull();
+    expect(screen.queryByText("This project has no files yet.")).toBeNull();
+  });
+
+  it("gives a tag-filtered empty project the filtered-empty line", async () => {
+    listProjectAssetsMock.mockResolvedValue({ items: [], hasMore: false });
+    listTagsMock.mockResolvedValue(["pla"]);
+
+    projectGrid();
+    await screen.findByText("This project has no files yet.");
+
+    // A tag chip that matches nothing is an empty result, not an empty project.
+    fireEvent.click(await screen.findByRole("button", { name: "pla" }));
+
+    const filterBlock = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>("[data-project-empty-filter]");
+      if (!found) throw new Error("project filtered-empty state not rendered");
+      return found;
+    });
+    expect(
+      within(filterBlock).getByText("No files in this project match this filter"),
+    ).toBeTruthy();
+    expect(
+      within(filterBlock).getByText("Clear the search and the filters to see the whole project."),
+    ).toBeTruthy();
+    expect(document.querySelector("[data-project-empty]")).toBeNull();
+    expect(screen.queryByText("This project has no files yet.")).toBeNull();
   });
 
   it("shows the failed fetch, not an empty project, when the listing fails", async () => {

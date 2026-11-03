@@ -194,20 +194,27 @@ export default function AssetGridBody({
         </div>
       )}
 
-      {/* "Empty" only means empty when no filter is narrowing it: a search or
-          tag filter that matched nothing is an empty result, not a new project.
-          `settled` and not a bolted-on `!error` on purpose: it is the same
-          firsthand gate the unfiled/all-files/folder scopes above use, and it
-          keeps a failed fetch from painting an empty project over the error
-          panel. */}
-      {isProject &&
-        settled &&
-        !queryRef.current &&
-        activeTags.length === 0 && (
-          <p className="text-sm opacity-70" data-project-empty>
-            This project has no files yet.
-          </p>
-        )}
+      {/* The project is the last scope to route through the shared `narrowed`
+          flag rather than its own hand-rolled predicate: that flag already
+          folds the search, the tag chips, the creator and `notInProject`, so a
+          creator or tag filter that empties the grid is an empty RESULT and no
+          longer claims the project is empty. `notInProject` is defensive here
+          because its checkbox is files-only and each grid owns its own
+          `useAssetList` state, so it is always false in project mode.
+          `settled` already carries `!error`, so this branch must never re-grow
+          its own `&& !error` (the Mf-qzx5 failure mode) or a failed fetch would
+          paint an empty project over the error panel. */}
+      {isProject && settled && !narrowed && (
+        <p className="text-sm opacity-70" data-project-empty>
+          This project has no files yet.
+        </p>
+      )}
+      {isProject && settled && narrowed && (
+        <div className="text-sm opacity-70" data-project-empty-filter>
+          <p className="font-medium">No files in this project match this filter</p>
+          <p>Clear the search and the filters to see the whole project.</p>
+        </div>
+      )}
 
       {["folder", "type"].includes(sortKey) ? (
         <div className="space-y-4">
@@ -250,9 +257,6 @@ export default function AssetGridBody({
                             {expanded ? "Show fewer" : `Show all ${group.items.length}`}
                           </button>
                         </div>
-                      )}
-                      {!group.items.length && (
-                        <div className="px-2 py-4 text-sm opacity-60">No assets in this folder</div>
                       )}
                     </div>
                   </div>
