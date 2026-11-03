@@ -4,7 +4,9 @@ set -eu
 # Regenerates /etc/nginx/security-headers.conf from SECURITY_HEADERS_* env vars.
 # Runs from /docker-entrypoint.d as UID 101 before nginx starts.
 
-conf_path=/etc/nginx/security-headers.conf
+# The entrypoint never sets SECURITY_HEADERS_CONF_PATH; only the host-side CSP
+# test does, so it can generate a policy into a temporary file.
+conf_path=${SECURITY_HEADERS_CONF_PATH:-/etc/nginx/security-headers.conf}
 tmp_path="${conf_path}.tmp.$$"
 
 default_content_type_options='nosniff'
@@ -29,9 +31,10 @@ is_safe_value() {
 }
 
 # The browser talks to the same origin by default. When an absolute API URL is
-# configured (split-host deployment) that origin must be allowed by connect-src,
-# otherwise every API call is blocked by the CSP. The derived origin is also
-# interpolated into nginx config, so validate it before use.
+# configured (split-host deployment) that origin must be allowed by connect-src
+# (fetch/XHR) and img-src (thumbnails and project covers served by the API),
+# otherwise API calls and every image are blocked by the CSP. The derived origin
+# is also interpolated into nginx config, so validate it before use.
 api_url="${VITE_API_URL:-}"
 if [ -z "$api_url" ] && [ -n "${PUBLIC_URL:-}" ]; then
   api_url="${PUBLIC_URL%/}/api"
@@ -41,16 +44,20 @@ case "$api_url" in
   http://* | https://*) api_origin=$(printf '%s' "$api_url" | sed 's#^\(https\?://[^/?]*\).*#\1#') ;;
 esac
 if [ -n "$api_origin" ] && ! is_safe_value "$api_origin"; then
-  printf '[security-headers] WARNING: ignoring unsafe derived API origin for connect-src; using self only\n' >&2
+  printf '[security-headers] WARNING: ignoring unsafe derived API origin for connect-src and img-src; using self only\n' >&2
   api_origin=""
 fi
 
-connect_sources="'self'"
+# The API origin is vetted once above and consumed by both directives, so
+# connect-src and img-src cannot drift apart.
+api_sources="'self'"
 if [ -n "$api_origin" ] && [ "$api_origin" != "'self'" ]; then
-  connect_sources="$connect_sources $api_origin"
+  api_sources="$api_sources $api_origin"
 fi
 
-default_csp="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src $connect_sources; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+# No media-src: nothing in curiarium/web/src renders <audio> or <video>. Adding
+# it would force a matching edit to the serialised baked security-headers.conf.
+default_csp="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src $api_sources data: blob:; font-src 'self' data:; connect-src $api_sources; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
 lowercase() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'

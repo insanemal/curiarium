@@ -84,7 +84,7 @@ the template and the image's built-in default applies.
 | `API_PORT` | The port the API listens on inside the compose network. | Pinned at `8000`: the web container proxies to `api:8000` by name. |
 | `PUBLIC_URL` | The absolute origin the browser uses. It is also the origin the OIDC redirect URI is derived from. | The origin you will actually browse to, `https://curiarium.example.com`-style: scheme and host, no path, no trailing slash. Empty only for a plain-HTTP deployment reached by address. |
 | `CORS_ORIGINS` | Comma-separated extra origins the API allows a browser to call it from. | Each origin the UI is loaded from, when it differs from `PUBLIC_URL`. Empty means same-origin only. |
-| `VITE_API_URL` | Absolute API base URL written into the web container's runtime config. | Leave empty: the web container derives it from `PUBLIC_URL`. Set it only for a split-origin deployment, and read the CSP trap in [cosmos.md](../docs/guides/cosmos.md) first. |
+| `VITE_API_URL` | Absolute API base URL written into the web container's runtime config. | Leave empty: the web container derives it from `PUBLIC_URL`. Set it only for a split-origin deployment, and read the split-origin note in [cosmos.md](../docs/guides/cosmos.md) first. |
 | `VITE_ALLOWED_HOSTS` | Extra hostnames accepted by the Vite dev server and `vite preview` only. The shipped web container is nginx with `server_name _;`, which answers any `Host`. | Leave empty in this deployment: nothing in the container reads it, so it constrains nothing there. |
 | `AUTH_USERNAME` | The break-glass local account name. | Choose it. It is inert from the moment an enabled administrator exists. |
 | `AUTH_PASSWORD` | The break-glass local password. | Chosen by the operator, then deleted once a real administrator exists. Never the published sample: the API refuses to boot while it is. |
@@ -123,7 +123,7 @@ the template and the image's built-in default applies.
 | `OIDC_DEFAULT_ROLE` | The role a first SSO sign-in is provisioned with. It applies at provisioning only. | `viewer` (the default) or `editor`. **`admin` is refused at boot.** |
 | `SECURITY_HEADERS_ENABLED` | Turns the bundled web container's header block off entirely. | Leave `true` unless a proxy in front already sets them, or the setup cannot tolerate them. |
 | `SECURITY_HEADERS_HSTS` | The `Strict-Transport-Security` value. | Empty means the built-in default, `max-age` only — no `includeSubDomains`, no `preload`. Literal `off` omits that one header. |
-| `SECURITY_HEADERS_CSP` | The `Content-Security-Policy`. The built-in policy's `connect-src` also allows the configured absolute API origin. | Empty unless you know the sources you need. Overriding it is how a split-origin deployment unblocks images. |
+| `SECURITY_HEADERS_CSP` | The `Content-Security-Policy`. The built-in policy's `connect-src` and `img-src` allow the configured absolute API origin. | Empty unless you know the sources you need. An override is only needed to add further sources beyond the derived API origin. |
 | `SECURITY_HEADERS_REFERRER_POLICY` | The `Referrer-Policy`. | Empty means the built-in default. Literal `off` omits it. |
 | `SECURITY_HEADERS_FRAME_OPTIONS` | The `X-Frame-Options`. | Empty means the built-in default. Literal `off` omits it. |
 | `SECURITY_HEADERS_PERMISSIONS_POLICY` | The `Permissions-Policy`. | Empty means the built-in default. Literal `off` omits it. |

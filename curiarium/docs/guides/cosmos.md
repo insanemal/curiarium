@@ -321,18 +321,22 @@ This is also why the 401 in the verification step above is expected rather than 
 to tell the two apart, compare the response body — the gate's refusal and the API's `{"detail": ...}` do not look
 the same — or turn the route's authentication off for the length of one test and turn it back on.
 
-### (c) A split origin breaks every image — `Mf-ce8l`
+### (c) A split origin used to break every image — `Mf-ce8l`, fixed
 
 If the API ends up on a different origin from the web UI — `VITE_API_URL` pointing at a different scheme, host or
 port than `PUBLIC_URL` — the browser loads the UI from one origin and fetches images from the other. The built-in
-CSP's `img-src` does not include that origin, so thumbnails and cover images are blocked: the element exists,
-`naturalWidth` is 0, and `decode()` rejects with "The source image cannot be decoded". Every other API call works,
-which is what makes it look like a storage bug.
+CSP's `img-src` used to not include that origin, so thumbnails and cover images were blocked: the element existed,
+`naturalWidth` was 0, and `decode()` rejected with "The source image cannot be decoded". Every other API call kept
+working, which is what made it look like a storage bug.
 
-This is **`Mf-ce8l`**, and this guide does not fix it. Either keep the API on the same origin — leave
-`VITE_API_URL` empty so the web container derives `<PUBLIC_URL>/api`, which is what the template does — or treat
-adding the API origin to `SECURITY_HEADERS_CSP` as a deliberate deployment decision and record it here for that
-target.
+This is **fixed by `Mf-ce8l`**. A split origin used to break every image because the derived origin reached
+`connect-src` only; the built-in CSP now adds the same vetted origin to both `connect-src` and `img-src`, so the
+template works whether the API shares the origin or not. Leave `VITE_API_URL` empty to let the web container derive
+`<PUBLIC_URL>/api`, which is what the template does, or set it to a split origin — either way images render.
+
+One case remains outside the container's knowledge: an origin chosen only in the browser-local network override is
+not known to the container, so it must be added to `SECURITY_HEADERS_CSP` with an explicit policy carrying both
+`connect-src` and `img-src`.
 
 ### Snapshot capability depends on the mount
 

@@ -621,7 +621,7 @@ that one header.
 | `SECURITY_HEADERS_FRAME_OPTIONS` | `DENY` | `X-Frame-Options` value. The default CSP also sets `frame-ancestors 'none'`. |
 | `SECURITY_HEADERS_PERMISSIONS_POLICY` | `camera=(), microphone=(), geolocation=()` | `Permissions-Policy` value. |
 | `SECURITY_HEADERS_HSTS` | `max-age=31536000` | `Strict-Transport-Security` value. No `includeSubDomains`, no `preload` by default. |
-| `SECURITY_HEADERS_CSP` | built-in policy | `Content-Security-Policy` value. The built-in policy allows `'self'` plus the origin of an absolute `VITE_API_URL` (or `<PUBLIC_URL>/api`) in `connect-src`. |
+| `SECURITY_HEADERS_CSP` | built-in policy | `Content-Security-Policy` value. The built-in policy allows `'self'` plus the origin of an absolute `VITE_API_URL` (or `<PUBLIC_URL>/api`) in `connect-src` and `img-src`. |
 
 Values are validated before they are written into Nginx configuration: a value
 containing a double quote, `$`, a backslash, or control characters is rejected
