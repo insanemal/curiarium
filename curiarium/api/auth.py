@@ -171,18 +171,53 @@ def credentials_match(username: str, password: str) -> bool:
   return user_ok and pass_ok
 
 
+def hmac_secret_problems(secret: str, *, enforce_length: bool) -> list[str]:
+  """What stops PyJWT signing HS256 with this secret; empty when nothing does.
+
+  `prepare_key` is the first call `jwt.encode` makes and `check_key_length` is
+  the rule it applies next, so asking the algorithm itself gives the answer the
+  login path would give, without minting a token. The shape failures raise
+  `InvalidKeyError` at encode time - a 500 on every login - which is why the
+  startup guard asks first. Length is opt-in because PyJWT only *warns* about a
+  short key: it treats the 32 bytes HS256 needs (RFC 7518 section 3.2) as a
+  recommendation, so a deployment that wants that enforced needs us to say so.
+  """
+  algorithm = jwt.get_algorithm_by_name(AUTH_ALGO)
+  try:
+    key = algorithm.prepare_key(secret)
+  except jwt.InvalidKeyError as exc:
+    return [
+      f"AUTH_SECRET cannot be used as an {AUTH_ALGO} signing key: {exc} "
+      "Set AUTH_SECRET to at least 32 random bytes, for example `openssl rand -hex 32`."
+    ]
+  if not enforce_length:
+    return []
+  length_message = algorithm.check_key_length(key)
+  if not length_message:
+    return []
+  return [
+    f"AUTH_SECRET is unusable: {length_message} PyJWT only warns about this when "
+    "it signs, so the startup guard refuses it. Generate one with "
+    "`openssl rand -hex 32`."
+  ]
+
+
 def validate_auth_configuration() -> None:
-  """Refuse to start with the published sample credentials still in place.
+  """Refuse to start with credentials PyJWT cannot safely sign with.
 
   The sample values are documented in the README, so leaving them active turns
   "auth enabled" into "publicly writable". "auth on" no longer means "password
   login exists": `AUTH_MODE` decides which login paths exist. The mode checks
-  come first because an unusable mode is worse than a sample credential.
+  come first because an unusable mode is worse than a sample credential. The
+  guard also refuses a secret PyJWT cannot use as an HMAC key, which would
+  otherwise surface as a 500 on every login attempt.
   """
-  # Position is load-bearing: this function is reached before the early return
-  # below. conftest sets AUTH_ALLOW_INSECURE_DEFAULTS=1, so anything after that
-  # line never fires in the suite, and an unknown mode yields AUTH_ENABLED=False
-  # and would early-return anyway.
+  # Position is load-bearing: the mode checks run before anything else, because
+  # an unusable mode is worse than a sample credential, and an unknown mode
+  # yields AUTH_ENABLED=False and would early-return anyway. conftest sets
+  # AUTH_ALLOW_INSECURE_DEFAULTS=1, so the sample-credential block below never
+  # fires in the suite. The shape probe still runs on every boot, and the
+  # suite's 15-byte sample secret passes it because its length half is opted out.
   problems = []
   if AUTH_MODE not in AUTH_MODES:
     problems.append(
@@ -197,18 +232,29 @@ def validate_auth_configuration() -> None:
     )
   if problems:
     raise RuntimeError("; ".join(problems))
-  if not AUTH_ENABLED or AUTH_ALLOW_INSECURE_DEFAULTS:
+  if not AUTH_ENABLED:
     return
-  if AUTH_PASSWORD == INSECURE_DEFAULT_PASSWORD:
-    problems.append("AUTH_PASSWORD is the published sample value")
-  if AUTH_SECRET in {"", INSECURE_DEFAULT_SECRET}:
-    problems.append("AUTH_SECRET is the published sample value")
-  if problems:
-    raise RuntimeError(
-      "; ".join(problems)
-      + ". Set AUTH_PASSWORD and AUTH_SECRET, or set AUTH_ALLOW_INSECURE_DEFAULTS=1 "
-      "to accept a publicly-known login (not recommended)."
-    )
+  if not AUTH_ALLOW_INSECURE_DEFAULTS:
+    if AUTH_PASSWORD == INSECURE_DEFAULT_PASSWORD:
+      problems.append("AUTH_PASSWORD is the published sample value")
+    if AUTH_SECRET in {"", INSECURE_DEFAULT_SECRET}:
+      problems.append("AUTH_SECRET is the published sample value")
+    if problems:
+      raise RuntimeError(
+        "; ".join(problems)
+        + ". Set AUTH_PASSWORD and AUTH_SECRET, or set AUTH_ALLOW_INSECURE_DEFAULTS=1 "
+        "to accept a publicly-known login (not recommended)."
+      )
+  # Last, and deliberately outside the opt-out above: that flag accepts a
+  # publicly-known secret, but it cannot make a key file sign, and a secret PyJWT
+  # refuses turns every login into a 500. The length half stays inside the
+  # opt-out because the published sample secret is 15 bytes and the flag exists
+  # precisely for throwaway deployments that keep it.
+  secret_problems = hmac_secret_problems(
+    AUTH_SECRET, enforce_length=not AUTH_ALLOW_INSECURE_DEFAULTS
+  )
+  if secret_problems:
+    raise RuntimeError("; ".join(secret_problems))
 
 
 def create_access_token(session_row: UserSession, role: str) -> str:

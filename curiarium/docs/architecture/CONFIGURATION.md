@@ -41,7 +41,7 @@ that keeps these forwards and fallbacks honest is
 | `AUTH_MODE` | `auto` | Which login paths exist: `auto` (legacy: on iff the `AUTH_USERNAME`/`AUTH_PASSWORD` pair is set), `local` (password only, SSO refused), `both`, `oidc` (SSO required, local passwords refused), `off`. Empty means `auto`; an unknown value refuses the boot. |
 | `AUTH_USERNAME` | `admin` | Username of the break-glass admin, accepted only while the users table is empty, so a real user account always disables it. |
 | `AUTH_PASSWORD` | `super-secret` | Single-admin bootstrap secret; the API refuses to start while this published sample value is still active. |
-| `AUTH_SECRET` | `changeme-secret` | JWT signing secret; the API refuses to start while this published sample value is still active. At least 32 bytes is needed for a warning-free HMAC key - PyJWT logs `InsecureKeyLengthWarning` for anything shorter. |
+| `AUTH_SECRET` | `changeme-secret` | JWT signing secret; the API refuses to start while this published sample value is still active. PyJWT only warns below 32 bytes, but the startup guard refuses a shorter secret unless `AUTH_ALLOW_INSECURE_DEFAULTS` is set, and refuses a PEM/SSH/JWK-shaped secret outright because it cannot sign. |
 | `AUTH_ALLOW_INSECURE_DEFAULTS` | unset (false) | Opts out of the startup guard that refuses the published sample credentials while auth is enabled. |
 | `AUTH_ACCESS_TOKEN_TTL` | `900` | Access-token (JWT) lifetime in seconds; the token also stops working as soon as its session row stops being live. |
 | `AUTH_REFRESH_TTL_SECONDS` | `2592000` | Refresh-token lifetime in seconds (30 days). Only the sha256 of the opaque token is stored, and rotation is single-use. |
@@ -94,7 +94,9 @@ Owned by `api/auth.py` and `api/sessions.py`.
   credentials and a blank pair is never a login, in any mode.
 - At startup, `validate_auth_configuration()` refuses to run while
   `AUTH_PASSWORD` or `AUTH_SECRET` are still the published sample values, unless
-  `AUTH_ALLOW_INSECURE_DEFAULTS` is set. `AUTH_TOKEN_TTL` is deprecated and
+  `AUTH_ALLOW_INSECURE_DEFAULTS` is set. It also refuses a secret PyJWT cannot
+  use as an HMAC key (PEM/SSH/JWK-shaped) even under that opt-out, and a secret
+  under 32 bytes whenever the opt-out is off. `AUTH_TOKEN_TTL` is deprecated and
   ignored; it is read only so an existing environment keeps starting.
 - SSO is opt-in and off by default. Enabling it adds an OIDC login next to the
   password form and changes nothing about the local path: password accounts,
@@ -170,10 +172,13 @@ To move a pair-only deployment to a mode, in order:
 PyJWT 2.15 warns `InsecureKeyLengthWarning` on every mint and every verify while
 the HMAC key is under 32 bytes. The shipped default `changeme-secret` is 15
 bytes, so a development deployment logs that warning on every token operation;
-it is a warning, not a failure, and nothing here suppresses it. The operator
-action is to set `AUTH_SECRET` to at least 32 bytes, for example
-`openssl rand -hex 32`. A secret shaped like a PEM, SSH, or JWK key is not a
-usable HMAC secret: PyJWT rejects it with `InvalidKeyError`.
+it is a warning, not a failure, and nothing here suppresses it. The startup
+guard now refuses a key under 32 bytes unless `AUTH_ALLOW_INSECURE_DEFAULTS` is
+set, so a short secret stops the boot instead of only warning; set `AUTH_SECRET`
+to at least 32 bytes, for example `openssl rand -hex 32`. A secret shaped like a
+PEM, SSH, or JWK key is not a usable HMAC secret: PyJWT rejects it with
+`InvalidKeyError`, and the startup guard refuses that at boot with an error
+naming `AUTH_SECRET` instead of surfacing as a 500 on `/login`.
 
 One caveat about attribution: `asset.created_by` exists only when Curiarium's own
 auth is enabled - local users or OIDC - because it is a snapshot of the
