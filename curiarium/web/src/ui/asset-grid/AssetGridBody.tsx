@@ -195,10 +195,13 @@ export default function AssetGridBody({
       )}
 
       {/* "Empty" only means empty when no filter is narrowing it: a search or
-          tag filter that matched nothing is an empty result, not a new project. */}
+          tag filter that matched nothing is an empty result, not a new project.
+          `settled` and not a bolted-on `!error` on purpose: it is the same
+          firsthand gate the unfiled/all-files/folder scopes above use, and it
+          keeps a failed fetch from painting an empty project over the error
+          panel. */}
       {isProject &&
-        !loading &&
-        !items.length &&
+        settled &&
         !queryRef.current &&
         activeTags.length === 0 && (
           <p className="text-sm opacity-70" data-project-empty>

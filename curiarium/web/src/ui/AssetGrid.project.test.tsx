@@ -314,6 +314,23 @@ describe("AssetGrid in project mode", () => {
     await waitFor(() => expect(screen.queryByText("This project has no files yet.")).toBeNull());
   });
 
+  it("shows the failed fetch, not an empty project, when the listing fails", async () => {
+    listProjectAssetsMock.mockRejectedValueOnce(new Error("boom"));
+
+    projectGrid();
+
+    const panel = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>("[data-grid-error]");
+      if (!found) throw new Error("error panel not rendered");
+      return found;
+    });
+    expect(within(panel).getByText("Could not load the files")).toBeTruthy();
+    expect(within(panel).getByText("Failed to load assets.")).toBeTruthy();
+    // A failed request is not an empty project: the empty copy must stay off.
+    expect(document.querySelector("[data-project-empty]")).toBeNull();
+    expect(screen.queryByText("This project has no files yet.")).toBeNull();
+  });
+
   it("keeps using listAssets when no project is set", async () => {
     listAssetsMock.mockResolvedValue({ items: assets, hasMore: false });
 
