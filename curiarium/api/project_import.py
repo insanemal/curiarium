@@ -117,7 +117,14 @@ def import_into_project(url: str, body: ImportProjectRequest, *, origin: Optiona
     page = attempt.page
     metadata = parse_page_metadata(page.html, page.url) if page else PageMetadata()
     source_url = canonical_url(page.url if page else url)
-    suggested_name = body.project_name or metadata.title or f"Imported model from {_host_for_name(source_url)}"
+    # A zip import's title names a NEW project (the gated branch shares this
+    # variable); on the single-file door it names the asset, not the project.
+    suggested_name = (
+        body.project_name
+        or (body.title if wants_zip else None)
+        or metadata.title
+        or f"Imported model from {_host_for_name(source_url)}"
+    )
 
     if attempt.error is not None:
         if not _is_gated(page, metadata, attempt.error):

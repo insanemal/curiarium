@@ -294,8 +294,17 @@ def extract_zip_entries_to_assets(
             mime = mime_from_content_type("", filename)
             asset: Optional[Asset] = None
             try:
+                # The archive title names the project and never the files: a None
+                # title makes `create_asset_record` fall back to
+                # `model_name_from_filename`, so every entry keeps its own stem.
                 asset = create_asset_record(
-                    filename, mime, body.title, body.notes, body.tags, target_folder_id, origin=origin
+                    filename,
+                    mime,
+                    title=None,
+                    notes=body.notes,
+                    tags=body.tags,
+                    folder_id=target_folder_id,
+                    origin=origin,
                 )
                 created_ids.append(asset.id)
                 dest = managed_asset_path(asset)
