@@ -128,6 +128,7 @@ function NarrowHeader({
 }: Props): ReactElement {
   const [menuOpen, setMenuOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   /**
    * Set whenever the header itself closes the panel, so the effect below knows
    * the close is ours to finish rather than an ordinary re-render.
@@ -144,6 +145,20 @@ function NarrowHeader({
     },
     [menuTriggerRef],
   );
+
+  // The trigger toggles on its own click and a click inside the panel is the
+  // panel's business, so only a pointerdown elsewhere closes the disclosure.
+  // Focus stays wherever the user put it: an outside close is not ours to undo.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && (panelRef.current?.contains(target) || triggerRef.current?.contains(target))) return;
+      setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [menuOpen]);
 
   useEffect(() => {
     if (!restoreFocusRef.current) return;
@@ -200,7 +215,12 @@ function NarrowHeader({
           <span aria-hidden="true">•••</span>
         </button>
         {menuOpen && (
-          <div id={panelId} className="workspace-menu-panel" onKeyDown={handlePanelKeyDown}>
+          <div
+            ref={panelRef}
+            id={panelId}
+            className="workspace-menu-panel"
+            onKeyDown={handlePanelKeyDown}
+          >
             {reviewReachable && (
               <button
                 ref={reviewButtonRef}

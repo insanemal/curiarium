@@ -73,7 +73,11 @@ export default function AssetFilePreview({ assetId, file, onClose }: Props): Rea
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      // React 18 delegates at its root container, an ancestor inside `document`,
+      // so an `onKeyDown` surface in the tree runs first and its `preventDefault()`
+      // is already visible here: a nested surface that consumed Escape keeps it.
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      onClose();
     };
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
