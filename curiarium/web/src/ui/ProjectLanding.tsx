@@ -499,8 +499,11 @@ export default function ProjectLanding({
     // themselves); ProjectView also ignores events from inside dialogs.
     if ((event.target as Element | null)?.closest?.('[role="dialog"]')) return;
     if (attacher.busy) {
-      // An attach gesture owns Escape too. The shared zip prompt has no Escape
-      // handler of its own, so closing the project under it would strand it.
+      // A busy attach gesture still owns Escape. The shared zip prompt is a
+      // `role="dialog"` descendant and answers Escape itself (preventDefault
+      // plus stopPropagation), so this branch covers the gestures that have no
+      // prompt of their own - a plain multi-file upload - and the project must
+      // not close under them either.
       event.preventDefault();
       return;
     }

@@ -1,0 +1,210 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import React, { useState } from "react";
+
+import FolderDrawer from "./FolderDrawer";
+import { useZipImportPrompt, type ZipPromptConfig } from "./ZipImportModal";
+
+/**
+ * The zip prompt is rendered un-portalled inside the folder rail, and the
+ * drawer guards Escape with a `[role="dialog"]` query over its own descendants.
+ * These tests therefore mount the real drawer around the real prompt: a stub
+ * would not reproduce the capture-phase bail-out that used to close the sheet
+ * while the prompt was still pending.
+ */
+
+const DEFAULT_CONFIG: ZipPromptConfig = {
+  label: "pack.zip",
+  onImportAsZip: async () => {},
+  loadEntries: async () => [],
+  onImportSelected: async () => {},
+};
+
+/**
+ * The rail's own controls, so the drawer has somewhere to put focus that is
+ * outside the prompt - the condition that made Escape miss the prompt's panel.
+ */
+function RailContents({ config }: { config: ZipPromptConfig }) {
+  const zipPrompt = useZipImportPrompt();
+  return (
+    <>
+      <div role="tree" aria-label="Folders">
+        <div role="treeitem" tabIndex={0}>
+          Art
+        </div>
+      </div>
+      {/*
+        Prompted from a click, never at mount: the drawer's open effect focuses
+        the roving tree row after the child's effects, so a mount-time prompt
+        would have its focus entry stolen and the assertions would prove nothing.
+      */}
+      <button onClick={() => void zipPrompt.prompt(config)}>drop zip</button>
+      {zipPrompt.modal}
+    </>
+  );
+}
+
+function Harness({
+  onDrawerClose,
+  config,
+}: {
+  onDrawerClose: () => void;
+  config?: Partial<ZipPromptConfig>;
+}) {
+  // The sheet really opens and closes, so "the sheet stayed open" is a claim
+  // about the drawer rather than about a frozen prop.
+  const [open, setOpen] = useState(true);
+  const promptConfig: ZipPromptConfig = { ...DEFAULT_CONFIG, ...config };
+
+  return (
+    <FolderDrawer
+      id="rail"
+      mode="files"
+      narrow
+      open={open}
+      onClose={() => {
+        onDrawerClose();
+        setOpen(false);
+      }}
+    >
+      <RailContents config={promptConfig} />
+    </FolderDrawer>
+  );
+}
+
+function renderHarness(config?: Partial<ZipPromptConfig>): {
+  onDrawerClose: ReturnType<typeof vi.fn>;
+  rail: HTMLElement;
+} {
+  const onDrawerClose = vi.fn();
+  render(<Harness onDrawerClose={onDrawerClose} config={config} />);
+  return { onDrawerClose, rail: screen.getByRole("dialog", { name: "Library folders" }) };
+}
+
+function openPrompt(): HTMLElement {
+  fireEvent.click(screen.getByRole("button", { name: "drop zip" }));
+  return screen.getByRole("dialog", { name: "Import zip pack.zip" });
+}
+
+function promptDialog(): HTMLElement | null {
+  return screen.queryByRole("dialog", { name: "Import zip pack.zip" });
+}
+
+afterEach(() => {
+  cleanup();
+});
+
+describe("ZipImportModal inside the folder rail", () => {
+  it("opens as an aria-modal dialog nested in the rail, where the drawer's guard can see it", () => {
+    const { rail } = renderHarness();
+
+    const prompt = openPrompt();
+
+    expect(prompt.getAttribute("aria-modal")).toBe("true");
+    expect(prompt.getAttribute("role")).toBe("dialog");
+    expect(rail.contains(prompt)).toBe(true);
+    expect(prompt).not.toBe(rail);
+  });
+
+  it("closes only the prompt on Escape, then lets the drawer answer the next Escape", async () => {
+    // Reproduces the ticket: the drawer's guard is a descendant-dialog query on
+    // a capture-phase document listener, so a prompt without `role="dialog"`
+    // could not stop the sheet from closing under it.
+    const { onDrawerClose, rail } = renderHarness();
+    const prompt = openPrompt();
+
+    fireEvent.keyDown(within(prompt).getByRole("button", { name: "Import as zip" }), {
+      key: "Escape",
+    });
+
+    await waitFor(() => expect(promptDialog()).toBeNull());
+    expect(rail.getAttribute("data-drawer-state")).toBe("open");
+    expect(rail.hidden).toBe(false);
+    expect(onDrawerClose).not.toHaveBeenCalled();
+
+    // With the prompt gone the guard has nothing to bail on: the sheet's own
+    // Escape works again.
+    fireEvent.keyDown(screen.getByRole("button", { name: "drop zip" }), { key: "Escape" });
+
+    expect(rail.getAttribute("data-drawer-state")).toBe("closed-narrow");
+    expect(onDrawerClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the sheet on Escape when no prompt is open", () => {
+    const { onDrawerClose, rail } = renderHarness();
+
+    fireEvent.keyDown(screen.getByRole("treeitem"), { key: "Escape" });
+
+    expect(rail.getAttribute("data-drawer-state")).toBe("closed-narrow");
+    expect(onDrawerClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Tab and Shift+Tab inside the prompt instead of reaching the rail", () => {
+    renderHarness();
+    const treeRow = screen.getByRole("treeitem");
+    const prompt = openPrompt();
+    const close = within(prompt).getByRole("button", { name: "Close" });
+    const unzip = within(prompt).getByRole("button", { name: "Import and unzip" });
+
+    unzip.focus();
+    fireEvent.keyDown(unzip, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
+    expect(prompt.contains(document.activeElement)).toBe(true);
+
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(unzip);
+    expect(prompt.contains(document.activeElement)).toBe(true);
+
+    expect(document.activeElement).not.toBe(treeRow);
+  });
+
+  it("keeps an in-flight import and the sheet alive when Escape is pressed", () => {
+    const { onDrawerClose, rail } = renderHarness({
+      onImportAsZip: () => new Promise<void>(() => {}),
+    });
+    const prompt = openPrompt();
+
+    fireEvent.click(within(prompt).getByRole("button", { name: "Import as zip" }));
+    // Every control is disabled while busy, so the panel itself carries the key.
+    const dispatched = fireEvent.keyDown(prompt, { key: "Escape" });
+
+    expect(dispatched).toBe(false);
+    expect(promptDialog()).toBe(prompt);
+    expect(rail.getAttribute("data-drawer-state")).toBe("open");
+    expect(onDrawerClose).not.toHaveBeenCalled();
+  });
+
+  it("moves focus into the prompt and recovers it across the stage change", async () => {
+    renderHarness();
+    const treeRow = screen.getByRole("treeitem");
+    expect(document.activeElement).toBe(treeRow);
+
+    const prompt = openPrompt();
+    const close = within(prompt).getByRole("button", { name: "Close" });
+    expect(document.activeElement).toBe(close);
+
+    // `choice -> select` unmounts the button that holds focus, which drops focus
+    // to <body>; the prompt has to re-enter itself or Escape goes dead.
+    const unzip = within(prompt).getByRole("button", { name: "Import and unzip" });
+    unzip.focus();
+    fireEvent.click(unzip);
+
+    await screen.findByText("0 of 0 selected");
+    expect(document.activeElement).toBe(close);
+    expect(prompt.contains(document.activeElement)).toBe(true);
+  });
+
+  it("returns focus to the control the prompt was opened from", async () => {
+    renderHarness();
+    const trigger = screen.getByRole("button", { name: "drop zip" });
+    trigger.focus();
+
+    fireEvent.click(trigger);
+    const prompt = screen.getByRole("dialog", { name: "Import zip pack.zip" });
+    fireEvent.keyDown(within(prompt).getByRole("button", { name: "Close" }), { key: "Escape" });
+
+    await waitFor(() => expect(promptDialog()).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+});

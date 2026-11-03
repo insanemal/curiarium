@@ -990,9 +990,14 @@ describe("ProjectLanding attach-own-files", () => {
 });
 
 describe("ProjectLanding attach escape guard", () => {
-  it("keeps the project open while the attach zip prompt is open", async () => {
-    const seenOnDocument: boolean[] = [];
-    document.addEventListener("keydown", event => seenOnDocument.push(event.defaultPrevented));
+  it("Escape closes the prompt only, the project stays open", async () => {
+    // The prompt handles Escape during React's dispatch on the root container
+    // and calls stopPropagation(), so a document bubble listener never sees the
+    // key. A capture listener on `document` observes it before that, and the
+    // event object's `defaultPrevented` read afterwards is the proof the prompt
+    // really preventDefault()ed it rather than the project ignoring it.
+    const seenOnDocument: KeyboardEvent[] = [];
+    document.addEventListener("keydown", event => seenOnDocument.push(event), true);
     renderLanding();
     await screen.findByRole("img", { name: "Photo one" });
 
@@ -1001,12 +1006,14 @@ describe("ProjectLanding attach escape guard", () => {
     });
     const choice = await screen.findByRole("button", { name: "Import and unzip" });
 
-    // The shared zip prompt has no Escape handler, so ProjectLanding has to keep
-    // the project from closing under it.
+    // The shared zip prompt is a `role="dialog"` descendant now and answers
+    // Escape itself (preventDefault + stopPropagation).
     fireEvent.keyDown(choice, { key: "Escape" });
 
-    expect(seenOnDocument).toContain(true);
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Import and unzip" })).toBeNull(),
+    );
+    expect(seenOnDocument.some(event => event.defaultPrevented)).toBe(true);
     expect(screen.getByRole("heading", { level: 1, name: "Hydra" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Import and unzip" })).toBeTruthy();
   });
 });

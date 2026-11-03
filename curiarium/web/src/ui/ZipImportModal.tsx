@@ -1,6 +1,16 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ZipEntry } from "../lib/zipUtils";
 import { formatBytes } from "../lib/format";
+import { tabbableIn, wrapTab } from "../lib/focusTrap";
+
+/**
+ * What this prompt can Tab through.
+ *
+ * Deliberately not `DRAWER_TABBABLE_SELECTOR`: that one also carries `summary`
+ * and `a[href]`, which this prompt never renders, so a Tab would be allowed to
+ * wrap onto a member that does not exist.
+ */
+const PROMPT_TABBABLE_SELECTOR = 'input:not([tabindex="-1"]), button:not([tabindex="-1"])';
 
 export type ZipPromptConfig = {
   label: string;
@@ -28,6 +38,11 @@ export function useZipImportPrompt() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const resolveRef = useRef<(() => void) | null>(null);
+  /**
+   * The control the prompt opened from, so closing returns focus to it. A
+   * drag-drop has no trigger control, so this is usually null.
+   */
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   const reset = () => {
     setStage("choice");
@@ -38,18 +53,27 @@ export function useZipImportPrompt() {
   };
 
   const close = () => {
+    const restore = restoreFocusRef.current;
+    restoreFocusRef.current = null;
     setState(null);
     reset();
     if (resolveRef.current) {
       resolveRef.current();
       resolveRef.current = null;
     }
+    if (restore && restore.isConnected) restore.focus();
   };
 
   const prompt = (config: ZipPromptConfig) => {
     if (state) {
       return Promise.resolve();
     }
+    // Captured before the prompt mounts: afterwards its entry effect has
+    // already moved focus inside it, and the trigger would be lost. `<body>`
+    // means nothing in particular held focus, so there is nothing to restore.
+    const trigger = document.activeElement;
+    restoreFocusRef.current =
+      trigger instanceof HTMLElement && trigger !== document.body ? trigger : null;
     reset();
     setState({ config });
     return new Promise<void>(resolve => {
@@ -182,14 +206,76 @@ function ZipImportModal({
 }) {
   const entryCount = entries.length;
   const title = useMemo(() => (stage === "choice" ? "Import zip" : "Choose files"), [stage]);
+  // Four prompts can coexist (the UploadBar, grid and Sidebar uploaders plus
+  // the project attacher), so the ids naming this dialog must be per-instance.
+  const id = useId();
+  const titleId = `${id}-title`;
+  const labelId = `${id}-label`;
+  const panelRef = useRef<HTMLDivElement | null>(null);
+
+  // Entry: focus a real control, not the container. `wrapTab` compares the
+  // active element against `first`/`last`, so a container-focused dialog lets
+  // Shift+Tab leak out.
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    tabbableIn(panel, PROMPT_TABBABLE_SELECTOR)[0]?.focus();
+  }, []);
+
+  // Recovery: choice -> select swaps the two choice buttons for the select
+  // list, so the focused node unmounts and focus drops to <body>. Re-enter the
+  // panel (FolderPicker's roving-tabstop recovery idiom) without stealing a
+  // caret that is still inside it.
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && panel.contains(active)) return;
+    tabbableIn(panel, PROMPT_TABBABLE_SELECTOR)[0]?.focus();
+  }, [stage]);
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      // The drawer's guard bails silently on a descendant dialog, so this
+      // prompt is the only surface that can answer Escape while it is open.
+      // `stopPropagation` keeps the project/landing Escape handlers out of it.
+      event.preventDefault();
+      event.stopPropagation();
+      // An in-flight upload must not be cancelled out from under its request.
+      if (busy) return;
+      onClose();
+      return;
+    }
+    if (event.key === "Tab") {
+      const panel = panelRef.current;
+      if (!panel) {
+        event.preventDefault();
+        return;
+      }
+      wrapTab(panel, PROMPT_TABBABLE_SELECTOR, event);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-      <div className="bg-panel-strong rounded-lg shadow-2xl max-w-3xl w-full max-h-full overflow-hidden flex flex-col">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        // Named by the visible heading plus the label rather than by an
+        // `aria-label`, which would drop the title the user can see.
+        aria-labelledby={`${titleId} ${labelId}`}
+        onKeyDown={handleKeyDown}
+        className="bg-panel-strong rounded-lg shadow-2xl max-w-3xl w-full max-h-full overflow-hidden flex flex-col"
+      >
         <div className="flex items-center justify-between border-b border-panel px-4 py-3">
           <div>
-            <h2 className="text-lg font-semibold">{title}</h2>
-            <p className="text-sm opacity-70">{label}</p>
+            <h2 id={titleId} className="text-lg font-semibold">
+              {title}
+            </h2>
+            <p id={labelId} className="text-sm opacity-70">
+              {label}
+            </p>
           </div>
           <button
             className="px-3 py-1 rounded-md border border-panel-strong text-sm disabled:opacity-60"
