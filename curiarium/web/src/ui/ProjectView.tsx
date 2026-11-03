@@ -129,8 +129,9 @@ function ProjectCardGrid({ projects, onOpenProject }: ProjectCardGridProps): Rea
  * Projects pane: the project index (search plus a contribute-gated inline
  * create) and the project landing page once a project is opened. Focus follows
  * the drill-down: opening focuses Back, closing returns focus to the card that
- * was opened, and a create/delete/missing-id outcome lands on a card or on the
- * notice, never on `<body>`.
+ * was opened (or to the search box when a live filter hides that card), and a
+ * create/delete/missing-id outcome lands on a card or on the notice, never on
+ * `<body>`.
  */
 export default function ProjectView({
   canContribute,
@@ -154,6 +155,7 @@ export default function ProjectView({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const noticeRef = useRef<HTMLParagraphElement | null>(null);
   const previousSelectedId = useRef<string | null>(null);
   const pendingFocusId = useRef<string | null>(null);
@@ -169,8 +171,9 @@ export default function ProjectView({
     return Array.from(cards ?? []).find(element => element.dataset.projectCard === id) ?? null;
   }, []);
 
-  // Open → Back; close → the card that was open. A created or deleted card is
-  // handled by the effects below, which own their own landing target.
+  // Open → Back; close → the card that was open, or the search box when a live
+  // filter hides it. A created or deleted card is handled by the effects below,
+  // which own their own landing target.
   useEffect(() => {
     const previous = previousSelectedId.current;
     previousSelectedId.current = selectedProjectId;
@@ -179,7 +182,20 @@ export default function ProjectView({
       return;
     }
     if (!previous) return;
-    cardFor(previous)?.focus();
+    const card = cardFor(previous);
+    if (card) {
+      card.focus();
+      return;
+    }
+    // No card: a live filter can hide the very project that was closed, and the
+    // search box is the control that hides it. Land there, never on <body>.
+    // Deliberately not a notice: Back and Escape clear the notice so an ordinary
+    // close is not announced, and the only honest sentence ("the filter is
+    // hiding it") belongs to the search box, whose clear button is one keystroke
+    // away. The input is mounted here because this is the branch rendered once
+    // `selectedProjectId` is null, and App never returns `projects` to null after
+    // the first load, so `Loading projects…` is unreachable from a close.
+    searchInputRef.current?.focus();
   }, [selectedProjectId, cardFor]);
 
   // A project deleted elsewhere cannot stay open: the detail view would be a
@@ -359,6 +375,7 @@ export default function ProjectView({
         <label className="sidebar-search min-w-0 flex-1">
           <Search className="h-4 w-4 shrink-0" aria-hidden="true" />
           <input
+            ref={searchInputRef}
             type="search"
             value={search}
             onChange={event => setSearch(event.target.value)}

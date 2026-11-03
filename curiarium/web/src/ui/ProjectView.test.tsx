@@ -741,4 +741,42 @@ describe("ProjectView", () => {
     expect(notice.textContent).toBe("That project no longer exists.");
     expect(document.activeElement).toBe(notice);
   });
+
+  it("lands on the search box, not <body>, when the filter hides the project just closed", () => {
+    // One spy for every render: Back reports the close to the owner, which then
+    // nulls the open id, exactly like `App`.
+    const onCloseProject = vi.fn();
+    const renamed = [makeProject({ id: "p1", name: "Wyvern" }), projects[1]];
+    const { rerender } = render(<ProjectView {...viewProps({ onCloseProject })} />);
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search projects" }), {
+      target: { value: "hydra" },
+    });
+    rerender(<ProjectView {...viewProps({ onCloseProject, selectedProjectId: "p1" })} />);
+
+    // The refetch keeps row p1 (only its name changed), so the vanished-id effect
+    // does not fire and no notice is set.
+    rerender(
+      <ProjectView
+        {...viewProps({ onCloseProject, selectedProjectId: "p1", projects: renamed })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to projects" }));
+    expect(onCloseProject).toHaveBeenCalledTimes(1);
+    rerender(
+      <ProjectView
+        {...viewProps({ onCloseProject, selectedProjectId: null, projects: renamed })}
+      />,
+    );
+
+    // No card is painted, so the close chain has nothing of its own to focus.
+    expect(screen.getByText("No projects match “hydra”.")).toBeTruthy();
+    expect(document.activeElement).not.toBe(document.body);
+    // No notice either: an ordinary close is not an outcome, and the search box
+    // is what hides the row - with its clear button one keystroke away.
+    expect(document.activeElement).toBe(
+      screen.getByRole("searchbox", { name: "Search projects" }),
+    );
+  });
 });
