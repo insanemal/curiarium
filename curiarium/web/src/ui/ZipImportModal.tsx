@@ -12,6 +12,17 @@ import { tabbableIn, wrapTab } from "../lib/focusTrap";
  */
 const PROMPT_TABBABLE_SELECTOR = 'input:not([tabindex="-1"]), button:not([tabindex="-1"])';
 
+/**
+ * The prompt's one focus home: its first real control, or the dialog surface
+ * itself when every control is disabled (busy) or gone. Shared by the entry,
+ * stage-recovery and busy effects so they cannot disagree about where focus
+ * belongs.
+ */
+function focusPromptHome(panel: HTMLDivElement, overlay: HTMLDivElement | null): void {
+  const first = tabbableIn(panel, PROMPT_TABBABLE_SELECTOR)[0] ?? overlay;
+  first?.focus();
+}
+
 export type ZipPromptConfig = {
   label: string;
   onImportAsZip: () => Promise<void>;
@@ -212,27 +223,47 @@ function ZipImportModal({
   const titleId = `${id}-title`;
   const labelId = `${id}-label`;
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
 
   // Entry: focus a real control, not the container. `wrapTab` compares the
   // active element against `first`/`last`, so a container-focused dialog lets
-  // Shift+Tab leak out.
+  // Shift+Tab leak out. When every control is disabled, the overlay is the
+  // focus home instead.
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
-    tabbableIn(panel, PROMPT_TABBABLE_SELECTOR)[0]?.focus();
+    focusPromptHome(panel, overlayRef.current);
   }, []);
 
   // Recovery: choice -> select swaps the two choice buttons for the select
   // list, so the focused node unmounts and focus drops to <body>. Re-enter the
-  // panel (FolderPicker's roving-tabstop recovery idiom) without stealing a
+  // prompt (FolderPicker's roving-tabstop recovery idiom) without stealing a
   // caret that is still inside it.
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
     const active = document.activeElement;
     if (active && active !== document.body && panel.contains(active)) return;
-    tabbableIn(panel, PROMPT_TABBABLE_SELECTOR)[0]?.focus();
+    focusPromptHome(panel, overlayRef.current);
   }, [stage]);
+
+  // Busy: starting an import disables every control in the panel, and a real
+  // browser blurs the clicked button to <body> when that happens. jsdom does
+  // not blur a disabled node, so testing "still inside the panel" alone would
+  // miss the case the ticket describes; a focused-but-disabled control has to
+  // count as needing re-homing too.
+  useEffect(() => {
+    if (!busy) return;
+    const panel = panelRef.current;
+    const overlay = overlayRef.current;
+    if (!panel) return;
+    const active = document.activeElement;
+    if (active === overlay) return;
+    const stillOnAControl =
+      active instanceof HTMLElement && tabbableIn(panel, PROMPT_TABBABLE_SELECTOR).includes(active);
+    if (stillOnAControl) return;
+    focusPromptHome(panel, overlay);
+  }, [busy]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
@@ -257,15 +288,22 @@ function ZipImportModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    <div
+      ref={overlayRef}
+      role="dialog"
+      aria-modal="true"
+      // Named by the visible heading plus the label rather than by an
+      // `aria-label`, which would drop the title the user can see.
+      aria-labelledby={`${titleId} ${labelId}`}
+      onKeyDown={handleKeyDown}
+      // Focusable, so a click on the backdrop lands on the dialog surface - the
+      // nearest focusable ancestor of the click - instead of <body>. Without
+      // this the panel's key handler never sees the Escape that follows.
+      tabIndex={-1}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+    >
       <div
         ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        // Named by the visible heading plus the label rather than by an
-        // `aria-label`, which would drop the title the user can see.
-        aria-labelledby={`${titleId} ${labelId}`}
-        onKeyDown={handleKeyDown}
         className="bg-panel-strong rounded-lg shadow-2xl max-w-3xl w-full max-h-full overflow-hidden flex flex-col"
       >
         <div className="flex items-center justify-between border-b border-panel px-4 py-3">

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React, { useState } from "react";
 
 import FolderDrawer from "./FolderDrawer";
@@ -206,5 +206,43 @@ describe("ZipImportModal inside the folder rail", () => {
 
     await waitFor(() => expect(promptDialog()).toBeNull());
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("keeps Escape alive when the backdrop is what holds focus", async () => {
+    const { onDrawerClose, rail } = renderHarness();
+    const dialog = openPrompt();
+
+    // A backdrop click lands focus on the dialog surface, never <body>, which
+    // is the whole point: the prompt keeps Escape instead of going dead.
+    dialog.focus();
+    expect(document.activeElement).toBe(dialog);
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() => expect(promptDialog()).toBeNull());
+    expect(rail.getAttribute("data-drawer-state")).toBe("open");
+    expect(onDrawerClose).not.toHaveBeenCalled();
+  });
+
+  it("re-homes focus to the dialog surface while an import is in flight", async () => {
+    const { onDrawerClose, rail } = renderHarness({
+      onImportAsZip: () => new Promise<void>(() => {}),
+    });
+    const dialog = openPrompt();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Import as zip" }));
+
+    // jsdom does not blur a node when its `disabled` attribute appears, so this
+    // pins the busy recovery effect rather than a browser blur.
+    await waitFor(() => expect(document.activeElement).toBe(dialog));
+    expect(promptDialog()).toBe(dialog);
+    expect(rail.getAttribute("data-drawer-state")).toBe("open");
+
+    const event = createEvent.keyDown(dialog, { key: "Escape" });
+    fireEvent(dialog, event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(promptDialog()).toBe(dialog);
+    expect(onDrawerClose).not.toHaveBeenCalled();
   });
 });
