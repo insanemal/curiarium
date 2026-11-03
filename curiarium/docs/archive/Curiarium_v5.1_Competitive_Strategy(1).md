@@ -181,7 +181,7 @@ The detailed policy is in [SUSTAINABILITY.md](SUSTAINABILITY.md).
   and explicit non-goals.
 - [ROADMAP.md](ROADMAP.md) — architecture and feature sequencing after v5.1.
 - [SUSTAINABILITY.md](SUSTAINABILITY.md) — open-source and revenue philosophy.
-- [ARCHITECTURE_RUNBOOK.md](ARCHITECTURE_RUNBOOK.md) — the evidence-based gate
+- [ARCHITECTURE_RUNBOOK.md](../ARCHITECTURE_RUNBOOK.md) — the evidence-based gate
   sequence, migration rules, acceptance protocol, and re-baselining process used
   to execute this strategy.
 

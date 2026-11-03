@@ -35,12 +35,12 @@ It is intentionally founded on gates and truth:
 
 This document is the operational companion to:
 
-- [Curiarium_v5.1_Competitive_Strategy(1).md](Curiarium_v5.1_Competitive_Strategy(1).md)
-- [PRODUCT_STRATEGY.md](PRODUCT_STRATEGY.md)
-- [V5.1_SCOPE.md](V5.1_SCOPE.md)
-- [ROADMAP.md](ROADMAP.md)
-- [SUSTAINABILITY.md](SUSTAINABILITY.md)
-- [Curiarium_v5.1_Security_Analysis.md](Curiarium_v5.1_Security_Analysis.md)
+- [Curiarium_v5.1_Competitive_Strategy(1).md](archive/Curiarium_v5.1_Competitive_Strategy(1).md)
+- [PRODUCT_STRATEGY.md](archive/PRODUCT_STRATEGY.md)
+- [V5.1_SCOPE.md](archive/V5.1_SCOPE.md)
+- [ROADMAP.md](archive/ROADMAP.md)
+- [SUSTAINABILITY.md](archive/SUSTAINABILITY.md)
+- [Curiarium_v5.1_Security_Analysis.md](archive/Curiarium_v5.1_Security_Analysis.md)
 
 If those documents disagree about product intent, the product strategy and
 explicit owner decision govern. If they disagree about current behavior, verified
@@ -378,7 +378,7 @@ Unless a gate explicitly proves an item irrelevant, completion requires:
 ### Gate 0 — Establish the reproducible baseline and safety harness
 
 **Current execution:** `EVIDENCE REVIEW` as of 2026-08-14. Local evidence is in
-[evidence/gate-0/RESULTS.md](evidence/gate-0/RESULTS.md). Both ADRs are accepted,
+[evidence/gate-0/RESULTS.md](archive/evidence/gate-0/RESULTS.md). Both ADRs are accepted,
 and immutable baseline `1231565642b8541a7ad36ba4ffdeb2da9527ef89` passed the
 complete local harness. Its remote CI result remains before `ACCEPTED`.
 

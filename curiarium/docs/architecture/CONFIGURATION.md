@@ -938,7 +938,7 @@ exactly as it ignores CephFS's `.snap` store.
 
 The helper is a separate build (`curiarium/snapshot-sidecar`) carrying only
 `btrfs-progs` and the two stdlib modules `guard.py` and `server.py`; it has its
-own [README](../snapshot-sidecar/README.md) for the short version and the
+own [README](../../snapshot-sidecar/README.md) for the short version and the
 security posture. A clearly marked example override, opt-in and not part of any
 shipped manifest:
 

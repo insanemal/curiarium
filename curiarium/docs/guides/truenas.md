@@ -203,7 +203,7 @@ sudo docker ps --filter name=c_api --filter name=curiarium_web
 
 The `edge-zfs` API image includes the ZFS userland tools (`zfsutils-linux`). The plain `edge` image does not, so Curiarium reports "zfs could not be run" even when the dataset is set up correctly. The `/dev/zfs` device in the YAML above gives those tools access to the pool, and TrueNAS already sets up the `apps` user to manage snapshots. Snapshots of the `storage` dataset work out of the box, with no extra setup.
 
-See [Snapshots (ZFS)](curiarium/docs/architecture/CONFIGURATION.md#snapshots-zfs) for how the ZFS provider works.
+See [Snapshots (ZFS)](../architecture/CONFIGURATION.md#snapshots-zfs) for how the ZFS provider works.
 
 ### Portal Workaround
 
