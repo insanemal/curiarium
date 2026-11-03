@@ -561,6 +561,21 @@ def test_project_name_is_taken_from_the_request_when_given(monkeypatch: pytest.M
     assert project_row(outcome.project_id).name == "Chosen Name"
 
 
+def test_a_title_does_not_name_the_project_for_a_single_file_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The title names the asset on the single-file door, not the project."""
+    target = page("https://makerworld.com/en/models/321-cube", MAKERWORLD_FREE_PAGE)
+    stub_attempt(monkeypatch, ImportAttempt(asset=make_asset(), page=target))
+
+    outcome = project_import.import_into_project(
+        "https://makerworld.com/en/models/321-cube",
+        ImportProjectRequest(url="https://makerworld.com/en/models/321-cube", title="Asset title"),
+    )
+
+    # The asset itself is named on the seam path this test stubs out, so this
+    # pins only the project name.
+    assert project_row(outcome.project_id).name == "Benchy Boat"
+
+
 # --- zip selection ----------------------------------------------------------
 
 
@@ -587,6 +602,74 @@ def test_selected_zip_entries_become_members(monkeypatch: pytest.MonkeyPatch, tm
     assert outcome.failed == []
     assert member_ids(outcome.project_id) == {asset.id for asset in outcome.assets}
     assert not zip_path.exists(), "the downloaded temp file is the import's to delete"
+
+
+def test_a_zip_import_title_names_the_project_not_the_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The archive title names the project; every entry keeps its own filename stem."""
+    zip_path = make_zip(tmp_path, ["part.stl", "a/nested.stl"])
+    target = page("https://www.printables.com/model/88-planter", PRINTABLES_FREE_PAGE)
+    stub_attempt(monkeypatch, ZipAttempt(tmp_path=zip_path, filename="download.zip", mime="application/zip", page=target))
+
+    outcome = project_import.import_into_project(
+        "https://www.printables.com/model/88-planter",
+        ImportProjectRequest(
+            url="https://www.printables.com/model/88-planter",
+            entries=["part.stl", "a/nested.stl"],
+            title="Archive title",
+        ),
+    )
+
+    assert project_row(outcome.project_id).name == "Archive title"
+    assert {asset.name for asset in outcome.assets} == {"part", "nested"}
+    assert {asset.filename for asset in outcome.assets} == {"part.stl", "nested.stl"}
+
+
+def test_a_gated_zip_import_still_takes_the_title_for_the_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gated branch writes no files, but it does create the project the title names."""
+    target = page("https://www.printables.com/model/89-paid", PRINTABLES_PAID_PAGE)
+    stub_attempt(
+        monkeypatch,
+        ZipAttempt(
+            filename="download.zip",
+            mime="application/zip",
+            page=target,
+            error=HTTPException(status_code=403, detail="forbidden"),
+        ),
+    )
+
+    outcome = project_import.import_into_project(
+        "https://www.printables.com/model/89-paid",
+        ImportProjectRequest(
+            url="https://www.printables.com/model/89-paid",
+            entries=["part.stl"],
+            title="Archive title",
+        ),
+    )
+
+    assert outcome.gated is True
+    assert outcome.assets == []
+    assert project_row(outcome.project_id).name == "Archive title"
+
+
+def test_project_name_still_beats_the_title(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An explicit project name wins over the title, which only fills the gap."""
+    zip_path = make_zip(tmp_path, ["part.stl", "a/nested.stl"])
+    target = page("https://www.printables.com/model/88-planter", PRINTABLES_FREE_PAGE)
+    stub_attempt(monkeypatch, ZipAttempt(tmp_path=zip_path, filename="download.zip", mime="application/zip", page=target))
+
+    outcome = project_import.import_into_project(
+        "https://www.printables.com/model/88-planter",
+        ImportProjectRequest(
+            url="https://www.printables.com/model/88-planter",
+            entries=["part.stl", "a/nested.stl"],
+            project_name="Chosen Name",
+            title="Archive title",
+        ),
+    )
+
+    assert project_row(outcome.project_id).name == "Chosen Name"
 
 
 def test_a_non_zip_download_is_a_415_and_leaves_no_temp_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
