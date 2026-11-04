@@ -5,9 +5,10 @@ import { strToU8, zipSync } from "fflate";
 import { isJunkZipPath } from "./zipJunk";
 import { buildUploadEntriesFromZip, readZipEntries } from "./zipUtils";
 
-// Mirrors the table in `curiarium/api/zip_junk.py`: the two must agree, because
+// Mirrors the table in `curiarium/api/entry_policy.py`: the two must agree, because
 // the browser's copy decides both what the prompt pre-ticks and what a locally
-// picked zip may upload.
+// picked zip may upload. `curiarium/api/tests/test_junk_vocabulary_mirror.py`
+// compares this vector set with the Python one, so drift fails a Python test.
 const JUNK_PATHS = [
   "__MACOSX/._part.stl",
   "__MACOSX/a/._nested.stl",

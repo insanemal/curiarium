@@ -43,10 +43,11 @@ class ImportInspectOut(BaseModel):
 class ZipEntryOut(BaseModel):
   """One zip member as an entries listing reports it.
 
-  `junk` is the server's verdict (`zip_junk.is_junk_entry`) that the member is
-  OS metadata - `__MACOSX/`, `.DS_Store`, `Thumbs.db`, an AppleDouble `._*` -
-  which the importer will refuse. The server decides it; the browser only uses
-  it to choose the modal's default ticks.
+  `junk` is the server's verdict (`entry_policy.is_junk_entry`) that the member
+  is OS metadata - `__MACOSX/`, `.DS_Store`, `Thumbs.db`, an AppleDouble `._*` -
+  and both server extract doors refuse it: `/import/zip` reports it in `failed`,
+  `/import/archive` leaves it out of the extraction. The server decides it; the
+  browser only uses it to choose the modal's default ticks.
   """
 
   path: str

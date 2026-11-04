@@ -26,6 +26,7 @@ from sqlmodel import Session, select
 
 import asset_service
 import db
+import entry_policy
 import library_scan
 import schemas
 import settings_service
@@ -127,8 +128,8 @@ class ShrunkSizeZipFile:
 
 def test_cumulative_preflight_rejects_before_any_write(isolated_storage: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     storage = isolated_storage
-    monkeypatch.setattr(zip_service, "IMPORT_MAX_BYTES", 100)
-    monkeypatch.setattr(zip_service, "IMPORT_ZIP_MAX_BYTES", 15)
+    monkeypatch.setattr(entry_policy, "IMPORT_MAX_BYTES", 100)
+    monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 15)
     archive = make_zip(storage.parent / "archive.zip", {"a.stl": payload(10), "b.stl": payload(10)})
     assets_before, folders_before, files_before = asset_ids(), folder_ids(), files_under(storage)
 
@@ -145,8 +146,8 @@ def test_cumulative_preflight_rejects_before_any_write(isolated_storage: Path, m
 
 def test_selected_subset_is_the_only_part_counted(isolated_storage: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     storage = isolated_storage
-    monkeypatch.setattr(zip_service, "IMPORT_MAX_BYTES", 100)
-    monkeypatch.setattr(zip_service, "IMPORT_ZIP_MAX_BYTES", 25)
+    monkeypatch.setattr(entry_policy, "IMPORT_MAX_BYTES", 100)
+    monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 25)
     archive = make_zip(
         storage.parent / "archive.zip",
         {"a.stl": payload(10), "b.stl": payload(10), "c.stl": payload(10)},
@@ -169,10 +170,10 @@ def test_selected_subset_is_the_only_part_counted(isolated_storage: Path, monkey
 
 def test_declared_per_entry_oversize_is_one_failed_entry(isolated_storage: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     storage = isolated_storage
-    monkeypatch.setattr(zip_service, "IMPORT_MAX_BYTES", 10)
+    monkeypatch.setattr(entry_policy, "IMPORT_MAX_BYTES", 10)
     # Room for small.stl alone, but not for small.stl plus the oversized entry:
     # a regression that counts big.stl toward the cumulative total fails here.
-    monkeypatch.setattr(zip_service, "IMPORT_ZIP_MAX_BYTES", 15)
+    monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 15)
     archive = make_zip(
         storage.parent / "archive.zip",
         {"big.stl": payload(20), "small.stl": payload(5)},
@@ -197,8 +198,8 @@ def test_declared_per_entry_oversize_is_one_failed_entry(isolated_storage: Path,
 
 def test_understated_declared_size_aborts_and_cleans_up(isolated_storage: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     storage = isolated_storage
-    monkeypatch.setattr(zip_service, "IMPORT_MAX_BYTES", 100)
-    monkeypatch.setattr(zip_service, "IMPORT_ZIP_MAX_BYTES", 15)
+    monkeypatch.setattr(entry_policy, "IMPORT_MAX_BYTES", 100)
+    monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 15)
     archive = make_zip(
         storage.parent / "archive.zip",
         {"a.stl": payload(10), "b.stl": payload(10)},

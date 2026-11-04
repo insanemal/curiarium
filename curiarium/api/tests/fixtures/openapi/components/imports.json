@@ -610,7 +610,7 @@
     "type": "object"
   },
   "ZipEntryOut": {
-    "description": "One zip member as an entries listing reports it.\n\n`junk` is the server's verdict (`zip_junk.is_junk_entry`) that the member is\nOS metadata - `__MACOSX/`, `.DS_Store`, `Thumbs.db`, an AppleDouble `._*` -\nwhich the importer will refuse. The server decides it; the browser only uses\nit to choose the modal's default ticks.",
+    "description": "One zip member as an entries listing reports it.\n\n`junk` is the server's verdict (`entry_policy.is_junk_entry`) that the member\nis OS metadata - `__MACOSX/`, `.DS_Store`, `Thumbs.db`, an AppleDouble `._*` -\nand both server extract doors refuse it: `/import/zip` reports it in `failed`,\n`/import/archive` leaves it out of the extraction. The server decides it; the\nbrowser only uses it to choose the modal's default ticks.",
     "properties": {
       "junk": {
         "title": "Junk",
