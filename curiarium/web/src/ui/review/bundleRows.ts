@@ -102,10 +102,21 @@ export function statusLine(row: BundleDetectItem): string {
 
 /** The detail line for a row that already became a project, or null when it did
  *  not. The id is the identity and is never spoken: a name we have is named, a
- *  name we do not have says so honestly rather than printing a uuid or nothing. */
+ *  name we do not have says so honestly rather than printing a uuid or nothing.
+ *
+ *  The asset identity is spoken differently on purpose. It is a claim about the
+ *  FILES, not about intent: the project holds the bundle's files, but the app
+ *  did not necessarily make it from this bundle, so the line says "Already in"
+ *  and names the evidence. The marker, source URL and name identities keep the
+ *  flat "Already created as project" line - the first two are the app's own
+ *  record, and a name match is already a guess about the same project. */
 export function createdProjectLine(row: BundleDetectItem): string | null {
   if (!row.existing_project_id) return null;
   const name = (row.existing_project_name ?? "").trim();
+  if (row.existing_project_match === "assets") {
+    if (name) return `Already in ${name} (matched by shared files)`;
+    return "Already in a project (matched by shared files) - its name is unavailable.";
+  }
   if (name) return `Already created as project ${name}`;
   return "Already created as a project - its name is unavailable.";
 }

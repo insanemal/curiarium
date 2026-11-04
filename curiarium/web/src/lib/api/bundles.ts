@@ -24,6 +24,13 @@ export type BundleArchive = {
   twin_verified: boolean;
 };
 
+/** Which identity claimed a row: the `_bundle` marker the app wrote, the
+ *  project's source URL, an exact casefolded name, or the bundle's own files
+ *  already sitting in one project. They are not equally certain: a marker is
+ *  proof, a source URL is strong, a name is a guess, and shared files are
+ *  strong evidence about the files but say nothing about intent. */
+export type ExistingProjectMatch = "marker" | "source_url" | "name" | "assets";
+
 /** One detected bundle. `status` and `confidence` are orthogonal. */
 export type BundleDetectItem = {
   key: string;
@@ -51,6 +58,10 @@ export type BundleDetectItem = {
   // a payload that names an id also names its project (or says it is nameless).
   existing_project_id: string | null;
   existing_project_name: string | null;
+  // OPTIONAL on purpose: a payload from before this identity existed omits it,
+  // and every existing fixture (including the ones another lane owns) must keep
+  // compiling. `undefined` means "the server did not say", never "assets".
+  existing_project_match?: ExistingProjectMatch | null;
   dismissed: boolean;
 };
 

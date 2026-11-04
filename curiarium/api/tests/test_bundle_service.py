@@ -24,6 +24,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
+from sqlalchemy import event
 from sqlmodel import Session, select
 
 import asset_file_service
@@ -3410,3 +3411,337 @@ def test_service_r4_outranks_the_title_rule_on_an_id_named_folder(
     assert row["source_url"] == DRAGON_URL
     assert report["counts"]["low"] == 0
     assert report["counts"]["total"] == 1
+
+
+# --- a hand-made project owns a bundle by its files (Mf-cf3c) ----------------
+
+# The owner's project over the Clockwork files, made by hand: no `_bundle`
+# marker, a name the folder-derived suggestion never equals, and no source URL.
+CLOCKWORK_PROJECT_NAME = "Fates End - ClockworkMonster Tower"
+
+
+def clockwork_model_paths(root: str = CLOCKWORK_ROOT) -> List[str]:
+    """The 12 storage paths of the Clockwork models, as the scan registers them."""
+    return [f"import/{root}/Clockwork_Part{index:02d}.stl" for index in range(12)]
+
+
+def hand_made_project(name: str, storage_paths: List[str]) -> str:
+    """A project a human made over already-registered files, out of band.
+
+    No ``_bundle`` marker and no source URL, because the app never touched it:
+    asset containment is the only identity that can find it.
+    """
+    with Session(engine) as session:
+        project = project_service.create_project(session, name, None, None, origin="own")
+        project_id = project.id
+    project_service.add_assets(project_id, [asset_id_at(path) for path in storage_paths])
+    return project_id
+
+
+class _PoisonedAssetIndex(dict):
+    """A membership index that raises if anyone reads it: proof a path never did."""
+
+    def get(self, key: object, default: object = None) -> object:
+        raise AssertionError("membership index read on a marker match")
+
+    def __getitem__(self, key: object) -> object:
+        raise AssertionError("membership index read on a marker match")
+
+    def __contains__(self, key: object) -> bool:
+        raise AssertionError("membership index read on a marker match")
+
+
+def test_service_a_hand_made_project_owns_a_bundle_by_its_files(isolated_storage: Path) -> None:
+    """AC-1: the owner's Clockwork project is reported as this bundle's owner.
+
+    The bundle is offered (R5 reads ``17_ClockworkMonster`` as a title), the
+    hand-made project matches none of the three older identities, and the report
+    still names it - matched by ``assets`` - without writing anything: the
+    project keeps no ``_bundle`` marker, because a read route writes nothing.
+
+    Mutation: drop the asset identity and ``existing_project_id`` goes None and
+    the row counts as pending again; stamp the project with a marker and the
+    match reads ``marker`` instead, so the ``assets`` assertion reds.
+    """
+    clockwork_directory(isolated_storage)
+    scan()
+    project_id = hand_made_project(CLOCKWORK_PROJECT_NAME, clockwork_model_paths())
+
+    report = bundle_service.build_report()
+
+    row = row_for(report, CLOCKWORK_DIR)
+    assert row["existing_project_id"] == project_id
+    assert row["existing_project_name"] == CLOCKWORK_PROJECT_NAME
+    assert row["existing_project_match"] == "assets"
+    assert row["status"] == "ready", "the asset identity never changes readiness"
+    assert report["counts"]["already_created"] == 1
+    with Session(engine) as session:
+        stored = project_service.get_project(session, project_id)
+    assert "_bundle" not in json.loads(stored.metadata_json or "{}"), (
+        "the report only reads: the hand-made project is never stamped"
+    )
+
+
+def test_service_a_project_holding_the_models_owns_a_bundle_that_also_has_images(
+    isolated_storage: Path,
+) -> None:
+    """The pinned reading of "every registered asset": models are the set.
+
+    The bundle has 14 registered assets (12 models and 2 renders) and the project
+    holds only the 12 models, and the bundle is STILL claimed. The app only ever
+    attaches MODELS to a project (``_create_one``'s ``model_assets``), so literal
+    full-set containment would report the owner's own project as not owning the
+    bundle and AC-1 would be false in production.
+
+    Mutation: build the containment set from ``own_assets`` instead of ``models``
+    and the match goes None here while the project still holds every file a
+    create would attach.
+    """
+    clockwork_directory(isolated_storage)
+    scan()
+    project_id = hand_made_project(CLOCKWORK_PROJECT_NAME, clockwork_model_paths())
+
+    report = bundle_service.build_report()
+
+    row = row_for(report, CLOCKWORK_DIR)
+    assert row["assets_total"] == 14, "the 12 models and the 2 renders are registered"
+    assert row["image_count"] == 2
+    assert member_count(project_id) == 12, "the project holds only the models"
+    assert row["existing_project_match"] == "assets"
+    assert row["existing_project_id"] == project_id
+
+
+def test_service_a_project_holding_some_of_the_files_does_not_claim_the_bundle(
+    isolated_storage: Path,
+) -> None:
+    """AC-3: containment, not intersection - 11 of 12 models claims nothing.
+
+    The project holds almost the whole bundle, which is exactly the shape a
+    loosened rule would claim. The row stays pending: no existing project and no
+    identity, so the operator still decides.
+
+    Mutation: accept ``count >= 1`` (or compare against an intersection) and
+    ``existing_project_id`` becomes this project, so the None assertions red.
+    """
+    clockwork_directory(isolated_storage)
+    scan()
+    hand_made_project(CLOCKWORK_PROJECT_NAME, clockwork_model_paths()[:11])
+
+    report = bundle_service.build_report()
+
+    row = row_for(report, CLOCKWORK_DIR)
+    assert row["existing_project_id"] is None
+    assert row["existing_project_match"] is None
+    assert row["status"] == "ready", "the row still appears and is still creatable"
+    assert report["counts"]["already_created"] == 0
+
+
+def test_service_an_empty_asset_list_never_claims_a_bundle(isolated_storage: Path) -> None:
+    """AC-4: an empty containment set owns nothing, and never a bundle without assets.
+
+    An empty project exists and the Moai bundle is deliberately NOT scanned, so
+    the row has zero registered assets. An empty wanted set must not degenerate
+    to "the first project wins": the row reports no owner.
+
+    Mutation: let ``_asset_owner`` answer for an empty wanted set and the empty
+    project claims this bundle, so both the None assertions and the direct call
+    red.
+    """
+    moai_bundle(isolated_storage)
+    with Session(engine) as session:
+        empty = project_service.create_project(session, "Empty Project", None, None, origin="own")
+        projects = {empty.id: empty}
+        index = bundle_service.project_assets_index(session)
+
+    assert index == {}, "a project that holds nothing contributes no membership"
+    assert bundle_service._asset_owner(index, (), projects) is None
+    assert bundle_service._asset_owner(index, ("asset-with-no-project",), projects) is None, (
+        "an asset id with no membership contributes nothing, so nothing is contained"
+    )
+
+    report = bundle_service.build_report()
+
+    row = row_for(report, MOAI)
+    assert row["assets_total"] == 0, "the row exists but the scan registered nothing under it"
+    assert row["existing_project_id"] is None
+    assert row["existing_project_match"] is None
+    assert report["counts"]["already_created"] == 0
+
+
+def test_service_the_four_identities_keep_their_precedence(isolated_storage: Path) -> None:
+    """AC-5: marker, then source URL, then name, then assets - in that order.
+
+    Each project below matches a weaker identity too, so every scenario would
+    pass under a different order except the one it names: the source project
+    also holds the asset, the named project also holds it, and the marker project
+    matches the name and holds the asset. The poisoned index proves the marker
+    path never even reads the membership index.
+
+    Mutation: move any identity ahead of a stronger one and that scenario's
+    ``match`` reds; move assets ahead of the marker and the poisoned index
+    raises ``AssertionError`` instead of returning ``MATCH_MARKER``.
+    """
+    with Session(engine) as session:
+        marked = project_service.create_project(
+            session,
+            "Fates End - ClockworkMonster Tower",
+            None,
+            None,
+            origin="imported",
+            metadata={"_bundle": {"key": "import/17_ClockworkMonster"}},
+        )
+        marked_id = marked.id
+        sourced = project_service.create_project(
+            session, "Sourced Thing", None, None, source_url=THING_URL, origin="imported"
+        )
+        sourced_id = sourced.id
+        named = project_service.create_project(session, "Named Thing", None, None, origin="own")
+        named_id = named.id
+        holding = project_service.create_project(session, "Holding Thing", None, None, origin="own")
+        holding_id = holding.id
+
+    with Session(engine) as session:
+        marker = bundle_service.find_existing_project(
+            session,
+            key="import/17_ClockworkMonster",
+            source_url=THING_URL,
+            name="Fates End - ClockworkMonster Tower",
+            assets=("asset-marker",),
+            asset_index=_PoisonedAssetIndex(),
+        )
+        source = bundle_service.find_existing_project(
+            session,
+            key="import/sourced",
+            source_url=THING_URL,
+            name="Sourced Thing",
+            assets=("asset-source",),
+            asset_index={"asset-source": (sourced_id,)},
+        )
+        by_name = bundle_service.find_existing_project(
+            session,
+            key="import/named",
+            source_url=None,
+            name="Named Thing",
+            assets=("asset-name",),
+            asset_index={"asset-name": (named_id,)},
+        )
+        by_assets = bundle_service.find_existing_project(
+            session,
+            key="import/assets",
+            source_url=None,
+            name="Nothing Like It",
+            assets=("asset-holding",),
+            asset_index={"asset-holding": (holding_id,)},
+        )
+
+    assert marker is not None and (marker.project.id, marker.match) == (
+        marked_id,
+        bundle_service.MATCH_MARKER,
+    ), "the marker is proof and never reads the membership index"
+    assert source is not None and (source.project.id, source.match) == (
+        sourced_id,
+        bundle_service.MATCH_SOURCE_URL,
+    ), "a source URL outranks both the name and the shared files"
+    assert by_name is not None and (by_name.project.id, by_name.match) == (
+        named_id,
+        bundle_service.MATCH_NAME,
+    ), "a name outranks the shared files"
+    assert by_assets is not None and (by_assets.project.id, by_assets.match) == (
+        holding_id,
+        bundle_service.MATCH_ASSETS,
+    ), "with nothing stronger, shared files are the identity"
+
+
+def test_service_one_project_asset_query_serves_every_candidate(isolated_storage: Path) -> None:
+    """AC-6: one statement for the whole report, whatever the candidate count.
+
+    Two candidates and then five: the count is the same, so the asset identity
+    costs one query per report rather than one per bundle.
+
+    Mutation: build the index inside ``_report_row`` and the count becomes one
+    per candidate (2, then 5).
+    """
+    for index in range(2):
+        thingiverse_bundle(isolated_storage, f"Two {index}", 1000 + index)
+    scan()
+
+    def project_asset_statements() -> int:
+        statements: List[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany) -> None:
+            if "project_asset" in statement.lower():
+                statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            bundle_service.build_report()
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        return len(statements)
+
+    assert project_asset_statements() == 1, "two candidates, one membership query"
+
+    for index in range(2, 5):
+        thingiverse_bundle(isolated_storage, f"Two {index}", 1000 + index)
+    scan()
+
+    assert len(bundle_service.build_report()["bundles"]) == 5
+    assert project_asset_statements() == 1, "five candidates, still one membership query"
+
+
+def test_service_the_clockwork_parent_is_promoted_and_reports_its_owner(isolated_storage: Path) -> None:
+    """AC-7: the Mf-v3i3 pairing and the Mf-cf3c identity hold at once.
+
+    The parent directory is promoted by its archive (the nested member is not a
+    second row and neither zip is a row) AND that same row reports the hand-made
+    project as its owner by ``assets``. Both must be true at once: the bundle
+    must survive as the parent candidate before it can be reported as already in
+    a project.
+
+    Mutation: let the nested archive become a second row and the key list reds;
+    drop the asset identity and the match goes None on the surviving row.
+    """
+    clockwork_pair(isolated_storage)
+    scan()
+    project_id = hand_made_project(CLOCKWORK_PROJECT_NAME, clockwork_model_paths())
+
+    report = bundle_service.build_report()
+
+    assert [row["key"] for row in report["bundles"]] == [CLOCKWORK_DIR], (
+        "the promoted parent is the only bundle row: neither zip and no nested member"
+    )
+    row = row_for(report, CLOCKWORK_DIR)
+    assert row["archive"] == {"rel_path": CLOCKWORK_ZIP, "twin_verified": True}
+    assert row["existing_project_id"] == project_id
+    assert row["existing_project_match"] == "assets"
+
+
+def test_service_a_create_for_an_asset_owned_bundle_is_a_skip(isolated_storage: Path) -> None:
+    """AC-8: the service-level create door refuses a second project over the files.
+
+    A POST that dodges the UI is still refused: the create pass asks the same
+    four identities, so the bundle is ``skipped``/``already_created`` with the
+    hand-made project's id, its members are untouched and no second project row
+    appears.
+
+    Mutation: skip the asset identity in ``_create_one`` and a second project is
+    created over the same 12 files, so the one-project and member-count
+    assertions red.
+    """
+    clockwork_directory(isolated_storage)
+    scan()
+    project_id = hand_made_project(CLOCKWORK_PROJECT_NAME, clockwork_model_paths())
+    members_before = member_count(project_id)
+
+    created = bundle_service.create_bundles(
+        [bundle_service.BundleCreateItem(key=CLOCKWORK_DIR)], audit_ctx()
+    )
+
+    assert created["created"] == 0
+    assert created["skipped"] == 1
+    assert created["results"][0]["status"] == "skipped"
+    assert created["results"][0]["reason"] == "already_created"
+    assert created["results"][0]["project_id"] == project_id
+    assert member_count(project_id) == members_before == 12, "a skip attaches nothing"
+    with Session(engine) as session:
+        assert len(session.exec(select(Project)).all()) == 1, "no second project over the same files"

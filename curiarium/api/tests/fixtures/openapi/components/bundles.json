@@ -353,6 +353,17 @@
         ],
         "title": "Existing Project Id"
       },
+      "existing_project_match": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Existing Project Match"
+      },
       "existing_project_name": {
         "anyOf": [
           {
