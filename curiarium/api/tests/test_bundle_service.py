@@ -13,7 +13,9 @@ below prove the same core contract without the request layer.
 """
 
 import json
+import re
 import shutil
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional
 from zipfile import ZipFile
@@ -21,6 +23,7 @@ from zipfile import ZipFile
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlmodel import Session, select
 
 import asset_file_service
@@ -40,6 +43,8 @@ from models import Asset, AssetFile, AuditEvent, Folder, Project, ProjectAsset
 
 MOAI = "2493386_Moai_statue_-No_overhang"
 THING_URL = "https://www.thingiverse.com/thing:2493386"
+# The shape the ticket is about: a Thingiverse export with models and no preview.
+GEAR_BEARING = "Gear Bearing"
 README_TEXT = "Moai statue -No overhang\nCreated by Thingiverse user moai_maker\nLicensed under CC BY-NC\n"
 LICENSE_TEXT = f"Moai statue -No overhang by moai_maker on Thingiverse: {THING_URL}\n"
 STL_BYTES = b"solid cube\nendsolid cube\n"
@@ -205,6 +210,40 @@ def thingiverse_bundle(root: Path, name: str, thing: int) -> Path:
     )
     write_file(bundle / "files" / "part.stl", STL_BYTES)
     return bundle
+
+
+def gear_bearing_bundle(root: Path, name: str = GEAR_BEARING, thing: int = 333333) -> Path:
+    """The Gear-Bearing shape: a README pair, two renderable models, no image.
+
+    ``gear.stl`` is larger than ``pinion.stl`` so "the largest renderable model"
+    has one answer regardless of path order, and ``bearing.scad`` is a model the
+    client renderer has no loader for, so it must never be the cover.
+    """
+    bundle = root / name
+    title = bundle_detect.display_name(name)
+    write_text(bundle / "README.txt", f"{title}\nCreated by Thingiverse user maker_{thing}\nLicensed under CC BY-NC\n")
+    write_text(
+        bundle / "LICENSE.txt",
+        f"{title} by maker_{thing} on Thingiverse: https://www.thingiverse.com/thing:{thing}\n",
+    )
+    write_file(bundle / "files" / "bearing.scad", b"s" * 10)
+    write_file(bundle / "files" / "gear.stl", b"g" * 900)
+    write_file(bundle / "files" / "pinion.stl", b"p" * 400)
+    return bundle
+
+
+def png_bytes() -> bytes:
+    """A real 2x2 PNG: the thumbnail writer validates the image, not just the type."""
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2), (30, 120, 200)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def asset_id_at(storage_path: str) -> str:
+    """The registered asset id for one storage path, read from the DB, never guessed."""
+    with Session(engine) as session:
+        asset = session.exec(select(Asset).where(Asset.storage_path == storage_path)).one()
+        return asset.id
 
 
 def legacy_bundle(root: Path, name: str) -> Path:
@@ -503,7 +542,13 @@ def test_an_archive_only_bundle_is_read_and_blocked(client: TestClient, isolated
     assert row["creator"] == "moai_maker"
     assert row["licence"] == "CC BY-NC"
     assert row["source_url"] == THING_URL
-    assert row["cover"] == {"asset_id": None, "rel_path": "images/a.jpg", "reason": "largest-image-unregistered"}
+    assert row["cover"] == {
+        "asset_id": None,
+        "rel_path": "images/a.jpg",
+        "reason": "largest-image-unregistered",
+        "url": None,
+        "thumb_url": None,
+    }
     assert row["status"] == "blocked"
     assert row["blocked_reason"] == "archive_only"
     assert create(client, headers, [{"key": "Moai.zip"}])["blocked"] == 1
@@ -812,7 +857,9 @@ def test_a_parent_attaches_only_its_own_models(client: TestClient, isolated_stor
     assert parent_row["detector"] == "thingiverse-readme"
     assert parent_row["confidence"] == "high"
     assert parent_row["model_count"] == 1, "the parent's snapshot names only its own model"
-    assert parent_row["cover"]["reason"] == "none", "the child's previews are not the parent's cover"
+    assert parent_row["cover"]["reason"] == "model-preview", "the child's previews are not the parent's cover"
+    assert parent_row["cover"]["rel_path"] == "Parent Thing/parent_part.stl", "the parent's own stl is its face"
+    assert parent_row["cover"]["asset_id"] is not None
     assert parent_row["assets_total"] == 13, "assets_total counts the parent's 3 files plus the child's 10"
     assert child_row["confidence"] == "high"
 
@@ -822,6 +869,131 @@ def test_a_parent_attaches_only_its_own_models(client: TestClient, isolated_stor
     parent_project, child_project = (result["project_id"] for result in created["results"])
     assert len(project_asset_ids(client, headers, parent_project)) == 1
     assert len(project_asset_ids(client, headers, child_project)) == 3
+
+
+# --- the model-preview cover (Mf-15xj) --------------------------------------
+#
+# A bundle with no image used to report ``reason: none``, so the review row had
+# no thumbnail and the created project no visual identity. Its own renderable
+# model is the fourth fallback; the reason stays honest about which source won.
+
+
+def test_a_bundle_with_models_and_no_image_derives_a_model_preview_cover(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    gear_bearing_bundle(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    row = row_for(report, GEAR_BEARING)
+    assert row["detector"] == "thingiverse-readme"
+    assert row["confidence"] == "high"
+    assert row["status"] == "ready"
+    assert row["image_count"] == 0, "the fixture ships no preview at all"
+    gear_id = asset_id_at(f"{GEAR_BEARING}/files/gear.stl")
+    assert row["cover"] == {
+        "asset_id": gear_id,
+        "rel_path": f"{GEAR_BEARING}/files/gear.stl",
+        "reason": "model-preview",
+        "url": f"/file/{gear_id}/gear.stl",
+        "thumb_url": None,
+    }, "the largest renderable model, served at the one asset URL shape, with no thumbnail yet"
+
+
+def test_an_unregistered_image_outranks_a_renderable_model(client: TestClient, isolated_storage: Path) -> None:
+    gear_bearing_bundle(isolated_storage)
+    scan()
+    # Written after the scan, so the largest image on disk has no Asset row: the
+    # vendor's own picture still beats a rendered one, exactly as before.
+    write_file(isolated_storage / GEAR_BEARING / "preview.png", b"p" * 60)
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), GEAR_BEARING)
+
+    assert row["cover"]["reason"] == "largest-image-unregistered"
+    assert row["cover"]["asset_id"] is None
+    assert row["cover"]["url"] is None
+    assert row["cover"]["thumb_url"] is None
+
+
+def test_a_bundle_with_no_image_and_no_renderable_model_reports_no_cover(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """An OpenSCAD source is a model in the tree but not one the client can render."""
+    bundle = isolated_storage / "Scad Only"
+    write_text(bundle / "README.txt", "Scad Only\nCreated by Thingiverse user maker_444\nLicensed under CC BY-NC\n")
+    write_text(
+        bundle / "LICENSE.txt",
+        "Scad Only by maker_444 on Thingiverse: https://www.thingiverse.com/thing:444444\n",
+    )
+    write_text(bundle / "notes.txt", "parametric source only")
+    write_file(bundle / "model.scad", b"s" * 20)
+    scan()
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), "Scad Only")
+
+    assert row["cover"]["reason"] == "none"
+    assert row["cover"]["rel_path"] is None
+    assert row["cover"]["url"] is None
+    assert row["cover"]["thumb_url"] is None
+
+
+def test_a_laser_file_is_not_offered_as_a_model_preview_cover(client: TestClient, isolated_storage: Path) -> None:
+    """A .lbrn2 is a MODEL_SUFFIXES member, but the client has no loader for it."""
+    bundle = isolated_storage / "Laser Cut"
+    write_text(bundle / "README.txt", "Laser Cut\nCreated by Thingiverse user maker_555\nLicensed under CC BY-NC\n")
+    write_text(
+        bundle / "LICENSE.txt",
+        "Laser Cut by maker_555 on Thingiverse: https://www.thingiverse.com/thing:555555\n",
+    )
+    write_file(bundle / "part.lbrn2", b"l" * 30)
+    scan()
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), "Laser Cut")
+
+    assert row["model_count"] == 1, "the laser file is still a model the bundle owns"
+    assert row["cover"]["reason"] == "none", "but a cover can never be rendered from it"
+
+
+def test_creating_a_model_preview_bundle_sets_the_project_cover_to_the_model(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    gear_bearing_bundle(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    created = create(client, headers, [{"key": GEAR_BEARING}])
+
+    assert created["created"] == 1
+    project = project_listing(client, headers)[created["results"][0]["project_id"]]
+    assert project["cover_asset_id"] == asset_id_at(f"{GEAR_BEARING}/files/gear.stl")
+
+
+def test_a_generated_thumbnail_makes_a_model_preview_project_cover_render(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    gear_bearing_bundle(isolated_storage)
+    scan()
+    headers = auth_header(client)
+    created = create(client, headers, [{"key": GEAR_BEARING}])
+    project_id = created["results"][0]["project_id"]
+    cover_asset_id = asset_id_at(f"{GEAR_BEARING}/files/gear.stl")
+
+    assert project_listing(client, headers)[project_id]["cover_thumb_url"] is None, "no thumbnail row yet"
+
+    generated = client.post(
+        f"/asset/{cover_asset_id}/thumbnail-generated",
+        files={"file": ("thumb.png", png_bytes(), "image/png")},
+        headers=headers,
+    )
+    assert generated.status_code == 200, generated.text
+
+    listed = project_listing(client, headers)[project_id]
+    assert re.fullmatch(rf"/thumb/{cover_asset_id}\.jpg\?v=\d+", listed["cover_thumb_url"] or ""), listed
 
 
 def test_the_live_shape_has_no_container_bundle(client: TestClient, isolated_storage: Path) -> None:

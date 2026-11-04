@@ -37,7 +37,13 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     image_count: 5,
     text_count: 2,
     other_count: 0,
-    cover: { asset_id: "asset-1", rel_path: "images/hero.jpg", reason: "largest-image" },
+    cover: {
+      asset_id: "asset-1",
+      rel_path: "images/hero.jpg",
+      reason: "largest-image",
+      url: "/file/asset-1/hero.jpg",
+      thumb_url: "/thumb/asset-1.jpg?v=1",
+    },
     assets_total: 8,
     status: "ready",
     blocked_reason: null,
@@ -323,7 +329,15 @@ describe("countsLine", () => {
 
 describe("coverLine", () => {
   it("says there is no cover when the bundle has none", () => {
-    const row = makeBundle({ cover: { asset_id: null, rel_path: null, reason: "largest-image-unregistered" } });
+    const row = makeBundle({
+      cover: {
+        asset_id: null,
+        rel_path: null,
+        reason: "largest-image-unregistered",
+        url: null,
+        thumb_url: null,
+      },
+    });
     expect(coverLine(row)).toBe("Cover: none");
   });
 
@@ -333,9 +347,28 @@ describe("coverLine", () => {
 
   it("marks an unregistered largest image", () => {
     const row = makeBundle({
-      cover: { asset_id: null, rel_path: "preview.png", reason: "largest-image-unregistered" },
+      cover: {
+        asset_id: null,
+        rel_path: "preview.png",
+        reason: "largest-image-unregistered",
+        url: null,
+        thumb_url: null,
+      },
     });
     expect(coverLine(row)).toBe("Cover preview.png (not registered)");
+  });
+
+  it("names a derived model preview", () => {
+    const row = makeBundle({
+      cover: {
+        asset_id: "asset-9",
+        rel_path: "model.stl",
+        reason: "model-preview",
+        url: "/file/asset-9/model.stl",
+        thumb_url: null,
+      },
+    });
+    expect(coverLine(row)).toBe("Cover model.stl (model preview)");
   });
 });
 

@@ -33,8 +33,11 @@ class BundleCoverOut(BaseModel):
 
   asset_id: Optional[str] = None
   rel_path: Optional[str] = None
-  # largest-image | largest-image-unregistered | none
+  # largest-image | largest-image-unregistered | model-preview | none
   reason: str
+  # Set exactly when asset_id is: the served paths for the cover's bytes.
+  url: Optional[str] = None
+  thumb_url: Optional[str] = None
 
 
 class BundleArchiveOut(BaseModel):
