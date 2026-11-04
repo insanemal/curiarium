@@ -31,7 +31,7 @@ vi.mock("../../lib/api", async importOriginal => ({
   extractArchive: vi.fn(),
 }));
 
-import type { Asset, Folder, PreparedPrint } from "../../lib/api";
+import { extractArchive, listArchiveEntries, type Asset, type Folder, type PreparedPrint } from "../../lib/api";
 import { AssetPreviewModal, PreparedPrintSummary, renderPreviewContent } from "./preview";
 
 afterEach(cleanup);
@@ -39,6 +39,8 @@ afterEach(cleanup);
 beforeEach(() => {
   lightBurnProps.length = 0;
   modelSnapshotProps.length = 0;
+  vi.mocked(listArchiveEntries).mockReset();
+  vi.mocked(extractArchive).mockReset();
 });
 
 /** The summary line sits on the outer div; the Clear button is a sibling. */
@@ -262,6 +264,19 @@ describe("AssetPreviewModal dialog upgrade", () => {
 
 describe("AssetPreviewModal archive extraction", () => {
   const ZIP_ASSET: Asset = { ...MODAL_ASSET, filename: "Moai.zip", mime: "application/zip" };
+  const ENTRIES = [
+    { path: "Moai.stl", size: 2048 },
+    { path: "readme.txt", size: 512 },
+  ];
+
+  /** A promise the test settles itself, to observe a stage that lasts one request. */
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(res => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
 
   it("offers the extract action for a zip the library holds", () => {
     render(
@@ -299,6 +314,79 @@ describe("AssetPreviewModal archive extraction", () => {
     );
 
     expect(screen.queryByRole("button", { name: "Extract Moai.zip" })).toBeNull();
+  });
+
+  it("keeps focus inside the panel across stages, so Escape still reaches the host", async () => {
+    // The footer inherits the action's recovery rather than copying it: before
+    // the fix every stage advance dropped the caret to <body>, where neither the
+    // dialog's Tab trap nor this Escape handler could reach it.
+    const listing = deferred<Awaited<ReturnType<typeof listArchiveEntries>>>();
+    vi.mocked(listArchiveEntries).mockReturnValue(listing.promise);
+    const extracting = deferred<Awaited<ReturnType<typeof extractArchive>>>();
+    vi.mocked(extractArchive).mockReturnValue(extracting.promise);
+    const onClose = vi.fn();
+    render(
+      <AssetPreviewModal
+        {...modalProps({ canContribute: true, onClose, asset: { ...ZIP_ASSET, storage_path: "Moai.zip" } })}
+      />,
+    );
+    const panel = screen.getByRole("dialog", { name: ZIP_ASSET.name });
+    const trigger = screen.getByRole("button", { name: "Extract Moai.zip" });
+
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    // `listing` disables the only control: the action's container is the home.
+    const actionContainer = trigger.parentElement;
+    await waitFor(() => expect(document.activeElement).toBe(actionContainer));
+    expect(panel.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(document.body);
+
+    await act(async () => {
+      listing.resolve({ path: "Moai.zip", entries: ENTRIES });
+    });
+
+    const confirmButton = await screen.findByRole("button", { name: "Extract 2 files" });
+    await waitFor(() => expect(document.activeElement).toBe(confirmButton));
+    expect(panel.contains(document.activeElement)).toBe(true);
+
+    // The host's Escape handler is reachable again from the new focus home.
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    confirmButton.focus();
+    fireEvent.click(confirmButton);
+
+    // `extracting` disables both controls: the panel itself is the home again.
+    const stagePanel = screen.getByText(/extract into a new folder beside the archive\?$/)
+      .parentElement as HTMLElement;
+    const extractingButton = within(stagePanel).getByRole("button", {
+      name: "Extracting...",
+    }) as HTMLButtonElement;
+    const cancelButton = within(stagePanel).getByRole("button", {
+      name: "Cancel",
+    }) as HTMLButtonElement;
+    expect(extractingButton.disabled).toBe(true);
+    expect(cancelButton.disabled).toBe(true);
+    await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true));
+    expect(document.activeElement).not.toBe(document.body);
+
+    await act(async () => {
+      extracting.resolve({
+        path: "Moai.zip",
+        destination: "Moai",
+        files: 2,
+        bytes: 2560,
+        already_present: false,
+        scan_started: true,
+      });
+    });
+
+    // Back on the action's own trigger, its accessible name still the label.
+    const archiveButton = screen.getByRole("button", { name: "Extract Moai.zip" });
+    expect(archiveButton.textContent).toBe("Extract archive");
+    await waitFor(() => expect(document.activeElement).toBe(archiveButton));
+    expect(panel.contains(document.activeElement)).toBe(true);
   });
 });
 
