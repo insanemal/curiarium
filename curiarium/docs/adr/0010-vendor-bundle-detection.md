@@ -805,18 +805,28 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     carrying a stronger verification string, and it is names-only on both routes
     anyway - no bytes are read either way.
 
-    **An id-named pile that has a verified twin is `pair_only`, not absent.** If
-    the id-shaped directory holds child bundles, the widened `claimed_ancestors`
-    refusal declines it in the folder pass. The promotion pass then finds a
-    verified stem twin and, because the key is a claimed ancestor, records the
-    directory in `pair_only_specs` instead of `found`: a `blocked` /
-    `archive_only` row that is visible, creates nothing, and whose facts read
-    `low` / `generic-bundle`. **A refusal is never stamped with the id provenance
-    it was refused for** - we refused the row *because* we decided it is a pile
-    and not a bundle, so the row says nothing about a Thingiverse id. An id-named
-    pile with **no** archive is simply absent, which is the same silence any other
-    pile gets. Mutation: un-widen the `claimed_ancestors` refusal and the pile is
-    a creatable `medium` / `ready` row beside its own two children, so the report
+    **An id-named pile that still carries a model at its own depth gets
+    `pair_only` from a verified twin; one that does not stays absent.** Two
+    conditions make the visible row, and the second is a bound this document
+    already states twice. First, this rule's own widening: `claimed_ancestors`
+    now covers an inferred `medium`, so an id-shaped directory holding child
+    bundles is declined in the folder pass. Second, the own-depth bound: the
+    promotion pass asks `archive_owned_facts`, which answers `None` unless
+    `_own_depth_model_count` is at least one, and the `claimed_ancestors` branch
+    is only reached after that answer. With both - the `5390184_pile` witness
+    writes its own loose model beside `Child_A` and `Child_B` - the verified stem
+    twin records the directory in `pair_only_specs` instead of `found`: a
+    `blocked` / `archive_only` row that is visible, creates nothing, and whose
+    facts read `low` / `generic-bundle`. **A refusal is never stamped with the id
+    provenance it was refused for** - we refused the row *because* we decided it
+    is a pile and not a bundle, so the row says nothing about a Thingiverse id.
+    A pile by this document's own definition - two or more unnamed model-bearing
+    subdirectories, no model at depth 0 and none under `files/` - has no
+    own-depth model at all, so `archive_owned_facts` refuses it *before* the
+    container rule is consulted: a verified twin buys it no row, and it stays
+    absent exactly as it would with no archive (`RepRap-MultiFilament` is that
+    shape). Mutation: un-widen the `claimed_ancestors` refusal and the pile is a
+    creatable `medium` / `ready` row beside its own two children, so the report
     gains a third row and create-all makes three projects instead of two.
 
     **The archive-snapshot widening is accepted.** `_zip_snapshot` names an
@@ -1027,13 +1037,16 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 * **A verified archive widens the offer, and the widening is accepted.** A
   directory the format rules would have refused - models alone, models plus a
   README, models plus images - is now offered at `low` when an archive beside it
-  verifies, and a pile whose own payload an archive verifies gains a visible
-  `blocked` / `archive_only` row where it previously vanished: visible, not
-  creatable. A pile of flat depth-0 models with a matching twin would now be
-  promoted, because the archive proves it is one thing. That is this ticket's
-  accepted trade, stated rather than hidden; the own-depth/cardinality guard
-  still refuses every pile of unnamed model-bearing subdirectories, so the
-  widening cannot promote a pile of things on its members' models.
+  verifies, and a directory that holds a claimed child bundle and still carries
+  a model at its own depth gains a visible `blocked` / `archive_only` row where
+  it previously vanished: visible, not creatable. A pile of flat depth-0 models
+  with a matching twin would now be promoted, because the archive proves it is
+  one thing. That is this ticket's accepted trade, stated rather than hidden; the
+  own-depth/cardinality guard still refuses every pile of unnamed model-bearing
+  subdirectories - and a refused pile produces no row at all, not even the
+  blocked one, because `archive_owned_facts` answers `None` before the container
+  rule is consulted - so the widening cannot promote a pile of things on its
+  members' models.
 * **A stem pairing costs one extra central-directory listing per undetected stem
   twin.** At report time each such twin's archive is read once to re-verify
   containment, uncached, on the `READ` route that is already the most expensive
@@ -1042,9 +1055,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   standing caveat is unchanged: a declared zip size is header data, so a lying
   header makes a pairing wrong and never a bundle corrupt.
 * **A container whose own payload an archive verifies is still refused, and
-  stays visible.** The bullet above - a container directory is no longer offered
-  - still holds: a verified pairing makes such a pile visible as a blocked
-  `archive_only` row, it does not make it creatable, and `Mf-6b82`'s
+  stays visible when it has a model of its own to judge.** The bullet above - a
+  container directory is no longer offered - still holds: a verified pairing
+  makes such a directory visible as a blocked `archive_only` row rather than
+  creatable, and only when the directory still carries a model at its own depth,
+  because that bound is the only shape guard the promotion has (Decision 18); a
+  container with no model at its own depth is absent, not blocked. `Mf-6b82`'s
   generic-root refusal is untouched for the route that uses the entry root to
   name a directory.
 * **A title containing a sentence boundary loses its leading part.** `Dr. No
