@@ -331,6 +331,12 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   // focus to <body> before any effect can observe it, so `document.activeElement`
   // alone cannot tell us to put focus back.
   const listHadFocusRef = React.useRef(false);
+  // The detail pane is the other door whose focused control can be removed by
+  // the same settle refetch, so it needs the same memory.
+  const asideHadFocusRef = React.useRef(false);
+  // The landmark the empty-queue step of the focus ladder hands the caret to:
+  // an emptied queue renders neither the listbox nor a row.
+  const queueRootRef = React.useRef<HTMLElement | null>(null);
 
   const rows = React.useMemo(() => report?.bundles ?? [], [report]);
   // One fetch feeds both toggles, and the badge calls the same predicate on the
@@ -359,8 +365,18 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   // The active key, not an index: a refetch reorders rows and an index would
   // silently point at a different bundle after every mutation.
   React.useEffect(() => {
+    const restoreFocus = listHadFocusRef.current || asideHadFocusRef.current;
     if (filtered.length === 0) {
       if (activeKey !== null) setActiveKey(null);
+      // Neither the listbox nor the aside renders a row here, so the queue's
+      // own region is the only honest home. Both flags are consumed: a later
+      // filter chip that empties the list must not have its caret stolen by a
+      // flag left standing.
+      if (restoreFocus) {
+        asideHadFocusRef.current = false;
+        listHadFocusRef.current = false;
+        queueRootRef.current?.focus();
+      }
       return;
     }
     const index = filtered.findIndex(row => row.key === activeKey);
@@ -370,12 +386,17 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
     }
     const nextIndex = Math.min(lastIndexRef.current, filtered.length - 1);
     const nextKey = filtered[nextIndex].key;
-    const restoreFocus = listHadFocusRef.current;
     lastIndexRef.current = nextIndex;
     setActiveKey(nextKey);
     // The rows are already committed, so this focuses the replacement row
-    // before the state update above re-renders it as the current one.
-    if (restoreFocus) rowRefs.current.get(nextKey)?.focus();
+    // before the state update above re-renders it as the current one. The
+    // aside flag is consumed here because removing the focused element fires
+    // no `focusout`, so this is the only place that can clear a stale `true`;
+    // focusing the row re-sets the list flag through its own focus event.
+    if (restoreFocus) {
+      asideHadFocusRef.current = false;
+      rowRefs.current.get(nextKey)?.focus();
+    }
   }, [filtered, activeKey]);
 
   const toggleSelection = (key: string) => {
@@ -529,6 +550,16 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
     const next = event.relatedTarget;
     if (next instanceof Node && event.currentTarget.contains(next)) return;
     listHadFocusRef.current = false;
+  };
+
+  // The detail pane owns the other door: its extract trigger (and that
+  // control's own stage buttons) can be removed by the settle refetch, and
+  // DOM removal fires no `focusout`, so the flag has to be consumed at the
+  // ladder instead of cleared here.
+  const handleAsideBlur = (event: React.FocusEvent<HTMLElement>) => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && event.currentTarget.contains(next)) return;
+    asideHadFocusRef.current = false;
   };
 
   const renderRow = (row: BundleDetectItem) => {
@@ -781,7 +812,16 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
           >
             {filtered.map(renderRow)}
           </div>
-          <aside className="review-detail" aria-label="Bundle details">
+          <aside
+            className="review-detail"
+            aria-label="Bundle details"
+            // React's onFocus/onBlur are focusin/focusout, so they bubble: a
+            // focus anywhere in this subtree sets the flag, which is the point.
+            onFocus={() => {
+              asideHadFocusRef.current = true;
+            }}
+            onBlur={handleAsideBlur}
+          >
             {activeRow === null ? (
               <p className="review-empty">Select a bundle to see its details.</p>
             ) : (
@@ -880,6 +920,9 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
       explanation="Folders that look like one download each: a Thingiverse README and licence, sibling docs, or a model/image/text mix. Detection writes nothing - creating a project is a separate, explicit step."
       count={bundleBadgeCount(report)}
       countTitle={describeQueueCount("bundles", bundleBadgeCount(report))}
+      // The empty-queue step of the focus ladder focuses this landmark: a row
+      // that vanished with nothing to replace it leaves no other home.
+      rootRef={queueRootRef}
       // The big count is what still needs a decision; this line carries the
       // whole walk's totals, the way the old Settings card's aggregate did.
       summary={report === null ? undefined : headline(report.counts)}

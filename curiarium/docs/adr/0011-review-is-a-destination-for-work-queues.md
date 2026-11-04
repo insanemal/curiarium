@@ -391,7 +391,17 @@ destination model, the count rule, the role threshold and the fetch policy.
   directory gone), the detail panel moves to the row that took its place, and if
   the list still held focus that row is focused too - a mouse click on a write
   button moves focus to that button first, so the operator's focus is never
-  stolen.
+  stolen. Recovery has two doors, and they share this one ladder: a caret that
+  was in the detail pane when the settle refetch replaced its row lands on the
+  row that replaced it. When no row survives - an in-place extract emptied the
+  queue - the ladder's second step focuses the queue's own `region` landmark,
+  `tabIndex={-1}`, reached through `ReviewQueueView`'s `rootRef` prop, because
+  that branch renders neither the listbox nor a row. Each step consumes the flag
+  it used: removing the focused element fires no `focusout`, so a flag left
+  standing would pull the caret out of a filter chip the next time a filter
+  empties the list. There is no `document.activeElement === <body>` heuristic -
+  a report that replaces the active row with a row that is still there takes no
+  focus at all, and a caret left on `<body>` in that case is by design.
 - A queue's filter, selection and typed names live in the queue view, so leaving
   REVIEW discards them. That is the same contract the Settings card had, and it
   keeps the App state free of per-queue drafts.

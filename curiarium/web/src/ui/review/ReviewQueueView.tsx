@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 
 import { formatReviewCount } from "./useReviewCounts";
 
@@ -29,6 +29,13 @@ type Props = {
   notices?: ReactNode;
   /** Aggregate line under the explanation; `undefined` renders nothing. */
   summary?: string;
+  /**
+   * The queue's own landmark, for a caller that has to return focus to it -
+   * an emptied queue renders no row, so the region is the only home left.
+   * A plain ref prop, not `forwardRef`: this repo has no `forwardRef` and
+   * React 18 does not pass `ref` through a function component.
+   */
+  rootRef?: RefObject<HTMLElement>;
   children: ReactNode;
 };
 
@@ -68,12 +75,20 @@ export default function ReviewQueueView({
   refreshing = false,
   notices,
   summary,
+  rootRef,
   children,
 }: Props) {
   const refreshed = refreshedText(lastRefreshedAt, lastRefreshedLabel);
 
   return (
-    <section className="review-queue" aria-label={title}>
+    <section
+      className="review-queue"
+      aria-label={title}
+      ref={rootRef}
+      // Unconditional: a landmark is only a focus target if it accepts
+      // programmatic focus, and `tabindex="-1"` keeps it out of the Tab cycle.
+      tabIndex={-1}
+    >
       <header className="review-queue-header">
         <h1 className="review-queue-title">{title}</h1>
         <span className="review-queue-count" title={countTitle}>

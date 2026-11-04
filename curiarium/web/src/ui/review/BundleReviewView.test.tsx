@@ -1188,6 +1188,56 @@ describe("BundleReviewView archive extraction", () => {
 
     expect(document.activeElement).toBe(betaRow);
   });
+
+  it("returns focus from the aside's own extract trigger to the row that replaces the archive", async () => {
+    // The queue as the settle refetch leaves it: the zip-only row is gone and
+    // the extracted directory has registered as a ready row.
+    function RefetchHarness() {
+      const [bundles, setBundles] = React.useState([moaiZip]);
+      const state = makeState({
+        report: makeReport(bundles),
+        afterExtract: vi.fn(async (): Promise<SettleOutcome> => {
+          setBundles([moai]);
+          return "settled";
+        }),
+      });
+      return <BundleReviewView state={state} canContribute />;
+    }
+    render(<RefetchHarness />);
+
+    const trigger = within(detail()).getByRole("button", { name: "Extract Moai zip" });
+    // `fireEvent.click` does not move focus in jsdom, so the operator's caret
+    // has to be placed by hand - and asserted, or this test would pass through
+    // the listbox's own recovery and prove nothing about the aside door.
+    trigger.focus();
+    expect(detail().contains(document.activeElement)).toBe(true);
+
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
+
+    await waitFor(() => expect(detailTitle()).toBe("Moai statue"));
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement?.getAttribute("data-bundle-row")).toBe("Moai");
+  });
+
+  it("returns focus to the row that opened the extract dialog when it closes", () => {
+    renderView(makeState());
+
+    fireEvent.click(rowElement("Moai_zip"));
+    fireEvent.click(statusCell("Moai_zip"));
+    expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
+
+    // The precondition: the dialog put the caret on a real control of its own.
+    // Without this the Escape below could be firing anywhere.
+    const close = within(screen.getByRole("dialog", { name: "Extract Moai zip" }))
+      .getByRole("button", { name: "Close" });
+    expect(document.activeElement).toBe(close);
+
+    fireEvent.keyDown(close, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "Extract Moai zip" })).toBeNull();
+    expect(document.activeElement).toBe(rowElement("Moai_zip"));
+  });
 });
 
 describe("BundleReviewView keyboard and focus", () => {
@@ -1281,6 +1331,76 @@ describe("BundleReviewView keyboard and focus", () => {
 
     await waitFor(() => expect(rowKeys()).toEqual(remaining.map(row => row.key)));
     expect(document.activeElement?.getAttribute("data-bundle-row")).toBe("Cable_clip");
+  });
+
+  it("moves focus to the queue itself when the aside's extract empties the queue", async () => {
+    function EmptyingHarness() {
+      const [bundles, setBundles] = React.useState([moaiZip]);
+      const state = makeState({
+        report: makeReport(bundles),
+        afterExtract: vi.fn(async (): Promise<SettleOutcome> => {
+          setBundles([]);
+          return "settled";
+        }),
+      });
+      return <BundleReviewView state={state} canContribute />;
+    }
+    render(<EmptyingHarness />);
+
+    const trigger = within(detail()).getByRole("button", { name: "Extract Moai zip" });
+    trigger.focus();
+    expect(detail().contains(document.activeElement)).toBe(true);
+
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
+
+    // Nothing survived to take the row's place: neither the listbox nor the
+    // detail pane renders, so the queue's own region is the only home. It is
+    // only a home because it accepts programmatic focus.
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Bundles to confirm" })).toBeNull());
+    const queue = screen.getByRole("region", { name: "Bundles to confirm" });
+    expect(document.activeElement).toBe(queue);
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("does not pull a filter chip's caret to the queue after an aside recovery", async () => {
+    function RefetchHarness() {
+      const [bundles, setBundles] = React.useState([moaiZip]);
+      const state = makeState({
+        report: makeReport(bundles),
+        afterExtract: vi.fn(async (): Promise<SettleOutcome> => {
+          setBundles([moai]);
+          return "settled";
+        }),
+      });
+      return <BundleReviewView state={state} canContribute />;
+    }
+    render(<RefetchHarness />);
+
+    // First the aside's own recovery, which is what leaves a stale flag behind
+    // if the ladder does not consume it.
+    const trigger = within(detail()).getByRole("button", { name: "Extract Moai zip" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
+    await waitFor(() => expect(detailTitle()).toBe("Moai statue"));
+    expect(document.activeElement?.getAttribute("data-bundle-row")).toBe("Moai");
+
+    // Now the operator picks a filter that hides the one row left. jsdom does
+    // not focus on click, so the chip is focused by hand first. `Moai` is a
+    // high-confidence ready row, so `Medium confidence` empties the filtered
+    // list while `rows` stays non-empty - the branch that renders the toolbar,
+    // and with it this chip.
+    const chip = screen.getByRole("button", { name: "Medium confidence" });
+    chip.focus();
+    expect(document.activeElement).toBe(chip);
+    fireEvent.click(chip);
+
+    await screen.findByText("No bundles match this filter.");
+    // The layout - and with it the chip that was clicked - is still mounted: a
+    // filter that hides every row is not an empty queue.
+    expect(screen.queryByRole("button", { name: "Medium confidence" })).not.toBeNull();
+    expect(document.activeElement).toBe(chip);
   });
 });
 
