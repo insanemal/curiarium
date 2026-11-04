@@ -7,6 +7,7 @@ import {
 } from "../../lib/api";
 import { tabbableIn } from "../../lib/focusTrap";
 import { formatBytes } from "../../lib/format";
+import { notifyError } from "../../lib/toast";
 
 type Props = {
   /** Contribute capability: extraction writes new bytes into the library. Required. */
@@ -63,6 +64,17 @@ function doneLine(result: ArchiveExtractResult): string {
   return `Extracted ${countLabel(result.files)}. ${scan}`;
 }
 
+// Out of the aside a failure has no heading of its own, so the toast must name
+// the archive itself: `err.message` names it only for the 404/twin-name cases,
+// never for 409/413/invalid-zip/network.
+function extractFailureLine(path: string, message: string): string {
+  return `Extract ${path} failed: ${message}`;
+}
+
+function listingFailureLine(path: string, message: string): string {
+  return `Could not list ${path}: ${message}`;
+}
+
 function totalBytes(entries: ArchiveEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.size, 0);
 }
@@ -89,13 +101,23 @@ export default function ArchiveExtractAction({
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const previousStageRef = useRef<Stage | null>(null);
+  const aliveRef = useRef(true);
+  // A failure scheduled by a request that no longer has a home.
+  const owedRef = useRef("");
 
   const button = variant === "row" ? ROW_BUTTON : DETAIL_BUTTON;
   const primaryButton = `${button} bg-accent hover:bg-accent-strong`;
 
-  function fail(err: unknown): void {
+  function fail(err: unknown, line: (message: string) => string): void {
+    const message = err instanceof Error && err.message.trim() ? err.message : "Extraction failed";
+    const report = line(message);
+    if (!aliveRef.current) {
+      notifyError(report);
+      return;
+    }
+    owedRef.current = report;
     setStage("error");
-    setError(err instanceof Error && err.message.trim() ? err.message : "Extraction failed");
+    setError(message);
   }
 
   async function startListing(): Promise<void> {
@@ -107,7 +129,7 @@ export default function ArchiveExtractAction({
       setEntries(result.entries);
       setStage("confirm");
     } catch (err) {
-      fail(err);
+      fail(err, message => listingFailureLine(path, message));
     }
   }
 
@@ -120,7 +142,7 @@ export default function ArchiveExtractAction({
       setMessage(doneLine(result));
       onExtracted?.(result);
     } catch (err) {
-      fail(err);
+      fail(err, message => extractFailureLine(path, message));
     }
   }
 
@@ -128,6 +150,29 @@ export default function ArchiveExtractAction({
     setEntries([]);
     setStage("idle");
   }
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      // A failure only this instance ever knew about, handed to the toast
+      // because the catch had nowhere live to paint it.
+      if (owedRef.current) {
+        notifyError(owedRef.current);
+        owedRef.current = "";
+      }
+    };
+  }, []);
+
+  // No dependency array on purpose: whatever this instance got as far as
+  // committing is on screen, so nothing is still owed. Do NOT key this on
+  // [stage]/[error] - a second failure whose setStage/setError is a state no-op
+  // would not re-run a keyed effect, leaving owedRef set while the identical
+  // line was already painted, and the unmount would then toast a message the
+  // operator already read.
+  useEffect(() => {
+    owedRef.current = "";
+  });
 
   // Recovery: every stage advance swaps this control's own controls, so the
   // button that was just pressed leaves the DOM - or is still there with

@@ -9,6 +9,7 @@ vi.mock("../../lib/api", () => ({
 }));
 
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
+import { getToasts, resetToasts } from "../../lib/toast";
 import ArchiveExtractAction from "./ArchiveExtractAction";
 
 const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
@@ -36,6 +37,7 @@ async function extractOnce(): Promise<void> {
 }
 
 beforeEach(() => {
+  resetToasts();
   listArchiveEntriesMock.mockReset();
   listArchiveEntriesMock.mockResolvedValue({ path: "Moai.zip", entries: ENTRIES });
   extractArchiveMock.mockReset();
@@ -136,6 +138,8 @@ describe("ArchiveExtractAction", () => {
 
     await waitFor(() => expect(onExtracted).toHaveBeenCalledTimes(1));
     expect(onExtracted).toHaveBeenCalledWith(RESULT);
+    // Nothing failed, so a success raises no toast.
+    expect(getToasts()).toHaveLength(0);
   });
 
   it("surfaces a 409's blocking paths as the error text", async () => {
@@ -156,6 +160,9 @@ describe("ArchiveExtractAction", () => {
     expect(await screen.findByText(message)).toBeTruthy();
     expect(screen.queryByRole("status")).toBeNull();
     expect(onExtracted).not.toHaveBeenCalled();
+    // Still mounted, so the inline line is the whole report: a regression that
+    // painted AND toasted would tell the operator twice.
+    expect(getToasts()).toHaveLength(0);
   });
 
   it("cancelling the confirmation leaves the archive untouched", async () => {
@@ -166,6 +173,86 @@ describe("ArchiveExtractAction", () => {
 
     expect(screen.getByRole("button", { name: "Extract Moai.zip" })).toBeTruthy();
     expect(extractArchiveMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("failure reporting after the instance is gone", () => {
+  /** A promise the test settles itself, so a rejection can land after a remount. */
+  function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (reason: unknown) => void;
+  } {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("toasts a failed extraction whose row changed under it, naming the archive that failed", async () => {
+    const message = "Refusing to overwrite: Moai.stl";
+    const extracting = deferred<ArchiveExtractResult>();
+    extractArchiveMock.mockReturnValue(extracting.promise);
+
+    const { rerender } = render(
+      <ArchiveExtractAction key="Alpha" canContribute path="Alpha.zip" label="Alpha.zip" />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Extract Alpha.zip" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
+    await waitFor(() =>
+      expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Alpha.zip", entries: null }),
+    );
+
+    // The caller keys the action by the active row, so this is a remount: the
+    // instance that issued the write is gone when its answer arrives.
+    rerender(
+      <ArchiveExtractAction key="Beta" canContribute path="Beta.zip" label="Beta.zip" />,
+    );
+
+    await act(async () => {
+      extracting.reject(new Error(message));
+    });
+
+    const toasts = getToasts();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe("error");
+    // The message alone never named the archive, so the toast has to.
+    expect(toasts[0].message).toBe(`Extract Alpha.zip failed: ${message}`);
+    // Nothing was painted: the instance that could paint it was unmounted.
+    expect(screen.queryByText(message)).toBeNull();
+    expect(screen.queryByText(/Extract Alpha\.zip failed/)).toBeNull();
+  });
+
+  it("toasts a failed listing whose row changed under it, naming the archive that failed", async () => {
+    const message = "Archive not found";
+    const listing = deferred<Awaited<ReturnType<typeof listArchiveEntries>>>();
+    listArchiveEntriesMock.mockReturnValue(listing.promise);
+
+    const { rerender } = render(
+      <ArchiveExtractAction key="Alpha" canContribute path="Alpha.zip" label="Alpha.zip" />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Extract Alpha.zip" }));
+    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("Alpha.zip"));
+
+    rerender(
+      <ArchiveExtractAction key="Beta" canContribute path="Beta.zip" label="Beta.zip" />,
+    );
+
+    await act(async () => {
+      listing.reject(new Error(message));
+    });
+
+    const toasts = getToasts();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe("error");
+    expect(toasts[0].message).toBe(`Could not list Alpha.zip: ${message}`);
+    expect(screen.queryByText(message)).toBeNull();
+    expect(screen.queryByText(/Could not list Alpha\.zip/)).toBeNull();
   });
 });
 

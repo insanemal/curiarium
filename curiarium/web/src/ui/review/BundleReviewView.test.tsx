@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within, type RenderResult } from "@testing-library/react";
 
 // `ArchiveExtractAction` is the only module here that reaches the API barrel,
 // so the mock carries just its two calls.
@@ -36,6 +36,7 @@ import type {
 } from "../../lib/api/bundles";
 import type { SettleOutcome } from "../../lib/scanSettle";
 import { getToasts, resetToasts } from "../../lib/toast";
+import Toaster from "../Toaster";
 import BundleReviewView from "./BundleReviewView";
 import { needsDecision } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
@@ -355,8 +356,8 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
   };
 }
 
-function renderView(state: BundleDetectState, canContribute = true): void {
-  render(<BundleReviewView state={state} canContribute={canContribute} />);
+function renderView(state: BundleDetectState, canContribute = true): RenderResult {
+  return render(<BundleReviewView state={state} canContribute={canContribute} />);
 }
 
 function listbox(): HTMLElement {
@@ -1310,6 +1311,69 @@ describe("BundleReviewView archive extraction", () => {
 
     expect(screen.queryByRole("dialog", { name: "Extract Moai zip" })).toBeNull();
     expect(document.activeElement).toBe(rowElement("Moai_zip"));
+  });
+
+  it("reports a failed extraction that landed after the row changed, naming the one that failed", async () => {
+    // A file-wide mock answers every path identically, which would let a panel
+    // listing the wrong archive still show the expected count.
+    installArchiveListings();
+    const message = "Refusing to overwrite: beta.stl";
+    let rejectExtract: (reason: unknown) => void = () => {};
+    extractArchiveMock.mockReturnValue(
+      new Promise<ArchiveExtractResult>((_resolve, reject) => {
+        rejectExtract = reject;
+      }),
+    );
+
+    const view = render(
+      <>
+        <BundleReviewView
+          state={makeState({ report: makeReport([alphaZip, betaZip]) })}
+          canContribute
+        />
+        <Toaster />
+      </>,
+    );
+
+    fireEvent.click(rowElement(BETA_KEY));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Beta" }));
+    // Three entries, not two: Beta is the archive that was actually listed.
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 3 files" }));
+
+    // The write is in flight before the row moves, so the rejection below has no
+    // live instance left to paint into.
+    await waitFor(() =>
+      expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Beta.zip", entries: null }),
+    );
+
+    fireEvent.click(rowElement(ALPHA_KEY));
+    expect(detailTitle()).toBe("Alpha");
+
+    await act(async () => {
+      rejectExtract(new Error(message));
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(`Extract Beta.zip failed: ${message}`);
+    expect(alert.textContent).not.toContain("Alpha.zip");
+    expect(getToasts()).toHaveLength(1);
+    // The aside is showing Alpha now, so a line about Beta can only be a lie.
+    expect(within(detail()).queryByText(/Extract Beta\.zip failed/)).toBeNull();
+
+    // The settle refetch drops the archive that failed: the toast is all that is
+    // left of that press, and it must not go away with the row.
+    view.rerender(
+      <>
+        <BundleReviewView state={makeState({ report: makeReport([alphaZip]) })} canContribute />
+        <Toaster />
+      </>,
+    );
+    expect(rowElement(ALPHA_KEY)).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain(
+      `Extract Beta.zip failed: ${message}`,
+    );
+    expect(getToasts()).toHaveLength(1);
+    expect(within(detail()).queryByText(/Extract Beta\.zip failed/)).toBeNull();
   });
 });
 
