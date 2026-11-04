@@ -39,6 +39,13 @@ The rules, strongest first:
   every provenance field is ``None``, because a guess is worse than a blank. The
   depth bound is what stops an ancestor qualifying on its descendants' models;
   images and text stay unbounded because neither can supply the trio alone.
+* R5 ``title-name`` / ``low``: the folder's NAME reads like a title a person
+  chose - a phrase with a separator, or one capitalised word longer than the
+  floor - and the tree holds at least one model at the folder's own depth. The
+  name is the evidence, so creator, licence and URL stay ``None`` exactly as
+  under R3. It is offered by ``bundle_service`` as a post-pass AFTER the archive
+  promotion, never by ``detect_bundle``: a deepest-first tree walk would
+  otherwise claim a child's row for its parent and lose an archive-owned row.
 
 Anything else is not a bundle and ``detect_bundle`` returns ``None``. A README
 that exists but lacks the markers is not R1 - both high-confidence rules miss and
@@ -159,6 +166,29 @@ SHAPE_ROOT_DOCS = "root-docs"
 SHAPE_SIBLING_DOCS = "sibling-docs"
 SHAPE_ID_NAME = "id-name"
 SHAPE_GENERIC = "generic"
+DETECTOR_TITLE_NAME = "title-name"
+SHAPE_TITLE_NAME = "title-name"
+
+# R5's exclusion list: names that say "a part of a thing", never "a thing". A
+# hand extraction and a vendor both ship these as payload directories, so
+# offering one would be the pile problem in a smaller shape. Matched
+# case-folded on the WHOLE display segment, never a prefix and never fuzzily:
+# `files` is a part name, `files 2` and `Fooparts` are not refused by this list.
+TITLE_PART_NAMES = frozenset(
+    {"files", "source", "src", "images", "img", "renders", "textures", "docs", "stl", "stls", "models", "meshes", "parts"}
+)
+# A single capitalised word is a title only if it is longer than this. Four is
+# the measured floor: `Taffi` (5) is a real title in the library while `Beta`
+# (4) is a pile member, so the bound is `len > 4` and not `>=`.
+TITLE_SINGLE_WORD_FLOOR = 4
+# The ONE switch for R5. Read only inside `title_name_facts`, so turning the
+# rule off is one edit and every caller (scan, report, create) follows.
+TITLE_NAME_BUNDLES_ENABLED = True
+
+# Branch B's shape: one capitalised word. `[A-Z]` first is what refuses a
+# lowercase single word; the lowercase clause in `is_title_name` is what
+# refuses an ALL-CAPS label, because `STAGETOP` is a product code, not a title.
+_TITLE_WORD = re.compile(r"[A-Z][A-Za-z0-9]*")
 
 _ROOT_README = "readme.txt"
 _ROOT_LICENSE = "license.txt"
@@ -1066,3 +1096,75 @@ def archive_owned_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
     if _own_depth_model_count(snapshot) < 1:
         return None
     return _generic_facts(snapshot, counts, _cover_entry(snapshot), _model_entries(snapshot))
+
+
+def is_title_name(name: str) -> bool:
+    """Whether a folder name reads like a title a person chose, not a part.
+
+    Computed on the DISPLAY name, whitespace-collapsed, so `17_ClockworkMonster`
+    is judged as `ClockworkMonster` and `mac_deckbox` as `mac deckbox` - the
+    name the operator sees, not the raw segment.
+
+    Exclusion first, on the whole case-folded segment: `files`, `source` and the
+    rest of ``TITLE_PART_NAMES`` are parts, whatever else they look like.
+    Branch A: any non-alphanumeric character is a space or a separator, which is
+    a person's phrasing and is the signal for `Rocket Filement support`,
+    `skull mask` and `printable carrage`. Branch B: one capitalised word longer
+    than ``TITLE_SINGLE_WORD_FLOOR`` that carries a lowercase letter, which is
+    the signal for `Stagetop`, `LittleTup`, `GavinIsABot` and `Taffi`.
+
+    Branch C - a vendor-ish suffix (`_v2`, `-remix`, `thingiverse`) - is
+    DECLINED deliberately: every suffix table is a guess about names someone
+    thought of, the measured library needed it for none of the nine, and the
+    same names already reach branch A through their separator. See ADR 0010
+    Decision 21.
+
+    `files` and `source` fail every branch twice over: the exclusion refuses
+    them first, and with the list emptied branch A finds no separator and
+    branch B's `fullmatch` is `None` on a leading lowercase character.
+    """
+    cleaned = " ".join(display_name(name).split())
+    if cleaned.casefold() in TITLE_PART_NAMES:
+        return False
+    if any(not character.isalnum() for character in cleaned):
+        return True
+    if _TITLE_WORD.fullmatch(cleaned) is None:
+        return False
+    if len(cleaned) <= TITLE_SINGLE_WORD_FLOOR:
+        return False
+    return any(character.islower() for character in cleaned)
+
+
+def title_name_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
+    """The facts for a title-shaped folder of models, or ``None``.
+
+    This is R5: the name is the only evidence, so the row is ``low`` and every
+    provenance field is ``None`` - a name proves nothing about who made a thing
+    or what it may be reused for. It is deliberately NOT a branch of
+    ``detect_bundle``: the service runs it as a post-pass after the archive
+    promotion, because a deepest-first tree walk would otherwise migrate a
+    child's row into a parent and lose an archive-owned row (ADR 0010
+    Decision 21).
+
+    ``_own_depth_model_count`` is the one shape guard and it is load-bearing:
+    without a model at the folder's own depth the name alone is not a bundle,
+    so a pile of unnamed model-bearing subdirectories and models buried at
+    depth 2 stay refused exactly as they are under R3.
+
+    The switch ``TITLE_NAME_BUNDLES_ENABLED`` is read HERE and nowhere else.
+    """
+    if not TITLE_NAME_BUNDLES_ENABLED:
+        return None
+    if not is_title_name(snapshot.bundle_name):
+        return None
+    if _own_depth_model_count(snapshot) < 1:
+        return None
+    return _name_only_facts(
+        DETECTOR_TITLE_NAME,
+        CONFIDENCE_LOW,
+        SHAPE_TITLE_NAME,
+        snapshot,
+        _counts(snapshot),
+        _cover_entry(snapshot),
+        _model_entries(snapshot),
+    )

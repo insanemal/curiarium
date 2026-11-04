@@ -582,9 +582,10 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     bound and the `Mf-snd8` cardinality rule apply here for free - a pile of two
     or more unnamed model-bearing subdirectories, or models buried at depth 2,
     is refused even when its archive verifies, and an ancestor can never qualify
-    on its children's models. Without a pairing the same shape stays silent,
-    because a pile of models and a render is also what a half-extracted import
-    looks like. The container rule still wins: a directory that *holds* bundles
+    on its children's models. Without a pairing the same shape stays silent -
+    unless the folder's NAME reads like a title, which is R5's separate signal
+    and not a loosening of this shape rule (Decision 21) - because a pile of
+    models and a render is also what a half-extracted import looks like. The container rule still wins: a directory that *holds* bundles
     keeps the blocked `archive_only` row and creates nothing, so a pile of models
     with one zip somewhere inside it never qualifies. And a pairing qualifies the
     directory it names and no descendant. The two orders cover the containment
@@ -817,13 +818,152 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     the guards ask about the set rather than about a list of literals.
 
     **Residual silence, stated rather than hidden.** A doc-less, image-less,
-    model-only folder **without** a numeric id is still not offered, and that is
-    R3 unchanged rather than an oversight: a random folder of STLs is genuinely
-    indistinguishable from a bundle, and the owner's 117 low-confidence rows
-    already show what a weak rule costs. A folder whose models sit only at depth
-    **2 or deeper** stays invisible too, because R4 reuses R3's
-    `_own_depth_model_count` bound instead of inventing a second one - that shape
-    is `Mf-hvck`'s territory, not this rule's.
+    model-only folder **without** a numeric id is still not offered *by this
+    rule*, and that is R3 unchanged rather than an oversight: a random folder of
+    STLs is genuinely indistinguishable from a bundle, and the owner's 117
+    low-confidence rows already show what a weak rule costs. It is offered when
+    the folder's NAME reads like a title (`Mf-hvck`, Decision 21), which is the
+    one signal R3 and R4 both leave on the table, and it is still only `low`. A
+    folder whose models sit only at depth **2 or deeper** stays invisible under
+    both rules, because R5 reuses the same `_own_depth_model_count` bound instead
+    of inventing a second one: the sentence that once called this shape
+    `Mf-hvck`'s territory was wrong about where it would be solved, and it is
+    still nobody's rule.
+
+21. **A title-shaped name is a `low` bundle, and the rule is a service
+    post-pass rather than a detection branch.** The owner's decision
+    (2026-11-03) was to offer the no-evidence folders only when the name reads
+    like a title, not a part. The measurement that forced it: 11 of the 131
+    directories in `import/` hold models and nothing else - no document, no
+    image, no archive twin. Nine carry a name a person chose (`Rocket Filement
+    support`, `Stagetop`, `LittleTup`, `Taffi`, `GavinIsABot`, `mac deckbox`,
+    `skull mask`, `printable carrage`, `Filament guide`); two carry the payload
+    directory a hand extraction leaves behind (`files`, `source`), and offering
+    those would be the pile problem in a smaller shape.
+
+    **"Reads like a title" is three checks in a fixed order, written down rather
+    than felt.** `is_title_name` judges the DISPLAY name (`display_name`),
+    whitespace-collapsed, so the judgement is about the name an operator sees and
+    never about the raw segment: `17_ClockworkMonster` is judged as
+    `ClockworkMonster`. First the exclusion list, matched case-folded on the
+    whole segment and never as a prefix and never fuzzily:
+
+    `files`, `source`, `src`, `images`, `img`, `renders`, `textures`, `docs`,
+    `stl`, `stls`, `models`, `meshes`, `parts`
+
+    (`TITLE_PART_NAMES`). Then branch A: any non-alphanumeric character is a
+    space or a separator, which is a person's phrasing - the signal for `Rocket
+    Filement support`, `mac deckbox`, `skull mask`, `printable carrage` and
+    `Filament guide`. Else branch B: exactly one capitalised word (`_TITLE_WORD`,
+    `[A-Z][A-Za-z0-9]*` by `fullmatch`), **longer than**
+    `TITLE_SINGLE_WORD_FLOOR` (4) and carrying at least one lowercase letter -
+    the signal for `Stagetop`, `LittleTup`, `GavinIsABot` and `Taffi`. The floor
+    is `> 4` and not `>= 4` because `Taffi` is a measured title at five letters
+    while a pile member called `Beta` is four; the lowercase clause is what
+    refuses an ALL-CAPS label, because `STAGETOP` is a product code and not a
+    title; and branch B's leading `[A-Z]` is what refuses every ordinary
+    lowercase directory name, which is why `residual`, `clockworkmonster` and
+    `plainparts` stay invisible. Mutations, each pinned: relax the floor to `<`
+    and `Beta` becomes a row; drop the lowercase clause and `STAGETOP` does; drop
+    the separator branch and five of the nine vanish.
+
+    **Branch C - a vendor-ish suffix - is declined deliberately.** A suffix table
+    (`_v2`, `-remix`, `thingiverse`) is a guess about names someone thought of,
+    and it buys nothing the other two branches do not already buy: every measured
+    name that carries a suffix also carries the separator branch A reads, and a
+    suffix table would silently widen the rule to names nobody measured. The
+    ticket listed it as an option and not a requirement; declining it keeps the
+    vocabulary closed and every exclusion explicit.
+
+    **`files` and `source` fail every branch twice over, and that is the whole of
+    the 11 -> 9.** The exclusion refuses them first; with the list emptied,
+    branch A still finds no separator and branch B's `fullmatch` is `None` on a
+    leading lowercase character. So the two part names are the only reason eleven
+    measured directories become nine rows, and deleting the list would not offer
+    them anyway - which is why the list is tested by name against a LITERAL
+    tuple, not against itself, so an entry cannot be deleted without a red.
+
+    **At least one model at the folder's own depth, and the name alone is never
+    enough.** `title_name_facts` reuses `_own_depth_model_count` - the same bound
+    R3 and R4 use - so a pile of two unnamed model-bearing subdirectories and a
+    folder whose models sit at depth 2 stay refused exactly as they are under
+    R3. Loosening it would promote piles on their children's models, which is the
+    one thing every inferred rule here refuses to do. The row is built by
+    `_name_only_facts` with **no** `thing_id`, so creator, licence, licence URL,
+    source URL, thing id and description are all `None` by construction rather
+    than by a test: a name proves nothing about who made a thing or what it may
+    be reused for. It reports `detector` `title-name`, `metadata_shape`
+    `title-name` and confidence `low`, so a name-derived row is visibly
+    distinguishable on the wire from a vendor row's
+    `thingiverse-readme`/`root-docs`/`high`.
+
+    **One switch, read in one place.** `TITLE_NAME_BUNDLES_ENABLED` is read inside
+    `title_name_facts` and nowhere else, so turning the rule off is one edit and
+    the scan, the report and the create pass all follow: the post-pass asks for
+    facts, gets `None`, and adds no candidate at all - not a candidate without a
+    row.
+
+    **The rule is a post-pass in `_build_candidates`, and the placement is
+    load-bearing.** It runs after the folder pass, after pairing, after the
+    zip-only pass and after the archive promotion, and before the
+    `contained_keys` strip. Inside `detect_bundle` it would inherit the
+    deepest-first walk, and that walk is exactly what lets a child's row pre-empt
+    its parent's: measured, moving it there migrates `LittleTup`'s row into
+    `LittleTup/articulated-dragon-claws` and turns the promoted
+    `17_ClockworkMonster` row into `title-name`, losing its archive-owned row -
+    16 witnesses red, 12 service and 4 pure. Running after the promotion is
+    load-bearing in the other direction: a directory a verified archive owns
+    keeps its stronger `archive_owned` row and is skipped here, which is what
+    lets `Cinderwing3D - Crystal Dragon` and
+    `ultimate-card-box-v4-model_files` keep reading `generic-bundle`. The pass is
+    shallowest-first and every accepted key joins the taken set, so a title
+    parent claims its title child and never the other way round.
+
+    **The container rule applies at the new site through `_relates_to_any`, with
+    three legs.** A key is skipped when it IS a row (claimed, promoted or
+    pair-only), when it sits INSIDE a row (a name-only guess must never re-offer
+    a bundle's own subtree as a second thing), or when it HOLDS a row (a folder
+    of bundles is a pile whatever its name says). The third leg is the one this
+    site needs and the one the older sites do not already express:
+    `contained_keys` covers archive-only, promoted and pair-only rows, but a
+    title parent holding an ordinary claimed bundle is refused by nothing else.
+    Mutation: drop that leg and `import/Skull Mask` - its own loose model plus a
+    claimed `Inner` bundle - becomes a creatable pile, and the two older
+    `Unsorted`/`Wrapper` witnesses red with it.
+
+    **Folders only, and that is the asymmetry against R4.** R4 fires on archive
+    snapshots because `_zip_snapshot` names a snapshot from the zip's stem, and
+    that widening is harmless because Decision 6 already makes a zip-only row
+    uncreatable. R5 is deliberately narrower: it is a post-pass over the
+    directory walk, so an archive is never offered on its name alone. A
+    title-shaped name on an archive is the vendor's own filename, which the
+    stem-twin and entry-root routes already use as EVIDENCE for a directory;
+    turning it into a row of its own would count the same signal twice and add
+    archive-only noise that can never create.
+
+    **Stagetop is a caveat, not a blocker, and `Mf-5dnx` owns the class.** The
+    owner reports `Stagetop` as a COMPOUND project - one folder holding several
+    distinct things - so this rule WILL offer it as one `low` bundle and that
+    will be wrong. Offering it anyway is the owner's instruction: a human can
+    reject the row in the queue, and a silently dropped row is a thing nobody can
+    review. This rule is explicitly not the answer for compound layouts; the
+    shape has still to be explained, and `Mf-5dnx` tracks it.
+
+    **The scope is wider than the measured eleven, and the risks are stated
+    rather than hidden.** A title-named folder holding models plus an image, or
+    models plus a text file, is also offered - shapes R3 refuses for want of the
+    trio - because a decoration gate was refused as non-monotonic: adding a
+    `notes.txt` would flip a row from offered to refused. A five-letter
+    capitalised word is admitted because `Taffi` is exactly five, so a pile
+    member called `Alpha` becomes a `low` row while `Beta` is floor-refused. The
+    exclusion is a closed set: `Foo/files` is refused but `Foo/files 2` and
+    `Fooparts` are not, and there is no fuzzy matching by design. A
+    browser-duplicate name (`Fates End Tower (1)`) reads as a title and would be
+    offered if it held models. `_relates_to_any` is O(dirs x bundle keys) inside
+    an already-bounded walk - fine at household scale, and stated rather than
+    measured. What cannot be measured here is the effect on the owner's live
+    library beyond the eleven directories the ticket counted; this ADR's counts
+    predate the rule.
 
 ## Consequences
 
@@ -1083,9 +1223,11 @@ unchanged.
   is an asset even though the import door would not take it), with
   `twin_verified: true` and the non-duplicate name as `archive.rel_path`, neither
   zip a row of its own, and `create` writing one project with the directory's 12
-  models attached (Decision 18); the same 14 files with no archive beside them
-  are offered by nothing, `iter_bundle_candidates` is empty and `create` answers
-  `unknown bundle` with no project - the silence the rule needs; a pile of two
+  models attached (Decision 18); the same 14 files with no archive beside them,
+  under a name R5 refuses, are offered by nothing, `iter_bundle_candidates` is
+  empty and `create` answers `unknown bundle` with no project - the silence the
+  rule needs, now that the title-shaped spelling of the same 14 files is a
+  `title-name` row instead; a pile of two
   real bundles plus its own loose model and render, paired with an archive rooted
   at the pile and containing exactly those two loose files, is refused: the
   children are `ready` rows and the pile is one `blocked`/`archive_only` row that
@@ -1124,17 +1266,22 @@ unchanged.
   `files/`) - are each offered at `generic-bundle` / `low`, `ready`, with
   `twin_verified: true` and only their own models attached, and neither zip a row
   of its own; the `RepRap-MultiFilament` pile of two unnamed model-bearing
-  subdirectories is offered by nothing even though an archive beside it verifies,
-  so deleting the stem branch leaves the four pairs with no candidates at all and
-  removing the own-depth bound promotes the pile; the `endorphin` pile holding
+  subdirectories is itself offered by nothing even though an archive beside it
+  verifies - its child `Alpha` is R5's `low` row and `Beta` is floor-refused, so
+  deleting the stem branch leaves those four directories as `title-name` rows
+  instead of `archive_owned` ones - which reds the pair witness all the same -
+  and removing the own-depth bound promotes the pile; the `endorphin` pile holding
   two claimed bundles plus its own loose model and render, with a verifying stem
   twin, is one `blocked` / `archive_only` row whose children are `ready`, and
   create-all makes two projects and none named after the pile - removing the
   `claimed_ancestors` refusal promotes it; an archive differing by one declared
-  size and an archive whose names differ each pair nothing, with no row and no
-  `twin_verified`, and a `_stem_pair_verified` that returns `True` would promote
-  the first; a stem twin in a different parent pairs nothing, and an entry root
-  naming a directory in another parent pairs nothing, with `Mf-6b82`'s two guard
+  size and an archive whose names differ each pair nothing - no row and no
+  `twin_verified`, under the names R5 refuses that this witness uses - and a
+  `_stem_pair_verified` that returns `True` would promote the first; a stem twin
+  in a different parent and an entry root naming a directory in another parent
+  attach nothing to the namesake, which R5 now offers as a `low` row of its own,
+  so each witness moved from "no candidates" to "exactly this one, unpaired" -
+  with `Mf-6b82`'s two guard
   tests (`test_service_a_nested_archive_cannot_pair_a_sibling_directory`,
   `test_service_a_pairing_names_the_directory_not_its_descendants`) staying
   green unchanged; and a promoted stem row whose directory has since gained one
@@ -1221,8 +1368,9 @@ unchanged.
   id-named export is one `medium` row with `counts.medium == 1` that creates a
   project without `name_only`, keeping the derived URL with `NULL` attribution
   and a `_bundle` marker reading `thingiverse-id-name` / `medium`; the same
-  create with `name_only` discards the URL; the non-id doc-less folder is still
-  refused, with `unknown bundle` and no project; an id-named pile beside its two
+  create with `name_only` discards the URL; the non-id doc-less folder under a
+  name R5 refuses is still refused, with `unknown bundle` and no project; an
+  id-named pile beside its two
   children is absent from the report while both children are `ready`; that pile
   with its stem twin is one `blocked` / `archive_only` row reading `low` /
   `generic-bundle` with no URL, and create-all makes two projects and none named
@@ -1232,6 +1380,46 @@ unchanged.
   `medium` candidate whose registered assets include another bundle's is refused
   `contains_bundles` with no `Project` row written; and an id-named zip is an
   `archive_only` `medium` row that creates nothing.
+- The same two files also pin R5 (`Mf-hvck`). In `tests/test_bundle_detect.py`,
+  from literals: the nine measured names are accepted by the branch that catches
+  each - five by the separator branch (`Rocket Filement support`, `mac deckbox`,
+  `skull mask`, `printable carrage`, `Filament guide`) and four by the
+  single-word branch (`Stagetop`, `LittleTup`, `GavinIsABot`, `Taffi`) - while
+  `Beta`/`Tup`/`Sub` are floor-refused, `STAGETOP`/`ARTICULATED`/`ALLSTL` are
+  refused for want of a lowercase letter, and `residual`/`clockworkmonster`/
+  `xbox360shell` are refused by the leading `[A-Z]`; every required part name is
+  refused in six casing and whitespace variants swept from a LITERAL tuple, so
+  deleting an entry reds the sweep instead of shrinking it, plus a subset test on
+  the constant (the required set cannot be quietly reduced) and a
+  constant-driven test (an added entry cannot be a title); with the list
+  monkeypatched to empty, `files` and `source` are still refused and the nine
+  still pass, which is the 11 -> 9 proof; `title_name_facts` is `None` with the
+  switch off, `None` for a part name and for a lowercase word, and `None` for a
+  pile of two unnamed model-bearing subdirectories and for models at depth 2,
+  while one own-depth model is enough; its facts read
+  `title-name`/`title-name`/`low` with creator, licence, licence URL, source URL,
+  thing id and description all `None` and the cover and model entries correct;
+  `detect_bundle` still returns `None` for the very listing `title_name_facts`
+  offers, which pins that R5 is not a detection branch; and on the dragon
+  snapshot R4 reads `medium` with the derived URL while `title_name_facts` reads
+  `low` with no URL. In `tests/test_bundle_service.py`, against a real temporary
+  tree: the eleven measured directories are built and exactly the nine are
+  offered, each `title-name`/`title-name`/`low`, `ready`, with four `NULL`
+  provenance fields and at least one model, and one of them creates a project
+  attaching exactly its own models; `files` and `source` are absent from the
+  report and from `iter_bundle_candidates`; a name-derived row and a vendor row
+  in one report read `title-name`/`title-name`/`low` with four `NULL`s against
+  `thingiverse-readme`/`root-docs`/`high` with the documents' creator, licence
+  and URL; a title-named folder holding a claimed folder bundle and one holding a
+  zip-only bundle are both refused, the first by `_relates_to_any`'s
+  holds-a-taken-key leg alone and the second by that leg and the
+  `contained_keys` strip; two `build_report` calls are equal and leave the
+  filesystem snapshot and the table counts unchanged; the switch off removes
+  exactly the title rows; and the id-named dragon folder stays one `medium` row
+  with its URL (`low == 0`, `total == 1`). The mutation that matters is the
+  placement: moving R5 into `detect_bundle` reds 16 witnesses - 12 service and 4
+  pure - because the deepest-first walk hands `LittleTup`'s row to its child and
+  loses the promoted Clockwork row.
 
 ## Superseding conditions
 
