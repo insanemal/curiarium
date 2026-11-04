@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 ARTIFACT_SCHEMA = "bundle-report/2"
 # The keys the hand-taken baseline row carries. A row in this artifact carries
@@ -51,13 +52,35 @@ BASELINE_ROW_KEYS = (
 )
 
 
+def _repo_root(start=None) -> Optional[Path]:
+    """The nearest ancestor of this module holding a `.git` entry, or ``None``.
+
+    Walks up from ``Path(__file__).resolve().parent`` and never indexes
+    ``parents[n]``: the API image flattens this module to
+    ``/app/bundle_serialize.py``, where a fixed index is an ``IndexError``.
+    ``.git`` is a directory in a checkout and a FILE in a linked worktree, so
+    existence is the test, not ``is_dir()``. Returns ``None`` at the filesystem
+    root, so a measurement without provenance is still a measurement.
+    """
+    current = Path(__file__) if start is None else Path(start)
+    current = current.resolve()
+    if current.is_file():
+        current = current.parent
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
 def _build_sha() -> dict:
     """The commit this artifact was produced from, and whether it was dirty.
 
     Never raises: a checkout with no git, no commits or a broken ``.git`` is a
     missing provenance field, not a reason a measurement cannot be taken.
     """
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _repo_root()
+    if repo_root is None:
+        return {"build_sha": None, "build_dirty": False}
     sha = None
     dirty = False
     try:
@@ -428,12 +451,16 @@ def format_diff(result) -> str:
 
 def main(argv=None) -> int:
     """The CLI: serialise a report to ``--out``, or diff two artifacts."""
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _repo_root()
     parser = argparse.ArgumentParser(
         description="Serialise a bundle report to JSON, or diff two artifacts (dev-only).",
     )
     parser.add_argument("--root", help="storage root to scan")
-    parser.add_argument("--db", default=str(repo_root / "curiarium.db"), help="database to count rows from")
+    parser.add_argument(
+        "--db",
+        default=str(repo_root / "curiarium.db") if repo_root else None,
+        help="database to count rows from",
+    )
     parser.add_argument("--out", help="artifact path to write")
     parser.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), help="compare two artifacts")
     parser.add_argument("--limit", type=int, default=None, help="row limit (default: the whole walk)")
@@ -445,6 +472,11 @@ def main(argv=None) -> int:
 
     if not args.root or not args.out:
         parser.error("--root and --out are required unless --diff is given")
+
+    if args.db is None:
+        parser.error(
+            "--db is required: no repository root, and so no default curiarium.db, was found above this module"
+        )
 
     # The app binds its paths at IMPORT time, so the temp environment has to be in
     # place before bundle_service (or db) is imported - which is what this tool

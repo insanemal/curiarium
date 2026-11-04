@@ -10,9 +10,17 @@ make, serialise it, and then prove the three properties the ticket asks for:
 * a rule change produces a diff that names each changed, added and removed row,
   and the stamp marks the two runs as not comparable - the confusion the 114 ->
   112 delta caused.
+
+Provenance is a FIELD, not a precondition. The API image flattens this module to
+``/app/bundle_serialize.py``, where a fixed ``parents[2]`` is an ``IndexError``:
+the last three tests below copy the module to a directory with no ``.git`` above
+it, on the host and in the image alike, and prove a measurement is still taken -
+with a null build sha, never a fabricated one.
 """
 
+import importlib.util
 import json
+import os
 import re
 import zipfile
 from copy import deepcopy
@@ -355,3 +363,180 @@ def test_the_cli_module_is_unreachable_over_http(storage: Path) -> None:
     assert "bundle_serialize" not in Path(main.__file__).read_text(encoding="utf-8")
     for path in (api_root / "routers").glob("*.py"):
         assert "bundle_serialize" not in path.read_text(encoding="utf-8"), path
+
+
+def load_serializer_without_a_checkout(target_dir: Path):
+    """A real copy of the module, at a path with no `.git` above it.
+
+    The image's defect is path-shaped: at `/app/bundle_serialize.py` a fixed
+    `parents[2]` is an IndexError. A copy in tmp_path reproduces that shape for
+    real - on the host and in the image - so this is the condition, not a mock.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+    source = Path(bundle_serialize.__file__).resolve()
+    copy_path = target_dir / "bundle_serialize_no_repo.py"
+    copy_path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("bundle_serialize_no_repo", copy_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The environment `main()` binds for the app it is about to import. It mutates the
+# real process environment, so a test that calls it hands the values back.
+BOUND_BY_MAIN = ("FILE_STORAGE", "DB_URL", "AUTH_MODE", "IMPORT_MOUNT_ON_STARTUP")
+
+
+def preserve_environment(patched: pytest.MonkeyPatch) -> None:
+    """Register the variables `main()` binds, so `patched`'s undo puts them back."""
+    for name in BOUND_BY_MAIN:
+        if name in os.environ:
+            patched.setenv(name, os.environ[name])
+        else:
+            patched.delenv(name, raising=False)
+
+
+def test_repo_root_finds_a_checkout_and_never_indexes_past_the_filesystem_root(tmp_path: Path) -> None:
+    """`_repo_root` walks to `.git` and answers None, never an IndexError.
+
+    Mutation: remove the helper and this reds on the missing answer; answer with a
+    fixed index instead of a walk and it reds wherever the module is shallow - the
+    image's `/app/bundle_serialize.py`, whose `parents` is `['/app', '/']`, which
+    is the IndexError the image gate hit. A copy deeper in tmp_path cannot show
+    that shape (index 2 is a real ancestor there), which is why the depth is
+    asserted by the host-only half below rather than pretended here.
+    """
+    no_checkout = tmp_path / "no-checkout"
+    copy = load_serializer_without_a_checkout(no_checkout)
+
+    assert copy._repo_root() is None, "a directory with no .git above it has no repository root"
+    module_copy = no_checkout / "bundle_serialize_no_repo.py"
+    assert copy._repo_root(module_copy) is None
+    assert copy._repo_root(module_copy.parent) is None
+
+    # A real checkout is found, from a file and from a directory inside it.
+    fake = tmp_path / "fake"
+    (fake / "sub").mkdir(parents=True)
+    write_text(fake / "sub" / "file.py", "# a module in a checkout\n")
+    (fake / ".git").mkdir()
+    assert copy._repo_root(fake / "sub") == fake.resolve()
+    assert copy._repo_root(fake / "sub" / "file.py") == fake.resolve()
+
+    # A linked worktree keeps `.git` as a FILE, so existence is the test, not is_dir().
+    linked = tmp_path / "linked"
+    (linked / "nested").mkdir(parents=True)
+    write_text(linked / ".git", f"gitdir: {tmp_path / 'fake' / '.git' / 'worktrees' / 'linked'}\n")
+    assert copy._repo_root(linked / "nested") == linked.resolve()
+
+    # The host-only half: this module's own answer against the real checkout. In
+    # the image there is no checkout above /app, which is the same condition as
+    # the copy above; asserting a path that does not exist there would be a lie.
+    module_path = Path(bundle_serialize.__file__).resolve()
+    checkout = module_path.parents[2] if len(module_path.parents) > 2 else None
+    if checkout is None:
+        assert bundle_serialize._repo_root() is None
+        pytest.skip(f"{module_path} has no checkout above it (the image's /app shape)")
+    assert bundle_serialize._repo_root() == checkout
+    assert (checkout / ".git").exists()
+    assert (checkout / "curiarium" / "api" / "bundle_serialize.py").exists()
+
+
+class GitMustNotBeCalled:
+    """A stand-in for the copy's `subprocess` that reds if git is asked anything.
+
+    Without a repository root there is nothing to ask git about: a measurement
+    with no checkout takes its null provenance and moves on.
+    """
+
+    def run(self, *args, **kwargs):
+        raise AssertionError(
+            "subprocess.run was reached although there is no repository root above this module"
+        )
+
+
+def test_a_report_still_measures_when_there_is_no_repository(
+    tmp_path: Path, storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A measurement without provenance is still a measurement: null sha, full artifact.
+
+    Mutation: drop the `repo_root is None` guard in `_build_sha` and, with no
+    checkout anywhere above, it still asks `git -C` whichever ancestor it picked -
+    an IndexError where the module sits shallow (the image's `/app`), a pointless
+    git call where it does not - so the `GitMustNotBeCalled` stand-in below reds;
+    let `_build_sha` invent a sha and the artifact lies about where it came from.
+    """
+    copy = load_serializer_without_a_checkout(tmp_path / "no-checkout")
+    monkeypatch.setattr(copy, "subprocess", GitMustNotBeCalled())
+
+    artifact = copy.serialise_report(storage)
+
+    assert artifact["build_sha"] is None, "provenance is a field, not a precondition"
+    assert artifact["build_dirty"] is False, "a null sha must not claim a dirty checkout"
+
+    # Complete, not a stub: the numbers the artifact exists for are all still here.
+    assert artifact["artifact_schema"] == copy.ARTIFACT_SCHEMA
+    assert artifact["rows"], "the corpus must still offer rows without a repository"
+    assert artifact["refused"], "the corpus must still record refusals without a repository"
+    for item in artifact["refused"]:
+        assert item["rule"] in bundle_service.REFUSAL_RULES, item
+    assert artifact["offered_keys"] == [row["rel_path"] for row in artifact["rows"]]
+    assert artifact["counts"]["total"] == len(artifact["rows"])
+    assert artifact["rule_set"]["stamp"] == bundle_detect.RULE_SET_STAMP
+    for row in artifact["rows"]:
+        for key in copy.BASELINE_ROW_KEYS:
+            assert key in row, f"row {row['rel_path']} lost the baseline key {key}"
+
+    # And it is writable and round-trips through the same module's loader.
+    out = tmp_path / "out" / "report.json"
+    copy.write_artifact(artifact, out)
+    assert copy.load_artifact(out) == json.loads(json.dumps(artifact))
+
+
+def test_the_cli_needs_no_repository_root_to_serialise_or_diff(
+    tmp_path: Path, storage: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both `main()` paths work with no checkout above the module, or refuse cleanly.
+
+    Mutation: restore the fixed index at the top of `main()` and the no-db run below
+    raises IndexError where the module sits shallow (the image's `/app`) and
+    FileNotFoundError on a `curiarium.db` that is not there where it does not;
+    drop the `--db` guard and the no-db run crashes instead of exiting 2 with
+    usage. A crash is not an argparse refusal, and neither is actionable.
+    """
+    copy = load_serializer_without_a_checkout(tmp_path / "no-checkout")
+    first = copy.serialise_report(storage)
+
+    old_path = tmp_path / "old.json"
+    new_path = tmp_path / "new.json"
+    copy.write_artifact(first, old_path)
+    changed = deepcopy(first)
+    changed["rows"][0]["status"] = "not-a-real-status"
+    copy.write_artifact(changed, new_path)
+
+    with pytest.MonkeyPatch.context() as patched:
+        preserve_environment(patched)
+
+        # 1. The module-level `_repo_root()` call cannot raise on the diff path.
+        assert copy.main(["--diff", str(old_path), str(new_path)]) == 0
+        out = capsys.readouterr().out
+        assert "comparable:" in out, out
+        assert "status changed (1)" in out, out
+
+        # 2. Without --db there is no default database to find: refuse, do not crash.
+        with pytest.raises(SystemExit) as exit_info:
+            copy.main(["--root", str(storage), "--out", str(tmp_path / "x.json")])
+        assert exit_info.value.code == 2
+        assert "--db" in capsys.readouterr().err
+        assert not (tmp_path / "x.json").exists(), "a refused run must not write an artifact"
+
+        # 3. With --db supplied the artifact is complete, with null provenance.
+        db_file = tmp_path / "empty.sqlite"
+        db_file.write_bytes(b"")
+        out_path = tmp_path / "report.json"
+        assert copy.main(["--root", str(storage), "--out", str(out_path), "--db", str(db_file)]) == 0
+
+    written = copy.load_artifact(out_path)
+    assert written["build_sha"] is None
+    assert written["build_dirty"] is False
+    assert written["rows"], "the CLI must still serialise a corpus without a repository"
+    assert written["offered_keys"] == [row["rel_path"] for row in written["rows"]]
