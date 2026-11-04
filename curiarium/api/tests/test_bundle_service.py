@@ -1532,6 +1532,9 @@ def test_a_swapped_legacy_sibling_bundle_detects_and_creates(client: TestClient,
 
 CLOCKWORK_DIR = "import/17_ClockworkMonster"
 CLOCKWORK_ROOT = "17_ClockworkMonster"
+# The same 14 files under a name R5 refuses, for the Decision-18 silence: a
+# lowercase single word is not a title, so the shape alone stays invisible.
+NO_TITLE_ROOT = "17_clockworkmonster"
 CLOCKWORK_ZIP = "import/17_Fates End - ClockworkMonster Tower.zip"
 CLOCKWORK_DUPLICATE_ZIP = "import/17_Fates End - ClockworkMonster Tower (1).zip"
 GENERIC_ZIP = "import/Generic Download.zip"
@@ -1545,9 +1548,9 @@ def clockwork_entries(root: str = CLOCKWORK_ROOT) -> Dict[str, bytes]:
     return entries
 
 
-def clockwork_directory(storage: Path) -> None:
+def clockwork_directory(storage: Path, root: str = CLOCKWORK_ROOT) -> None:
     """The directory alone: 12 models and 2 renders, no text and no archive."""
-    for rel_path, payload in clockwork_entries().items():
+    for rel_path, payload in clockwork_entries(root).items():
         write_file(storage / "import" / rel_path, payload)
 
 
@@ -1868,15 +1871,20 @@ def test_service_a_no_docs_directory_without_its_archive_is_not_a_bundle(
     117-LOW measurement argues for - his number, not ours, and not a number this
     fixture can re-measure. Under "treat the shape as a bundle regardless" the
     report here would offer a row and create a project, and this test fails.
+
+    R5 changed the fixture's NAME, not its assertions: ``17_ClockworkMonster``
+    reads as the title ``ClockworkMonster`` and IS offered now, so this test uses
+    a lowercased name R5 refuses. What it pins is that the SHAPE alone is still
+    silent.
     """
-    clockwork_directory(isolated_storage)
+    clockwork_directory(isolated_storage, NO_TITLE_ROOT)
     scan()
     headers = auth_header(client)
 
     assert bundle_service.build_report()["bundles"] == []
     assert bundle_service.iter_bundle_candidates(isolated_storage) == ([], False)
 
-    created = create(client, headers, [{"key": CLOCKWORK_DIR}])
+    created = create(client, headers, [{"key": f"import/{NO_TITLE_ROOT}"}])
 
     assert created["created"] == 0
     assert created["failed"] == 1
@@ -2107,8 +2115,10 @@ def test_service_a_verified_stem_twin_promotes_an_offered_nowhere_directory(
       the real generic entry root only the stem route may strip.
 
     All four are asserted because each is failed by a different mutation: delete
-    the stem branch in ``_build_candidates`` and these four produce no candidates
-    at all, while restoring ``counts.image < 1 or counts.text`` in
+    the stem branch in ``_build_candidates`` and these four directories come back
+    as R5 ``title-name`` rows instead of ``archive_owned`` ones, so every
+    ``archive_owned`` / ``entry_root`` / ``archive_path`` / ``generic-bundle``
+    assertion below reds, while restoring ``counts.image < 1 or counts.text`` in
     ``archive_owned_facts`` silently drops three of them (both models-only pairs
     and the models-plus-text one) and leaves only the models-plus-images pair.
     """
@@ -2194,6 +2204,10 @@ def test_service_a_pile_of_two_unnamed_model_directories_is_not_promoted(isolate
     ``_own_depth_model_count``'s cardinality bound promotes this pile and fails
     this test. Deleting the stem branch changes nothing here, so the test
     discriminates the shape guard, not the pairing.
+
+    R5 offers ``Alpha`` (5 letters) as a title row and floor-refuses ``Beta``
+    (4), which is the other half of the same guard: the pile is not promoted and
+    its children are not swallowed.
     """
     root = isolated_storage / "import"
     write_file(root / "RepRap-MultiFilament" / "Alpha" / "part.stl", b"s" * 40)
@@ -2209,8 +2223,13 @@ def test_service_a_pile_of_two_unnamed_model_directories_is_not_promoted(isolate
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
 
     assert truncated is False
-    assert candidates == [], "the archive verifies and the pile is still refused"
-    assert bundle_service.build_report()["bundles"] == []
+    assert [candidate.key for candidate in candidates] == ["import/RepRap-MultiFilament/Alpha"], (
+        "the pile is refused by own-depth/cardinality; only Alpha's name reads as a title"
+    )
+    report = bundle_service.build_report()
+    assert [row["key"] for row in report["bundles"]] == ["import/RepRap-MultiFilament/Alpha"]
+    alpha = row_for(report, "import/RepRap-MultiFilament/Alpha")
+    assert (alpha["detector"], alpha["confidence"]) == ("title-name", "low")
 
 
 def test_service_a_verified_stem_twin_does_not_promote_a_pile_of_bundles(
@@ -2262,27 +2281,30 @@ def test_service_a_verified_stem_twin_does_not_promote_a_pile_of_bundles(
 def test_service_a_stem_twin_that_does_not_match_pairs_nothing(isolated_storage: Path) -> None:
     """AC-3 (a) and (b): a namesake archive is not evidence until its payload agrees.
 
-    ``xbox360_shell.zip`` declares a size that differs from the file on disk and
-    ``razer-cat-ears-remix-model_files.zip`` holds entries whose names match
-    nothing, so both verifications fail. Neither directory is offered by a rule
-    of its own and neither archive is a bundle of its own (two models only), so
-    "no candidates" is the whole assertion. A ``_stem_pair_verified`` mutated to
+    ``xbox360shell.zip`` declares a size that differs from the file on disk and
+    ``razercatearsremixmodelfiles.zip`` holds entries whose names match nothing,
+    so both verifications fail. Neither directory is offered by a rule of its
+    own and neither archive is a bundle of its own (two models only), so "no
+    candidates" is the whole assertion. A ``_stem_pair_verified`` mutated to
     ``return True`` promotes both, so this test discriminates the verification.
+
+    The fixture names are deliberately NOT title-shaped: both are lowercase
+    single words R5 refuses, so stem verification is the only thing under test.
     """
     root = isolated_storage / "import"
-    write_file(root / "xbox360_shell" / "shell.stl", b"s" * 47)
-    write_file(root / "xbox360_shell" / "shell.png", b"p" * 50)
+    write_file(root / "xbox360shell" / "shell.stl", b"s" * 47)
+    write_file(root / "xbox360shell" / "shell.png", b"p" * 50)
     write_zip(
-        root / "xbox360_shell.zip",
-        {"xbox360_shell/shell.stl": b"s" * 48, "xbox360_shell/shell.png": b"p" * 50},
+        root / "xbox360shell.zip",
+        {"xbox360shell/shell.stl": b"s" * 48, "xbox360shell/shell.png": b"p" * 50},
     )
-    write_file(root / "razer-cat-ears-remix-model_files" / "ears.stl", b"s" * 49)
-    write_file(root / "razer-cat-ears-remix-model_files" / "ears.png", b"p" * 51)
+    write_file(root / "razercatearsremixmodelfiles" / "ears.stl", b"s" * 49)
+    write_file(root / "razercatearsremixmodelfiles" / "ears.png", b"p" * 51)
     write_zip(
-        root / "razer-cat-ears-remix-model_files.zip",
+        root / "razercatearsremixmodelfiles.zip",
         {
-            "razer-cat-ears-remix-model_files/other.stl": b"s" * 49,
-            "razer-cat-ears-remix-model_files/other.png": b"p" * 51,
+            "razercatearsremixmodelfiles/other.stl": b"s" * 49,
+            "razercatearsremixmodelfiles/other.png": b"p" * 51,
         },
     )
 
@@ -2296,23 +2318,27 @@ def test_service_a_stem_twin_that_does_not_match_pairs_nothing(isolated_storage:
 def test_service_a_failed_stem_verification_consumes_the_archive(isolated_storage: Path) -> None:
     """AC-3 tail: a failed stem check is the end of that archive, not a retry.
 
-    ``OutOfMarbles.zip`` names the sibling ``xbox360_shell`` by its entry root,
+    ``outofmarbles.zip`` names the sibling ``xbox360shell`` by its entry root,
     so a fall-through to the entry-root route after the stem check fails WOULD
-    pair ``xbox360_shell``. The stem is the operator's own statement of which
+    pair ``xbox360shell``. The stem is the operator's own statement of which
     directory the archive is, and a failed check must never be retried under a
-    weaker name: neither ``OutOfMarbles`` nor ``xbox360_shell`` may be a row.
-    Restoring the fall-through makes ``xbox360_shell`` a row and fails this test;
-    a ``_stem_pair_verified`` mutated to ``True`` makes ``OutOfMarbles`` a row
+    weaker name: neither ``outofmarbles`` nor ``xbox360shell`` may be a row.
+    Restoring the fall-through makes ``xbox360shell`` a row and fails this test;
+    a ``_stem_pair_verified`` mutated to ``True`` makes ``outofmarbles`` a row
     and fails it too.
+
+    R5 offers the title-shaped spelling of both, so the fixture names are
+    lowercased to single words it refuses - the two mutations stay the only
+    thing that can affect this result.
     """
     root = isolated_storage / "import"
-    write_file(root / "OutOfMarbles" / "marbles.stl", b"s" * 52)
-    write_file(root / "OutOfMarbles" / "marbles.png", b"p" * 53)
-    write_file(root / "xbox360_shell" / "shell.stl", b"s" * 54)
-    write_file(root / "xbox360_shell" / "shell.png", b"p" * 55)
+    write_file(root / "outofmarbles" / "marbles.stl", b"s" * 52)
+    write_file(root / "outofmarbles" / "marbles.png", b"p" * 53)
+    write_file(root / "xbox360shell" / "shell.stl", b"s" * 54)
+    write_file(root / "xbox360shell" / "shell.png", b"p" * 55)
     write_zip(
-        root / "OutOfMarbles.zip",
-        {"xbox360_shell/shell.stl": b"s" * 54, "xbox360_shell/shell.png": b"p" * 55},
+        root / "outofmarbles.zip",
+        {"xbox360shell/shell.stl": b"s" * 54, "xbox360shell/shell.png": b"p" * 55},
     )
 
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
@@ -2329,6 +2355,12 @@ def test_service_a_stem_twin_in_another_parent_pairs_nothing(isolated_storage: P
     the directory it matches sits under ``import/Deep``. Mutating
     ``_twin_directory`` to search every ancestor parent pairs them, so this test
     discriminates the same-parent bound of the stem route.
+
+    R5 makes that namesake a LOW title row of its own, so the assertion moved
+    from "no candidates" to "exactly this one, unpaired": the directory is
+    offered on its NAME, and the archive under another parent is never ATTACHED
+    to it. Under the same mutation the row gains
+    ``archive.rel_path == "import/Cinderwing3D - Crystal Dragon.zip"`` and reds.
     """
     root = isolated_storage / "import"
     write_file(root / "Deep" / CINDERWING / "dragon.stl", b"s" * 56)
@@ -2341,20 +2373,32 @@ def test_service_a_stem_twin_in_another_parent_pairs_nothing(isolated_storage: P
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
 
     assert truncated is False
-    assert candidates == [], "a namesake under another parent is not the archive's twin"
-    assert bundle_service.build_report()["bundles"] == []
+    assert [candidate.key for candidate in candidates] == [f"import/Deep/{CINDERWING}"], (
+        "a namesake under another parent is not the archive's twin"
+    )
+    assert candidates[0].title_name is True
+    assert candidates[0].archive_path is None
+    report = bundle_service.build_report()
+    assert [row["key"] for row in report["bundles"]] == [f"import/Deep/{CINDERWING}"]
+    row = row_for(report, f"import/Deep/{CINDERWING}")
+    assert row["archive"] is None, "the zip under import/ is never attached to a namesake under import/Deep"
+    assert row["confidence"] == "low"
 
 
 def test_service_an_entry_root_naming_another_parent_pairs_nothing(isolated_storage: Path) -> None:
     """AC-4b: an entry root names a directory in the archive's OWN parent only.
 
     ``import/Gizmo.zip`` is rooted at ``xbox360_shell/``, but that directory sits
-    under ``import/Other``. Mutating ``_entry_root_pair`` to search every parent
+    under ``import/other``. Mutating ``_entry_root_pair`` to search every parent
     pairs them, so this test discriminates its same-parent bound.
+
+    R5 makes that directory a LOW title row of its own (``xbox360 shell`` has a
+    separator), so the assertion moved from "no candidates" to "exactly this
+    one, unpaired". Under the same mutation the row gains that archive and reds.
     """
     root = isolated_storage / "import"
-    write_file(root / "Other" / "xbox360_shell" / "shell.stl", b"s" * 58)
-    write_file(root / "Other" / "xbox360_shell" / "shell.png", b"p" * 59)
+    write_file(root / "other" / "xbox360_shell" / "shell.stl", b"s" * 58)
+    write_file(root / "other" / "xbox360_shell" / "shell.png", b"p" * 59)
     write_zip(
         root / "Gizmo.zip",
         {"xbox360_shell/shell.stl": b"s" * 58, "xbox360_shell/shell.png": b"p" * 59},
@@ -2363,8 +2407,16 @@ def test_service_an_entry_root_naming_another_parent_pairs_nothing(isolated_stor
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
 
     assert truncated is False
-    assert candidates == [], "the named directory is not a sibling of the archive"
-    assert bundle_service.build_report()["bundles"] == []
+    assert [candidate.key for candidate in candidates] == ["import/other/xbox360_shell"], (
+        "the named directory is not a sibling of the archive"
+    )
+    assert candidates[0].title_name is True
+    assert candidates[0].archive_path is None
+    report = bundle_service.build_report()
+    assert [row["key"] for row in report["bundles"]] == ["import/other/xbox360_shell"]
+    assert row_for(report, "import/other/xbox360_shell")["archive"] is None, (
+        "an archive rooted at a same-named directory under another parent is never attached"
+    )
 
 
 def test_service_a_promoted_stem_row_is_re_verified_by_containment(
@@ -2610,15 +2662,19 @@ def test_service_a_doc_less_model_only_directory_without_an_id_is_still_refused(
     Mutation: let R4 fire on any name and the report offers a row here, so both
     the empty-report assertions red and the create is no longer ``unknown
     bundle``.
+
+    R5 now offers the title-shaped spelling (``Plain_parts`` reads as ``Plain
+    parts``), so the fixture name is lowercased to one R5 refuses. An ordinary
+    name getting nothing is what "R4 does not fire on any name" means.
     """
-    write_file(isolated_storage / "import" / "Plain_parts" / "files" / "a.stl", STL_BYTES)
+    write_file(isolated_storage / "import" / "plainparts" / "files" / "a.stl", STL_BYTES)
     scan()
     headers = auth_header(client)
 
     assert bundle_service.build_report()["bundles"] == []
     assert bundle_service.iter_bundle_candidates(isolated_storage) == ([], False)
 
-    created = create(client, headers, [{"key": "import/Plain_parts"}])
+    created = create(client, headers, [{"key": "import/plainparts"}])
 
     assert created["created"] == 0
     assert created["failed"] == 1
@@ -2906,3 +2962,248 @@ def test_service_an_id_named_zip_is_an_archive_only_medium_row(
 
     assert created["blocked"] == 1
     assert project_listing(client, headers) == {}
+
+
+# --- R5: a title-shaped folder name (Mf-hvck) ---------------------------------
+
+# The eleven measured directories from the ticket: nine names that read like a
+# title, two that say "a part of a thing". The counts are the measured handfuls;
+# the shape under test is the NAME, so a couple of models each is enough.
+TITLE_FOLDER_MODEL_COUNTS = {
+    "Rocket Filement support": 5,
+    "Stagetop": 2,
+    "LittleTup": 4,
+    "Taffi": 3,
+    "GavinIsABot": 2,
+    "mac deckbox": 2,
+    "skull mask": 2,
+    "printable carrage": 2,
+    "Filament guide": 2,
+}
+TITLE_FOLDERS = tuple(TITLE_FOLDER_MODEL_COUNTS)
+PART_FOLDERS = ("files", "source")
+
+
+def write_title_folder(root: Path, name: str, models: int = 2) -> Path:
+    """Models at the folder's own depth and nothing else: the name is all the evidence."""
+    folder = root / name
+    for index in range(models):
+        write_file(folder / f"part{index}.stl", b"s" * (40 + index))
+    return folder
+
+
+def test_service_the_nine_title_shaped_folders_are_offered_and_the_two_parts_are_not(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-1, AC-2: the eleven measured directories, and only nine become rows.
+
+    Each title folder holds models at its own depth and no image and no text, so
+    no other rule can offer it: R1/R2 need documents, R4 needs an id and R3
+    needs the trio. ``files`` and ``source`` are refused by the exclusion list
+    and would fail both title branches anyway. Mutations: the discriminating ones
+    are the branch mutations - drop branch A, the floor or the lowercase clause
+    and the exact-key assertion reds - while emptying ``TITLE_PART_NAMES`` reds
+    only the pure list tests, because those two names fail both branches too.
+    """
+    import_root = isolated_storage / "import"
+    for name, models in TITLE_FOLDER_MODEL_COUNTS.items():
+        write_title_folder(import_root, name, models)
+    for name in PART_FOLDERS:
+        write_title_folder(import_root, name, 1)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    expected = sorted(f"import/{name}" for name in TITLE_FOLDERS)
+    assert sorted(row["key"] for row in report["bundles"]) == expected
+    for name in TITLE_FOLDERS:
+        row = row_for(report, f"import/{name}")
+        assert row["detector"] == "title-name", f"{name} is offered on its name alone"
+        assert row["metadata_shape"] == "title-name"
+        assert row["confidence"] == "low"
+        assert row["status"] == "ready", f"{name} is creatable like any low row"
+        assert (row["creator"], row["licence"], row["licence_url"], row["source_url"]) == (
+            None,
+            None,
+            None,
+            None,
+        ), "a name proves nothing about who made a thing or what it may be reused for"
+        assert row["model_count"] >= 1
+
+    keys = {row["key"] for row in report["bundles"]}
+    for name in PART_FOLDERS:
+        assert f"import/{name}" not in keys, f"{name} is a part name, never a title"
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    assert truncated is False
+    assert sorted(candidate.key for candidate in candidates) == expected
+    assert all(candidate.title_name is True for candidate in candidates)
+    assert all(candidate.archive_path is None for candidate in candidates)
+
+    created = create(client, headers, [{"key": "import/skull mask"}])
+
+    assert created["created"] == 1
+    assert len(project_listing(client, headers)) == 1
+    project_id = created["results"][0]["project_id"]
+    assert member_count(project_id) == 2, "a title row attaches exactly its own models"
+
+
+def test_service_a_name_derived_row_is_distinguishable_from_a_vendor_row(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-5: a name-derived row never looks like a vendor row on the wire.
+
+    Both rows exist in one report and the triple plus the provenance fields tell
+    them apart: the title row is ``title-name``/``title-name``/``low`` with four
+    NULLs, the Moai row is ``thingiverse-readme``/``root-docs``/``high`` with its
+    documents' creator, licence and URL. Mutation: enrich the title row from any
+    source and the NULL quartet reds.
+    """
+    write_title_folder(isolated_storage / "import", "skull mask", 2)
+    moai_bundle(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    title = row_for(report, "import/skull mask")
+    assert (title["detector"], title["metadata_shape"], title["confidence"]) == (
+        "title-name",
+        "title-name",
+        "low",
+    )
+    assert (title["creator"], title["licence"], title["licence_url"], title["source_url"]) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+    vendor = row_for(report, MOAI)
+    assert (vendor["detector"], vendor["metadata_shape"], vendor["confidence"]) == (
+        "thingiverse-readme",
+        "root-docs",
+        "high",
+    )
+    assert vendor["creator"] == "moai_maker"
+    assert vendor["licence"] == "CC BY-NC"
+    assert vendor["licence_url"] == "https://creativecommons.org/licenses/by-nc/4.0/"
+    assert vendor["source_url"] == THING_URL
+
+
+def test_service_a_title_named_folder_of_bundles_is_still_a_container(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-3 at the NEW site: a title-named folder holding a bundle is a pile.
+
+    ``import/Skull Mask`` holds a child FOLDER bundle and ``import/Stagetop``
+    holds a ZIP-ONLY one, and both parents' names read as titles. Both parents
+    keep a model of their OWN, so the claim tree leaves their listings non-empty
+    and the container guard is the only thing that can refuse them. Neither is a
+    row.
+
+    The two halves discriminate two different guards, and that split is the
+    point. ``Skull Mask``'s child is an ordinary claimed bundle, which
+    ``contained_keys`` does not carry, so the leg of ``_relates_to_any`` that
+    refuses a folder HOLDING a taken key is the ONLY refusal: drop it and
+    ``import/Skull Mask`` is offered as a pile on its own loose model. The zip
+    half is refused by that same leg first and by the ``contained_keys`` strip
+    second - an archive-only row is a contained key - so it stays a witness for
+    the older site rather than a second witness for the leg.
+    """
+    write_file(isolated_storage / "import" / "Skull Mask" / "loose.stl", STL_BYTES)
+    inner = isolated_storage / "import" / "Skull Mask" / "Inner"
+    write_file(inner / "part.stl", STL_BYTES)
+    write_file(inner / "cover.jpg", b"j" * 50)
+    write_text(inner / "notes.txt", "print at 0.2mm")
+    write_file(isolated_storage / "import" / "Stagetop" / "loose.stl", STL_BYTES)
+    write_zip(
+        isolated_storage / "import" / "Stagetop" / "Vendor.zip",
+        {"part.stl": STL_BYTES, "cover.jpg": b"j" * 50, "notes.txt": b"n" * 20},
+    )
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    keys = {row["key"] for row in report["bundles"]}
+    assert "import/Skull Mask" not in keys, "a folder of bundles is a pile whatever its name says"
+    assert "import/Stagetop" not in keys, "a folder holding a zip-only bundle is a container too"
+    assert "import/Skull Mask/Inner" in keys
+    assert "import/Stagetop/Vendor.zip" in keys
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    assert truncated is False
+    assert {candidate.key for candidate in candidates} == {
+        "import/Skull Mask/Inner",
+        "import/Stagetop/Vendor.zip",
+    }
+
+
+def test_service_title_name_detection_is_idempotent(isolated_storage: Path) -> None:
+    """AC-6: reading the report twice is the same read, on disk and in the DB.
+
+    ``build_report`` only reads. Mutation: let the title post-pass write a row, a
+    dismissal or a file and both the payload equality and the two before/after
+    comparisons red.
+    """
+    write_title_folder(isolated_storage / "import", "skull mask", 2)
+    moai_bundle(isolated_storage)
+    scan()
+    files_before = filesystem_snapshot(isolated_storage)
+    counts_before = table_counts()
+
+    first = bundle_service.build_report()
+    second = bundle_service.build_report()
+
+    assert first == second
+    assert len(first["bundles"]) == 2, "the title row and the vendor row"
+    assert filesystem_snapshot(isolated_storage) == files_before
+    assert table_counts() == counts_before
+
+
+def test_service_the_switch_off_removes_only_the_title_rows(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: the switch is one attribute the service's behaviour follows.
+
+    Mutation: read ``TITLE_NAME_BUNDLES_ENABLED`` anywhere but inside
+    ``title_name_facts`` and one of the two reports keeps a row it should not.
+    """
+    write_title_folder(isolated_storage / "import", "skull mask", 2)
+    moai_bundle(isolated_storage)
+    scan()
+
+    monkeypatch.setattr(bundle_detect, "TITLE_NAME_BUNDLES_ENABLED", False)
+    off = bundle_service.build_report()
+    monkeypatch.setattr(bundle_detect, "TITLE_NAME_BUNDLES_ENABLED", True)
+    on = bundle_service.build_report()
+
+    assert [row["key"] for row in off["bundles"]] == [MOAI], "only the title rows depend on the switch"
+    assert sorted(row["key"] for row in on["bundles"]) == sorted([MOAI, "import/skull mask"])
+
+
+def test_service_r4_outranks_the_title_rule_on_an_id_named_folder(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """Cross-cutting: the id-named export's display name is title-shaped too.
+
+    Both rules apply to this listing; the service must offer the medium R4 row,
+    with its derived URL, exactly once. Mutation: dispatch the title facts before
+    ``detect_bundle`` (or run the post-pass without ``taken``) and this key comes
+    back ``low`` - or twice, which ``row_for`` reds.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == [f"import/{DRAGON}"]
+    row = row_for(report, f"import/{DRAGON}")
+    assert row["confidence"] == "medium"
+    assert row["detector"] == "thingiverse-id-name"
+    assert row["source_url"] == DRAGON_URL
+    assert report["counts"]["low"] == 0
+    assert report["counts"]["total"] == 1

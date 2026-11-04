@@ -1339,3 +1339,222 @@ def test_inferred_confidences_holds_both_guesses_and_not_high() -> None:
         {bundle_detect.CONFIDENCE_MEDIUM, bundle_detect.CONFIDENCE_LOW}
     )
     assert bundle_detect.CONFIDENCE_HIGH not in bundle_detect.INFERRED_CONFIDENCES
+
+
+# --- R5: a title-shaped folder name (Mf-hvck) -------------------------------
+
+# The literal measurement, not the constant: the anti-shrink tests read this
+# tuple so deleting an entry from `TITLE_PART_NAMES` reds instead of shrinking
+# the sweep silently.
+REQUIRED_TITLE_PART_NAMES = (
+    "files",
+    "source",
+    "src",
+    "images",
+    "img",
+    "renders",
+    "textures",
+    "docs",
+    "stl",
+    "stls",
+    "models",
+    "meshes",
+    "parts",
+)
+
+# The nine measured names R5 offers, by the branch that accepts each.
+TITLE_NAMES_WITH_A_SEPARATOR = (
+    "Rocket Filement support",
+    "mac deckbox",
+    "skull mask",
+    "printable carrage",
+    "Filament guide",
+)
+TITLE_NAMES_SINGLE_WORD = ("Stagetop", "LittleTup", "GavinIsABot", "Taffi")
+
+
+@pytest.mark.parametrize("name", TITLE_NAMES_WITH_A_SEPARATOR)
+def test_is_title_name_accepts_a_name_with_a_space_or_separator(name: str) -> None:
+    """Branch A: a separator is a person's phrasing.
+
+    Mutation: require a capitalised first word as well and ``mac deckbox`` and
+    ``printable carrage`` - both measured titles - are refused.
+    """
+    assert bundle_detect.is_title_name(name) is True
+
+
+@pytest.mark.parametrize("name", TITLE_NAMES_SINGLE_WORD)
+def test_is_title_name_accepts_a_long_capitalised_single_word(name: str) -> None:
+    """Branch B: one capitalised word longer than the floor, with a lowercase letter.
+
+    Mutation: drop the lowercase clause and ``STAGETOP`` gets in; the all-caps
+    test below pins that refusal.
+    """
+    assert bundle_detect.is_title_name(name) is True
+
+
+@pytest.mark.parametrize("name", ["Beta", "Tup", "Sub"])
+def test_is_title_name_refuses_a_short_single_word(name: str) -> None:
+    """The FLOOR is load-bearing: four letters is a pile member, not a title.
+
+    Mutation: ``len(cleaned) < TITLE_SINGLE_WORD_FLOOR`` admits ``Beta`` (4) and
+    this test reds; ``Taffi`` (5) is a measured title, so the bound is ``> 4``.
+    """
+    assert bundle_detect.is_title_name(name) is False
+
+
+@pytest.mark.parametrize("name", ["STAGETOP", "ARTICULATED", "ALLSTL"])
+def test_is_title_name_refuses_an_all_caps_label(name: str) -> None:
+    """An ALL-CAPS label is a product code, so branch B's lowercase clause refuses it.
+
+    Mutation: drop ``any(character.islower() ...)`` and every one of these is
+    offered as a title.
+    """
+    assert bundle_detect.is_title_name(name) is False
+
+
+@pytest.mark.parametrize("name", ["residual", "clockworkmonster", "xbox360shell"])
+def test_is_title_name_refuses_a_lowercase_single_word(name: str) -> None:
+    """``_TITLE_WORD.fullmatch`` is ``None`` on a leading lowercase character.
+
+    Mutation: ``fullmatch`` -> ``search``/``match`` without the ``[A-Z]`` first
+    and every ordinary lowercase folder name becomes a title.
+    """
+    assert bundle_detect.is_title_name(name) is False
+
+
+def test_the_exclusion_list_contains_every_required_part_name() -> None:
+    """The anti-shrink test: deleting an entry from the constant reds here."""
+    assert set(REQUIRED_TITLE_PART_NAMES) <= bundle_detect.TITLE_PART_NAMES
+
+
+def test_a_part_name_is_never_a_title() -> None:
+    """Every part name, in every casing and whitespace variant, is refused.
+
+    The variants are looped INSIDE the test over the LITERAL tuple, so one
+    deletion from the constant cannot shrink the sweep - it only reds the
+    subset test above, which is the point.
+    """
+    for part in REQUIRED_TITLE_PART_NAMES:
+        for variant in (part, part.upper(), part.title(), f" {part} ", f"{part}\t", part.capitalize()):
+            assert bundle_detect.is_title_name(variant) is False, variant
+
+
+@pytest.mark.parametrize("part", sorted(bundle_detect.TITLE_PART_NAMES))
+def test_every_name_in_the_exclusion_list_is_refused(part: str) -> None:
+    """An ADDED entry is refused too, so the list cannot grow a title by accident."""
+    assert bundle_detect.is_title_name(part) is False
+
+
+def test_files_and_source_are_refused_even_with_the_exclusion_list_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two part names fail every branch twice over: this is the 11 -> 9 proof.
+
+    With ``TITLE_PART_NAMES`` emptied, ``files`` and ``source`` still fail -
+    branch A finds no separator and branch B's ``fullmatch`` is ``None`` on a
+    leading lowercase character - while the nine title names still pass. Mutation:
+    let branch A fire on an empty name or branch B on a lowercase word and both
+    refusals red.
+    """
+    monkeypatch.setattr(bundle_detect, "TITLE_PART_NAMES", frozenset())
+
+    assert bundle_detect.is_title_name("files") is False
+    assert bundle_detect.is_title_name("source") is False
+    for name in TITLE_NAMES_WITH_A_SEPARATOR + TITLE_NAMES_SINGLE_WORD:
+        assert bundle_detect.is_title_name(name) is True, name
+
+
+def test_title_name_facts_is_none_when_the_switch_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ONE switch is read inside ``title_name_facts`` and nowhere else."""
+    snapshot_ = snapshot("skull mask", {"a.stl": 10})
+
+    monkeypatch.setattr(bundle_detect, "TITLE_NAME_BUNDLES_ENABLED", False)
+
+    assert bundle_detect.title_name_facts(snapshot_) is None
+
+
+@pytest.mark.parametrize("name", ["files", "source", "residual"])
+def test_title_name_facts_is_none_for_a_part_name_and_a_lowercase_word(name: str) -> None:
+    """A model at the folder's own depth is not enough: the name must read as a title."""
+    assert bundle_detect.title_name_facts(snapshot(name, {"a.stl": 10})) is None
+
+
+def test_title_name_facts_requires_a_model_at_the_folders_own_depth() -> None:
+    """The one shape guard: a name alone is never a bundle.
+
+    Mutation: drop the ``_own_depth_model_count`` leg and the pile and the
+    depth-2 shape are both offered, so both ``None`` assertions red.
+    """
+    pile = {"Alpha/a.stl": 40, "Beta/b.stl": 41}
+    assert bundle_detect.title_name_facts(snapshot("RepRap-MultiFilament", pile)) is None
+
+    buried = {"v1.8/older/part.stl": 100}
+    assert bundle_detect.title_name_facts(snapshot("RepRap-MultiFilament", buried)) is None
+
+    assert bundle_detect.title_name_facts(snapshot("RepRap-MultiFilament", {"part.stl": 100})) is not None
+
+
+def test_title_name_facts_is_low_name_derived_and_invents_no_provenance() -> None:
+    """The row says the name read like a title, and nothing about who made the thing.
+
+    Mutation: pass a ``thing_id`` through ``_name_only_facts`` and the source URL
+    assertion reds; nothing in R5 may invent a URL, a creator or a licence.
+    """
+    files = {"a.stl": 10, "b.stl": 20, "cover.jpg": 30}
+
+    facts = bundle_detect.title_name_facts(snapshot("skull mask", files))
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_TITLE_NAME == "title-name"
+    assert facts.metadata_shape == bundle_detect.SHAPE_TITLE_NAME == "title-name"
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+    assert facts.title == "skull mask"
+    assert (
+        facts.creator,
+        facts.licence,
+        facts.licence_url,
+        facts.source_url,
+        facts.thing_id,
+        facts.description,
+    ) == (None, None, None, None, None, None)
+    assert facts.counts.model == 2
+    assert facts.counts.image == 1
+    assert facts.cover_entry == "cover.jpg"
+    assert facts.model_entries == ("a.stl", "b.stl")
+
+
+def test_detect_bundle_still_refuses_the_snapshot_title_name_facts_offers() -> None:
+    """R5 is NOT a ``detect_bundle`` branch, and this is the pin.
+
+    Mutation: move R5 into ``detect_bundle`` and this snapshot comes back non-None,
+    which is exactly the deepest-first migration that loses a promoted row.
+    """
+    snapshot_ = snapshot("skull mask", {"a.stl": 10, "cover.jpg": 30, "notes.txt": 5})
+
+    assert bundle_detect.detect_bundle(snapshot_, {}) is not None, "that trio is R3"
+    assert bundle_detect.detect_bundle(snapshot("skull mask", {"a.stl": 10}), {}) is None
+    assert bundle_detect.title_name_facts(snapshot("skull mask", {"a.stl": 10})) is not None
+
+
+def test_r4_outranks_the_title_rule_on_an_id_named_snapshot() -> None:
+    """R4's inferred id beats R5's name-only row, and the service uses the former.
+
+    The display name of the dragon export is title-shaped, so both rules apply to
+    the identical listing: the medium row carries the derived URL, the low row
+    carries nothing. Mutation: dispatch R5 before R4 in the service and the same
+    key comes back low with ``source_url is None``.
+    """
+    snapshot_ = snapshot(DRAGON_NAME, {"ARTICULATED_ice_dragon_fixed_p1.stl": 40})
+
+    detected = bundle_detect.detect_bundle(snapshot_, {})
+    title = bundle_detect.title_name_facts(snapshot_)
+
+    assert detected is not None
+    assert detected.confidence == bundle_detect.CONFIDENCE_MEDIUM
+    assert detected.detector == bundle_detect.DETECTOR_THINGIVERSE_ID_NAME
+    assert detected.source_url == DRAGON_URL
+    assert title is not None
+    assert title.confidence == bundle_detect.CONFIDENCE_LOW
+    assert title.detector == bundle_detect.DETECTOR_TITLE_NAME
+    assert title.source_url is None

@@ -88,7 +88,9 @@ or a child's models.
 
 Be honest about the bounds. **Without a pairing the shape is silent**: model
 files and a render are too weak on their own, so nothing is offered and nothing
-can be created. **The pairing never overrides the container rule**: a directory
+can be created - unless the folder's NAME reads like a title, which is R5's
+separate signal and not a loosening of this shape rule (ADR 0010 Decision 21).
+**The pairing never overrides the container rule**: a directory
 that holds bundles keeps the blocked ``archive_only`` row and creates nothing, so
 a pile of models with one zip somewhere inside it is still a pile. **A pairing
 names the directory itself and never a descendant**, so it can never qualify one.
@@ -218,7 +220,9 @@ class BundleCandidate:
     directory: the archive supplies its identity on the entry-root route or on the
     stem route, and the low confidence says the shape was inferred, so it is
     offered at LOW even when no rule offers the directory on its own and it is
-    creatable like any other LOW candidate.
+    creatable like any other LOW candidate. ``title_name`` means the row exists
+    only because the folder's NAME reads like a title, so its facts come from
+    ``bundle_detect.title_name_facts`` and its confidence is LOW.
     """
 
     key: str
@@ -229,6 +233,7 @@ class BundleCandidate:
     entry_root: Optional[str] = None
     pair_only: bool = False
     archive_owned: bool = False
+    title_name: bool = False
 
     @property
     def offers_archive_only(self) -> bool:
@@ -284,6 +289,22 @@ def _depth(rel_dir: str) -> int:
 
 def _parent(rel_dir: str) -> str:
     return rel_dir.rsplit("/", 1)[0] if "/" in rel_dir else ""
+
+
+def _relates_to_any(rel_dir: str, taken: AbstractSet[str]) -> bool:
+    """Whether ``rel_dir`` is already spoken for by a row, or is a container.
+
+    Three legs, and each one is a distinct refusal: the key IS a row (it was
+    claimed by a rule, promoted by a pairing or recorded as pair-only); it sits
+    INSIDE a row, so a name-only guess must never re-offer a bundle's own
+    subtree as a second thing; or it HOLDS a row, which is the container rule -
+    a folder of bundles is a pile whatever its name says. ``taken`` includes
+    archive rows, so a folder holding a zip-only bundle is a container too.
+    """
+    prefix = rel_dir + "/"
+    return any(
+        key == rel_dir or key.startswith(prefix) or rel_dir.startswith(key + "/") for key in taken
+    )
 
 
 def _basename(rel_dir: str) -> str:
@@ -557,6 +578,39 @@ def _build_candidates(
             )
         )
 
+    # R5: a title-shaped folder of models is a LOW, name-derived bundle. This is
+    # a post-pass and NOT a `detect_bundle` branch, and the placement is
+    # load-bearing: the folder pass is deepest-first, so a rule inside it would
+    # claim `LittleTup`'s row for a child and lose `17_ClockworkMonster`'s
+    # promoted row (16 witnesses red, 12 service and 4 pure). It runs after the
+    # promotion so a verified archive keeps its stronger `archive_owned` row, and
+    # before the container strip so a title folder holding a bundle is refused by
+    # `_relates_to_any` rather than offered as a pile. Shallowest-first, so a
+    # title parent claims its title child instead of the other way round.
+    taken = {candidate.key for candidate in found}
+    taken.update(pair_only_specs)
+    for rel_dir in sorted(work, key=lambda item: (_depth(item), item.casefold(), item)):
+        if _relates_to_any(rel_dir, taken):
+            continue
+        entries = work[rel_dir]
+        if not entries:
+            continue
+        snapshot = _folder_snapshot(rel_dir, entries)
+        facts = bundle_detect.title_name_facts(snapshot)
+        if facts is None:
+            continue
+        found.append(
+            BundleCandidate(
+                key=rel_dir,
+                snapshot=snapshot,
+                archive_path=None,
+                is_archive=False,
+                confidence=facts.confidence,
+                title_name=True,
+            )
+        )
+        taken.add(rel_dir)
+
     # An archive-only bundle is still a bundle: a low folder that strictly
     # contains one is a container too, and the folder pass cannot see it because
     # the archive is read after the directory walk. `contained_keys` is the keys of
@@ -663,6 +717,7 @@ def _build_candidates(
                 entry_root=entry_root,
                 pair_only=candidate.pair_only,
                 archive_owned=candidate.archive_owned,
+                title_name=candidate.title_name,
             )
         )
     with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
@@ -673,10 +728,11 @@ def scan_bundles(root: Path) -> BundleScan:
     """One walk of the storage tree: bundle candidates plus duplicate archives.
 
     Detection is one deepest-first pass. ``bundle_detect.detect_bundle`` applies R1 ->
-    R2 -> R3 strongest-first within a single directory, so the only ordering a
-    tree-wide walk needs is children before parents: a child bundle is claimed
-    before its parent is evaluated, and claiming it removes it from the parent's
-    view. A directory can therefore only ever be a bundle in its own right - it
+    R2 -> R3 strongest-first within a single directory, so the only ordering that
+    pass needs is children before parents: a child bundle is claimed before its
+    parent is evaluated, and claiming it removes it from the parent's view. The
+    R5 name post-pass runs afterwards and shallowest-first, over keys no row
+    already owns, so it can only add a row and never reorder a claim. A directory can therefore only ever be a bundle in its own right - it
     never inherits a child's models, and a directory that holds nothing but child
     bundles is not a bundle at all. A LOW candidate whose key is a strict
     ancestor of an already-claimed bundle is a *container* and is skipped without
@@ -1126,6 +1182,8 @@ def _qualify(scope: str, rel_path: str) -> str:
 
 
 def _candidate_facts(root: Path, candidate: BundleCandidate) -> Optional[bundle_detect.BundleFacts]:
+    if candidate.title_name:
+        return bundle_detect.title_name_facts(candidate.snapshot)
     if candidate.pair_only or candidate.archive_owned:
         return bundle_detect.archive_owned_facts(candidate.snapshot)
     if candidate.is_archive:
