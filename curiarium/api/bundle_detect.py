@@ -56,6 +56,18 @@ The rules, strongest first:
   promotion, never by ``detect_bundle``: the folder pass is deepest-first, so a
   rule inside it would claim a parent's row for its child and lose an
   archive-owned row.
+* R6 ``archive-bundle`` / ``low``: an ARCHIVE whose payload - at least one model
+  and at least one image - sits under a SINGLE root entry directory and ships no
+  text file. An archive is a vendor artifact (someone zipped it deliberately), so
+  a missing README is the vendor's choice rather than evidence against bundling;
+  the confidence stays ``low`` because nothing states provenance, and every
+  provenance field is ``None``. The single root is the pile guard, replacing
+  R3's own-depth bound here: the archive IS the wrapper. It is consulted by
+  ``archive_bundle_decision`` ONLY on the archive carrier and ONLY after R1, R2,
+  R4 and R3 all refused, so it can never lower a row those rules produced and is
+  never reached by a directory. The restraint is explicit: an archive with
+  models and nothing else stays refused, because there is no evidence it is one
+  thing rather than a dump.
 
 Anything else is not a bundle and ``detect_bundle`` returns ``None``. A README
 that exists but lacks the markers is not R1 - both high-confidence rules miss and
@@ -164,10 +176,15 @@ DETECTOR_THINGIVERSE_README = "thingiverse-readme"
 DETECTOR_THINGIVERSE_SIBLING = "thingiverse-sibling-docs"
 DETECTOR_THINGIVERSE_ID_NAME = "thingiverse-id-name"
 DETECTOR_GENERIC = "generic-bundle"
+# R6's vocabulary: an archive that is one thing under one root entry directory.
+# It is a separate detector and shape from R3 on purpose, so a report can say the
+# row came from the archive carrier rather than from a directory's own listing.
+DETECTOR_ARCHIVE_BUNDLE = "archive-bundle"
+SHAPE_ARCHIVE_ROOT = "archive-root"
 # The rule-set version, bumped by hand whenever a row-deciding table changes.
 # It is a human-readable companion to the derived stamp below: the version says
 # *which* revision a report was taken at, the stamp proves *what* the tables were.
-RULE_SET_VERSION = "2026-11-04.1"
+RULE_SET_VERSION = "2026-11-04.2"
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"
@@ -339,6 +356,7 @@ def rule_set_tables() -> dict:
         "DETECTOR_THINGIVERSE_ID_NAME": DETECTOR_THINGIVERSE_ID_NAME,
         "DETECTOR_GENERIC": DETECTOR_GENERIC,
         "DETECTOR_TITLE_NAME": DETECTOR_TITLE_NAME,
+        "DETECTOR_ARCHIVE_BUNDLE": DETECTOR_ARCHIVE_BUNDLE,
         # Confidences.
         "CONFIDENCE_HIGH": CONFIDENCE_HIGH,
         "CONFIDENCE_MEDIUM": CONFIDENCE_MEDIUM,
@@ -351,6 +369,7 @@ def rule_set_tables() -> dict:
         "SHAPE_ID_NAME": SHAPE_ID_NAME,
         "SHAPE_GENERIC": SHAPE_GENERIC,
         "SHAPE_TITLE_NAME": SHAPE_TITLE_NAME,
+        "SHAPE_ARCHIVE_ROOT": SHAPE_ARCHIVE_ROOT,
         # Suffix tables and shape bounds.
         "MODEL_SUFFIXES": sorted(MODEL_SUFFIXES),
         "IMAGE_SUFFIXES": sorted(IMAGE_SUFFIXES),
@@ -1314,6 +1333,79 @@ def archive_owned_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
     if _own_depth_model_count(snapshot) < 1:
         return None
     return _generic_facts(snapshot, counts, _cover_entry(snapshot), _model_entries(snapshot))
+
+
+def single_root_archive_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
+    """R6: an archive that is one thing under one root, without a vendor document.
+
+    An archive is a vendor artifact: someone zipped it deliberately, so a missing
+    README is the vendor's choice rather than evidence against bundling. This
+    rule therefore fills only the missing-document hole R3 leaves, and it refuses
+    the moment the listing carries a text file (``counts.text != 0``): then R3's
+    own-depth bound is the right question, and this clause must not second-guess
+    it. Measured: ``Fates End_Bonus_Delivery-Banks.zip`` (33 models, 3 images, one
+    text, one root ``_Bonus_Delivery``, own-depth 0) stays refused because of
+    this clause and nothing else.
+
+    The restraint is a model AND an image. A models-only archive stays refused:
+    nothing in it says it is one thing rather than a dump, and an image is the one
+    decoration that shows the vendor shipped a preview beside the models.
+
+    The single root entry directory is the pile guard and it REPLACES
+    ``_own_depth_model_count`` here deliberately. R3's own-depth bound is what
+    misses ``Fates End - DiceJails.zip``: 8 models under four subdirectories
+    (``DJ1_WoodenCrate/``, ``DJ2_StoneJail/``, ``DJ3_GelatinousCube/``,
+    ``DJ4_Mimic/``) inside one root (``_DiceJails/``), 4 images - one render
+    beside each jail's models - and no text, so the own-depth count is 0 even
+    though the archive is plainly one thing. The archive IS the wrapper, so a
+    single root says "one thing" where a directory rule needs a model at its own
+    depth. ``common_entry_root`` already ignores ``__MACOSX`` cruft, so the guard
+    is reused rather than re-implemented.
+
+    Every provenance field is ``None`` by construction (``_name_only_facts``):
+    the archive's composition says it is one thing, never who made it or what it
+    may be reused for.
+    """
+    counts = _counts(snapshot)
+    if counts.text != 0:
+        return None
+    if counts.model < 1 or counts.image < 1:
+        return None
+    if common_entry_root(entry.rel_path for entry in snapshot.entries) is None:
+        return None
+    return _name_only_facts(
+        DETECTOR_ARCHIVE_BUNDLE,
+        CONFIDENCE_LOW,
+        SHAPE_ARCHIVE_ROOT,
+        snapshot,
+        counts,
+        _cover_entry(snapshot),
+        _model_entries(snapshot),
+    )
+
+
+def archive_bundle_decision(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Detection:
+    """An archive's decision, with R6 appended after every rule ``detect_bundle`` runs.
+
+    This is a WRAPPER, not a branch of ``detect_bundle_decision``: a row R1, R2,
+    R4 or R3 produced is returned exactly as that function produced it, so R6 can
+    never re-report a HIGH row lower. The clause is consulted only when every
+    stronger rule refused, and only for an archive - the service calls this on the
+    archive carrier and never on a directory.
+
+    When R6 also declines, the PRIMARY refusal is returned unchanged, so an
+    archive that fails the clause keeps exactly the reason it had before this
+    rule existed - ``R3:no-own-depth-model`` for ``All Pokemon.zip`` and ``Fates
+    End Dice Jails 5-8.zip``, ``R3:trio-no-image`` for the models-only archives.
+    No new refusal word exists: the ledger's vocabulary is unchanged.
+    """
+    primary = detect_bundle_decision(snapshot, docs)
+    if primary.facts is not None:
+        return primary
+    facts = single_root_archive_facts(snapshot)
+    if facts is not None:
+        return Detection(facts=facts, refusal=None)
+    return primary
 
 
 def is_title_name(name: str) -> bool:
