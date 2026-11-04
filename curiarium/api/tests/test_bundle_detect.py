@@ -22,7 +22,7 @@ The heuristics pinned here:
   pick including its tie-break.
 """
 
-from typing import Dict, Mapping
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import pytest
 
@@ -868,6 +868,97 @@ def test_a_genuine_root_is_not_a_generic_container(name: str) -> None:
     assert bundle_detect.is_generic_container_root(name) is False
 
 
+def contained(
+    archive: List[Tuple[str, int]],
+    folder: List[Tuple[str, int]],
+    entry_root: Optional[str] = None,
+) -> bool:
+    """``archive_payload_contained`` from two ``(rel_path, size)`` literals."""
+    folder_entries = [bundle_detect.BundleEntry(rel_path=rel_path, size=size) for rel_path, size in folder]
+    return bundle_detect.archive_payload_contained(archive, folder_entries, entry_root)
+
+
+def test_archive_payload_contained_accepts_an_identity_payload() -> None:
+    """A flat archive written over the same paths needs no strip at all."""
+    archive = [("part.stl", 40), ("preview.jpg", 20)]
+
+    assert contained(archive, [("part.stl", 40), ("preview.jpg", 20)]), "identity: the paths already agree"
+
+
+def test_archive_payload_contained_strips_one_wrapper() -> None:
+    """The archive's own entries name the wrapper; one strip makes them agree."""
+    assert contained([("SnVB623/part.stl", 40)], [("part.stl", 40)]), "one common entry root is stripped"
+
+
+def test_archive_payload_contained_strips_a_generic_wrapper_on_the_stem_route() -> None:
+    """``is_generic_container_root`` is the entry-root route's rule, not this one.
+
+    The name only says nothing about WHICH bundle an archive holds, and it is
+    consulted where a root is used to NAME a directory. Here nobody names a
+    directory with it - the folder is the stem twin already - so ``files/`` is
+    just a wrapper like any other and is stripped once.
+    """
+    assert contained([("files/part.stl", 40)], [("part.stl", 40)]), (
+        "a generic root is refused where it names a directory, not where it is stripped"
+    )
+
+
+def test_archive_payload_contained_is_containment_not_equality() -> None:
+    """A lived-in directory legitimately holds more than the archive shipped."""
+    archive = [("SnVB623/part.stl", 40)]
+    folder = [("part.stl", 40), ("spare.stl", 41), ("render.png", 20)]
+
+    assert contained(archive, folder), "one extra file on disk does not unpair a verified archive"
+
+
+def test_archive_payload_contained_refuses_two_strips() -> None:
+    """The wrapper decision is made once; a wrapper's wrapper is not stripped."""
+    archive = [("outer/files/part.stl", 40)]
+
+    assert contained(archive, [("part.stl", 40)]) is False, "two strips would pair a nested thing with anything"
+    assert contained(archive, [("files/part.stl", 40)]), "exactly one strip is the rule"
+
+
+def test_archive_payload_contained_refuses_a_size_mismatch() -> None:
+    """Declared size is header data; a lie in it makes the pairing wrong, so refuse."""
+    assert contained([("SnVB623/part.stl", 40)], [("part.stl", 41)]) is False
+
+
+def test_archive_payload_contained_refuses_a_name_mismatch() -> None:
+    assert contained([("SnVB623/part.stl", 40)], [("other.stl", 40)]) is False
+
+
+def test_archive_payload_contained_ignores_macosx_cruft() -> None:
+    """AppleDouble entries are not payload, and cruft alone has verified nothing."""
+    assert contained([("__MACOSX/._part.stl", 5), ("part.stl", 40)], [("part.stl", 40)]), (
+        "the cruft is dropped before the comparison"
+    )
+    assert contained([("__MACOSX/._part.stl", 5)], [("part.stl", 40)]) is False
+
+
+def test_archive_payload_contained_without_one_common_root_refuses() -> None:
+    """No single wrapper, and no identity, means there is no strip to make."""
+    assert contained([("A/part.stl", 40), ("B/other.stl", 41)], [("part.stl", 40)]) is False, (
+        "two wrappers: there is no single entry root"
+    )
+    assert contained([("part.stl", 40), ("A/other.stl", 41)], [("part.stl", 40)]) is False, (
+        "a top-level file beside a wrapped one is no single root either"
+    )
+
+
+def test_archive_payload_contained_with_an_entry_root_is_the_strict_strip() -> None:
+    """The named root is stripped without any identity shortcut."""
+    assert contained([("SnVB623/part.stl", 40)], [("part.stl", 40)], entry_root="SnVB623"), (
+        "every entry sits under the named root"
+    )
+    assert contained(
+        [("SnVB623/part.stl", 40), ("Other/x.stl", 1)], [("part.stl", 40)], entry_root="SnVB623"
+    ) is False, "an entry outside the root is not this archive's payload"
+    assert contained([("part.stl", 40)], [("part.stl", 40)], entry_root="SnVB623") is False, (
+        "no identity shortcut on the entry-root route: a flat archive must not widen Mf-6b82"
+    )
+
+
 def clockwork_files() -> Dict[str, int]:
     files = {f"Clockwork_Part{index:02d}.stl": 100 + index for index in range(12)}
     files["Clockwork_Render0.png"] = 400
@@ -914,14 +1005,49 @@ def test_detect_bundle_still_refuses_the_snapshot_archive_owned_facts_offers() -
     assert bundle_detect.archive_owned_facts(snapshot_) is not None
 
 
-def test_archive_owned_facts_refuses_a_directory_with_text() -> None:
+def test_archive_owned_facts_offers_a_directory_with_text() -> None:
+    """A stray text file is decoration now: the archive is the identity.
+
+    The old rule refused any directory holding a ``.txt``; restoring that leg
+    (``or counts.text``) makes this test fail, and it is the models-plus-text
+    bucket - 8 directories on the owner's library - that the leg silently hid.
+    """
     files = {**clockwork_files(), "notes.txt": 20}
 
-    assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, files)) is None
+    facts = bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, files))
+
+    assert facts is not None, "a notes.txt beside the models is decoration, not a refusal"
+    assert facts.detector == bundle_detect.DETECTOR_GENERIC
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+    assert facts.counts.text == 1
 
 
-def test_archive_owned_facts_refuses_a_directory_without_an_image() -> None:
+def test_archive_owned_facts_offers_a_directory_without_an_image() -> None:
+    """The ``counts.image < 1`` leg is gone: this is the models-only bucket.
+
+    Restoring ``counts.image < 1 or ...`` in ``archive_owned_facts`` makes this
+    test fail. It is 6 directories on the owner's library, each with models and
+    no preview at all.
+    """
     files = {f"Clockwork_Part{index:02d}.stl": 100 for index in range(12)}
+
+    facts = bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, files))
+
+    assert facts is not None, "models alone are enough when an archive says what the directory is"
+    assert facts.counts.image == 0
+    assert facts.cover_entry is None
+
+
+def test_archive_owned_facts_refuses_a_pile_of_two_unnamed_model_bearing_directories() -> None:
+    """Own-depth/cardinality is the only shape guard left, and it is load-bearing.
+
+    Two unnamed model-bearing subdirectories, nothing at depth 0 and nothing
+    under ``files/``, is a pile of things rather than one bundle - the archive
+    identity does not make it one. Removing ``_own_depth_model_count``'s
+    cardinality bound (the ``len(unnamed) == 1`` leg) promotes this pile, so
+    this test fails exactly when that guard is emptied.
+    """
+    files = {"Alpha/a.stl": 40, "Beta/b.stl": 41}
 
     assert bundle_detect.archive_owned_facts(snapshot(CLOCKWORK_ROOT, files)) is None
 

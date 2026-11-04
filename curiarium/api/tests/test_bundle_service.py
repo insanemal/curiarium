@@ -2074,6 +2074,322 @@ def test_service_a_nested_archive_cannot_pair_a_sibling_directory(isolated_stora
     assert nested_zip not in {row["key"] for row in report["bundles"]}
 
 
+# --- stem-twin pairing (Mf-it2a) --------------------------------------------
+
+# The ticket's real directory names. The first four are directories no rule
+# offers on its own - models alone, models plus a stray text, models plus an
+# image - and the Cinderwing archive is rooted at the generic ``files/``, which
+# only the stem route may strip.
+SNVB623 = "SnVB623"
+SNVD623 = "SnVD623"
+CARD_BOX = "ultimate-card-box-v4-model_files"
+CINDERWING = "Cinderwing3D - Crystal Dragon"
+
+
+def test_service_a_verified_stem_twin_promotes_an_offered_nowhere_directory(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-1: four real pairs that no rule of their own offers become low rows.
+
+    Each directory is a same-parent stem twin of its archive and its archive
+    payload was written to disk byte-identically, so containment verifies:
+
+    * SnVB623 - models only, every entry rooted at the directory name;
+    * SnVD623 - models only, FLAT entries, so the identity-first leg is exercised;
+    * ultimate-card-box-v4-model_files - models plus ``notes.txt``, no image;
+    * Cinderwing3D - Crystal Dragon - models plus one render, rooted at ``files/``,
+      the real generic entry root only the stem route may strip.
+
+    All four are asserted because each is failed by a different mutation: delete
+    the stem branch in ``_build_candidates`` and these four produce no candidates
+    at all, while restoring ``counts.image < 1 or counts.text`` in
+    ``archive_owned_facts`` silently drops three of them (both models-only pairs
+    and the models-plus-text one) and leaves only the models-plus-images pair.
+    """
+    root = isolated_storage / "import"
+    write_file(root / SNVB623 / "model-a.stl", b"s" * 40)
+    write_file(root / SNVB623 / "model-b.stl", b"s" * 41)
+    write_zip(
+        root / f"{SNVB623}.zip",
+        {f"{SNVB623}/model-a.stl": b"s" * 40, f"{SNVB623}/model-b.stl": b"s" * 41},
+    )
+    write_file(root / SNVD623 / "flat-a.stl", b"s" * 42)
+    write_file(root / SNVD623 / "flat-b.stl", b"s" * 43)
+    write_zip(root / f"{SNVD623}.zip", {"flat-a.stl": b"s" * 42, "flat-b.stl": b"s" * 43})
+    write_file(root / CARD_BOX / "card-box.stl", b"s" * 44)
+    write_text(root / CARD_BOX / "notes.txt", "print at 0.2mm")
+    write_zip(
+        root / f"{CARD_BOX}.zip",
+        {f"{CARD_BOX}/card-box.stl": b"s" * 44, f"{CARD_BOX}/notes.txt": b"print at 0.2mm"},
+    )
+    write_file(root / CINDERWING / "dragon.stl", b"s" * 45)
+    write_file(root / CINDERWING / "dragon-body.stl", b"s" * 46)
+    write_file(root / CINDERWING / "dragon.png", b"p" * 60)
+    write_zip(
+        root / f"{CINDERWING}.zip",
+        {
+            "files/dragon.stl": b"s" * 45,
+            "files/dragon-body.stl": b"s" * 46,
+            "files/dragon.png": b"p" * 60,
+        },
+    )
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    sets = [
+        (SNVB623, 2),
+        (SNVD623, 2),
+        (CARD_BOX, 1),
+        (CINDERWING, 2),
+    ]
+    by_key = {candidate.key: candidate for candidate in candidates}
+    assert sorted(by_key) == sorted(f"import/{name}" for name, _models in sets), (
+        "four promoted directories and nothing else"
+    )
+    for name, _models in sets:
+        candidate = by_key[f"import/{name}"]
+        assert candidate.archive_owned is True, f"the verified stem pairing owns {name}"
+        assert candidate.entry_root is None, "the stem route names no entry root"
+        assert candidate.archive_path == f"import/{name}.zip"
+
+    scan()
+    headers = auth_header(client)
+    report = detect(client, headers)
+
+    assert sorted(row["key"] for row in report["bundles"]) == sorted(by_key)
+    for name, _models in sets:
+        row = row_for(report, f"import/{name}")
+        assert row["confidence"] == "low", f"{name} is a shape inference"
+        assert row["detector"] == "generic-bundle"
+        assert row["status"] == "ready"
+        assert row["archive"] == {"rel_path": f"import/{name}.zip", "twin_verified": True}
+
+    created = create(client, headers, [{"key": f"import/{name}"} for name, _models in sets])
+
+    assert created["created"] == 4
+    assert created["blocked"] == 0
+    assert created["failed"] == 0
+    assert len(project_listing(client, headers)) == 4
+    for result, (name, models) in zip(created["results"], sets, strict=True):
+        assert member_count(result["project_id"]) == models, (
+            f"{name} attaches only its own models; the archive attaches nothing"
+        )
+    assert member_count(created["results"][0]["project_id"]) == 2, "the models-only pair is exactly two"
+
+
+def test_service_a_pile_of_two_unnamed_model_directories_is_not_promoted(isolated_storage: Path) -> None:
+    """AC-2a: the archive verifies and the pile is still refused.
+
+    ``RepRap-MultiFilament`` holds two unnamed model-bearing subdirectories and
+    no model at depth 0 and none under ``files/``, so it is a pile of things. Its
+    stem archive's payload is exactly those two files, so containment PASSES; the
+    only refusal is own-depth/cardinality, which is why removing
+    ``_own_depth_model_count``'s cardinality bound promotes this pile and fails
+    this test. Deleting the stem branch changes nothing here, so the test
+    discriminates the shape guard, not the pairing.
+    """
+    root = isolated_storage / "import"
+    write_file(root / "RepRap-MultiFilament" / "Alpha" / "part.stl", b"s" * 40)
+    write_file(root / "RepRap-MultiFilament" / "Beta" / "part.stl", b"s" * 41)
+    write_zip(
+        root / "RepRap-MultiFilament.zip",
+        {
+            "RepRap-MultiFilament/Alpha/part.stl": b"s" * 40,
+            "RepRap-MultiFilament/Beta/part.stl": b"s" * 41,
+        },
+    )
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert candidates == [], "the archive verifies and the pile is still refused"
+    assert bundle_service.build_report()["bundles"] == []
+
+
+def test_service_a_verified_stem_twin_does_not_promote_a_pile_of_bundles(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-2b: a verified stem twin never swallows a subtree of bundles.
+
+    ``endorphin`` holds its own loose model and render plus two real child
+    bundles, and ``endorphin.zip`` contains exactly the two loose files - so the
+    stem check verifies and only the container rule can refuse the promotion. The
+    children are ``ready`` rows; the pile is one ``blocked``/``archive_only`` row
+    and creates nothing. Removing the ``claimed_ancestors`` refusal in the
+    promotion pass makes ``endorphin`` ``ready`` and this test fails.
+    """
+    root = isolated_storage / "import" / "endorphin"
+    write_file(root / "loose.stl", STL_BYTES)
+    write_file(root / "render.png", b"p" * 70)
+    for name, model in (("Alpha", "a.stl"), ("Beta", "b.stl")):
+        write_file(root / name / model, b"s" * 41)
+        write_file(root / name / f"{name.lower()}.png", b"p" * 50)
+        write_text(root / name / "notes.txt", "print at 0.2mm")
+    write_zip(
+        isolated_storage / "import" / "endorphin.zip",
+        {"endorphin/loose.stl": STL_BYTES, "endorphin/render.png": b"p" * 70},
+    )
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    keys = [row["key"] for row in report["bundles"]]
+    for child in ("import/endorphin/Alpha", "import/endorphin/Beta"):
+        assert child in keys, "the two child bundles are rows of their own"
+        assert row_for(report, child)["status"] == "ready"
+    pile = row_for(report, "import/endorphin")
+    assert pile["status"] == "blocked"
+    assert pile["blocked_reason"] == "archive_only", "the refused pair stays visible and creates nothing"
+    assert pile["archive"] == {"rel_path": "import/endorphin.zip", "twin_verified": True}
+
+    created = create(client, headers, [{"key": key} for key in keys])
+
+    assert created["created"] == 2
+    assert created["blocked"] == 1
+    assert created["failed"] == 0
+    names = {project["name"].casefold() for project in project_listing(client, headers).values()}
+    assert "endorphin" not in names, "the pile is refused, never made into a project"
+
+
+def test_service_a_stem_twin_that_does_not_match_pairs_nothing(isolated_storage: Path) -> None:
+    """AC-3 (a) and (b): a namesake archive is not evidence until its payload agrees.
+
+    ``xbox360_shell.zip`` declares a size that differs from the file on disk and
+    ``razer-cat-ears-remix-model_files.zip`` holds entries whose names match
+    nothing, so both verifications fail. Neither directory is offered by a rule
+    of its own and neither archive is a bundle of its own (two models only), so
+    "no candidates" is the whole assertion. A ``_stem_pair_verified`` mutated to
+    ``return True`` promotes both, so this test discriminates the verification.
+    """
+    root = isolated_storage / "import"
+    write_file(root / "xbox360_shell" / "shell.stl", b"s" * 47)
+    write_file(root / "xbox360_shell" / "shell.png", b"p" * 50)
+    write_zip(
+        root / "xbox360_shell.zip",
+        {"xbox360_shell/shell.stl": b"s" * 48, "xbox360_shell/shell.png": b"p" * 50},
+    )
+    write_file(root / "razer-cat-ears-remix-model_files" / "ears.stl", b"s" * 49)
+    write_file(root / "razer-cat-ears-remix-model_files" / "ears.png", b"p" * 51)
+    write_zip(
+        root / "razer-cat-ears-remix-model_files.zip",
+        {
+            "razer-cat-ears-remix-model_files/other.stl": b"s" * 49,
+            "razer-cat-ears-remix-model_files/other.png": b"p" * 51,
+        },
+    )
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert candidates == [], "a size or name mismatch pairs nothing"
+    assert bundle_service.build_report()["bundles"] == []
+
+
+def test_service_a_failed_stem_verification_consumes_the_archive(isolated_storage: Path) -> None:
+    """AC-3 tail: a failed stem check is the end of that archive, not a retry.
+
+    ``OutOfMarbles.zip`` names the sibling ``xbox360_shell`` by its entry root,
+    so a fall-through to the entry-root route after the stem check fails WOULD
+    pair ``xbox360_shell``. The stem is the operator's own statement of which
+    directory the archive is, and a failed check must never be retried under a
+    weaker name: neither ``OutOfMarbles`` nor ``xbox360_shell`` may be a row.
+    Restoring the fall-through makes ``xbox360_shell`` a row and fails this test;
+    a ``_stem_pair_verified`` mutated to ``True`` makes ``OutOfMarbles`` a row
+    and fails it too.
+    """
+    root = isolated_storage / "import"
+    write_file(root / "OutOfMarbles" / "marbles.stl", b"s" * 52)
+    write_file(root / "OutOfMarbles" / "marbles.png", b"p" * 53)
+    write_file(root / "xbox360_shell" / "shell.stl", b"s" * 54)
+    write_file(root / "xbox360_shell" / "shell.png", b"p" * 55)
+    write_zip(
+        root / "OutOfMarbles.zip",
+        {"xbox360_shell/shell.stl": b"s" * 54, "xbox360_shell/shell.png": b"p" * 55},
+    )
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert candidates == [], "the failed stem check consumed the archive"
+    assert bundle_service.build_report()["bundles"] == []
+
+
+def test_service_a_stem_twin_in_another_parent_pairs_nothing(isolated_storage: Path) -> None:
+    """AC-4a: a stem twin is the directory BESIDE the archive, never a namesake deeper.
+
+    ``import/Cinderwing3D - Crystal Dragon.zip`` names nothing in its own parent;
+    the directory it matches sits under ``import/Deep``. Mutating
+    ``_twin_directory`` to search every ancestor parent pairs them, so this test
+    discriminates the same-parent bound of the stem route.
+    """
+    root = isolated_storage / "import"
+    write_file(root / "Deep" / CINDERWING / "dragon.stl", b"s" * 56)
+    write_file(root / "Deep" / CINDERWING / "dragon.png", b"p" * 57)
+    write_zip(
+        root / f"{CINDERWING}.zip",
+        {f"{CINDERWING}/dragon.stl": b"s" * 56, f"{CINDERWING}/dragon.png": b"p" * 57},
+    )
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert candidates == [], "a namesake under another parent is not the archive's twin"
+    assert bundle_service.build_report()["bundles"] == []
+
+
+def test_service_an_entry_root_naming_another_parent_pairs_nothing(isolated_storage: Path) -> None:
+    """AC-4b: an entry root names a directory in the archive's OWN parent only.
+
+    ``import/Gizmo.zip`` is rooted at ``xbox360_shell/``, but that directory sits
+    under ``import/Other``. Mutating ``_entry_root_pair`` to search every parent
+    pairs them, so this test discriminates its same-parent bound.
+    """
+    root = isolated_storage / "import"
+    write_file(root / "Other" / "xbox360_shell" / "shell.stl", b"s" * 58)
+    write_file(root / "Other" / "xbox360_shell" / "shell.png", b"p" * 59)
+    write_zip(
+        root / "Gizmo.zip",
+        {"xbox360_shell/shell.stl": b"s" * 58, "xbox360_shell/shell.png": b"p" * 59},
+    )
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert candidates == [], "the named directory is not a sibling of the archive"
+    assert bundle_service.build_report()["bundles"] == []
+
+
+def test_service_a_promoted_stem_row_is_re_verified_by_containment(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The stem route's ``twin_verified`` is containment, re-checked at report time.
+
+    The directory holds a ``spare.stl`` the flat archive does not, so the archive's
+    basename set and the directory's are NOT equal - and the answer is still
+    ``True``, because every entry of the archive is on disk. Mutating
+    ``_archive_twin_verified`` to the names-only ``twin_verified`` for this row
+    reports ``false`` and fails this test; the names-only answer stays correct for
+    a directory a rule detects (``test_the_twin_zip_is_provenance_only`` pins it).
+    """
+    root = isolated_storage / "import"
+    write_file(root / SNVD623 / "flat-a.stl", b"s" * 42)
+    write_file(root / SNVD623 / "flat-b.stl", b"s" * 43)
+    write_file(root / SNVD623 / "spare.stl", b"s" * 44)
+    write_zip(root / f"{SNVD623}.zip", {"flat-a.stl": b"s" * 42, "flat-b.stl": b"s" * 43})
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    row = row_for(report, f"import/{SNVD623}")
+    assert row["archive"] == {"rel_path": f"import/{SNVD623}.zip", "twin_verified": True}, (
+        "basename set equality is FALSE here (the folder has spare.stl, the archive does not) "
+        "while containment is TRUE"
+    )
+
+
 # --- duplicate archives (Mf-z4vv) -------------------------------------------
 
 # The four constructed duplicate groups of the fixture below. The payload sizes
