@@ -108,6 +108,13 @@ Artifacts the loop writes are gitignored: `.tickets/`, `.plans/`, `.lanes/`.
 - Docs: if behaviour changes, the doc that claims it changes too. Facts that drift in this
   repo have historically been version numbers, schema versions, route counts and image
   names.
+- **Measurements: record the data, not just the count.** When a change alters how data is
+  classified — bundle detection, scan naming, dedupe, folder resolution — save a
+  row-level artifact before and after (every row with its detector, confidence, status and
+  reason), not a summary figure. A count cannot be diffed, and "114 became 112" cost an
+  hour to investigate because no row set existed on either side. State the exact command,
+  the build sha, and the library state (asset/folder/archive counts) with the artifact.
+  Counts are a headline for the artifact, never a substitute for it.
 
 ## Where to read next
 
