@@ -177,6 +177,79 @@ const moaiZip = makeBundle({
   archive: { rel_path: "Moai.zip", twin_verified: false },
 });
 
+/** Two zip-only rows, the same shape, so a row change swaps `path` and `label`
+ *  without changing which children render: the extract action stays the same
+ *  instance unless something keys it. */
+const ALPHA_KEY = "Alpha_zip";
+const BETA_KEY = "Beta_zip";
+const ALPHA_ENTRIES = [
+  { path: "alpha.stl", size: 1024 },
+  { path: "alpha.txt", size: 256 },
+];
+const BETA_ENTRIES = [
+  { path: "beta.stl", size: 1024 },
+  { path: "beta.txt", size: 256 },
+  { path: "beta.jpg", size: 512 },
+];
+const alphaZip = makeBundle({
+  key: ALPHA_KEY,
+  rel_path: ALPHA_KEY,
+  title: "Alpha",
+  name_suggestion: "Alpha",
+  creator: null,
+  licence: null,
+  licence_url: null,
+  source_url: null,
+  detector: "generic-bundle",
+  confidence: "low",
+  metadata_shape: "generic",
+  description_excerpt: null,
+  model_count: 0,
+  image_count: 0,
+  text_count: 0,
+  other_count: 1,
+  cover: {
+    asset_id: null,
+    rel_path: null,
+    reason: "largest-image-unregistered",
+    url: null,
+    thumb_url: null,
+  },
+  assets_total: 1,
+  status: "blocked",
+  blocked_reason: "archive_only",
+  archive: { rel_path: "Alpha.zip", twin_verified: false },
+});
+const betaZip = makeBundle({
+  key: BETA_KEY,
+  rel_path: BETA_KEY,
+  title: "Beta",
+  name_suggestion: "Beta",
+  creator: null,
+  licence: null,
+  licence_url: null,
+  source_url: null,
+  detector: "generic-bundle",
+  confidence: "low",
+  metadata_shape: "generic",
+  description_excerpt: null,
+  model_count: 0,
+  image_count: 0,
+  text_count: 0,
+  other_count: 1,
+  cover: {
+    asset_id: null,
+    rel_path: null,
+    reason: "largest-image-unregistered",
+    url: null,
+    thumb_url: null,
+  },
+  assets_total: 1,
+  status: "blocked",
+  blocked_reason: "archive_only",
+  archive: { rel_path: "Beta.zip", twin_verified: false },
+});
+
 /** A medium row: the folder name carried a Thingiverse id, so the source URL is
  *  derived from it and no creator or licence is known. */
 const mediumDragon = makeBundle({
@@ -329,6 +402,16 @@ function selectionCheck(key: string): HTMLElement {
 
 function detailTitle(): string | null {
   return within(detail()).getByRole("heading").textContent;
+}
+
+/** One answer per path, so the confirmation's count names the archive that was
+ *  listed. The file-wide mock answers every path the same way, which would leave
+ *  a stale panel and a fresh one reading identically. */
+function installArchiveListings(): void {
+  listArchiveEntriesMock.mockImplementation(async (path: string) => ({
+    path,
+    entries: path === "Beta.zip" ? BETA_ENTRIES : ALPHA_ENTRIES,
+  }));
 }
 
 /** Both reveal toggles need live setters, exactly as the hook supplies them. */
@@ -1018,6 +1101,92 @@ describe("BundleReviewView archive extraction", () => {
       name: "Extract selected archives (0)",
     }) as HTMLButtonElement;
     expect(ready.disabled).toBe(true);
+  });
+
+  it("drops a stale confirmation when the row changes to another archive", async () => {
+    installArchiveListings();
+    renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
+
+    fireEvent.click(rowElement(ALPHA_KEY));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Alpha" }));
+    await screen.findByRole("button", { name: "Extract 2 files" });
+
+    fireEvent.click(rowElement(BETA_KEY));
+
+    // The confirmation belonged to Alpha. Left standing it would read as
+    // Beta's own - one archive confirmed, another extracted - so the action has
+    // to be back at idle, offering the new row's trigger instead.
+    expect(detailTitle()).toBe("Beta");
+    expect(within(detail()).queryByRole("button", { name: /^Extract \d+ files$/ })).toBeNull();
+    expect(within(detail()).getByRole("button", { name: "Extract Beta" })).toBeTruthy();
+  });
+
+  it("writes the archive the new row names, never the one the row left behind", async () => {
+    installArchiveListings();
+    renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
+
+    fireEvent.click(rowElement(ALPHA_KEY));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Alpha" }));
+    await screen.findByRole("button", { name: "Extract 2 files" });
+    // Alpha was listed only to reach its confirmation - nothing was written.
+    expect(listArchiveEntriesMock).toHaveBeenCalledTimes(1);
+    expect(listArchiveEntriesMock).toHaveBeenCalledWith("Alpha.zip");
+
+    fireEvent.click(rowElement(BETA_KEY));
+    // The row change is where the old bug fired: a confirmation still armed for
+    // Alpha was the one on screen, so the write it led to named Alpha.
+    expect(extractArchiveMock).not.toHaveBeenCalled();
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Beta" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 3 files" }));
+
+    await waitFor(() => expect(extractArchiveMock).toHaveBeenCalledTimes(1));
+    expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Beta.zip", entries: null });
+
+    // Alpha.zip is legitimately listed on the way to its confirmation, so the
+    // "never Alpha" claim is scoped to the write and to every listing after the
+    // row change - the call pinned above makes the first of those the only one.
+    expect(extractArchiveMock.mock.calls.map(([request]) => request.path)).toEqual(["Beta.zip"]);
+    const listedAfterRowChange = listArchiveEntriesMock.mock.calls.slice(1).map(([path]) => path);
+    expect(listedAfterRowChange).toEqual(["Beta.zip"]);
+  });
+
+  it("does not take focus when the remount drops the stale confirmation", async () => {
+    installArchiveListings();
+    renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
+
+    fireEvent.click(rowElement(ALPHA_KEY));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Alpha" }));
+    await screen.findByRole("button", { name: "Extract 2 files" });
+
+    // In a browser the confirmation panel's own button held the caret. The
+    // remount must not chase it: `previousStageRef` starts null, so the mount
+    // is skipped.
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+
+    fireEvent.click(rowElement(BETA_KEY));
+
+    expect(document.activeElement).toBe(document.body);
+    expect(within(detail()).getByRole("button", { name: "Extract Beta" })).toBeTruthy();
+  });
+
+  it("leaves the operator's caret on the row that changed", async () => {
+    installArchiveListings();
+    renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
+
+    fireEvent.click(rowElement(ALPHA_KEY));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Alpha" }));
+    await screen.findByRole("button", { name: "Extract 2 files" });
+
+    // `fireEvent.click` does not move focus in jsdom, so the caret has to be
+    // placed by hand - this is the row the operator was reading when the panel
+    // reset itself.
+    const betaRow = rowElement(BETA_KEY);
+    betaRow.focus();
+    fireEvent.click(betaRow);
+
+    expect(document.activeElement).toBe(betaRow);
   });
 });
 
