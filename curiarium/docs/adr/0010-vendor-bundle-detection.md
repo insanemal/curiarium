@@ -51,6 +51,8 @@ as `already_created` and named on the wire by which identity matched).
 
 **Extended:** ticket `Mf-9ygi` (every bundle report carries a derived rule-set stamp and every row its stamp; a dev-only JSON serialiser + `--diff` makes two runs comparable or explicitly not; every candidate not offered carries the rule that refused it - the refused ledger is reported, the offered set is unchanged).
 
+**Extended:** ticket `Mf-tcrw` (a sixth rule, R6 `archive-bundle`, offers an ARCHIVE whose models and images sit under a single root entry directory with no text file at `low`, consulted only on the archive carrier after R1/R2/R4/R3 refused, so no row those rules produced can be lowered and the refusal vocabulary is unchanged).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -88,7 +90,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 
 ## Decision
 
-1. **Five rules, strongest first; four of them are `detect_bundle`'s order.**
+1. **Six rules, strongest first; four of them are `detect_bundle`'s order.**
    `curiarium/api/bundle_detect.py` holds every judgement and performs no I/O:
    no `Session`, no `engine`, no `open()`, no `Path.read_*`, no `os.scandir`.
    It is handed a `BundleSnapshot` (a listing of `BundleEntry(rel_path, size)`)
@@ -103,19 +105,30 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    | R2 | `thingiverse-sibling-docs` | `high` | `sibling-docs` | the same pair shipped beside the files as `<bundle>_README` / `<bundle>_LICENSE` - as two files, or as two directories each holding one text file (the legacy flattening) - at least one of them present, and both markers present in whichever of the two documents holds them |
    | R4 | `thingiverse-id-name` | `medium` | `id-name` | nothing parses, but the bundle's name starts with a Thingiverse id (`NNNNNNN_Title` - 4+ digits then `_`) and the tree holds at least one model **at the bundle's own depth** (the same bound R3 uses); the id is provenance inferred from the name, buying `source_url` / `thing_id` and nothing else |
    | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model **at the bundle's own depth** - depth 0, depth 1 under `files/`, or depth 1 under exactly one model-bearing subdirectory - plus one image and one text entry |
+   | R6 | `archive-bundle` | `low` | `archive-root` | an ARCHIVE whose payload - at least one model and at least one image - sits under a SINGLE root entry directory and ships no text file |
 
    **R5 `title-name` / `low` is the fifth rule, and `detect_bundle` never
    reaches it.** Its judgement lives in the same pure module - `is_title_name`
-   and `title_name_facts` - so it is testable from literals like the other four,
+   and `title_name_facts` - so it is testable from literals like the other five,
    but `bundle_service` calls it as a post-pass over the folder walk, after the
    archive promotion and before the `contained_keys` strip, never as a branch of
    `detect_bundle` (Decision 21). A branch there would inherit the deepest-first
    walk and hand a parent's row to its child. It fires on a name and one
    own-depth model and, uniquely, `TITLE_NAME_BUNDLES_ENABLED` - the one switch,
-   read in one place (Decision 21) - which puts it last in strength and outside
-   the order above: `low`, `title-name`, every provenance field `None`.
-   The module lists five rules and `detect_bundle` runs four, so the order R1,
-   R2, R4, R3 is that function's and never the rule set's.
+   read in one place (Decision 21) - which puts it below every document rule and
+   outside the order above: `low`, `title-name`, every provenance field `None`.
+
+   **R6 `archive-bundle` / `low` is the sixth rule, and it is archive-only.** A
+   directory never reaches it: `bundle_service` calls `archive_bundle_decision`
+   on the archive carrier alone. That function is a wrapper around
+   `detect_bundle_decision`, so R6 is consulted **only after R1, R2, R4 and R3
+   all refused** and can never re-report a HIGH (or medium, or R3 trio) row
+   lower. A directory whose payload is the same shape stays refused exactly as
+   it always was.
+
+   The module lists six rules and `detect_bundle` runs four, so the order R1,
+   R2, R4, R3 is that function's and never the rule set's. R5 and R6 are the two
+   rules that fire outside it, and neither can lower a row the other produced.
 
    `high` therefore means *the vendor told us*, never *there is a `.txt` file*.
    A README that exists but lacks the markers is not R1: both high-confidence
@@ -1156,6 +1169,85 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     library beyond the eleven directories the ticket counted; this ADR's counts
     predate the rule.
 
+22. **A single-root archive with models and images is a `low` bundle, and the
+    rule is archive-only.** `Mf-tcrw` adds R6 `archive-bundle` / `low` /
+    `archive-root`. An archive is a vendor artifact: someone zipped it
+    deliberately, so a missing README is the vendor's choice rather than evidence
+    against bundling. R3 needs a text file, and a tower archive that ships none is
+    refused for a document the vendor never intended to include. R6 fills exactly
+    that hole: at least one model **and** at least one image, every payload entry
+    under a **single root entry directory**, and `counts.text == 0`. The
+    confidence stays `low` because nothing states provenance - the row is built by
+    `_name_only_facts`, so creator, licence, licence URL, source URL, thing id and
+    description are `None` **by construction**, not by a test. An archive's shape
+    proves it is one thing; it says nothing about who made it or what it may be
+    reused for.
+
+    **The single root is the pile guard, and it replaces `_own_depth_model_count`
+    here deliberately.** R3's own-depth bound is what misses
+    `Fates End - DiceJails.zip`: 8 models under **four** subdirectories
+    (`DJ1_WoodenCrate/`, `DJ2_StoneJail/`, `DJ3_GelatinousCube/`, `DJ4_Mimic/`)
+    inside one root (`_DiceJails/`), 4 images - one render beside each jail's own
+    models - and no text, so the own-depth count is **0** even though the archive
+    is plainly one thing. The archive IS the wrapper, so a single common entry
+    root says "one thing" where a directory rule needs a model at its own depth.
+    `common_entry_root` is reused rather than re-implemented, so an `__MACOSX`
+    prefix cannot make a real bundle rootless. This is not a loosening of R3: the
+    clause is consulted only when every stronger rule refused, never by
+    `detect_bundle` and never on a directory.
+
+    **The measured delta on the owner's library is 26 archives to 6 consumed to
+    20 new rows.** 26 archives have this composition. Six are consumed by
+    stronger rules and render no R6 row: four stem twins (`Cinderwing3D - Crystal
+    Dragon.zip`, `Cinderwing3D Dragon Rose Valentine.s day.zip`, `SnVB623.zip`,
+    `SnVD623.zip`), `17_Fates End - ClockworkMonster Tower.zip` by entry-root
+    pairing, and its byte-identical `(1)` copy as `duplicate`. That leaves exactly
+    20 new LOW rows: 19 previously `R3:trio-no-text` towers and rails (including
+    `beltedz_rails.zip`) plus `Fates End - DiceJails.zip`. Those are the rows the
+    owner asked to be able to review. R6 decides an ARCHIVE's composition and
+    nothing about which directory it belongs to, so a pairing still runs first and
+    keeps its answer: the six above never reach the clause. The mirror case is
+    visible and deliberate - an archive whose namesake directory sits under
+    ANOTHER parent is not a stem twin (Decision 6's same-parent bound), so it is
+    offered on its own composition as well as its namesake being offered on its
+    own (R5), two uncreatable rows for what may be one thing, which the operator
+    rejects in the queue rather than the code guessing.
+
+    **The restraint is a model and an image, and model-only archives stay
+    refused.** Nine measured archives are models and nothing else: six with
+    entries at the zip root (`606df4f71f663_fates-end-dice-tower-free-wizard-tower.zip`,
+    `Articulated_Axolotl.zip`, `ImageToStl.com_trans+-+coo+pwr+-+black.zip`,
+    `MTG+DECK+BOX+-+GOBLIN+CONSTRUCT+100++CARDS+AND+DICE+HOLDER+-+SUPPORTFREE.zip`,
+    `MTG+Icy+Manipulator+Deck+box+100++Single+Sleeved.zip`,
+    `Print In Place FIDGET GRENADE.zip`) and three under a single root
+    (`articulated-dragon-claws20200216-24469-1e5maw5.zip`,
+    `creeper-headphone-stand20220605-111-e4jv0b.zip`,
+    `trading-card-game-deck-box-80-or-110-cards20230404-16215-f0wdcb.zip`). They
+    stay refused: nothing in them is evidence they are one thing rather than a
+    dump, and the measured cost of a weak rule is the 68 low-confidence rows
+    already in the queue. The `text == 0` scoping is the other half of the
+    restraint: a listing that ships a document is R3's business, so
+    `Fates End_Bonus_Delivery-Banks.zip` (33 models, 3 images, one text, one root
+    `_Bonus_Delivery`, own-depth 0) stays refused exactly as it was.
+
+    **The guards, each measured.** `All Pokemon.zip` stays refused as a pile: 607
+    root entry directories, 2096 images, 607 text, and 2 files the detector
+    classifies as models. The 3255 the ticket counted is `.obj` + `.blend` +
+    `.stl`, and the 1626 `.obj`, 1627 `.blend` and 226 `.fbx` beside those 2
+    `.stl` are not extensions the import door accepts (only `.stl`, `.step`,
+    `.stp`, `.3mf`, `.lbrn` and `.lbrn2` are). A text file keeps R6 away and the
+    roots would too. `Fates End Dice Jails 5-8.zip` (8 models, 4 images, 4 roots,
+    no text) is the one multi-root near-miss and stays refused: every part would
+    qualify alone and the archive is still four things.
+    A HIGH archive (README pair carrying both markers) keeps `high`; R6 is a
+    wrapper around `detect_bundle_decision`, so R1/R2/R4/R3 precedence is
+    untouched. A `.zip` nested below a detected bundle is still a member, never a
+    candidate (`Mf-74x5` unchanged). And when the clause declines, the refusal
+    returned is the **primary** one - `R3:no-own-depth-model` for `All Pokemon.zip`
+    and `Fates End Dice Jails 5-8.zip`, `R3:trio-no-image` for the models-only
+    archives - so no new `REFUSAL_*` word exists and the refusal ledger's
+    vocabulary is unchanged.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -1701,6 +1793,42 @@ unchanged.
   UNVERIFIED here:** the live deployment is off-limits to this work, and this
   checkout's `curiarium.db` holds 0 projects, so the shape was reproduced and the
   machine was not.
+- **R6's witnesses are named, and each one reds a different mutation.** In
+  `tests/test_bundle_detect.py`, from literal snapshots built from the measured
+  archive layouts:
+  `test_single_root_archive_offers_the_fates_end_tower_shape` (14 models, 3
+  previews and the vendor's own nested deliverable zip, one root, no text:
+  `archive-bundle` / `low` / `archive-root`, every provenance field `None`, the
+  largest preview the cover, and R3's `trio-no-text` refusal as the hole it
+  fills);
+  `test_the_clause_catches_the_dice_jails_shape_r3s_depth_bound_misses` (8
+  models across four subdirectories of one root: the own-depth count asserted as
+  `0` **first**, then
+  `detect_bundle_decision(...).facts is None` and
+  `archive_bundle_decision(...).facts is not None`);
+  `test_models_only_archives_stay_refused_at_the_zip_root_and_under_one_root`
+  (the restraint, both refused at `R3:trio-no-image`);
+  `test_three_hundred_root_directories_are_a_pile_and_stay_refused`,
+  `test_the_four_root_near_miss_stays_refused` and
+  `test_the_all_pokemon_pile_keeps_its_primary_refusal` (the pile guard and the
+  primary refusal unchanged);
+  `test_a_loose_file_archive_has_no_wrapper_and_stays_refused` (no single root,
+  no bundle); `test_a_high_archive_and_r3s_trio_are_returned_unchanged` (the
+  wrapper can never lower a stronger row);
+  `test_macosx_cruft_cannot_make_a_real_bundle_rootless`; and
+  `test_a_text_file_hands_the_listing_back_to_r3_even_at_depth_two` (the
+  `text == 0` scoping, with the untexted twin of the same listing offered). In
+  `tests/test_bundle_service.py`, against temporary storage roots with real zip
+  bytes:
+  `test_service_a_single_root_archive_without_a_readme_is_a_low_row` (the row
+  through `build_report`, which is the `_candidate_facts` routing witness),
+  `test_service_a_matching_archive_beside_an_offered_twin_stays_consumed`,
+  `test_service_an_archive_rooted_at_an_offered_sibling_is_consumed_by_it`,
+  `test_service_byte_identical_matching_archives_yield_one_row_and_one_duplicate`,
+  `test_service_a_matching_zip_inside_a_bundle_is_still_a_member`,
+  `test_service_models_only_and_multi_root_archives_stay_refused` and
+  `test_service_every_archive_is_offered_or_refused_with_a_named_rule` (the
+  Mf-9ygi ledger invariant with the new rows in the mix).
 
 ## Superseding conditions
 

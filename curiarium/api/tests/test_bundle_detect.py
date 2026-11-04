@@ -1576,14 +1576,328 @@ def test_r4_outranks_the_title_rule_on_an_id_named_snapshot() -> None:
     assert title.source_url is None
 
 
+# --- R6: a single-root archive with models and images (Mf-tcrw) ----------
+
+
+# The measured `03_Fates End - Barbarian Tower.zip`, entry for entry: one root
+# directory, 14 models, 3 previews (the largest is the cover), no text at all and
+# the vendor's own nested deliverable zip. Sizes are the measured byte counts.
+FATES_TOWER_COVER = "03_Barbarian/Barbarian_VisualReference.png"
+FATES_TOWER_FILES = {
+    "03_Barbarian/Barbarian_VisualReference.png": 273497,
+    "03_Barbarian/Barbarian_DT_v2.2.stl": 25078084,
+    "03_Barbarian/Barbarian_Dec2_top_v2.2.stl": 25034084,
+    "03_Barbarian/_FileName_Key.png": 24699,
+    "03_Barbarian/Barbarian_RENDER.png": 183190,
+    "03_Barbarian/Barbarian_Dec_Roof_v1.0.stl": 14721584,
+    "03_Barbarian/BarbarianTray_OpenLock_v1.0.stl": 15039484,
+    "03_Barbarian/Barbarian_DT2_btm_v2.2.stl": 25024784,
+    "03_Barbarian/Barbarian_DT2_top_v2.2.stl": 25046284,
+    "03_Barbarian/BarbarianTray_Lg_Tx_v1.0.stl": 15009084,
+    "03_Barbarian/BarbarianTray_DiceHolder_v1.0.stl": 15021384,
+    "03_Barbarian/BarbarianTray_Lg_Smo_v1.0.stl": 15008884,
+    "03_Barbarian/BarbarianTray_Sm_Tx_v1.0.stl": 15026484,
+    "03_Barbarian/BarbarianTray_Sm_Smo_v1.0.stl": 15023184,
+    "03_Barbarian/Barbarian_DT_roof_v1.1.stl": 25000084,
+    "03_Barbarian/03_Barbarian_2.2.zip": 207981695,
+    "03_Barbarian/Barbarian_Dec_btm_v2.2.stl": 25036284,
+    "03_Barbarian/Barbarian_Dec_v2.2.stl": 25046484,
+}
+
+# The measured `Fates End - DiceJails.zip`: one root, FOUR subdirectories, 8
+# models with one render beside each jail's own models, and the DJ1 deliverable
+# zip. No text, and no model at the root or directly under it.
+DICE_JAILS_FILES = {
+    "_DiceJails/DJ1_WoodenCrate/Render_WoodenCrate.png": 427937,
+    "_DiceJails/DJ4_Mimic/Mimic_Render.png": 231263,
+    "_DiceJails/DJ3_GelatinousCube/Cube_Render3.png": 347707,
+    "_DiceJails/DJ2_StoneJail/Render_StoneJail_02.png": 424941,
+    "_DiceJails/DJ1_WoodenCrate/DJ1_Crate_Top_EasyOpen_v1.2.stl": 15043984,
+    "_DiceJails/DJ1_WoodenCrate/DJ1_Crate_Top_v1.2.stl": 15540984,
+    "_DiceJails/DJ1_WoodenCrate/DJ1_CrateEasyPrint_v1.3.stl": 25783984,
+    "_DiceJails/DJ1_WoodenCrate/DJ1_Crate_v1.2.stl": 15486784,
+    "_DiceJails/DJ2_StoneJail/DJ2_StoneJail_v1.2.stl": 15017284,
+    "_DiceJails/DJ2_StoneJail/DJ2_StoneJail_top_v1.2.stl": 15744384,
+    "_DiceJails/DJ4_Mimic/DJ_Mimic_v2.0.stl": 25381184,
+    "_DiceJails/DJ3_GelatinousCube/DJ_Cube_v1.6.stl": 25003784,
+    "_DiceJails/DJ1_WoodenCrate/DJ1_Crate_v1.2.zip": 51237946,
+}
+
+
+def fates_tower_files() -> Dict[str, int]:
+    """The measured Fates End tower: 14 models, 3 previews and a nested zip, no text."""
+    return dict(FATES_TOWER_FILES)
+
+
+def dice_jails_files() -> Dict[str, int]:
+    """The measured DiceJails shape: 8 models across FOUR subdirectories of ONE root."""
+    return dict(DICE_JAILS_FILES)
+
+
+def test_single_root_archive_offers_the_fates_end_tower_shape() -> None:
+    """R6: 14 models, 3 previews and a nested zip under one root and no text.
+
+    R3 refuses this listing for want of a text file - exactly the hole the clause
+    fills. The nested deliverable zip is an entry of the listing like any other:
+    it counts as an archive and changes nothing else. Mutation: require a text
+    file and the facts are ``None`` again; drop the single-root guard and the
+    pile cases below are offered.
+    """
+    snapshot_ = snapshot("03_Fates End - Barbarian Tower", fates_tower_files())
+
+    assert bundle_detect.detect_bundle_decision(snapshot_, {}).refusal == bundle_detect.REFUSAL_R3_TRIO_NO_TEXT
+
+    facts = bundle_detect.single_root_archive_facts(snapshot_)
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_ARCHIVE_BUNDLE == "archive-bundle"
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+    assert facts.metadata_shape == bundle_detect.SHAPE_ARCHIVE_ROOT == "archive-root"
+    assert (
+        facts.creator,
+        facts.licence,
+        facts.licence_url,
+        facts.source_url,
+        facts.thing_id,
+        facts.description,
+    ) == (None, None, None, None, None, None)
+    assert (facts.counts.model, facts.counts.image, facts.counts.text) == (14, 3, 0)
+    assert facts.counts.archive == 1, "the vendor's nested deliverable zip is an entry, not a model"
+    assert facts.cover_entry == FATES_TOWER_COVER, "the largest image is the cover"
+    assert len(facts.model_entries) == 14
+
+    decision = bundle_detect.archive_bundle_decision(snapshot_, {})
+    assert decision.refusal is None
+    assert decision.facts == facts
+
+
+def test_the_clause_catches_the_dice_jails_shape_r3s_depth_bound_misses() -> None:
+    """8 models across FOUR subdirectories of ONE root is one archive, not a pile.
+
+    The interpretation is asserted FIRST: R3's own-depth count is 0 for this
+    listing, so ``detect_bundle_decision`` refuses it. The archive IS the wrapper,
+    which is why the single-root test replaces the depth bound here rather than
+    sitting next to it. Mutation: consult ``_own_depth_model_count`` inside
+    ``single_root_archive_facts`` and the clause returns ``None`` for the very
+    shape it was written for.
+    """
+    snapshot_ = snapshot("Fates End - DiceJails", dice_jails_files())
+
+    assert bundle_detect._own_depth_model_count(snapshot_) == 0
+    assert bundle_detect.detect_bundle_decision(snapshot_, {}).facts is None
+    assert bundle_detect.single_root_archive_facts(snapshot_) is not None
+
+    composed = bundle_detect.archive_bundle_decision(snapshot_, {})
+
+    assert composed.refusal is None
+    assert composed.facts is not None
+    assert composed.facts.detector == bundle_detect.DETECTOR_ARCHIVE_BUNDLE
+    assert (composed.facts.counts.model, composed.facts.counts.image) == (8, 4)
+    assert composed.facts.counts.archive == 1, "the DJ1 deliverable zip is an entry, not a model"
+
+
+def test_models_only_archives_stay_refused_at_the_zip_root_and_under_one_root() -> None:
+    """No image means no evidence it is one thing rather than a dump.
+
+    The zip-root listing has no wrapper and the rooted one has a single root, so
+    only the missing image differs from the offered shape; both stay refused at
+    the primary R3 refusal. Mutation: relax the image leg and both become rows -
+    the 9 measured models-only archives each cost a low-confidence row.
+    """
+    at_top = snapshot("model-only-top", {f"part{index}.stl": 10 + index for index in range(4)})
+    under_root = snapshot("model-only-root", {f"Root/part{index}.stl": 10 + index for index in range(3)})
+
+    assert bundle_detect.common_entry_root(entry.rel_path for entry in at_top.entries) is None
+    assert bundle_detect.common_entry_root(entry.rel_path for entry in under_root.entries) == "Root"
+    for snapshot_ in (at_top, under_root):
+        assert bundle_detect.single_root_archive_facts(snapshot_) is None
+        decision = bundle_detect.archive_bundle_decision(snapshot_, {})
+        assert decision.facts is None
+        assert decision.refusal == bundle_detect.REFUSAL_R3_TRIO_NO_IMAGE
+
+
+def test_three_hundred_root_directories_are_a_pile_and_stay_refused() -> None:
+    """A single root is the pile guard: 300 roots with a model and an image each.
+
+    Mutation: accept the first root instead of the common one and this becomes a
+    row; the measured ``All Pokemon.zip`` pile is the same shape at scale.
+    """
+    files: Dict[str, int] = {}
+    for index in range(300):
+        files[f"Root{index}/part.stl"] = 10
+        files[f"Root{index}/preview.jpg"] = 20
+
+    pile = snapshot("pile", files)
+
+    assert bundle_detect.common_entry_root(entry.rel_path for entry in pile.entries) is None
+    assert bundle_detect.single_root_archive_facts(pile) is None
+
+    primary = bundle_detect.detect_bundle_decision(pile, {})
+    composed = bundle_detect.archive_bundle_decision(pile, {})
+
+    assert composed.facts is None
+    assert composed.refusal == primary.refusal == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+
+
+def test_the_four_root_near_miss_stays_refused() -> None:
+    """Fates End Dice Jails 5-8: 8 models and 4 images across FOUR roots.
+
+    Every part would qualify alone and the archive is still four things - the one
+    multi-root near-miss. Mutation: turn the guard into ``any root`` and this is
+    one row.
+    """
+    files: Dict[str, int] = {}
+    for jail in ("DJ5_ChairOFShame", "DJ6_IronMaiden", "DJ7_BagOfHolding", "DJ8_Altar"):
+        files[f"{jail}/part-a.stl"] = 10
+        files[f"{jail}/part-b.stl"] = 11
+        files[f"{jail}/preview.jpg"] = 20
+
+    near_miss = snapshot("Fates End Dice Jails 5-8", files)
+
+    assert bundle_detect.single_root_archive_facts(near_miss) is None
+
+    primary = bundle_detect.detect_bundle_decision(near_miss, {})
+    composed = bundle_detect.archive_bundle_decision(near_miss, {})
+
+    assert composed.facts is None
+    assert composed.refusal == primary.refusal == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+
+
+def test_the_all_pokemon_pile_keeps_its_primary_refusal() -> None:
+    """``All Pokemon.zip``: 607 roots, 2 models at depth 2, 2096 images, 607 text.
+
+    The 2 are the only entries under the detector's own ``MODEL_SUFFIXES``. The
+    1626 ``.obj``, 1627 ``.blend`` and 226 ``.fbx`` beside them are not extensions
+    the import door accepts, and the 3255 the ticket counted is ``.obj`` +
+    ``.blend`` + ``.stl`` written up as a model count. A text file already keeps
+    R6 away, and the many roots would keep it away too: the refusal is R3's
+    own-depth one, unchanged by the new clause.
+    """
+    files: Dict[str, int] = {
+        "Root0/models/bulbasaur.stl": 100,
+        "Root0/models/charmander.stl": 101,
+    }
+    for index in range(607):
+        files[f"Root{index}/notes.txt"] = 5
+        files[f"Root{index}/card-a.jpg"] = 20
+        files[f"Root{index}/card-b.jpg"] = 21
+        files[f"Root{index}/card-c.jpg"] = 22
+    for index in range(2096 - 607 * 3):
+        files[f"Root{index}/extra.jpg"] = 30
+
+    pile = snapshot("All Pokemon", files)
+    counts = bundle_detect._counts(pile)
+
+    assert (counts.model, counts.image, counts.text) == (2, 2096, 607)
+    assert bundle_detect.common_entry_root(entry.rel_path for entry in pile.entries) is None
+    assert bundle_detect.single_root_archive_facts(pile) is None
+
+    primary = bundle_detect.detect_bundle_decision(pile, {})
+    composed = bundle_detect.archive_bundle_decision(pile, {})
+
+    assert composed.facts is None
+    assert composed.refusal == primary.refusal == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+
+
+def test_a_loose_file_archive_has_no_wrapper_and_stays_refused() -> None:
+    """Models and images at the zip top level have no single root, so no wrapper.
+
+    Mutation: let ``common_entry_root`` accept a top-level file as a root and a
+    loose-file archive becomes a bundle on no evidence of a wrapper at all.
+    """
+    loose = snapshot(
+        "loose",
+        {"part-a.stl": 10, "part-b.stl": 11, "preview.jpg": 20, "card.jpg": 21},
+    )
+
+    assert bundle_detect.common_entry_root(entry.rel_path for entry in loose.entries) is None
+    assert bundle_detect.single_root_archive_facts(loose) is None
+
+    decision = bundle_detect.archive_bundle_decision(loose, {})
+
+    assert decision.facts is None
+    assert decision.refusal == bundle_detect.REFUSAL_R3_TRIO_NO_TEXT
+
+
+def test_a_high_archive_and_r3s_trio_are_returned_unchanged() -> None:
+    """The wrapper's whole safety property: R6 runs after R1/R2/R4/R3, never instead.
+
+    Mutation: evaluate R6 before the primary decision, or return its facts
+    unconditionally, and this README pair reads ``archive-bundle`` / ``low`` while
+    R3's trio is downgraded to a different detector.
+    """
+    high = snapshot(
+        "Moai",
+        {"README.txt": 100, "LICENSE.txt": 100, "files/part.stl": 200, "images/a.jpg": 60},
+    )
+
+    assert bundle_detect.single_root_archive_facts(high) is None, "a text file is R3's business, not R6's"
+
+    high_decision = bundle_detect.archive_bundle_decision(high, r1_docs())
+
+    assert high_decision.refusal is None
+    assert high_decision.facts is not None
+    assert high_decision.facts.detector == bundle_detect.DETECTOR_THINGIVERSE_README
+    assert high_decision.facts.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert high_decision.facts.metadata_shape == bundle_detect.SHAPE_ROOT_DOCS
+
+    trio = snapshot("Trio", {"Root/part.stl": 10, "Root/preview.jpg": 20, "Root/notes.txt": 5})
+    trio_decision = bundle_detect.archive_bundle_decision(trio, {})
+
+    assert trio_decision.refusal is None
+    assert trio_decision.facts is not None
+    assert trio_decision.facts.detector == bundle_detect.DETECTOR_GENERIC
+    assert trio_decision.facts.confidence == bundle_detect.CONFIDENCE_LOW
+
+
+def test_macosx_cruft_cannot_make_a_real_bundle_rootless() -> None:
+    """The root guard reuses ``common_entry_root``, which already skips ``__MACOSX``.
+
+    Mutation: re-implement the root test without the cruft skip and rsync junk
+    strips a real vendor bundle of its wrapper.
+    """
+    files = fates_tower_files()
+    files["__MACOSX/03_Barbarian/._Barbarian_DT_v2.0.stl"] = 5
+    files["__MACOSX/._03_Barbarian"] = 4
+    snapshot_ = snapshot("03_Fates End - Barbarian Tower", files)
+
+    assert bundle_detect.common_entry_root(entry.rel_path for entry in snapshot_.entries) == "03_Barbarian"
+    assert bundle_detect.single_root_archive_facts(snapshot_) is not None
+
+
+def test_a_text_file_hands_the_listing_back_to_r3_even_at_depth_two() -> None:
+    """The clause fills only the missing-document hole; it never second-guesses R3.
+
+    The listing is the DiceJails depth (own-depth count 0) with one text file
+    added: model, image and single root are all satisfied, only the text differs,
+    and the refusal must be the PRIMARY one - ``R3:no-own-depth-model`` - rather
+    than an offering. The untexted twin of the same listing IS offered, which is
+    what makes the text the only difference. Mutation: drop the ``counts.text``
+    guard and this becomes a row while
+    ``Fates End_Bonus_Delivery-Banks.zip`` does too.
+    """
+    buried = dice_jails_files()
+    no_text = snapshot("Buried No Text", buried)
+    with_text = snapshot("Buried With Text", {**buried, "notes.txt": 5})
+
+    assert bundle_detect.single_root_archive_facts(no_text) is not None
+    assert bundle_detect.single_root_archive_facts(with_text) is None
+
+    primary = bundle_detect.detect_bundle_decision(with_text, {})
+    composed = bundle_detect.archive_bundle_decision(with_text, {})
+
+    assert composed.facts is None
+    assert composed.refusal == primary.refusal == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+
+
 # --- the rule-set stamp and the refusal vocabulary (Mf-9ygi) ----------------
 
 # The version a report records, and the stamp of the tables as imported. Both are
 # LITERALS on purpose: an edit to any row-deciding table changes the derived hash
 # and this test reds, which is the whole point of the stamp - the 114 -> 112 delta
 # of Mf-9ygi could not be explained because nothing recorded what the rules were.
-RULE_SET_VERSION = "2026-11-04.1"
-RULE_SET_STAMP = "418445978b9a45fb6d68e9814e7df2c2ae83487181d095496f70741b3d4732b5"
+RULE_SET_VERSION = "2026-11-04.2"
+RULE_SET_STAMP = "072a1505299394483222ec7cd103c9d85c9008345827b8ea21288857905f3e09"
 
 # Every constant `rule_set_tables` captures, with a replacement that differs from
 # the shipped value. The names are also the exact key set of the derived table, so
@@ -1599,6 +1913,7 @@ ROW_DECIDING_TABLES = {
     "DETECTOR_THINGIVERSE_ID_NAME": "thingiverse-id-name-v2",
     "DETECTOR_GENERIC": "generic-bundle-v2",
     "DETECTOR_TITLE_NAME": "title-name-v2",
+    "DETECTOR_ARCHIVE_BUNDLE": "archive-bundle-v2",
     "CONFIDENCE_HIGH": "high-v2",
     "CONFIDENCE_MEDIUM": "medium-v2",
     "CONFIDENCE_LOW": "low-v2",
@@ -1609,6 +1924,7 @@ ROW_DECIDING_TABLES = {
     "SHAPE_ID_NAME": "id-name-v2",
     "SHAPE_GENERIC": "generic-v2",
     "SHAPE_TITLE_NAME": "title-name-shape-v2",
+    "SHAPE_ARCHIVE_ROOT": "archive-root-v2",
     "MODEL_SUFFIXES": frozenset({".obj"}),
     "IMAGE_SUFFIXES": frozenset({".webp"}),
     "BUNDLE_TEXT_EXTS": frozenset({".nfo"}),
@@ -1644,7 +1960,8 @@ def test_the_rule_set_stamp_is_pinned_so_a_table_edit_cannot_go_unnoticed() -> N
 
     Mutation: change one constant any row-deciding path reads and the pinned hash
     stops matching - which is exactly the audit trail Mf-9ygi's 114 -> 112
-    investigation lacked.
+    investigation lacked. This bump is Mf-tcrw's rule table change: R6 added
+    ``DETECTOR_ARCHIVE_BUNDLE`` and ``SHAPE_ARCHIVE_ROOT``.
     """
     assert bundle_detect.RULE_SET_VERSION == RULE_SET_VERSION
     assert bundle_detect.RULE_SET_STAMP == RULE_SET_STAMP

@@ -2560,10 +2560,11 @@ def test_service_a_stem_twin_in_another_parent_pairs_nothing(isolated_storage: P
     ``_twin_directory`` to search every ancestor parent pairs them, so this test
     discriminates the same-parent bound of the stem route.
 
-    R5 makes that namesake a LOW title row of its own, so the assertion moved
-    from "no candidates" to "exactly this one, unpaired": the directory is
-    offered on its NAME, and the archive under another parent is never ATTACHED
-    to it. Under the same mutation the row gains
+    R5 makes that namesake a LOW title row of its own and R6 offers the archive
+    (one root, models and images, no text) as a row of its own, so the assertion
+    moved to two unpaired rows: the directory is offered on its NAME and the
+    archive is an ``archive-bundle`` row, and neither is ATTACHED to the other.
+    Under the same mutation the directory row gains
     ``archive.rel_path == "import/Cinderwing3D - Crystal Dragon.zip"`` and reds.
     """
     root = isolated_storage / "import"
@@ -2577,16 +2578,23 @@ def test_service_a_stem_twin_in_another_parent_pairs_nothing(isolated_storage: P
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
 
     assert truncated is False
-    assert [candidate.key for candidate in candidates] == [f"import/Deep/{CINDERWING}"], (
-        "a namesake under another parent is not the archive's twin"
-    )
-    assert candidates[0].title_name is True
-    assert candidates[0].archive_path is None
+    assert [candidate.key for candidate in candidates] == [
+        f"import/{CINDERWING}.zip",
+        f"import/Deep/{CINDERWING}",
+    ], "a namesake under another parent is not the archive's twin"
+    by_key = {candidate.key: candidate for candidate in candidates}
+    assert by_key[f"import/Deep/{CINDERWING}"].title_name is True
+    assert by_key[f"import/Deep/{CINDERWING}"].archive_path is None
+    assert by_key[f"import/{CINDERWING}.zip"].is_archive is True
     report = bundle_service.build_report()
-    assert [row["key"] for row in report["bundles"]] == [f"import/Deep/{CINDERWING}"]
+    assert [row["key"] for row in report["bundles"]] == [
+        f"import/{CINDERWING}.zip",
+        f"import/Deep/{CINDERWING}",
+    ]
     row = row_for(report, f"import/Deep/{CINDERWING}")
     assert row["archive"] is None, "the zip under import/ is never attached to a namesake under import/Deep"
     assert row["confidence"] == "low"
+    assert row_for(report, f"import/{CINDERWING}.zip")["detector"] == "archive-bundle"
 
 
 def test_service_an_entry_root_naming_another_parent_pairs_nothing(isolated_storage: Path) -> None:
@@ -2597,8 +2605,9 @@ def test_service_an_entry_root_naming_another_parent_pairs_nothing(isolated_stor
     pairs them, so this test discriminates its same-parent bound.
 
     R5 makes that directory a LOW title row of its own (``xbox360 shell`` has a
-    separator), so the assertion moved from "no candidates" to "exactly this
-    one, unpaired". Under the same mutation the row gains that archive and reds.
+    separator) and R6 offers the archive as a row of its own, so the assertion
+    moved to two unpaired rows. Under the same mutation the directory row gains
+    that archive and reds.
     """
     root = isolated_storage / "import"
     write_file(root / "other" / "xbox360_shell" / "shell.stl", b"s" * 58)
@@ -2611,13 +2620,19 @@ def test_service_an_entry_root_naming_another_parent_pairs_nothing(isolated_stor
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
 
     assert truncated is False
-    assert [candidate.key for candidate in candidates] == ["import/other/xbox360_shell"], (
-        "the named directory is not a sibling of the archive"
-    )
-    assert candidates[0].title_name is True
-    assert candidates[0].archive_path is None
+    assert [candidate.key for candidate in candidates] == [
+        "import/Gizmo.zip",
+        "import/other/xbox360_shell",
+    ], "the named directory is not a sibling of the archive"
+    by_key = {candidate.key: candidate for candidate in candidates}
+    assert by_key["import/other/xbox360_shell"].title_name is True
+    assert by_key["import/other/xbox360_shell"].archive_path is None
+    assert by_key["import/Gizmo.zip"].is_archive is True
     report = bundle_service.build_report()
-    assert [row["key"] for row in report["bundles"]] == ["import/other/xbox360_shell"]
+    assert [row["key"] for row in report["bundles"]] == [
+        "import/Gizmo.zip",
+        "import/other/xbox360_shell",
+    ]
     assert row_for(report, "import/other/xbox360_shell")["archive"] is None, (
         "an archive rooted at a same-named directory under another parent is never attached"
     )
@@ -3745,3 +3760,243 @@ def test_service_a_create_for_an_asset_owned_bundle_is_a_skip(isolated_storage: 
     assert member_count(project_id) == members_before == 12, "a skip attaches nothing"
     with Session(engine) as session:
         assert len(session.exec(select(Project)).all()) == 1, "no second project over the same files"
+
+
+# --- R6: a single-root archive with models and images (Mf-tcrw) -------------
+
+FATES_TOWER_ZIP = "03_Fates End - Barbarian Tower.zip"
+FATES_TOWER_ROOT = "03_Barbarian"
+# The measured `03_Fates End - Barbarian Tower.zip`, entry for entry: 14 models,
+# 3 previews and the vendor's own nested deliverable zip under ONE root, no text.
+FATES_TOWER_MODELS = (
+    f"{FATES_TOWER_ROOT}/Barbarian_DT_v2.2.stl",
+    f"{FATES_TOWER_ROOT}/Barbarian_Dec2_top_v2.2.stl",
+    f"{FATES_TOWER_ROOT}/Barbarian_Dec_Roof_v1.0.stl",
+    f"{FATES_TOWER_ROOT}/BarbarianTray_OpenLock_v1.0.stl",
+    f"{FATES_TOWER_ROOT}/Barbarian_DT2_btm_v2.2.stl",
+    f"{FATES_TOWER_ROOT}/Barbarian_DT2_top_v2.2.stl",
+    f"{FATES_TOWER_ROOT}/BarbarianTray_Lg_Tx_v1.0.stl",
+    f"{FATES_TOWER_ROOT}/BarbarianTray_DiceHolder_v1.0.stl",
+    f"{FATES_TOWER_ROOT}/BarbarianTray_Lg_Smo_v1.0.stl",
+    f"{FATES_TOWER_ROOT}/BarbarianTray_Sm_Tx_v1.0.stl",
+    f"{FATES_TOWER_ROOT}/BarbarianTray_Sm_Smo_v1.0.stl",
+    f"{FATES_TOWER_ROOT}/Barbarian_DT_roof_v1.1.stl",
+    f"{FATES_TOWER_ROOT}/Barbarian_Dec_btm_v2.2.stl",
+    f"{FATES_TOWER_ROOT}/Barbarian_Dec_v2.2.stl",
+)
+# The measured previews, largest first: the visual reference (273497 bytes) is
+# the cover, then the render (183190) and the file-name key (24699).
+FATES_TOWER_IMAGES = (
+    f"{FATES_TOWER_ROOT}/Barbarian_VisualReference.png",
+    f"{FATES_TOWER_ROOT}/Barbarian_RENDER.png",
+    f"{FATES_TOWER_ROOT}/_FileName_Key.png",
+)
+FATES_TOWER_NESTED_ZIP = f"{FATES_TOWER_ROOT}/03_Barbarian_2.2.zip"
+DICE_JAIL_ROOTS = ("DJ5_ChairOFShame", "DJ6_IronMaiden", "DJ7_BagOfHolding", "DJ8_Altar")
+
+
+def fates_tower_entries() -> Dict[str, bytes]:
+    """The measured Fates End tower: 14 models, 3 previews and the nested zip, no text.
+
+    The names and the entry set are the measured ones and the preview payloads
+    carry their measured byte counts, so the cover is decided by real sizes. The
+    model and nested-zip payloads are placeholders: the pure layer pins the exact
+    measured quantities, and writing 250 MB per model into a temp zip would test
+    the disk, not the rule.
+    """
+    entries = {path: b"s" * (40 + index) for index, path in enumerate(FATES_TOWER_MODELS)}
+    entries[FATES_TOWER_IMAGES[0]] = b"j" * 273497
+    entries[FATES_TOWER_IMAGES[1]] = b"j" * 183190
+    entries[FATES_TOWER_IMAGES[2]] = b"j" * 24699
+    entries[FATES_TOWER_NESTED_ZIP] = b"z" * 64
+    return entries
+
+
+def multi_root_entries() -> Dict[str, bytes]:
+    """Fates End Dice Jails 5-8: models and an image under FOUR sibling roots."""
+    entries: Dict[str, bytes] = {}
+    for jail in DICE_JAIL_ROOTS:
+        entries[f"{jail}/part-a.stl"] = b"s" * 40
+        entries[f"{jail}/part-b.stl"] = b"s" * 41
+        entries[f"{jail}/preview.jpg"] = b"j" * 50
+    return entries
+
+
+def refusal_rules(storage: Path) -> Dict[str, str]:
+    """Every refusal of one scan, keyed by path, for a readable assertion."""
+    return {
+        item.rel_path: item.rule
+        for item in bundle_service.scan_bundles(storage).refusals
+    }
+
+
+def test_service_a_single_root_archive_without_a_readme_is_a_low_row(isolated_storage: Path) -> None:
+    """AC-1: the Fates End tower becomes a row through ``build_report``, not only a scan.
+
+    The archive has 14 models, 3 previews and the vendor's nested deliverable zip
+    under one root and no text, so R3 refuses it for want of a document and R6
+    offers it. The nested zip is an entry of the archive's listing, never a member
+    of a bundle directory, so it must not move the outcome. ``build_report`` is the
+    witness that matters: the row is rendered by ``_candidate_facts`` ->
+    ``_detect_archive``, which shares the decision with the walk. Mutation: route
+    only the walk through ``archive_bundle_decision`` and this report row vanishes
+    because ``_report_row`` returns ``None`` when its own detect does.
+
+    Every provenance field is ``None`` and the row is ``blocked`` /
+    ``archive_only``, so the rule can never create a project on a guess.
+    """
+    write_zip(isolated_storage / FATES_TOWER_ZIP, fates_tower_entries())
+
+    report = bundle_service.build_report()
+    row = row_for(report, FATES_TOWER_ZIP)
+
+    assert row["detector"] == "archive-bundle"
+    assert row["confidence"] == "low"
+    assert row["metadata_shape"] == "archive-root"
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+    assert (row["model_count"], row["image_count"], row["text_count"]) == (14, 3, 0)
+    assert row["title"] == "Fates End - Barbarian Tower"
+    assert (row["creator"], row["licence"], row["licence_url"], row["source_url"]) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert row["cover"]["rel_path"] == FATES_TOWER_IMAGES[0], "the largest preview is the cover"
+
+
+def test_service_a_matching_archive_beside_an_offered_twin_stays_consumed(isolated_storage: Path) -> None:
+    """AC-2: a same-stem directory some rule already offers owns the row.
+
+    The directory carries its own text file, so R3 offers it; the archive beside it
+    has the identical payload without the text and would qualify for R6. The
+    archive is the directory's provenance and is ``twin-consumed`` - never a
+    second row. Mutation: let R6 decide before the twin guard and the pair becomes
+    two rows.
+    """
+    name = "Barbarian Tower"
+    write_file(isolated_storage / name / "Barbarian" / "part-a.stl", STL_BYTES)
+    write_file(isolated_storage / name / "Barbarian" / "part-b.stl", STL_BYTES)
+    write_file(isolated_storage / name / "Barbarian" / "preview.jpg", b"j" * 50)
+    write_text(isolated_storage / name / "notes.txt", "the directory's own text")
+    write_zip(
+        isolated_storage / f"{name}.zip",
+        {
+            "Barbarian/part-a.stl": STL_BYTES,
+            "Barbarian/part-b.stl": STL_BYTES,
+            "Barbarian/preview.jpg": b"j" * 50,
+        },
+    )
+
+    scan = bundle_service.scan_bundles(isolated_storage)
+
+    assert [candidate.key for candidate in scan.candidates] == [name], "one row, keyed at the directory"
+    assert row_for(bundle_service.build_report(), name)["detector"] == "generic-bundle"
+    assert refusal_rules(isolated_storage)[f"{name}.zip"] == bundle_service.REFUSAL_TWIN_CONSUMED
+
+
+def test_service_an_archive_rooted_at_an_offered_sibling_is_consumed_by_it(isolated_storage: Path) -> None:
+    """AC-3: the entry root names the sibling directory, so the archive is provenance.
+
+    ``17_Fates End - ClockworkMonster Tower.zip`` roots its entries at
+    ``17_ClockworkMonster``, and that directory is offered (promoted by the
+    verified pair). No archive row exists and the archive is ``twin-consumed``.
+    Mutation: let ``archive_bundle_decision`` bypass pairing and the same bytes
+    become a second row.
+    """
+    clockwork_directory(isolated_storage)
+    write_zip(isolated_storage / CLOCKWORK_ZIP, clockwork_entries())
+
+    scan = bundle_service.scan_bundles(isolated_storage)
+
+    assert [candidate.key for candidate in scan.candidates] == [CLOCKWORK_DIR]
+    assert refusal_rules(isolated_storage)[CLOCKWORK_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED
+
+
+def test_service_byte_identical_matching_archives_yield_one_row_and_one_duplicate(
+    isolated_storage: Path,
+) -> None:
+    """AC-4: the browser's `` (1)`` copy is a duplicate, never a second R6 row.
+
+    ``copyfile`` rather than a second ``writestr`` keeps the two archives
+    byte-identical by construction. Mutation: skip the duplicate suppression in
+    the zip-only pass and the pair renders two rows for the same bytes.
+    """
+    original = isolated_storage / "import" / FATES_TOWER_ZIP
+    duplicate = isolated_storage / "import" / "03_Fates End - Barbarian Tower (1).zip"
+    write_zip(original, fates_tower_entries())
+    shutil.copyfile(original, duplicate)
+
+    scan = bundle_service.scan_bundles(isolated_storage)
+    keys = {candidate.key for candidate in scan.candidates}
+
+    assert keys == {"import/" + FATES_TOWER_ZIP}, "at most one row for the pair"
+    assert refusal_rules(isolated_storage)["import/" + duplicate.name] == bundle_service.REFUSAL_DUPLICATE
+
+
+def test_service_a_matching_zip_inside_a_bundle_is_still_a_member(isolated_storage: Path) -> None:
+    """AC-5: Mf-74x5 is unchanged - a nested archive is a member, not an R6 row.
+
+    The enclosing directory is the real Clockwork bundle (a verified pairing owns
+    it, so the container strip never targets it) and the Fates-shaped zip inside it
+    is refused ``nested-member``. Mutation: exempt archive-only rows from
+    membership and the nested zip is offered as a second, uncreatable row.
+    """
+    clockwork_pair(isolated_storage)
+    nested = f"{CLOCKWORK_DIR}/{FATES_TOWER_ZIP}"
+    write_zip(isolated_storage / nested, fates_tower_entries())
+
+    scan = bundle_service.scan_bundles(isolated_storage)
+
+    assert [candidate.key for candidate in scan.candidates] == [CLOCKWORK_DIR]
+    assert refusal_rules(isolated_storage)[nested] == bundle_service.REFUSAL_NESTED_MEMBER
+
+
+def test_service_models_only_and_multi_root_archives_stay_refused(isolated_storage: Path) -> None:
+    """AC-6: the restraint and the pile guard, at the service layer.
+
+    The models-only archive has no image and the four-root archive is four things;
+    both are refused at the PRIMARY R3 refusals, which is what makes the new rule
+    a missing-document fill rather than a loosening. Mutation: drop the image leg
+    and the first becomes a row; accept a non-common root and the second does.
+    """
+    write_zip(
+        isolated_storage / "models-only.zip",
+        {"part-a.stl": b"s" * 40, "part-b.stl": b"s" * 41, "part-c.stl": b"s" * 42},
+    )
+    write_zip(isolated_storage / "four-roots.zip", multi_root_entries())
+
+    scan = bundle_service.scan_bundles(isolated_storage)
+    rules = {item.rel_path: item.rule for item in scan.refusals}
+
+    assert scan.candidates == []
+    assert rules["models-only.zip"] == bundle_service.bundle_detect.REFUSAL_R3_TRIO_NO_IMAGE
+    assert rules["four-roots.zip"] == bundle_service.bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+
+
+def test_service_every_archive_is_offered_or_refused_with_a_named_rule(isolated_storage: Path) -> None:
+    """AC-7: the Mf-9ygi ledger invariant holds with the new rows in the mix.
+
+    Every ``.zip`` in the tree is either an offered candidate or a refused entry
+    whose rule is in the shared vocabulary, and no path is both. The mix covers an
+    R6 row, a duplicate, a model-only refusal and a multi-root refusal. Mutation:
+    let a refusal also decide a row (the ledger becomes an input) or add a rule
+    word outside ``REFUSAL_RULES`` and one assertion reds.
+    """
+    write_zip(isolated_storage / "fates" / FATES_TOWER_ZIP, fates_tower_entries())
+    write_zip(isolated_storage / "fates" / "models-only.zip", {"part.stl": STL_BYTES, "part2.stl": b"s" * 41})
+    write_zip(isolated_storage / "fates" / "four-roots.zip", multi_root_entries())
+    original = isolated_storage / "pair" / "Original.zip"
+    write_zip(original, fates_tower_entries())
+    shutil.copyfile(original, isolated_storage / "pair" / "Original (1).zip")
+
+    scan = bundle_service.scan_bundles(isolated_storage)
+    all_zips = {str(path.relative_to(isolated_storage)) for path in isolated_storage.rglob("*.zip")}
+    offered = {candidate.key for candidate in scan.candidates if candidate.is_archive}
+    refused = {item.rel_path for item in scan.refusals if item.kind == "archive"}
+
+    assert offered | refused == all_zips, "no archive is invisible"
+    assert not (offered & refused), "no archive is both a row and a refusal"
+    for item in scan.refusals:
+        assert item.rule in bundle_service.REFUSAL_RULES, (item.rel_path, item.rule)

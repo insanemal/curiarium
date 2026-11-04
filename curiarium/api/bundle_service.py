@@ -433,17 +433,28 @@ def _detect_folder_decision(root: Path, snapshot: bundle_detect.BundleSnapshot) 
 
 
 def _detect_archive(zip_path: Path, snapshot: bundle_detect.BundleSnapshot) -> Optional[bundle_detect.BundleFacts]:
+    """The archive's facts, shared with ``_candidate_facts`` when a row is rendered.
+
+    It delegates to ``_detect_archive_decision`` so the archive carrier's rule set
+    - R1/R2/R4/R3 and then R6 - is decided in exactly one place; a row rendered
+    here can never disagree with the candidate the walk offered.
+    """
     return _detect_archive_decision(zip_path, snapshot).facts
 
 
 def _detect_archive_decision(zip_path: Path, snapshot: bundle_detect.BundleSnapshot) -> bundle_detect.Detection:
-    """The archive's decision: same bounded read as ``_detect_archive``, plus a reason."""
+    """The archive's decision: the bounded read, then the archive-carrier rules.
+
+    ``archive_bundle_decision`` is a wrapper around ``detect_bundle_decision``, so
+    R1/R2/R4/R3 keep their precedence and R6 is consulted only when all four
+    refused. A directory is never handed this function; R6 is archive-only.
+    """
     docs: Dict[str, str] = {}
     for candidate in bundle_detect.doc_entry_candidates(snapshot):
         text = zip_service.read_zip_text_entry(zip_path, candidate, bundle_detect.BUNDLE_DOC_MAX_BYTES)
         if text is not None:
             docs[candidate] = text
-    return bundle_detect.detect_bundle_decision(snapshot, docs)
+    return bundle_detect.archive_bundle_decision(snapshot, docs)
 
 
 def _refusal_of(detection: bundle_detect.Detection) -> str:
