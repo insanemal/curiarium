@@ -92,7 +92,11 @@ can be created - unless the folder's NAME reads like a title, which is R5's
 separate signal and not a loosening of this shape rule (ADR 0010 Decision 21).
 **The pairing never overrides the container rule**: a directory
 that holds bundles keeps the blocked ``archive_only`` row and creates nothing, so
-a pile of models with one zip somewhere inside it is still a pile. **A pairing
+a pile of models with one zip somewhere inside it is still a pile. **A promotion
+is refused entirely - no row at all - when the directory's subtree holds a
+candidate a stronger rule produced** (``medium`` or ``high``), because then the
+directory is a container the operator made by hand and the child is the real
+bundle (ADR 0010 Decision 18, ``Mf-v3i3``). **A pairing
 names the directory itself and never a descendant**, so it can never qualify one.
 **A stem twin of a directory some rule already offers keeps the names-only
 answer** (the archive is that directory's provenance, never a pairing), and **a
@@ -304,6 +308,26 @@ def _relates_to_any(rel_dir: str, taken: AbstractSet[str]) -> bool:
     prefix = rel_dir + "/"
     return any(
         key == rel_dir or key.startswith(prefix) or rel_dir.startswith(key + "/") for key in taken
+    )
+
+
+def _holds_stronger_candidate(rel_dir: str, candidates: Sequence[BundleCandidate]) -> bool:
+    """Whether a STRONGER rule already detected a bundle strictly below ``rel_dir``.
+
+    An ``archive_owned`` row is a LOW shape inference, and it must never swallow a
+    bundle a stronger rule produced (ADR 0010 Decision 18, owner decision
+    2026-11-04: "I will sometimes extract a file and copy the zip in" - such a
+    parent is a hand-made container and the child is the real bundle). The
+    discriminating question is "does the subtree hold a candidate a stronger rule
+    produced", never "does it hold a zip": a zip that is only a MEMBER of the
+    enclosing bundle is not a candidate at that strength, which is why the
+    Clockwork directory keeps its row (Decision 17). The LOW/MEDIUM boundary is
+    ``bundle_detect.STRONG_CONFIDENCES``, membership rather than a literal.
+    """
+    prefix = rel_dir + "/"
+    return any(
+        candidate.key.startswith(prefix) and candidate.confidence in bundle_detect.STRONG_CONFIDENCES
+        for candidate in candidates
     )
 
 
@@ -542,9 +566,10 @@ def _build_candidates(
     # its ENTRY ROOT or by its STEM. The archive supplies the identity, so this is a
     # real LOW candidate keyed at the DIRECTORY. The container rule applies to a
     # pairing exactly as it does to any other guess - a pairing that names a
-    # directory holding a claimed bundle is a pile and proves nothing - and a
+    # directory holding a CLAIMED bundle is a pile and proves nothing - and such a
     # refused pairing keeps the blocked row instead, so the pair stays visible and
-    # creates nothing.
+    # creates nothing. A pairing refused because the subtree holds a STRONGER
+    # candidate is silent instead; see the guard in the loop.
     #
     # A pairing that names a directory INSIDE an already-claimed bundle never
     # reaches a row of its own, and needs no extra refusal here: the archive it
@@ -566,6 +591,25 @@ def _build_candidates(
             continue
         if folder in claimed_ancestors:
             pair_only_specs[folder] = (snapshot, facts)
+            continue
+        # A promoted LOW row must never swallow a bundle a STRONGER rule produced
+        # (ADR 0010 Decision 18, owner decision 2026-11-04). The parent gets NO row
+        # at all - deliberately not `pair_only_specs`: a pair-only key joins
+        # `bundle_dirs`, which makes `_nested_archives` mark the strong child a
+        # member, i.e. the swallow again by a different route. The residual is
+        # silence for the parent, the same silence this function already documents
+        # for a pruned promotion (a directory simply not offered is never a wrong
+        # project and never a delete invitation), and the archive of the refused
+        # pair attaches to no row because the zip-only pass has already run. The
+        # child keeps its `blocked`/`archive_only` archive row, whose remedy is the
+        # import door, exactly like any other archive-only row. The guard bounds
+        # the PROMOTION and nothing else: it sits after the `claimed_ancestors`
+        # branch on purpose, so a directory holding a CLAIMED child keeps its
+        # blocked pair-only row (the container rule at its existing site) and the
+        # ordering must not be "tidied" later. A weaker candidate below - a LOW
+        # archive, e.g. a member zip inside the Clockwork directory - does not
+        # refuse the promotion; that is the discriminator.
+        if _holds_stronger_candidate(folder, found):
             continue
         found.append(
             BundleCandidate(

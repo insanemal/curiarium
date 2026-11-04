@@ -636,6 +636,72 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     fixtures; the owner's library figure is his measurement, not this
     repository's.
 
+    **Amended by `Mf-v3i3`: a promoted row never swallows a stronger candidate,
+    on an owner decision of 2026-11-04.** The paragraph above claimed that "the
+    container rule still wins ... so a pile of models with one zip somewhere
+    inside it never qualifies". That held for a directory holding a *claimed*
+    bundle, and it did not hold for an archive-only child: the promotion pass
+    runs after the zip-only pass, and its only refusals were an existing row for
+    the same key and `claimed_ancestors`, which only the folder pass populates.
+    An archive that is a row of its own was therefore invisible to it, and the
+    member filter then deleted that row as a member of the promoted directory.
+    The directory was offered, the real bundle inside it vanished, and the
+    report hid the thing the operator had on disk. That is the superseding
+    condition this amendment closes.
+
+    The owner's ruling, with his reason: he sometimes extracts a file and copies
+    the zip in beside it, so such a parent is a container he made by hand and
+    the child is the real bundle. Prefer the child. The rule as shipped refuses
+    the promotion when the directory's subtree holds a candidate whose
+    confidence is in `bundle_detect.STRONG_CONFIDENCES` - `medium` or `high`,
+    i.e. a candidate a *stronger* rule produced - and the parent then gets **no
+    row at all**. Explicitly not a `pair_only` row: a pair-only key joins
+    `bundle_dirs`, so `_nested_archives` would mark the strong child a member
+    and the member filter would delete it, which is the same swallow by another
+    route.
+
+    The residual, stated fully rather than argued away: the parent is silent.
+    The refused pair's archive attaches to no row - the stem or entry-root route
+    already consumed it as a pairing, and only a row can carry a pairing as
+    provenance - and it is not treated as a member either, so it appears nowhere
+    in the report. That is the silence a consumed pairing gets when the directory
+    it named is not offered, and it is deliberately not the treatment an unpaired
+    archive gets: an unpaired archive is offered as a row of its own whenever it
+    detects. The child keeps its `blocked` / `archive_only` row, whose remedy is the
+    import door (`POST /import/zip` or `/import/archive`, Decision 6), and no
+    creatability rule changes: creation still needs a resolved `Folder` and
+    registered models, and an archive row is never creatable from the report.
+
+    This is a confidence comparison, not a shape test, and **the Clockwork
+    directory is untouched**. Its own nested `Clockwork_v1.8.zip` holds a model,
+    a render and a text, so it is itself a LOW `generic-bundle` candidate - a
+    member-strength candidate, not a stronger one - and the promotion therefore
+    still fires, the directory still owns the row and the zip is still removed
+    as a member. Decision 17's carve-out is the reason the discriminator is a
+    confidence comparison rather than "contains a zip", and Decision 17 is left
+    exactly as written.
+
+    The bound is on the promotion, not on the ordering: the refusal sits after
+    the `claimed_ancestors` branch deliberately, so a directory holding a
+    *claimed* child keeps its blocked `archive_only` row - the container rule at
+    its existing site - and both the pile row and the child stay visible. One
+    honesty note: the swallow also corrupted duplicate reporting, because
+    `_without_nested_members` removed a duplicate group containing a row that
+    should not have been a member; the reachable shapes now report the group
+    again.
+
+    `test_service_a_promoted_row_does_not_swallow_a_nested_high_bundle` and
+    `test_service_a_promoted_row_does_not_swallow_a_nested_medium_bundle` pin
+    it; `test_service_a_promoted_row_still_wins_over_a_nested_low_member` and
+    `test_service_a_pile_with_a_claimed_child_and_a_verified_twin_keeps_its_blocked_row`
+    bound the other side. The Decision 17 witnesses -
+    `test_service_an_archive_pairs_with_the_directory_its_entries_are_rooted_at`
+    and `test_service_a_nested_archive_is_a_member_not_a_second_bundle` - must
+    keep passing (the ticket's quoted
+    `test_service_the_clockwork_pair_is_one_low_bundle` does not exist; those
+    are the real symbols). The mutation that reproduces the bug is deleting the
+    new refusal.
+
 19. **Two routes, one containment predicate.** The directory an archive belongs
     to is decided on two routes: the **entry-root route**, where the archive's
     own common entry root names a same-parent directory, and the **stem route**,
@@ -1502,7 +1568,12 @@ This ADR is superseded if any of the following becomes true:
   a candidate with two or more unnamed model-bearing subdirectories, and no
   depth-0 or named-directory model, starts qualifying on them;
 - a directory that contains bundles starts being offered as a bundle again, or a
-  high-confidence candidate starts being demoted for containing one;
+  high-confidence candidate starts being demoted for containing one; **closed
+  2026-11-04 by the owner decision recorded in Decision 18 (`Mf-v3i3`)** - the
+  archive-only case this condition was tripped by is now refused (the promotion
+  is silent rather than swallowing the strong child) and is pinned by tests; the
+  condition reopens if the promotion starts swallowing a stronger candidate
+  again, which the bullet below states in its own right;
 - creation stops refusing a candidate of inferred confidence whose registered
   assets outnumber its own snapshot's, or that refusal starts reporting
   `blocked` instead of `failed`;
@@ -1530,4 +1601,8 @@ This ADR is superseded if any of the following becomes true:
   optional separator, or an unanchored match;
 - a confidence that rests on inference stops being added to
   `INFERRED_CONFIDENCES`, or a container guard goes back to comparing a
-  confidence literal instead of membership of that set.
+  confidence literal instead of membership of that set;
+- a promoted `archive_owned` row starts swallowing a candidate of `medium` or
+  `high` confidence again (`bundle_detect.STRONG_CONFIDENCES`), or
+  `STRONG_CONFIDENCES` widens to admit a confidence that rests on shape
+  inference alone.

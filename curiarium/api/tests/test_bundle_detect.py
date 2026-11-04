@@ -1341,6 +1341,21 @@ def test_inferred_confidences_holds_both_guesses_and_not_high() -> None:
     assert bundle_detect.CONFIDENCE_HIGH not in bundle_detect.INFERRED_CONFIDENCES
 
 
+def test_strong_confidences_outrank_a_shape_inference() -> None:
+    """The set is the boundary a promoted LOW row may not swallow past.
+
+    Mutation: adding ``low`` widens the guard until a member zip refuses a
+    legitimate promotion - the Clockwork shape - and dropping ``medium`` lets an
+    id-named child be swallowed; the equality reds either way. Membership is
+    what ``_holds_stronger_candidate`` reads, so a future confidence has to be
+    placed here deliberately rather than slipping in as ``not low``.
+    """
+    assert bundle_detect.STRONG_CONFIDENCES == frozenset(
+        {bundle_detect.CONFIDENCE_HIGH, bundle_detect.CONFIDENCE_MEDIUM}
+    )
+    assert bundle_detect.CONFIDENCE_LOW not in bundle_detect.STRONG_CONFIDENCES
+
+
 # --- R5: a title-shaped folder name (Mf-hvck) -------------------------------
 
 # The literal measurement, not the constant: the anti-shrink tests read this

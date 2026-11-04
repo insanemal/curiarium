@@ -162,6 +162,13 @@ CONFIDENCE_LOW = "low"
 # candidate's confidence is IN this set, so a future inferred confidence cannot
 # escape a guard merely by not being `low`.
 INFERRED_CONFIDENCES = frozenset({CONFIDENCE_MEDIUM, CONFIDENCE_LOW})
+# The confidences that OUTRANK a shape inference. This is a rank, not a claim that
+# these rules read evidence: `medium` rests on a name and `high` on a document pair,
+# and both are stronger statements than a `low` guess made from the tree's shape
+# alone. Used where a LOW, inference-based row must never swallow a candidate a
+# stronger rule produced (ADR 0010 Decision 18, `Mf-v3i3`). Membership, never a
+# literal comparison, so a future confidence cannot slip the guard.
+STRONG_CONFIDENCES = frozenset({CONFIDENCE_HIGH, CONFIDENCE_MEDIUM})
 
 SHAPE_ROOT_DOCS = "root-docs"
 SHAPE_SIBLING_DOCS = "sibling-docs"

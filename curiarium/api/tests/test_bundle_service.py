@@ -2278,6 +2278,209 @@ def test_service_a_verified_stem_twin_does_not_promote_a_pile_of_bundles(
     assert "endorphin" not in names, "the pile is refused, never made into a project"
 
 
+# --- a promoted row never swallows a stronger candidate (Mf-v3i3) ------------
+
+# The owner's own shape: a file extracted beside the zip it came in. The inner
+# archive is a genuine R1 export (all four provenance markers), so it is a
+# `high`-confidence candidate in its own right, and the identical payload on
+# disk is what makes the stem route's containment check verify for the parent.
+INNER_README = "Inner Thing\nCreated by Thingiverse user maker_inner\nLicensed under CC BY-NC\n"
+INNER_LICENSE = "Inner Thing by maker_inner on Thingiverse: https://www.thingiverse.com/thing:777777\n"
+INNER_URL = "https://www.thingiverse.com/thing:777777"
+
+
+def test_service_a_promoted_row_does_not_swallow_a_nested_high_bundle(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The owner's shape: an extracted file beside its zip, and the zip is the bundle.
+
+    ``import/P`` holds ``a.stl`` and ``inner.zip``, and ``import/P.zip`` contains
+    exactly ``a.stl``, so the stem check verifies and only the new refusal can
+    stop the promotion. ``inner.zip`` is a genuine R1 export on its own, so it is
+    a ``high`` candidate and the parent is a hand-made container: it gets no row
+    at all, and the child keeps its ``blocked``/``archive_only`` row. The
+    identical payload is deliberate - containment has to pass for the promotion
+    to be anything but dead code here.
+
+    Mutation: deleting ``if _holds_stronger_candidate(folder, found): continue``
+    restores the bug - ``import/P`` returns as a creatable ``archive_owned``
+    ``low`` row and ``import/P/inner.zip`` disappears from the report entirely,
+    because the member filter then deletes it as a file of the promoted
+    directory.
+    """
+    root = isolated_storage / "import"
+    write_zip(
+        root / "P" / "inner.zip",
+        {"README.txt": INNER_README.encode(), "LICENSE.txt": INNER_LICENSE.encode()},
+    )
+    write_file(root / "P" / "a.stl", b"s" * 40)
+    write_zip(root / "P.zip", {"a.stl": b"s" * 40})
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert [candidate.key for candidate in candidates] == ["import/P/inner.zip"], (
+        "the parent is a hand-made container: it gets no row at all, so the high child is all there is"
+    )
+    child = candidates[0]
+    assert child.is_archive is True
+    assert child.archive_owned is False
+    assert child.confidence == "high"
+
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == ["import/P/inner.zip"]
+    row = row_for(report, "import/P/inner.zip")
+    assert row["confidence"] == "high"
+    assert row["detector"] == "thingiverse-readme"
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+    assert row["source_url"] == INNER_URL, "the high row is intact, not a stub"
+
+    unknown = create(client, headers, [{"key": "import/P"}])
+    assert unknown["created"] == 0
+    assert unknown["failed"] == 1
+    assert unknown["results"][0]["reason"] == "unknown bundle", "the parent is offered by nothing"
+    blocked = create(client, headers, [{"key": "import/P/inner.zip"}])
+    assert blocked["blocked"] == 1
+    assert blocked["results"][0]["reason"] == "archive_only", (
+        "an archive row is never creatable from the report"
+    )
+    assert project_listing(client, headers) == {}
+
+
+def test_service_a_promoted_row_does_not_swallow_a_nested_medium_bundle(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A ``medium`` child is a stronger candidate too, not only a ``high`` one.
+
+    ``import/M/5390184_inner.zip`` carries an id in its stem and one model at
+    depth 0, so R4 offers it at ``medium``; ``import/M.zip`` contains exactly the
+    parent's ``a.stl``, so the stem check verifies. The parent is a container and
+    gets no row.
+
+    Mutation: narrowing ``bundle_detect.STRONG_CONFIDENCES`` to
+    ``frozenset({CONFIDENCE_HIGH})`` re-swallows this child - ``import/M`` comes
+    back as the promoted row and the id-named archive vanishes.
+    """
+    root = isolated_storage / "import"
+    write_file(root / "M" / "a.stl", b"s" * 40)
+    write_zip(root / "M" / "5390184_inner.zip", {"part.stl": b"s" * 41})
+    write_zip(root / "M.zip", {"a.stl": b"s" * 40})
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert [candidate.key for candidate in candidates] == ["import/M/5390184_inner.zip"], (
+        "the id-named child survives and the parent, a hand-made container, is silent"
+    )
+    assert candidates[0].confidence == "medium"
+
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == ["import/M/5390184_inner.zip"]
+    row = row_for(report, "import/M/5390184_inner.zip")
+    assert row["confidence"] == "medium"
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+    assert all(row["key"] != "import/M" for row in report["bundles"])
+
+
+def test_service_a_promoted_row_still_wins_over_a_nested_low_member(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The discriminator is confidence, not shape: the Clockwork directory still wins.
+
+    The Clockwork pair promotes its directory and the directory holds its own
+    ``Clockwork_v1.8.zip``, whose facts are a LOW ``generic-bundle`` - a
+    member-strength candidate, not a stronger one - so the promotion still fires,
+    the directory owns the row and the zip is removed as a member. This is
+    Decision 17's carve-out and the boundary of the new refusal.
+
+    Mutation: widening the discriminator to "the subtree contains a zip" (the
+    zip-only pass has already appended this candidate to ``found``) - or adding
+    ``low`` to ``STRONG_CONFIDENCES`` - makes the parent vanish and the member
+    surface as the only row.
+    """
+    clockwork_pair(isolated_storage)
+    write_zip(
+        isolated_storage / CLOCKWORK_DIR / "Clockwork_v1.8.zip",
+        {"inner/part.stl": STL_BYTES, "inner/preview.jpg": b"j" * 50, "inner/notes.txt": b"n" * 20},
+    )
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert [candidate.key for candidate in candidates] == [CLOCKWORK_DIR], (
+        "the LOW member does not refuse the promotion, and is never a row of its own"
+    )
+    assert candidates[0].archive_owned is True
+    assert candidates[0].pair_only is False
+    assert all(not candidate.key.endswith("Clockwork_v1.8.zip") for candidate in candidates)
+
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == [CLOCKWORK_DIR]
+    assert row_for(report, CLOCKWORK_DIR)["status"] == "ready"
+
+
+def test_service_a_pile_with_a_claimed_child_and_a_verified_twin_keeps_its_blocked_row(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The guard bounds the PROMOTION, never the container rule it sits beside.
+
+    ``import/Q`` holds its own loose trio plus a claimed ``medium`` child, and
+    ``import/Q.zip`` contains exactly the trio, so the stem check verifies and
+    the container rule refuses the promotion: the parent is a blocked
+    ``archive_only`` row and creates nothing, while the child keeps its own row.
+    The refusal is the ``claimed_ancestors`` branch, which is *above* the new
+    guard on purpose.
+
+    Mutation: moving ``if _holds_stronger_candidate(folder, found): continue``
+    above the ``if folder in claimed_ancestors:`` branch deletes the blocked
+    pair-only row - the strong child refuses the promotion before the container
+    rule can keep it visible - so this test reds.
+    """
+    root = isolated_storage / "import" / "Q"
+    write_file(root / "loose.stl", STL_BYTES)
+    write_file(root / "render.png", b"p" * 70)
+    write_text(root / "notes.txt", "a loose trio")
+    write_file(root / "5390184_inner" / "part.stl", b"s" * 41)
+    write_zip(
+        isolated_storage / "import" / "Q.zip",
+        {"loose.stl": STL_BYTES, "render.png": b"p" * 70, "notes.txt": b"a loose trio"},
+    )
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    by_key = {candidate.key: candidate for candidate in candidates}
+    assert sorted(by_key) == ["import/Q", "import/Q/5390184_inner"]
+    assert by_key["import/Q/5390184_inner"].confidence == "medium", "the id-named child is claimed"
+    parent = by_key["import/Q"]
+    assert parent.pair_only is True, "the container rule keeps the refused pair visible"
+    assert parent.archive_owned is False
+
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert row_for(report, "import/Q/5390184_inner")["confidence"] == "medium"
+    row = row_for(report, "import/Q")
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+
+
 def test_service_a_stem_twin_that_does_not_match_pairs_nothing(isolated_storage: Path) -> None:
     """AC-3 (a) and (b): a namesake archive is not evidence until its payload agrees.
 
