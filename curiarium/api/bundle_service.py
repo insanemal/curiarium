@@ -148,6 +148,14 @@ stopped early) and a document read is capped at
 still describe everything that was found, and ``truncated`` is true when rows
 were withheld. Detection itself writes nothing - no row, no file, no folder
 healing - so the report is safe on a read route.
+
+**Every absence is named (Mf-9ygi).** A scan also returns the ledger of what it
+refused: one ``BundleRefusal`` per path the walk saw and did not offer, carrying
+the rule that refused it (``REFUSAL_RULES``). The ledger is derived AFTER the
+candidate set is final and is never an input to it, so reporting a refusal can
+never change which rows are offered. This is the part the 114 -> 112
+investigation lacked: 46 archives were invisible and the report said nothing at
+all about them.
 """
 
 import hashlib
@@ -218,6 +226,35 @@ MATCH_SOURCE_URL = "source_url"
 MATCH_NAME = "name"
 MATCH_ASSETS = "assets"
 
+# Why this service refused a path the walk saw. The detector owns the R1-R5
+# vocabulary (``bundle_detect.REFUSAL_RULES``); these are the refusals only the
+# scan can make, because only the scan sees the whole tree: a duplicate archive, a
+# hidden twin, an archive nobody could open, a folder that holds bundles, and a
+# file that belongs to a live bundle. A path that is not offered carries exactly
+# one of these or one detector reason - never silence, which is what made the
+# invisible archives of Mf-9ygi expensive to find.
+REFUSAL_CONTAINER = "container-rule"
+REFUSAL_DUPLICATE = "duplicate"
+REFUSAL_NESTED_MEMBER = "nested-member"
+REFUSAL_TWIN_CONSUMED = "twin-consumed"
+REFUSAL_TWIN_UNVERIFIED = "twin-unverified"
+REFUSAL_UNREADABLE_ARCHIVE = "unreadable-archive"
+REFUSAL_MEMBER_OF_BUNDLE = "member-of-bundle"
+
+# Every reason a refusal row may carry: the detector's vocabulary plus this
+# service's, so a caller can validate a ledger without knowledge of either half.
+REFUSAL_RULES = bundle_detect.REFUSAL_RULES | frozenset(
+    {
+        REFUSAL_CONTAINER,
+        REFUSAL_DUPLICATE,
+        REFUSAL_NESTED_MEMBER,
+        REFUSAL_TWIN_CONSUMED,
+        REFUSAL_TWIN_UNVERIFIED,
+        REFUSAL_UNREADABLE_ARCHIVE,
+        REFUSAL_MEMBER_OF_BUNDLE,
+    }
+)
+
 
 @dataclass(frozen=True)
 class BundleCandidate:
@@ -259,12 +296,29 @@ class BundleCandidate:
 
 
 @dataclass(frozen=True)
+class BundleRefusal:
+    """One path the scan saw and did NOT offer, with the rule that refused it.
+
+    ``kind`` says what the path is on disk - ``archive`` or ``directory`` - so a
+    consumer can tell a missing row from a missing folder without a second walk.
+    """
+
+    rel_path: str
+    rule: str
+    kind: str
+
+
+@dataclass(frozen=True)
 class BundleScan:
-    """One walk of the storage tree: the bundle candidates plus duplicate archives."""
+    """One walk of the storage tree: the candidates, the duplicates, the refusals."""
 
     candidates: List[BundleCandidate]
     truncated: bool
     duplicates: Tuple[bundle_detect.DuplicateGroup, ...] = ()
+    # Every path the walk refused to offer, sorted and named by its rule. Derived
+    # from the candidate set, never an input to it: adding a refusal can never
+    # change which rows are offered.
+    refusals: Tuple[BundleRefusal, ...] = ()
 
 
 def _entry_size(entry) -> int:
@@ -369,17 +423,48 @@ def _read_docs(base: Path, candidates: Sequence[str]) -> Dict[str, str]:
 
 
 def _detect_folder(root: Path, snapshot: bundle_detect.BundleSnapshot) -> Optional[bundle_detect.BundleFacts]:
+    return _detect_folder_decision(root, snapshot).facts
+
+
+def _detect_folder_decision(root: Path, snapshot: bundle_detect.BundleSnapshot) -> bundle_detect.Detection:
+    """The folder's decision, so a refusal can name its rule as well as a row its facts."""
     docs = _read_docs(Path(root) / snapshot.rel_dir, bundle_detect.doc_entry_candidates(snapshot))
-    return bundle_detect.detect_bundle(snapshot, docs)
+    return bundle_detect.detect_bundle_decision(snapshot, docs)
 
 
 def _detect_archive(zip_path: Path, snapshot: bundle_detect.BundleSnapshot) -> Optional[bundle_detect.BundleFacts]:
+    return _detect_archive_decision(zip_path, snapshot).facts
+
+
+def _detect_archive_decision(zip_path: Path, snapshot: bundle_detect.BundleSnapshot) -> bundle_detect.Detection:
+    """The archive's decision: same bounded read as ``_detect_archive``, plus a reason."""
     docs: Dict[str, str] = {}
     for candidate in bundle_detect.doc_entry_candidates(snapshot):
         text = zip_service.read_zip_text_entry(zip_path, candidate, bundle_detect.BUNDLE_DOC_MAX_BYTES)
         if text is not None:
             docs[candidate] = text
-    return bundle_detect.detect_bundle(snapshot, docs)
+    return bundle_detect.detect_bundle_decision(snapshot, docs)
+
+
+def _refusal_of(detection: bundle_detect.Detection) -> str:
+    """The rule that refused this detection; a refused decision always names one."""
+    if detection.refusal is None:
+        raise RuntimeError("a refused detection must name its rule")
+    return detection.refusal
+
+
+def _refuse(ledger: Dict[str, str], rel_path: str, rule: str, *, override: bool = False) -> None:
+    """Record why ``rel_path`` is not offered. The FIRST refusal wins by default.
+
+    First-wins is what makes the ledger stable: the folder pass sees a directory
+    before any later pass does, so its reason is the most specific one. A pass
+    that has strictly better information (a promotion refusing a pair it has
+    already examined) passes ``override=True``.
+    """
+    if override:
+        ledger[rel_path] = rule
+    else:
+        ledger.setdefault(rel_path, rule)
 
 
 def _zip_snapshot(zip_path: Path, rel_path: str) -> Optional[bundle_detect.BundleSnapshot]:
@@ -458,12 +543,17 @@ def _build_candidates(
     files_by_dir: Mapping[str, Sequence[Tuple[str, int]]],
     dirs_by_parent: Mapping[str, set],
     suppressed: AbstractSet[str],
+    refusals: Dict[str, str],
 ) -> List[BundleCandidate]:
     """Every bundle under ``root`` from one walk's listings.
 
     ``suppressed`` holds the duplicate archives: a byte-identical copy is not a
     bundle of its own, so both archive passes skip it and only the group's
     authoritative path can be a row (or a pairing).
+
+    ``refusals`` is the ledger this function WRITES: every path it declines gets
+    a rule, so a caller can say why something is missing. It is never read back to
+    decide anything, so recording a refusal cannot change which rows are offered.
     """
     folded = _subtree(files_by_dir)
     found: List[BundleCandidate] = []
@@ -484,12 +574,20 @@ def _build_candidates(
     for rel_dir in sorted(work, key=lambda item: (-_depth(item), item.casefold(), item)):
         entries = work[rel_dir]
         if not entries:
+            # Nothing left in this directory's own view, but the walk DID see files
+            # below it: they were all claimed by child bundles, so this directory
+            # holds bundles and is a container, never a bundle.
+            if folded.get(rel_dir):
+                _refuse(refusals, rel_dir, REFUSAL_CONTAINER)
             continue
         snapshot = _folder_snapshot(rel_dir, entries)
-        facts = _detect_folder(root, snapshot)
+        detection = _detect_folder_decision(root, snapshot)
+        facts = detection.facts
         if facts is None:
+            _refuse(refusals, rel_dir, _refusal_of(detection))
             continue
         if facts.confidence in bundle_detect.INFERRED_CONFIDENCES and rel_dir in claimed_ancestors:
+            _refuse(refusals, rel_dir, REFUSAL_CONTAINER)
             continue
         found.append(
             BundleCandidate(
@@ -528,17 +626,28 @@ def _build_candidates(
     detected = {candidate.key for candidate in found}
     for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
         if rel_path in suppressed:
+            _refuse(refusals, rel_path, REFUSAL_DUPLICATE)
             continue
         twin = _twin_directory(rel_path, dirs_by_parent)
         if twin is not None:
             if twin in detected:
+                # The directory is offered on its own: the archive is its
+                # provenance, and a second row from the same bytes is a duplicate.
+                _refuse(refusals, rel_path, REFUSAL_TWIN_CONSUMED)
                 continue
             if _stem_pair_verified(root / rel_path, work.get(twin, ())):
                 pairs.setdefault(twin, []).append((rel_path, None))
                 paired_zips.add(rel_path)
+            else:
+                # Consumed: the stem is the operator's statement of which directory
+                # this archive is, and a failed check is never retried under a weaker
+                # name. The pairing that did not happen is named, not silent.
+                _refuse(refusals, rel_path, REFUSAL_TWIN_UNVERIFIED)
             continue
         paired = _entry_root_pair(root, rel_path, dirs_by_parent, work)
         if paired is None:
+            # Silence here is deliberate: the zip-only pass below decides this
+            # archive, and two answers for one path would be a lie.
             continue
         folder, entry_root = paired
         pairs.setdefault(folder, []).append((rel_path, entry_root))
@@ -548,17 +657,27 @@ def _build_candidates(
     # duplicate is skipped here too, so a copy never becomes a second bundle row.
     for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
         if rel_path in suppressed:
+            # Already recorded as `duplicate` by the pairing pass.
             continue
         if rel_path in paired_zips:
+            # Provisional: the promotion loop below overrides this when it refuses
+            # the pairing, and the reconciliation drops it when the directory is
+            # offered. A pairing that does produce a row leaves the archive with no
+            # row of its own, which is exactly what `twin-consumed` says.
+            _refuse(refusals, rel_path, REFUSAL_TWIN_CONSUMED)
             continue
         twin = _twin_directory(rel_path, dirs_by_parent)
         if twin:
+            _refuse(refusals, rel_path, REFUSAL_TWIN_UNVERIFIED)
             continue
         snapshot = _zip_snapshot(root / rel_path, rel_path)
         if snapshot is None:
+            _refuse(refusals, rel_path, REFUSAL_UNREADABLE_ARCHIVE)
             continue
-        facts = _detect_archive(root / rel_path, snapshot)
+        detection = _detect_archive_decision(root / rel_path, snapshot)
+        facts = detection.facts
         if facts is None:
+            _refuse(refusals, rel_path, _refusal_of(detection))
             continue
         found.append(
             BundleCandidate(
@@ -588,17 +707,27 @@ def _build_candidates(
     # than the archived evidence.
     pair_only_specs: Dict[str, Tuple[bundle_detect.BundleSnapshot, bundle_detect.BundleFacts]] = {}
     for folder in sorted(pairs, key=lambda item: (item.casefold(), item)):
+        pair_zips = [zip_rel for zip_rel, _entry_root in pairs[folder]]
         if any(candidate.key == folder for candidate in found):
+            # The directory is offered on its own; the archive stays attached to it
+            # as provenance, and its `twin-consumed` reason is what the ledger says.
             continue
         entries = work.get(folder) or []
         if not entries:
+            for zip_rel in pair_zips:
+                _refuse(refusals, zip_rel, REFUSAL_TWIN_UNVERIFIED, override=True)
             continue
         snapshot = _folder_snapshot(folder, entries)
-        facts = bundle_detect.archive_owned_facts(snapshot)
+        detection = bundle_detect.archive_owned_decision(snapshot)
+        facts = detection.facts
         if facts is None:
+            for zip_rel in pair_zips:
+                _refuse(refusals, zip_rel, _refusal_of(detection), override=True)
             continue
         if folder in claimed_ancestors:
             pair_only_specs[folder] = (snapshot, facts)
+            for zip_rel in pair_zips:
+                _refuse(refusals, zip_rel, REFUSAL_TWIN_CONSUMED, override=True)
             continue
         # A promoted LOW row must never swallow a bundle a STRONGER rule produced
         # (ADR 0010 Decision 18, owner decision 2026-11-04). The parent gets NO row
@@ -618,6 +747,8 @@ def _build_candidates(
         # archive, e.g. a member zip inside the Clockwork directory - does not
         # refuse the promotion; that is the discriminator.
         if _holds_stronger_candidate(folder, found):
+            for zip_rel in pair_zips:
+                _refuse(refusals, zip_rel, REFUSAL_CONTAINER, override=True)
             continue
         found.append(
             BundleCandidate(
@@ -629,6 +760,8 @@ def _build_candidates(
                 archive_owned=True,
             )
         )
+        for zip_rel in pair_zips:
+            _refuse(refusals, zip_rel, REFUSAL_TWIN_CONSUMED, override=True)
 
     # R5: a title-shaped folder of models is a LOW, name-derived bundle. This is
     # a post-pass and NOT a `detect_bundle` branch, and the placement is
@@ -643,13 +776,22 @@ def _build_candidates(
     taken.update(pair_only_specs)
     for rel_dir in sorted(work, key=lambda item: (_depth(item), item.casefold(), item)):
         if _relates_to_any(rel_dir, taken):
+            # Already a row, inside one, or holding one. The two legs are different
+            # answers: a member of a live bundle is a member, everything else here
+            # is a container.
+            member = any(rel_dir.startswith(key + "/") for key in taken)
+            _refuse(refusals, rel_dir, REFUSAL_MEMBER_OF_BUNDLE if member else REFUSAL_CONTAINER)
             continue
         entries = work[rel_dir]
         if not entries:
             continue
         snapshot = _folder_snapshot(rel_dir, entries)
-        facts = bundle_detect.title_name_facts(snapshot)
+        detection = bundle_detect.title_name_decision(snapshot)
+        facts = detection.facts
         if facts is None:
+            # setdefault semantics on purpose: an earlier, more specific detector
+            # reason for this directory must survive this post-pass.
+            _refuse(refusals, rel_dir, _refusal_of(detection))
             continue
         found.append(
             BundleCandidate(
@@ -688,17 +830,19 @@ def _build_candidates(
     contained_keys.extend(pair_only_specs)
     contained_keys.extend(candidate.key for candidate in found if candidate.archive_owned)
     if contained_keys:
-        found = [
-            candidate
-            for candidate in found
-            if not (
+        survived: List[BundleCandidate] = []
+        for candidate in found:
+            if (
                 not candidate.is_archive
                 and not candidate.pair_only
                 and not candidate.archive_owned
                 and candidate.confidence in bundle_detect.INFERRED_CONFIDENCES
                 and any(key.startswith(candidate.key + "/") for key in contained_keys)
-            )
-        ]
+            ):
+                _refuse(refusals, candidate.key, REFUSAL_CONTAINER)
+                continue
+            survived.append(candidate)
+        found = survived
 
     # A zip inside a detected bundle is a supporting file of that bundle, never a
     # candidate and never a pairing (Mf-74x5). The bundle directories are the
@@ -708,6 +852,9 @@ def _build_candidates(
     bundle_dirs.update(pair_only_specs)
     nested = _nested_archives(files_by_dir, bundle_dirs)
     if nested:
+        for candidate in found:
+            if candidate.is_archive and candidate.key in nested:
+                _refuse(refusals, candidate.key, REFUSAL_NESTED_MEMBER)
         found = [
             candidate
             for candidate in found
@@ -725,6 +872,9 @@ def _build_candidates(
         # archive-owned: a zip inside a bundle proved nothing about a sibling
         # directory. The residual is silence - that directory is simply not
         # offered - which is never a wrong project and never a delete invitation.
+        for candidate in found:
+            if candidate.archive_owned and candidate.key not in pairs:
+                _refuse(refusals, candidate.key, REFUSAL_MEMBER_OF_BUNDLE)
         found = [
             candidate
             for candidate in found
@@ -805,11 +955,86 @@ def scan_bundles(root: Path) -> BundleScan:
     files_by_dir, dirs_by_parent, truncated = _walk_tree(root)
     duplicates = duplicate_archives(root, files_by_dir)
     suppressed = frozenset(bundle_detect.duplicate_archive_paths(duplicates))
-    candidates = _build_candidates(root, files_by_dir, dirs_by_parent, suppressed)
+    refusals: Dict[str, str] = {}
+    candidates = _build_candidates(root, files_by_dir, dirs_by_parent, suppressed, refusals)
     bundle_dirs = {candidate.key for candidate in candidates if not candidate.is_archive}
     nested = _nested_archives(files_by_dir, bundle_dirs)
     duplicates = _without_nested_members(duplicates, nested)
-    return BundleScan(candidates=candidates, truncated=truncated, duplicates=duplicates)
+    return BundleScan(
+        candidates=candidates,
+        truncated=truncated,
+        duplicates=duplicates,
+        refusals=_reconcile_refusals(
+            refusals,
+            candidates,
+            nested=nested,
+            suppressed=suppressed,
+            files_by_dir=files_by_dir,
+        ),
+    )
+
+
+def _strictly_inside_any(rel_path: str, keys: AbstractSet[str]) -> bool:
+    """Whether ``rel_path`` sits below one of ``keys``, walking its ancestors."""
+    parent = _parent(rel_path)
+    while parent:
+        if parent in keys:
+            return True
+        parent = _parent(parent)
+    return False
+
+
+def _reconcile_refusals(
+    refusals: Dict[str, str],
+    candidates: Sequence[BundleCandidate],
+    *,
+    nested: AbstractSet[str],
+    suppressed: AbstractSet[str],
+    files_by_dir: Mapping[str, Sequence[Tuple[str, int]]],
+) -> Tuple[BundleRefusal, ...]:
+    """Turn the ledger written during the passes into one reason per refused path.
+
+    The passes record reasons as they go, which means a keep can still look like a
+    refusal until the whole candidate set is known - an archive paired with a
+    directory that was then promoted is "consumed", not missing. This step reads
+    the FINAL candidate set and settles each entry, so the ledger never contradicts
+    the rows. It only ever edits the ledger: no candidate is added or dropped here.
+    """
+    offered_keys = {candidate.key for candidate in candidates}
+    offered_dirs = {candidate.key for candidate in candidates if not candidate.is_archive}
+    attached = {candidate.archive_path for candidate in candidates if candidate.archive_path}
+    all_zips = set(_zip_files(files_by_dir))
+
+    for rel_path in all_zips:
+        if rel_path in offered_keys:
+            refusals.pop(rel_path, None)
+        elif rel_path in nested:
+            refusals[rel_path] = REFUSAL_NESTED_MEMBER
+        elif rel_path in suppressed:
+            refusals[rel_path] = REFUSAL_DUPLICATE
+        elif rel_path in attached:
+            refusals[rel_path] = REFUSAL_TWIN_CONSUMED
+        elif refusals.get(rel_path) == REFUSAL_TWIN_CONSUMED:
+            # A twin directory existed but no row was offered for it, so the archive
+            # was not consumed by anything: the pairing was refused.
+            refusals[rel_path] = REFUSAL_CONTAINER
+
+    for rel_path in list(refusals):
+        if rel_path in all_zips:
+            continue
+        if rel_path in offered_keys:
+            refusals.pop(rel_path)
+        elif _strictly_inside_any(rel_path, offered_dirs):
+            refusals[rel_path] = REFUSAL_MEMBER_OF_BUNDLE
+
+    return tuple(
+        BundleRefusal(
+            rel_path=rel_path,
+            rule=refusals[rel_path],
+            kind="archive" if rel_path in all_zips else "directory",
+        )
+        for rel_path in sorted(refusals, key=lambda path: (path.casefold(), path))
+    )
 
 
 def iter_bundle_candidates(root: Path) -> Tuple[List[BundleCandidate], bool]:
@@ -1539,6 +1764,9 @@ def _report_from_scan(
     not capped by ``limit``: the walk is already bounded by ``MAX_SCAN_ENTRIES``.
     """
     dismissals = get_dismissals()
+    # One rule set for the whole report, so every row's stamp and the report's own
+    # are the same value even if a table is edited mid-run.
+    rule_set = bundle_detect.rule_set()
     rows: List[dict] = []
     with Session(engine) as session:
         folders = _folder_index(session)
@@ -1555,6 +1783,7 @@ def _report_from_scan(
                 dismissals=dismissals,
             )
             if row is not None:
+                row["rule_set"] = rule_set["stamp"]
                 rows.append(row)
 
     visible = rows if include_dismissed else [row for row in rows if not row["dismissed"]]
@@ -1596,6 +1825,14 @@ def _report_from_scan(
         "duplicates_text": bundle_detect.duplicate_report_text(scoped_duplicates),
         "stale_dismissals": sorted(
             (key for key in dismissals if key not in live_keys), key=lambda key: (key.casefold(), key)
+        ),
+        "rule_set": rule_set,
+        "refused": sorted(
+            (
+                {"rel_path": _qualify(scope, refusal.rel_path), "rule": refusal.rule, "kind": refusal.kind}
+                for refusal in scan.refusals
+            ),
+            key=lambda item: item["rel_path"],
         ),
     }
 

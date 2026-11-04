@@ -8,6 +8,15 @@ no ``Session``, no ``engine``, no ``open()``, no ``Path.read_*``, no
 ``os.scandir`` - so every rule below can be tested from literals, and the one
 disk+DB layer (``bundle_service``) owns every byte this module is handed.
 
+**The stamp and the refused ledger (Mf-9ygi).** Every report row carries the
+``rule_set`` stamp of the tables that decided it, and every path the scan did NOT
+offer carries the rule that refused it, so two runs are comparable by construction
+or explicitly not. ``rule_set_tables`` captures every row-deciding constant BY
+VALUE, ``rule_set_stamp`` hashes it, and ``tests/test_bundle_detect.py`` pins the
+hash: an edit to a table cannot go unnoticed. The refusal vocabulary
+(``REFUSAL_*``) is deliberately NOT part of that stamp - it names an absence, it
+does not decide a row.
+
 The rules, strongest first:
 
 * R1 ``thingiverse-readme`` / ``high``: the bundle root holds ``README.txt``
@@ -102,6 +111,8 @@ the same size - then every archive is read exactly once. The report below only
 renders text; it never deletes, renames or moves a file.
 """
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import PurePath
@@ -153,6 +164,10 @@ DETECTOR_THINGIVERSE_README = "thingiverse-readme"
 DETECTOR_THINGIVERSE_SIBLING = "thingiverse-sibling-docs"
 DETECTOR_THINGIVERSE_ID_NAME = "thingiverse-id-name"
 DETECTOR_GENERIC = "generic-bundle"
+# The rule-set version, bumped by hand whenever a row-deciding table changes.
+# It is a human-readable companion to the derived stamp below: the version says
+# *which* revision a report was taken at, the stamp proves *what* the tables were.
+RULE_SET_VERSION = "2026-11-04.1"
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"
@@ -255,6 +270,142 @@ _LICENCE_TABLE: dict = {
 }
 _TOKEN_SEPARATORS = re.compile(r"[\s\-]+")
 
+# Why a listing was refused, named by the rule that refused it. A report that
+# lists only what it offers makes an absence invisible - the 46 archives of
+# Mf-9ygi's investigation were exactly that - so every candidate this module
+# declines carries one of these reasons. They are vocabulary, not tables: the
+# stamp covers what DECIDES a row, and a refusal is the absence of a row.
+REFUSAL_R1_NO_MARKERS = "R1:no-markers"
+REFUSAL_R2_NO_MARKERS = "R2:no-markers"
+REFUSAL_R3_NO_OWN_DEPTH_MODEL = "R3:no-own-depth-model"
+REFUSAL_R3_TRIO_NO_IMAGE = "R3:trio-no-image"
+REFUSAL_R3_TRIO_NO_TEXT = "R3:trio-no-text"
+REFUSAL_R4_NO_OWN_DEPTH_MODEL = "R4:no-own-depth-model"
+REFUSAL_R5_DISABLED = "R5:disabled"
+REFUSAL_R5_NOT_TITLE = "R5:not-title"
+REFUSAL_R5_NO_OWN_DEPTH_MODEL = "R5:no-own-depth-model"
+REFUSAL_PROMOTION_NO_OWN_DEPTH_MODEL = "promotion:no-own-depth-model"
+
+REFUSAL_RULES = frozenset(
+    {
+        REFUSAL_R1_NO_MARKERS,
+        REFUSAL_R2_NO_MARKERS,
+        REFUSAL_R3_NO_OWN_DEPTH_MODEL,
+        REFUSAL_R3_TRIO_NO_IMAGE,
+        REFUSAL_R3_TRIO_NO_TEXT,
+        REFUSAL_R4_NO_OWN_DEPTH_MODEL,
+        REFUSAL_R5_DISABLED,
+        REFUSAL_R5_NOT_TITLE,
+        REFUSAL_R5_NO_OWN_DEPTH_MODEL,
+        REFUSAL_PROMOTION_NO_OWN_DEPTH_MODEL,
+    }
+)
+
+
+def _regex_table(pattern) -> dict:
+    """One compiled regex as the canonical ``{pattern, flags}`` table entry."""
+    return {"pattern": pattern.pattern, "flags": pattern.flags}
+
+
+def rule_set_tables() -> dict:
+    """Every constant a row-deciding path consults, captured BY VALUE.
+
+    This is the artefact a report's stamp is derived from. Each value is read
+    from the module at call time, so editing a table changes the stamp that
+    ``tests/test_bundle_detect.py`` pins - a table edit cannot go unnoticed.
+
+    The capture is by value, never by reference: sets become sorted lists, a
+    regex becomes ``{pattern, flags}``, and ``_LICENCE_TABLE`` becomes a sorted
+    dict of ``key -> [text, url]``, so the digest is a function of the tables
+    and not of process memory, dict insertion order or set iteration order.
+
+    Deliberately EXCLUDED, because they are enrichment or walk bounds rather
+    than row-deciding tables: ``PREVIEW_SUFFIXES``, the cover reason strings
+    (``COVER_*``) and the ``MATCH_*`` identities in ``bundle_service``, plus the
+    scan bounds (``MAX_SCAN_ENTRIES``, ``HASH_CHUNK_BYTES``, ``DEFAULT_LIMIT``).
+    Including them would make a cosmetic edit look like a classification change,
+    which is exactly the noise this stamp exists to remove.
+    """
+    return {
+        # Role names.
+        "MODEL": MODEL,
+        "IMAGE": IMAGE,
+        "TEXT": TEXT,
+        "ARCHIVE": ARCHIVE,
+        "OTHER": OTHER,
+        # Detectors.
+        "DETECTOR_THINGIVERSE_README": DETECTOR_THINGIVERSE_README,
+        "DETECTOR_THINGIVERSE_SIBLING": DETECTOR_THINGIVERSE_SIBLING,
+        "DETECTOR_THINGIVERSE_ID_NAME": DETECTOR_THINGIVERSE_ID_NAME,
+        "DETECTOR_GENERIC": DETECTOR_GENERIC,
+        "DETECTOR_TITLE_NAME": DETECTOR_TITLE_NAME,
+        # Confidences.
+        "CONFIDENCE_HIGH": CONFIDENCE_HIGH,
+        "CONFIDENCE_MEDIUM": CONFIDENCE_MEDIUM,
+        "CONFIDENCE_LOW": CONFIDENCE_LOW,
+        "INFERRED_CONFIDENCES": sorted(INFERRED_CONFIDENCES),
+        "STRONG_CONFIDENCES": sorted(STRONG_CONFIDENCES),
+        # Shapes.
+        "SHAPE_ROOT_DOCS": SHAPE_ROOT_DOCS,
+        "SHAPE_SIBLING_DOCS": SHAPE_SIBLING_DOCS,
+        "SHAPE_ID_NAME": SHAPE_ID_NAME,
+        "SHAPE_GENERIC": SHAPE_GENERIC,
+        "SHAPE_TITLE_NAME": SHAPE_TITLE_NAME,
+        # Suffix tables and shape bounds.
+        "MODEL_SUFFIXES": sorted(MODEL_SUFFIXES),
+        "IMAGE_SUFFIXES": sorted(IMAGE_SUFFIXES),
+        "BUNDLE_TEXT_EXTS": sorted(BUNDLE_TEXT_EXTS),
+        "R3_MODEL_DIRS": sorted(R3_MODEL_DIRS),
+        "GENERIC_CONTAINER_ROOTS": sorted(GENERIC_CONTAINER_ROOTS),
+        "_MACOSX_ROOT": _MACOSX_ROOT,
+        "BUNDLE_DOC_MAX_BYTES": BUNDLE_DOC_MAX_BYTES,
+        "MAX_DOC_CANDIDATES": MAX_DOC_CANDIDATES,
+        # R5's vocabulary.
+        "TITLE_PART_NAMES": sorted(TITLE_PART_NAMES),
+        "TITLE_SINGLE_WORD_FLOOR": TITLE_SINGLE_WORD_FLOOR,
+        "TITLE_NAME_BUNDLES_ENABLED": TITLE_NAME_BUNDLES_ENABLED,
+        "_TITLE_WORD": _regex_table(_TITLE_WORD),
+        # The document names and marker grammar.
+        "_ROOT_README": _ROOT_README,
+        "_ROOT_LICENSE": _ROOT_LICENSE,
+        "_SIBLING_README": _SIBLING_README,
+        "_SIBLING_LICENSE": _SIBLING_LICENSE,
+        "_THINGIVERSE_ID_IN_NAME": _regex_table(_THINGIVERSE_ID_IN_NAME),
+        "_THINGIVERSE_THING_URL": _THINGIVERSE_THING_URL,
+        "_README_MARKERS": _regex_table(_README_MARKERS),
+        "_LICENSE_LINE": _regex_table(_LICENSE_LINE),
+        "_SENTENCE_BOUNDARY": _regex_table(_SENTENCE_BOUNDARY),
+        "_LEADING_ORDINAL": _regex_table(_LEADING_ORDINAL),
+        "_TRAILING_JUNK": _TRAILING_JUNK,
+        "_TOKEN_SEPARATORS": _regex_table(_TOKEN_SEPARATORS),
+        # The licence table: a token only ever maps to a URL we know by heart.
+        "_LICENCE_TABLE": {key: list(value) for key, value in sorted(_LICENCE_TABLE.items())},
+        "_CREATIVE_COMMONS": _CREATIVE_COMMONS,
+        "_CC0_URL": _CC0_URL,
+    }
+
+
+def rule_set_stamp() -> str:
+    """The sha256 stamp of the rule tables as they are NOW, not as they were imported.
+
+    Read at call time on purpose: a test (or an operator's debug session) can
+    change one table and re-derive the stamp, which is how the pin below is
+    proven to cover every row-deciding constant.
+    """
+    canonical = json.dumps(rule_set_tables(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# The stamp of the tables as this process imported them: what every report row
+# records, so two reports are comparable by construction or explicitly not.
+RULE_SET_STAMP = rule_set_stamp()
+
+
+def rule_set() -> dict:
+    """The rule set a report is taken against: its version and its stamp."""
+    return {"version": RULE_SET_VERSION, "stamp": rule_set_stamp()}
+
+
 
 @dataclass(frozen=True)
 class BundleEntry:
@@ -309,6 +460,20 @@ class BundleFacts:
     cover_entry: Optional[str]
     counts: BundleCounts
     model_entries: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Detection:
+    """One decision: the facts it offers, or the rule that refused the listing.
+
+    Exactly one of the two is set. ``facts`` is the row a caller may offer (a
+    ``BundleFacts``); ``refusal`` is one of ``REFUSAL_RULES`` and means the
+    listing is not a bundle. Neither is ever both, so a caller cannot mistake a
+    refusal for a weak offer.
+    """
+
+    facts: Optional[BundleFacts]
+    refusal: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -1023,8 +1188,8 @@ def _name_only_facts(
     )
 
 
-def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional[BundleFacts]:
-    """Classify one snapshot; ``None`` means "this is not a vendor bundle".
+def detect_bundle_decision(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Detection:
+    """Classify one snapshot: the facts it offers, or the rule that refused it.
 
     ``docs`` is keyed by the bundle-relative path the caller actually opened, so
     this function can only parse what it was handed - it never reaches for disk.
@@ -1035,23 +1200,35 @@ def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional
     and not `low`. Both R4 and R3 gate on the same ``_own_depth_model_count``
     predicate, so the one model-bearing-directory cardinality bound governs both
     and is computed once.
+
+    When no rule fires, the refusal names the FIRST rule the listing failed, in
+    rule order: a document pair that exists but did not merge (R1, then R2), then
+    R4's missing own-depth model, then R3's three requirements in the order they
+    are checked. That is the whole point of the reason - an absence in a report is
+    otherwise indistinguishable from a directory nobody scanned.
     """
     counts = _counts(snapshot)
     models = _model_entries(snapshot)
     cover = _cover_entry(snapshot)
     own_models = _own_depth_model_count(snapshot)
 
-    root_pair = _merge_pair(_root_pair_paths(snapshot), docs)
+    root_pair_paths = _root_pair_paths(snapshot)
+    root_pair = _merge_pair(root_pair_paths, docs)
     if root_pair is not None:
-        return _high_facts(DETECTOR_THINGIVERSE_README, SHAPE_ROOT_DOCS, snapshot, root_pair, counts, cover, models)
+        facts = _high_facts(DETECTOR_THINGIVERSE_README, SHAPE_ROOT_DOCS, snapshot, root_pair, counts, cover, models)
+        return Detection(facts=facts, refusal=None)
 
-    sibling_pair = _merge_pair(_sibling_pair_paths(snapshot), docs)
+    sibling_pair_paths = _sibling_pair_paths(snapshot)
+    sibling_pair = _merge_pair(sibling_pair_paths, docs)
     if sibling_pair is not None:
-        return _high_facts(DETECTOR_THINGIVERSE_SIBLING, SHAPE_SIBLING_DOCS, snapshot, sibling_pair, counts, cover, models)
+        facts = _high_facts(
+            DETECTOR_THINGIVERSE_SIBLING, SHAPE_SIBLING_DOCS, snapshot, sibling_pair, counts, cover, models
+        )
+        return Detection(facts=facts, refusal=None)
 
     thing_id = thingiverse_id_from_name(snapshot.bundle_name)
     if thing_id is not None and own_models >= 1:
-        return _name_only_facts(
+        facts = _name_only_facts(
             DETECTOR_THINGIVERSE_ID_NAME,
             CONFIDENCE_MEDIUM,
             SHAPE_ID_NAME,
@@ -1061,10 +1238,43 @@ def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional
             models,
             thing_id,
         )
+        return Detection(facts=facts, refusal=None)
 
     if own_models >= 1 and counts.image >= 1 and counts.text >= 1:
-        return _generic_facts(snapshot, counts, cover, models)
-    return None
+        return Detection(facts=_generic_facts(snapshot, counts, cover, models), refusal=None)
+
+    # Nothing fired: name the FIRST rule the listing failed, in rule order.
+    if root_pair_paths:
+        refusal = REFUSAL_R1_NO_MARKERS
+    elif sibling_pair_paths:
+        refusal = REFUSAL_R2_NO_MARKERS
+    elif thing_id is not None and own_models < 1:
+        refusal = REFUSAL_R4_NO_OWN_DEPTH_MODEL
+    elif own_models < 1:
+        refusal = REFUSAL_R3_NO_OWN_DEPTH_MODEL
+    elif counts.image < 1:
+        refusal = REFUSAL_R3_TRIO_NO_IMAGE
+    else:
+        refusal = REFUSAL_R3_TRIO_NO_TEXT
+    return Detection(facts=None, refusal=refusal)
+
+
+def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional[BundleFacts]:
+    """The facts of one snapshot; ``None`` means "this is not a vendor bundle".
+
+    The reason a listing was refused is ``detect_bundle_decision``'s, and callers
+    that need it ask that one; this wrapper keeps every existing caller and test
+    reading the same answer it always did.
+    """
+    return detect_bundle_decision(snapshot, docs).facts
+
+
+def archive_owned_decision(snapshot: BundleSnapshot) -> Detection:
+    """``archive_owned_facts``' decision: the facts, or the rule that refused them."""
+    facts = archive_owned_facts(snapshot)
+    if facts is not None:
+        return Detection(facts=facts, refusal=None)
+    return Detection(facts=None, refusal=REFUSAL_PROMOTION_NO_OWN_DEPTH_MODEL)
 
 
 def archive_owned_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
@@ -1176,3 +1386,19 @@ def title_name_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
         _cover_entry(snapshot),
         _model_entries(snapshot),
     )
+
+
+def title_name_decision(snapshot: BundleSnapshot) -> Detection:
+    """``title_name_facts``' decision: the facts, or the rule that refused them.
+
+    The refusals are ordered exactly as ``title_name_facts`` decides them: the
+    switch first (so turning R5 off reads as one reason, not as "not a title"),
+    then the name, then the one shape guard.
+    """
+    if not TITLE_NAME_BUNDLES_ENABLED:
+        return Detection(facts=None, refusal=REFUSAL_R5_DISABLED)
+    if not is_title_name(snapshot.bundle_name):
+        return Detection(facts=None, refusal=REFUSAL_R5_NOT_TITLE)
+    if _own_depth_model_count(snapshot) < 1:
+        return Detection(facts=None, refusal=REFUSAL_R5_NO_OWN_DEPTH_MODEL)
+    return Detection(facts=title_name_facts(snapshot), refusal=None)

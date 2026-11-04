@@ -25,6 +25,7 @@ The heuristics pinned here:
   tie-break.
 """
 
+import re
 from typing import Dict, List, Mapping, Optional, Tuple
 
 import pytest
@@ -1573,3 +1574,191 @@ def test_r4_outranks_the_title_rule_on_an_id_named_snapshot() -> None:
     assert title.confidence == bundle_detect.CONFIDENCE_LOW
     assert title.detector == bundle_detect.DETECTOR_TITLE_NAME
     assert title.source_url is None
+
+
+# --- the rule-set stamp and the refusal vocabulary (Mf-9ygi) ----------------
+
+# The version a report records, and the stamp of the tables as imported. Both are
+# LITERALS on purpose: an edit to any row-deciding table changes the derived hash
+# and this test reds, which is the whole point of the stamp - the 114 -> 112 delta
+# of Mf-9ygi could not be explained because nothing recorded what the rules were.
+RULE_SET_VERSION = "2026-11-04.1"
+RULE_SET_STAMP = "418445978b9a45fb6d68e9814e7df2c2ae83487181d095496f70741b3d4732b5"
+
+# Every constant `rule_set_tables` captures, with a replacement that differs from
+# the shipped value. The names are also the exact key set of the derived table, so
+# a constant that stops being stamped (or a table entry that names nothing) reds.
+ROW_DECIDING_TABLES = {
+    "MODEL": "model-v2",
+    "IMAGE": "image-v2",
+    "TEXT": "text-v2",
+    "ARCHIVE": "archive-v2",
+    "OTHER": "other-v2",
+    "DETECTOR_THINGIVERSE_README": "thingiverse-readme-v2",
+    "DETECTOR_THINGIVERSE_SIBLING": "thingiverse-sibling-docs-v2",
+    "DETECTOR_THINGIVERSE_ID_NAME": "thingiverse-id-name-v2",
+    "DETECTOR_GENERIC": "generic-bundle-v2",
+    "DETECTOR_TITLE_NAME": "title-name-v2",
+    "CONFIDENCE_HIGH": "high-v2",
+    "CONFIDENCE_MEDIUM": "medium-v2",
+    "CONFIDENCE_LOW": "low-v2",
+    "INFERRED_CONFIDENCES": frozenset({"low-v2"}),
+    "STRONG_CONFIDENCES": frozenset({"high-v2"}),
+    "SHAPE_ROOT_DOCS": "root-docs-v2",
+    "SHAPE_SIBLING_DOCS": "sibling-docs-v2",
+    "SHAPE_ID_NAME": "id-name-v2",
+    "SHAPE_GENERIC": "generic-v2",
+    "SHAPE_TITLE_NAME": "title-name-shape-v2",
+    "MODEL_SUFFIXES": frozenset({".obj"}),
+    "IMAGE_SUFFIXES": frozenset({".webp"}),
+    "BUNDLE_TEXT_EXTS": frozenset({".nfo"}),
+    "R3_MODEL_DIRS": frozenset({"parts"}),
+    "GENERIC_CONTAINER_ROOTS": frozenset({"stuff"}),
+    "_MACOSX_ROOT": "__macosx-v2",
+    "BUNDLE_DOC_MAX_BYTES": 4096,
+    "MAX_DOC_CANDIDATES": 9,
+    "TITLE_PART_NAMES": frozenset({"pieces"}),
+    "TITLE_SINGLE_WORD_FLOOR": 8,
+    "TITLE_NAME_BUNDLES_ENABLED": False,
+    "_TITLE_WORD": re.compile(r"[A-Z][a-z]+"),
+    "_ROOT_README": "readme.md",
+    "_ROOT_LICENSE": "licence.md",
+    "_SIBLING_README": "_ABOUT",
+    "_SIBLING_LICENSE": "_TERMS",
+    "_THINGIVERSE_ID_IN_NAME": re.compile(r"^(\d{6,})-"),
+    "_THINGIVERSE_THING_URL": "https://example.invalid/thing:{}",
+    "_README_MARKERS": re.compile(r"made by (?P<creator>[^,\n]+)"),
+    "_LICENSE_LINE": re.compile(r"(?P<title>.+) from (?P<creator>.+?) at (?P<url>https?://\S+)"),
+    "_SENTENCE_BOUNDARY": re.compile(r"[;]\s+"),
+    "_LEADING_ORDINAL": re.compile(r"^\d+\.+"),
+    "_TRAILING_JUNK": "?!",
+    "_TOKEN_SEPARATORS": re.compile(r"[.:]+"),
+    "_LICENCE_TABLE": {"cc_by": ("CC BY v2", "https://example.invalid/by/5.0/")},
+    "_CREATIVE_COMMONS": "https://example.invalid/licenses/",
+    "_CC0_URL": "https://example.invalid/publicdomain/zero/2.0/",
+}
+
+
+def test_the_rule_set_stamp_is_pinned_so_a_table_edit_cannot_go_unnoticed() -> None:
+    """The stamp a report records is a literal here, so a table edit reds.
+
+    Mutation: change one constant any row-deciding path reads and the pinned hash
+    stops matching - which is exactly the audit trail Mf-9ygi's 114 -> 112
+    investigation lacked.
+    """
+    assert bundle_detect.RULE_SET_VERSION == RULE_SET_VERSION
+    assert bundle_detect.RULE_SET_STAMP == RULE_SET_STAMP
+    assert bundle_detect.rule_set() == {"version": RULE_SET_VERSION, "stamp": RULE_SET_STAMP}
+    assert bundle_detect.rule_set_stamp() == RULE_SET_STAMP
+
+
+def test_every_row_deciding_table_is_inside_the_derived_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each stamped constant, changed on its own, moves the digest.
+
+    The sweep is the guard against a constant that a rule reads but the stamp does
+    not capture: such a constant would silently escape the audit trail. Mutation:
+    drop any entry from `rule_set_tables` and the key-set assertion below names it.
+    """
+    baseline = bundle_detect.rule_set_stamp()
+    assert re.fullmatch(r"[0-9a-f]{64}", baseline), "the stamp must be a sha256 hexdigest"
+    assert set(bundle_detect.rule_set_tables()) == set(ROW_DECIDING_TABLES)
+
+    for name, replacement in ROW_DECIDING_TABLES.items():
+        with monkeypatch.context() as patched:
+            patched.setattr(bundle_detect, name, replacement)
+            assert bundle_detect.rule_set_stamp() != baseline, f"{name} is not inside the rule-set stamp"
+
+    assert bundle_detect.rule_set_stamp() == baseline
+
+
+def test_the_stamp_covers_the_image_table_and_the_title_word_explicitly() -> None:
+    """The two constants a subtler sweep could miss are named here.
+
+    ``IMAGE_SUFFIXES`` is a second module's table re-exported, and ``_TITLE_WORD``
+    is a compiled regex whose flags matter as much as its pattern, so both get an
+    explicit statement rather than only a dict entry.
+    """
+    tables = bundle_detect.rule_set_tables()
+
+    assert tables["IMAGE_SUFFIXES"] == sorted(library_scan.IMAGE_SUFFIXES)
+    assert tables["_TITLE_WORD"] == {
+        "pattern": bundle_detect._TITLE_WORD.pattern,
+        "flags": bundle_detect._TITLE_WORD.flags,
+    }
+    assert tables["_MACOSX_ROOT"] == bundle_detect._MACOSX_ROOT
+    assert tables["_LICENCE_TABLE"]["cc_by"] == ["CC BY", "https://creativecommons.org/licenses/by/4.0/"]
+
+
+def test_each_pure_refusal_names_its_rule() -> None:
+    """Every refusal the pure detector makes carries its rule, and nothing else.
+
+    Mutation: return the old bare ``None`` from ``detect_bundle_decision`` and a
+    refused directory is invisible again - the 46 archives of Mf-9ygi.
+    """
+    readmeless_root = snapshot("Moai", {"README.txt": 10, "a.stl": 10})
+    readmeless_sibling = snapshot("x", {"x_README": 10, "a.stl": 10})
+    id_named_without_model = snapshot("5390184_X", {"a.jpg": 10})
+    no_model = snapshot("Widget", {"a.png": 10, "b.txt": 5})
+    no_image = snapshot("Widget", {"a.stl": 10, "b.txt": 5})
+    no_text = snapshot("Widget", {"a.stl": 10, "b.png": 5})
+
+    cases = (
+        (readmeless_root, {"README.txt": "no markers here\n"}, bundle_detect.REFUSAL_R1_NO_MARKERS),
+        (readmeless_sibling, {"x_README": "no markers here\n"}, bundle_detect.REFUSAL_R2_NO_MARKERS),
+        (id_named_without_model, {}, bundle_detect.REFUSAL_R4_NO_OWN_DEPTH_MODEL),
+        (no_model, {}, bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL),
+        (no_image, {}, bundle_detect.REFUSAL_R3_TRIO_NO_IMAGE),
+        (no_text, {}, bundle_detect.REFUSAL_R3_TRIO_NO_TEXT),
+    )
+
+    for snapshot_, docs, expected in cases:
+        decision = bundle_detect.detect_bundle_decision(snapshot_, docs)
+        assert decision.refusal == expected, f"{snapshot_.bundle_name} refused as {decision.refusal}"
+        assert decision.facts is None
+        assert decision.refusal in bundle_detect.REFUSAL_RULES
+        assert bundle_detect.detect_bundle(snapshot_, docs) is None
+
+    fired = bundle_detect.detect_bundle_decision(snapshot("Moai", {"README.txt": 10, "LICENSE.txt": 10}), r1_docs())
+    assert fired.refusal is None, "a fired rule must not also name a refusal"
+    assert fired.facts is not None
+    assert fired.facts.confidence == bundle_detect.CONFIDENCE_HIGH
+
+
+def test_the_promotion_refusal_names_its_rule() -> None:
+    """``archive_owned_decision`` refuses with the promotion's own reason.
+
+    Mutation: keep ``archive_owned_facts``' bare ``None`` and a pairing refused for
+    want of an own-depth model is indistinguishable from a pairing never examined.
+    """
+    refused = bundle_detect.archive_owned_decision(snapshot("clockwork", {"a.png": 10}))
+    fired = bundle_detect.archive_owned_decision(snapshot("clockwork", {"a.stl": 10}))
+
+    assert refused.refusal == bundle_detect.REFUSAL_PROMOTION_NO_OWN_DEPTH_MODEL
+    assert refused.refusal in bundle_detect.REFUSAL_RULES
+    assert refused.facts is None
+    assert fired.refusal is None
+    assert fired.facts is not None
+    assert fired.facts.confidence == bundle_detect.CONFIDENCE_LOW
+
+
+def test_the_title_refusals_are_ordered_like_the_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R5's three refusals: the switch, then the name, then the own-depth guard.
+
+    Mutation: reorder the branches in ``title_name_decision`` and a disabled rule
+    reports "not a title", which is the wrong diagnosis for the operator.
+    """
+    with monkeypatch.context() as patched:
+        patched.setattr(bundle_detect, "TITLE_NAME_BUNDLES_ENABLED", False)
+        disabled = bundle_detect.title_name_decision(snapshot("skull mask", {"a.stl": 10}))
+        assert disabled.refusal == bundle_detect.REFUSAL_R5_DISABLED
+        assert disabled.facts is None
+
+    not_a_title = bundle_detect.title_name_decision(snapshot("files", {"a.stl": 10}))
+    too_deep = bundle_detect.title_name_decision(snapshot("Rocket Filement support", {"x/a.stl": 1, "y/b.stl": 1}))
+    fired = bundle_detect.title_name_decision(snapshot("Rocket Filement support", {"a.stl": 10}))
+
+    assert not_a_title.refusal == bundle_detect.REFUSAL_R5_NOT_TITLE
+    assert too_deep.refusal == bundle_detect.REFUSAL_R5_NO_OWN_DEPTH_MODEL
+    assert fired.refusal is None
+    assert fired.facts is not None
+    assert fired.facts.detector == bundle_detect.DETECTOR_TITLE_NAME
