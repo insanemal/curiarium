@@ -31,6 +31,12 @@ second row and nothing is ever deleted).
 supporting member, never a candidate, never a pairing and never evidence; its
 entries are opaque and nothing is ever extracted).
 
+**Extended:** ticket `Mf-it2a` (a verified pairing on either route - entry root
+or stem - makes an offered-nowhere directory a `generic-bundle` / `low` offer
+whatever else it holds, and both routes now decide containment through one
+predicate; the stem rule's precedence and the entry-root rule's generic-root
+refusal are unchanged).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -196,19 +202,31 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    directory's post-claim listing. A lived-in directory legitimately holds more
    than its archive, so equality would refuse the very pair this exists for; and
    the declared size is a zip header field, so this decides pairing and is never
-   an integrity claim. `twin_verified` therefore means two things by path: on the
-   stem path it is an operator remark (either answer is information), while on
-   the entry-root path it is a *pairing condition* and is always true by
-   construction - an archive that fails containment simply does not pair. The
-   archive attaches nothing on either path. **A verified pair also makes the
-   directory an offer.** A directory no detector offers on its own - models and
-   images, no text - is a real `generic-bundle` / `low` candidate keyed at the
-   *directory*, with that archive reported as its `archive` and nothing attached
-   from it: the archive supplies the identity, the low confidence says the shape
-   was inferred. It is creatable exactly like any other low row, because
-   creatability is still a resolved `Folder` plus registered model assets and
-   never a detector name. Without a pairing the same shape stays silent
-   (Decision 18).
+   an integrity claim.
+
+   **Amended by `Mf-it2a`.** A verified pair on *either* route now makes the
+   directory an offer **whatever else it holds**. The archive is the identity and
+   images and text are decoration: the old "models and images, no text"
+   qualification is gone, so a directory of models alone, one whose extraction
+   left a README behind, and one of models plus images are all the same
+   `generic-bundle` / `low` candidate keyed at the *directory*, with that archive
+   reported as its `archive` and nothing attached from it. It is creatable
+   exactly like any other low row, because creatability is still a resolved
+   `Folder` plus registered model assets and never a detector name. **A stem twin
+   whose directory no rule offers is verified the same way** - through the same
+   `archive_payload_contained` predicate - and joins the same promotion pass with
+   no entry root; a stem twin whose directory some rule already detects keeps the
+   names-only answer, because there the archive is that directory's provenance
+   and never a pairing; and a stem twin that *fails* containment is consumed
+   rather than retried under the entry-root name (Decision 19). Without a pairing
+   the same shape stays silent (Decision 18).
+
+   `twin_verified` therefore no longer means "always true by construction" on a
+   verified route: an entry-root pairing and a promoted or pair-only stem pairing
+   are **re-verified at report time** by that same containment predicate, so a
+   `false` there means the bytes on disk changed since the scan. Only the plain
+   twin of a directory some rule detects keeps the names-only basename remark,
+   where either answer is information for the operator.
 
 5. **Duplicate archives are one bundle, and hashing never deletes.** Identity
    for an archive is its content hash: a sha256 over the file, read in bounded
@@ -523,32 +541,127 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     already suppressed (when it was not). The report never invites deleting a
     file that is part of a live bundle, and nothing is extracted or written.
 
-18. **A verified archive makes a no-text directory a low bundle, and only that
-    directory.** Models and images with no text file are offered at
-    `generic-bundle` / `low` only when the entry-root pairing has proved that an
-    archive beside the directory owns *this* directory. The archive supplies what
-    the listing cannot - the identity of the thing - and the confidence badge says
-    the shape was inferred rather than read. Every provenance field the project
-    would carry (creator, licence, source URL, description) stays `None`, because
-    an entry root is evidence of which thing this is, never of who made it; the
-    row's `archive` field is the identity, not a claim about authorship. Without
-    a pairing the shape stays silent, because a pile of models and a
-    render is also what a half-extracted import looks like. Two refusals bound
-    the rule. The container rule still wins: a directory that *holds* bundles
+18. **A verified archive makes an offered-nowhere directory a low bundle, and
+    only that directory.** A directory no detector offers on its own, but for
+    which a pairing has verified that an archive beside it is *this* directory's
+    provenance, is offered at `generic-bundle` / `low`. The qualification is that
+    verified pairing - on the entry-root route (`Mf-6b82`) or the stem route
+    (`Mf-it2a`) - together with at least one model at the bundle's own depth in
+    one of R3's three shapes (`_own_depth_model_count`); the archive supplies the
+    identity the listing cannot, and the confidence badge says the shape was
+    inferred rather than read. What the directory holds beside its models no
+    longer matters: images and text are neither required nor disqualifying,
+    because a verified archive already proved what the directory is. Every
+    provenance field the project would carry (creator, licence, source URL,
+    description) stays `None`, because an entry root or a stem is evidence of
+    which thing this is, never of who made it; the row's `archive` field is the
+    identity, not a claim about authorship.
+
+    The own-depth/cardinality bound is now the *only* shape guard, and it is
+    load-bearing: the archive says WHICH thing a directory is, never that a pile
+    of things is one thing. It is reused deliberately, so the `Mf-h0p8` depth
+    bound and the `Mf-snd8` cardinality rule apply here for free - a pile of two
+    or more unnamed model-bearing subdirectories, or models buried at depth 2,
+    is refused even when its archive verifies, and an ancestor can never qualify
+    on its children's models. Without a pairing the same shape stays silent,
+    because a pile of models and a render is also what a half-extracted import
+    looks like. The container rule still wins: a directory that *holds* bundles
     keeps the blocked `archive_only` row and creates nothing, so a pile of models
     with one zip somewhere inside it never qualifies. And a pairing qualifies the
-    directory its entry root names and no descendant. The two orders cover the
-    containment cases: a containing guess loses to the promoted candidate (the
-    strip drops it), and a promoted candidate inside a bundle never becomes a row
-    at all, because the archive it paired with is a member of that bundle and the
-    member filter prunes both. Both failure modes are stated plainly rather than
-    argued away: a false positive invites a project
-    for something that is not a bundle and attaches its models to it; a false
-    negative leaves the owner hand-making a project, which is exactly what
-    happened for the Clockwork directory. Duplicate suppression (Decision 5)
-    stays upstream, so a byte-identical copy can never promote a second bundle.
-    The fixture-built numbers below belong to the fixtures; the owner's library
-    figure is his measurement, not this repository's.
+    directory it names and no descendant. The two orders cover the containment
+    cases: a containing guess loses to the promoted candidate (the strip drops
+    it), and a promoted candidate inside a bundle never becomes a row at all,
+    because the archive it paired with is a member of that bundle and the member
+    filter prunes both. Two further bounds come from the stem route: a stem twin
+    of a directory some rule already detects keeps the names-only answer and is
+    never promoted, because there the archive is that directory's provenance;
+    and a stem twin that fails containment is consumed rather than retried under
+    the entry-root name, so a wrapper the operator already named is not
+    re-litigated by a weaker guess (Decision 19).
+
+    Both failure modes are stated plainly rather than argued away: a false
+    positive invites a project for something that is not a bundle and attaches
+    its models to it; a false negative leaves the owner hand-making a project,
+    which is exactly what happened for the Clockwork directory. Duplicate
+    suppression (Decision 5) stays upstream, so a byte-identical copy can never
+    promote a second bundle. The fixture-built numbers below belong to the
+    fixtures; the owner's library figure is his measurement, not this
+    repository's.
+
+19. **Two routes, one containment predicate.** The directory an archive belongs
+    to is decided on two routes: the **entry-root route**, where the archive's
+    own common entry root names a same-parent directory, and the **stem route**,
+    where a `<name>.zip` beside `<name>/` states the same thing by filename. Both
+    routes decide whether the payload fits through **one** predicate,
+    `bundle_detect.archive_payload_contained`, so they cannot disagree about what
+    an archive's payload is or about when it fits a folder.
+
+    **The wrapper is decided once, for the whole archive.** With an entry root
+    the predicate is the strict strip-and-compare it always was: every entry's
+    first segment must match the named root, and there is deliberately no
+    identity shortcut on that route, because trying one would silently widen the
+    rule that produced the root. With no entry root - the stem route, where
+    nobody has named the wrapper - identity is tried first (the archive's paths
+    are already the folder's paths), else exactly **one** `common_entry_root`
+    strip. Never per entry and never two strips: `a/files/x.stl` must not verify
+    against a directory holding `x.stl`, because that would pair a wrapper's
+    wrapper with anything nested one level deeper.
+
+    **One `__MACOSX` predicate.** Both routes drop AppleDouble cruft through
+    `is_macosx_artifact`, the same predicate `common_entry_root` applies, so the
+    two layers agree on what the payload is and an archive of cruft alone has
+    verified nothing.
+
+    **`twin_verified` per route.** An entry-root pairing and a promoted or
+    pair-only stem pairing are **re-verified at report time** through that same
+    predicate, so a `false` there means the bytes on disk changed since the scan -
+    the old "always true by construction" claim is gone. A plain twin of a
+    directory some rule detects keeps the names-only basename comparison as an
+    operator remark, where either answer is information.
+
+    **Stem first, and a detected twin keeps the old answer.** The stem rule has
+    first refusal. When its directory is already a detected candidate the pairing
+    is skipped exactly as before: the archive is that directory's provenance,
+    never a pairing. When no rule offers that directory, the stem twin is
+    verified by containment and joins the same `pairs` map with no entry root, so
+    the promotion pass offers the directory at `generic-bundle` / `low` exactly
+    as it does for the entry-root route. **A stem twin that fails verification is
+    consumed**: it does not fall through to the entry-root pass, because the stem
+    is the operator's own statement of which directory the archive is, and a
+    failed check must never be retried under a weaker name.
+
+    **The entry-root route and its generic-root refusal are untouched.**
+    `files` / `images` / `models` / `stl` remain refusals for the route that
+    *uses* the root to name a directory - which is precisely why the stem route
+    is the one that had to grow, as the measured fault shows.
+
+    **The fault, per bucket.** On the owner's library (2026-11-03), 39 of 131
+    directories in `import/` were offered by nothing. Three buckets among them -
+    18 directories in all - were one root-cause family: a directory with a
+    verified archive twin that the pairing rules refused to promote.
+
+    * Models only, nothing else, twin zip - **6 directories** (`SnVB623`,
+      `SnVD623`, `Creality__Ender_3__Filament_holder`): the fault was
+      `archive_owned_facts`' `counts.image < 1` leg. R3's image role was demanded
+      of a directory whose archive already proved what it is.
+    * Models and text, no images, twin zip - **8 directories**
+      (`ultimate-card-box-v4-model_files`, `razer-cat-ears-remix-model_files`):
+      the same line's `counts.text` leg. A README that shipped with the
+      extraction disqualified the directory from the "no text" offer.
+    * Models and images, twin zip - **4 directories** (`Cinderwing3D - Crystal
+      Dragon`): **not** the predicate. Two independent refusals.
+      `_build_candidates`' stem first refusal found the twin directory and
+      `continue`d before the entry-root pass could ever see it, and
+      `archive_owned` was only ever set by the entry-root pass - so a directory
+      carrying BOTH models and images, exactly the shape the predicate was
+      written for, produced no row at all. The second, independent refusal is
+      the generic-root exclusion (`is_generic_container_root`): these archives are
+      rooted at `files/`, so even with the stem refusal out of the way the
+      entry-root route refuses them. `Cinderwing3D - Crystal Dragon` is the whole
+      story in one directory: it had models and images, so had the pairing fired
+      `Mf-t12a` would already have promoted it; its archive is rooted at `files/`,
+      so the entry root could never name it; and its stem was consumed before any
+      pass could verify it.
 
 ## Consequences
 
@@ -580,6 +693,29 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   likewise no longer offered - it fails closed rather than wrongly created;
   a single model-bearing directory of any name is offered by the cardinality
   rule above.
+* **A verified archive widens the offer, and the widening is accepted.** A
+  directory the format rules would have refused - models alone, models plus a
+  README, models plus images - is now offered at `low` when an archive beside it
+  verifies, and a pile whose own payload an archive verifies gains a visible
+  `blocked` / `archive_only` row where it previously vanished: visible, not
+  creatable. A pile of flat depth-0 models with a matching twin would now be
+  promoted, because the archive proves it is one thing. That is this ticket's
+  accepted trade, stated rather than hidden; the own-depth/cardinality guard
+  still refuses every pile of unnamed model-bearing subdirectories, so the
+  widening cannot promote a pile of things on its members' models.
+* **A stem pairing costs one extra central-directory listing per undetected stem
+  twin.** At report time each such twin's archive is read once to re-verify
+  containment, uncached, on the `READ` route that is already the most expensive
+  `GET` in the product. That cost has not been measured on the owner's
+  169-archive library, so this document does not pretend to a number, and the
+  standing caveat is unchanged: a declared zip size is header data, so a lying
+  header makes a pairing wrong and never a bundle corrupt.
+* **A container whose own payload an archive verifies is still refused, and
+  stays visible.** The bullet above - a container directory is no longer offered
+  - still holds: a verified pairing makes such a pile visible as a blocked
+  `archive_only` row, it does not make it creatable, and `Mf-6b82`'s
+  generic-root refusal is untouched for the route that uses the entry root to
+  name a directory.
 * **A title containing a sentence boundary loses its leading part.** `Dr. No
   Replica` is reported as `No Replica`, because the trim that keeps a preceding
   sentence of prose out of the title is the same trim that eats the title. It is
@@ -663,6 +799,9 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   compare the declared `ZipInfo.file_size` with the size on disk, which is not a
   byte comparison - it reads no bytes at all, and it decides pairing, not
   integrity. Comparing content would still be rejected for the reason above.
+  **Re-scoped by `Mf-it2a`:** the stem route applies the same declared-size
+  containment, through the same predicate, so both pairing routes compare header
+  sizes and neither reads bytes.
   **Re-scoped by `Mf-z4vv`:** content hashing is adopted for duplicate identity
   and reporting only - the `duplicates` list and `duplicates_text`, size-first,
   and only within equal-size groups - and never for `twin_verified`, pairing or
@@ -758,11 +897,22 @@ unchanged.
   `files_and_docs`, `my files`, `FileShare` and `17_ClockworkMonster`; and
   `archive_owned_facts` renders the 12-model, 2-render Clockwork listing as a
   `generic-bundle` / `low` generic row with the largest render as its cover and
-  every provenance field `None`, while refusing a directory that holds text, that
-  has no image, or whose only models sit at depth 2 (the `Mf-h0p8` bound still
-  holds); and `detect_bundle` still returns `None` for the very listing
-  `archive_owned_facts` offers, which pins that the low offer is the service's
-  verified pairing and never a looser R3. In `tests/test_bundle_service.py`,
+  every provenance field `None`, and equally renders a models-only listing and
+  one carrying a README and no image - images and text are decoration once the
+  archive has proved the directory - while still refusing a pile of two unnamed
+  model-bearing subdirectories and models at depth 2 (the `Mf-h0p8` depth bound
+  and the `Mf-snd8` cardinality rule hold here too); `detect_bundle` still
+  returns `None` for the very listing `archive_owned_facts` offers, which pins
+  that the low offer is the service's verified pairing and never a looser R3; and
+  `archive_payload_contained`, the one predicate both routes use, is proved from
+  literals: an archive whose paths are the folder's pairs by identity, an archive
+  under one wrapper pairs after exactly one `common_entry_root` strip, two strips
+  are refused (`a/files/x.stl` against a folder holding `x.stl`), `__MACOSX`
+  cruft is dropped on both routes and an all-cruft archive verifies nothing, a
+  declared-size mismatch and a name mismatch each pair nothing, and the
+  entry-root route refuses the identity shortcut - an archive whose paths happen
+  to be the folder's, but which does not sit under the named root, is `false`.
+  In `tests/test_bundle_service.py`,
   against a temporary root: the real
   Clockwork pair - `import/17_ClockworkMonster/` (12 STL, 2 PNG, no text),
   `17_Fates End - ClockworkMonster Tower.zip` and its byte-identical ` (1)`
@@ -797,6 +947,38 @@ unchanged.
   LOW container holding a promoted directory is still dropped - the container
   strip fires for a promoted candidate too, so `Collection` disappears while the
   paired directory it wraps is offered.
+- The same two files also pin the two pairing routes and the fault they fix
+  (`Mf-it2a`). In `tests/test_bundle_detect.py`, from literals: the stem route's
+  wrapper decision is made once - identity, one strip, never two - and the
+  entry-root route's strict strip refuses the identity shortcut, both through
+  `archive_payload_contained`; and `archive_owned_facts` refuses a pile of two
+  unnamed model-bearing subdirectories even when a pairing would verify the
+  directory, which pins that own-depth/cardinality is the only shape guard left
+  and that emptying it promotes the pile. In `tests/test_bundle_service.py`,
+  against temporary roots built from real directory names and shapes only: the
+  four owner-library pairs - `SnVB623` and `SnVD623` (models only),
+  `ultimate-card-box-v4-model_files` (models plus a README, no image) and
+  `Cinderwing3D - Crystal Dragon` (models plus images, its archive rooted at
+  `files/`) - are each offered at `generic-bundle` / `low`, `ready`, with
+  `twin_verified: true` and only their own models attached, and neither zip a row
+  of its own; the `RepRap-MultiFilament` pile of two unnamed model-bearing
+  subdirectories is offered by nothing even though an archive beside it verifies,
+  so deleting the stem branch leaves the four pairs with no candidates at all and
+  removing the own-depth bound promotes the pile; the `endorphin` pile holding
+  two claimed bundles plus its own loose model and render, with a verifying stem
+  twin, is one `blocked` / `archive_only` row whose children are `ready`, and
+  create-all makes two projects and none named after the pile - removing the
+  `claimed_ancestors` refusal promotes it; an archive differing by one declared
+  size and an archive whose names differ each pair nothing, with no row and no
+  `twin_verified`, and a `_stem_pair_verified` that returns `True` would promote
+  the first; a stem twin in a different parent pairs nothing, and an entry root
+  naming a directory in another parent pairs nothing, with `Mf-6b82`'s two guard
+  tests (`test_service_a_nested_archive_cannot_pair_a_sibling_directory`,
+  `test_service_a_pairing_names_the_directory_not_its_descendants`) staying
+  green unchanged; and a promoted stem row whose directory has since gained one
+  extra file still reports `twin_verified: true`, because the basename sets are
+  no longer equal while containment still holds - the dispatch test that would
+  fail if a promoted stem row fell back to the names-only comparison.
 - The duplicate-archive contract (`Mf-z4vv`) is pinned at three levels. In
   `tests/test_bundle_detect.py`, from literals: `equal_size_archive_groups` keeps
   only sizes that occur twice; `duplicate_groups` puts the shortest name first
@@ -900,4 +1082,16 @@ This ADR is superseded if any of the following becomes true:
 - detection starts preferring a document by its filename again, beyond the fixed
   tie-break order `_root_pair_paths` / `_sibling_pair_paths` establish;
 - the pair merge stops requiring all four provenance fields before it reports
-  high confidence, or a named-pair merge starts reaching outside its own pair.
+  high confidence, or a named-pair merge starts reaching outside its own pair;
+- `archive_owned_facts` starts requiring an image, or starts refusing a
+  directory because it holds a text file, again;
+- a third pairing route appears, or either route stops deciding containment
+  through `bundle_detect.archive_payload_contained`;
+- the stem route starts stripping twice, strips per entry, or pairs a directory
+  outside the archive's own parent;
+- a stem twin that fails containment starts falling through to the entry-root
+  route instead of being consumed;
+- `twin_verified` starts claiming "always true" again for a verified pairing, or
+  a promoted stem row loses its report-time containment re-verification;
+- `_own_depth_model_count` stops being the only shape guard on
+  `archive_owned_facts`, or its cardinality bound widens to let a pile through.

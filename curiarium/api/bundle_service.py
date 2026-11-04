@@ -13,11 +13,14 @@ trusted on a box someone else administers.
 
 **The folder is the truth; a twin zip is provenance only.** When a directory and
 a ``<name>.zip`` sit side by side, the directory is the bundle and the archive
-attaches no files. The archive is reported with ``twin_verified``: a comparison
-of the casefolded *basenames* inside the zip with the casefolded basenames of the
-folder's recursive entries. Names only, never a checksum - the archive attaches
-nothing, so a mismatch is information for the operator (``False``), not an
-assertion to raise.
+attaches no files. What the report then says in ``twin_verified`` depends on who
+paired them. For a directory some rule detects on its own, it is the names-only
+comparison - the casefolded *basenames* inside the zip against the casefolded
+basenames of the folder's recursive entries, never a checksum - because the
+operator paired them and a mismatch is information for the operator (``False``),
+not an assertion to raise. For a directory the pairing itself promoted, it is a
+re-verified containment: the same containment check that had to pass for the
+archive to pair at all, re-run against the bytes on disk now.
 
 **A nested archive is a member, never a candidate.** A ``.zip`` strictly below a
 detected bundle's directory belongs to that bundle: it is counted as an archive
@@ -43,9 +46,10 @@ to the wrong thing. ``entry_root_verified`` then requires containment of
 (casefolded bundle-relative path, declared size) against the directory's
 post-claim listing. Containment, not equality: a lived-in directory holds more
 than its archive. Declared size is an archive header field, so this is pairing
-evidence, never an integrity claim - and on this path ``twin_verified`` is a
-pairing condition (always true by construction; an unverified archive simply
-does not pair), where the stem path's ``twin_verified`` stays an operator remark.
+evidence, never an integrity claim. On either path ``twin_verified`` is a
+re-verified containment for a directory the pairing promoted - it is not "always
+true": a ``False`` means the bytes changed since the scan. For a directory a rule
+detects on its own, the stem path's ``twin_verified`` stays an operator remark.
 The archive attaches nothing on either path.
 
 **Duplicate archives are one bundle.** Identity for an archive is its content
@@ -65,25 +69,34 @@ still offered as its own archive bundle (when it was the group's keep) or was
 already suppressed (when it was not); the report never invites deleting part of a
 live bundle.
 
-**A verified pairing makes a no-text directory a low bundle.** The Clockwork
-shape - models and images, no text - is not an R3 bundle, so a rule that only
-read the listing would render nothing for it. When the entry-root pass has
-proved that an archive beside a directory owns that directory, the archive
-supplies what the listing cannot: its identity. The directory is therefore
-offered as a real ``generic-bundle`` / ``low`` candidate keyed at the
-DIRECTORY, with that archive reported as its ``archive`` and no file attached
-from it - the archive is provenance, the low confidence says the shape was
-inferred. It is then creatable exactly like any other low candidate: a resolved
-``Folder`` and registered model assets, nothing about the detector.
+**A verified pairing makes an offered-nowhere directory a low bundle.** The
+Clockwork shape - models and images and no text - is not an R3 bundle, so a rule
+that only read the listing would render nothing for it. When a pairing has proved
+that an archive beside a directory owns that directory, the archive supplies what
+the listing cannot: its identity. The directory is therefore offered as a real
+``generic-bundle`` / ``low`` candidate keyed at the DIRECTORY, with that archive
+reported as its ``archive`` and no file attached from it - the archive is
+provenance, the low confidence says the shape was inferred. It is then creatable
+exactly like any other low candidate: a resolved ``Folder`` and registered model
+assets, nothing about the detector. The pairing arrives one of two ways: by the
+archive's entry root, or by a stem twin whose directory no rule offers on its own
+and whose payload was verified by containment. Images and text inside the
+directory are neither required nor disqualifying; own-depth/cardinality
+(``bundle_detect._own_depth_model_count``) is the only shape guard left, and it
+is load-bearing - it is what keeps a pile from being promoted on an ancestor's
+or a child's models.
 
-Be honest about the two bounds. **Without a pairing the shape is silent**: model
+Be honest about the bounds. **Without a pairing the shape is silent**: model
 files and a render are too weak on their own, so nothing is offered and nothing
-can be created. And **the pairing never overrides the container rule**: a
-directory that holds bundles keeps the blocked ``archive_only`` row and creates
-nothing, so a pile of models with one zip somewhere inside it is still a pile;
-and the entry root has to name the directory itself, so a pairing can never
-qualify a descendant. A refused pair stays visible rather than vanishing, which
-is why it keeps the archive-only row.
+can be created. **The pairing never overrides the container rule**: a directory
+that holds bundles keeps the blocked ``archive_only`` row and creates nothing, so
+a pile of models with one zip somewhere inside it is still a pile. **A pairing
+names the directory itself and never a descendant**, so it can never qualify one.
+**A stem twin of a directory some rule already offers keeps the names-only
+answer** (the archive is that directory's provenance, never a pairing), and **a
+stem twin whose directory no rule offers and whose payload fails containment is
+consumed** rather than retried under the weaker entry-root name. A refused pair
+stays visible rather than vanishing, which is why it keeps the archive-only row.
 
 A zip with no extracted twin is still read, through
 ``zip_service.read_zip_text_entry`` (bounded, never extracted), so the report can
@@ -201,10 +214,11 @@ class BundleCandidate:
     from its own detect call. ``entry_root`` is the archive entry root that
     paired this bundle's archive, ``None`` when the stem rule paired it.
     ``pair_only`` means a paired directory the container rule refuses: it is
-    shown, never creatable. ``archive_owned`` means a verified entry-root pairing
-    owns this directory: the archive supplies its identity and the low confidence
-    says the shape was inferred, so it is offered at LOW even when no rule finds
-    text and it is creatable like any other LOW candidate.
+    shown, never creatable. ``archive_owned`` means a verified pairing owns this
+    directory: the archive supplies its identity on the entry-root route or on the
+    stem route, and the low confidence says the shape was inferred, so it is
+    offered at LOW even when no rule offers the directory on its own and it is
+    creatable like any other LOW candidate.
     """
 
     key: str
@@ -437,17 +451,36 @@ def _build_candidates(
             claimed_ancestors.add(ancestor)
             ancestor = _parent(ancestor)
 
-    # Entry-root pairing: the stem rule has first refusal, so this pass only sees
-    # the archives it left behind. Each archive's common entry root must name a
-    # sibling DIRECTORY (same parent only) and its entries must contain nothing
-    # the directory's post-claim listing does not hold. A duplicate archive is
-    # skipped: the content hash already says which of the pair is the original.
-    pairs: Dict[str, List[Tuple[str, str]]] = {}
+    # Pairing: the stem rule has first refusal, then the entry-root rule for the
+    # archives it left behind. Each pairing is `(zip_rel, Optional[entry_root])` - no
+    # entry root means the stem route paired it.
+    #
+    # A stem twin whose directory some rule already offers keeps the old answer
+    # byte-for-byte: the archive is that directory's provenance, never a pairing.
+    # A stem twin whose directory NO rule offers is verified by containment (the
+    # archive's own entries decide the wrapper) and joins the same map with no entry
+    # root. A stem twin that fails that verification is CONSUMED: it does not fall
+    # through to the entry-root pass, because the stem is the operator's own
+    # statement of which directory the archive is, and a failed check must never be
+    # retried under a weaker name.
+    #
+    # The entry-root pass then requires the archive's common entry root to name a
+    # sibling DIRECTORY (same parent only) and its entries to contain nothing the
+    # directory's post-claim listing does not hold. A duplicate archive is skipped:
+    # the content hash already says which of the pair is the original.
+    pairs: Dict[str, List[Tuple[str, Optional[str]]]] = {}
     paired_zips: set = set()
+    detected = {candidate.key for candidate in found}
     for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
         if rel_path in suppressed:
             continue
-        if _twin_directory(rel_path, dirs_by_parent):
+        twin = _twin_directory(rel_path, dirs_by_parent)
+        if twin is not None:
+            if twin in detected:
+                continue
+            if _stem_pair_verified(root / rel_path, work.get(twin, ())):
+                pairs.setdefault(twin, []).append((rel_path, None))
+                paired_zips.add(rel_path)
             continue
         paired = _entry_root_pair(root, rel_path, dirs_by_parent, work)
         if paired is None:
@@ -482,9 +515,9 @@ def _build_candidates(
             )
         )
 
-    # A directory a verified archive owns and no rule offers on its own: models
-    # and images, no text. The archive supplies the identity, so this is a real
-    # LOW candidate keyed at the DIRECTORY. The container rule applies to a
+    # A directory a verified archive owns and no rule offers on its own - paired by
+    # its ENTRY ROOT or by its STEM. The archive supplies the identity, so this is a
+    # real LOW candidate keyed at the DIRECTORY. The container rule applies to a
     # pairing exactly as it does to any other guess - a pairing that names a
     # directory holding a claimed bundle is a pile and proves nothing - and a
     # refused pairing keeps the blocked row instead, so the pair stays visible and
@@ -609,10 +642,12 @@ def _build_candidates(
         if candidate.offers_archive_only:
             with_twins.append(candidate)
             continue
-        archive = _twin_archive(candidate.key, files_by_dir)
-        entry_root = None
-        if archive is None and candidate.key in pairs:
-            archive, entry_root = _paired_archive(pairs[candidate.key])
+        stem = _twin_archive(candidate.key, files_by_dir)
+        archive, entry_root = stem, None
+        if candidate.archive_owned or stem is None:
+            paired = pairs.get(candidate.key)
+            if paired:
+                archive, entry_root = _paired_archive(paired)
         with_twins.append(
             BundleCandidate(
                 key=candidate.key,
@@ -804,7 +839,7 @@ def _entry_root_pair(
     return None
 
 
-def _paired_archive(pairs: Sequence[Tuple[str, str]]) -> Tuple[str, str]:
+def _paired_archive(pairs: Sequence[Tuple[str, Optional[str]]]) -> Tuple[str, Optional[str]]:
     """``(zip_rel, entry_root)`` to report for one directory.
 
     The shortest name wins, ties by (casefold, raw): a browser's `` (1)``
@@ -812,6 +847,9 @@ def _paired_archive(pairs: Sequence[Tuple[str, str]]) -> Tuple[str, str]:
     original file. Hash identity for duplicates lives in ``duplicate_archives``;
     this pass still picks the shortest name, because the copy is suppressed before
     pairing and the choice only has to be deterministic.
+
+    The entry root is ``None`` on the stem route, so a caller must dispatch on
+    ``entry_root`` before deciding how to re-verify the archive.
     """
     return min(pairs, key=lambda pair: (len(pair[0]), pair[0].casefold(), pair[0]))
 
@@ -901,6 +939,28 @@ def twin_verified(zip_path: Path, folder_entries: Sequence[bundle_detect.BundleE
     return archive_names == folder_names
 
 
+def _stem_pair_verified(zip_path: Path, folder_entries: Sequence[bundle_detect.BundleEntry]) -> bool:
+    """Whether an archive verifies as the twin of the directory beside it.
+
+    This is the route for a stem twin whose directory no rule offers on its own:
+    the operator's names agree and the payload has to agree too, or the archive is
+    not that directory's provenance. The archive's own entries decide the wrapper -
+    identity first, else ONE ``common_entry_root`` strip, never per entry and never
+    two strips - through ``bundle_detect.archive_payload_contained``, the same
+    predicate the entry-root route uses. Declared size is header data, so this is
+    pairing evidence and never an integrity claim. Any read failure is ``False`` -
+    never an exception on a read route.
+    """
+    try:
+        entries = zip_service.list_zip_entries(Path(zip_path))
+    except (BadZipFile, OSError):
+        return False
+    return bundle_detect.archive_payload_contained(
+        ((str(entry["path"]), int(entry["size"])) for entry in entries),
+        folder_entries,
+    )
+
+
 def entry_root_verified(
     zip_path: Path,
     entry_root: str,
@@ -908,42 +968,28 @@ def entry_root_verified(
 ) -> bool:
     """Whether every entry of the archive sits inside ``entry_root`` and on disk.
 
-    Containment, not equality, because a lived-in directory legitimately holds more
-    than the archive that shipped it (extracted, then a second zip dropped in, then
-    a render saved by hand), and equality would refuse the very pair this exists
-    for. Declared size comes from the archive's header, so this is pairing evidence
-    and never an integrity claim: it decides which directory an archive belongs to,
-    and a lie in the header only makes a pairing wrong, never a bundle corrupt.
+    Strict strip-and-compare on this route: the root was named before the check, so
+    the caller already decided which wrapper to strip. Containment, not equality,
+    because a lived-in directory legitimately holds more than the archive that
+    shipped it. Declared size comes from the archive's header, so this is pairing
+    evidence and never an integrity claim: it decides which directory an archive
+    belongs to, and a lie in the header only makes a pairing wrong, never a bundle
+    corrupt. Any read failure is ``False`` - never an exception on a read route.
 
-    The first segment is split off the path rather than sliced by the length of a
-    casefolded prefix: casefolding may change a string's length, and a slice would
-    then cut the tail in the wrong place.
-
-    An ``__MACOSX/`` entry is AppleDouble cruft, not payload: it is skipped before
-    the head check and never counted in ``seen``, so an archive carrying such
-    cruft still pairs on its real entries, while an archive of cruft alone has
-    verified no entry and is refused. The skip is ``is_macosx_artifact``, the same
-    predicate ``common_entry_root`` applies, so the two layers agree on what the
-    archive's root is.
+    The ``__MACOSX`` skip, the first-segment split and the refusal of an archive of
+    cruft alone all live in ``bundle_detect.archive_payload_contained``, which both
+    pairing routes call, so the two routes cannot disagree about what an archive's
+    payload is.
     """
     try:
         entries = zip_service.list_zip_entries(Path(zip_path))
     except (BadZipFile, OSError):
         return False
-    wanted = (entry_root or "").casefold()
-    folder = {(entry.rel_path.casefold(), entry.size) for entry in folder_entries}
-    seen = 0
-    for entry in entries:
-        rel_path = str(entry["path"])
-        if bundle_detect.is_macosx_artifact(rel_path):
-            continue
-        head, separator, rest = rel_path.partition("/")
-        if not separator or head.casefold() != wanted:
-            return False
-        seen += 1
-        if (rest.casefold(), int(entry["size"])) not in folder:
-            return False
-    return seen > 0
+    return bundle_detect.archive_payload_contained(
+        ((str(entry["path"]), int(entry["size"])) for entry in entries),
+        folder_entries,
+        entry_root,
+    )
 
 
 def get_dismissals() -> Dict[str, dict]:
@@ -1218,14 +1264,18 @@ def _report_row(
 def _archive_twin_verified(root: Path, archive_path: str, candidate: BundleCandidate) -> bool:
     """``twin_verified`` for the archive this candidate attaches.
 
-    Two pairing paths, two meanings. The stem path compares basenames and reports a
-    mismatch, because the operator paired them and the answer is information. The
-    entry-root path already required containment to pair at all, so its answer is a
-    pairing condition and is always true here - a ``False`` would mean a pairing
-    that should not exist.
+    Which answer is honest depends on who paired the two. A directory the entry-root
+    route OR the stem route promoted, and a pair-only directory, was verified by
+    containment at scan time, so its archive is **re-verified at report time**: a
+    ``False`` there means the bytes on disk changed since the scan, never that the
+    pairing was never checked. A stem twin of a directory some rule offers keeps the
+    names-only answer, because there the operator paired them and a mismatch is
+    information for the operator rather than an assertion to raise.
     """
     if candidate.entry_root:
         return entry_root_verified(root / archive_path, candidate.entry_root, candidate.snapshot.entries)
+    if candidate.archive_owned or candidate.pair_only:
+        return _stem_pair_verified(root / archive_path, candidate.snapshot.entries)
     return twin_verified(root / archive_path, candidate.snapshot.entries)
 
 

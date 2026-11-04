@@ -68,9 +68,15 @@ its *entry root* rather than its filename (``common_entry_root``,
 ``is_generic_container_root``) and the facts for a directory a verified archive
 owns but which no rule offers on its own (``archive_owned_facts``). Those facts
 are what ``bundle_service`` now offers as a LOW candidate: the archive supplies
-the directory's identity and the confidence says the shape was inferred. This
-module still only judges a listing; the service decides creatability. It stays
-pure: the caller reads the archive's entry list and this module only judges it.
+the directory's identity and the confidence says the shape was inferred. The
+archive is offered whatever else the directory holds - images and text are
+decoration, so neither is required and neither disqualifies - and
+own-depth/cardinality (``_own_depth_model_count``) is the only shape guard left.
+Both pairing routes - the entry root and the stem - decide membership through the
+ONE containment predicate ``archive_payload_contained``, so the two can never
+disagree about what an archive's payload is. This module still only judges a
+listing; the service decides creatability. It stays pure: the caller reads the
+archive's entry list and this module only judges it.
 
 Content identity is used ONLY to report duplicate archives and to suppress the
 copy as a bundle row; it never enters ``twin_verified``, pairing or an integrity
@@ -476,6 +482,92 @@ def is_generic_container_root(name: str) -> bool:
     return (name or "").strip().casefold() in GENERIC_CONTAINER_ROOTS
 
 
+def _payload_entries(archive_entries: Iterable[Tuple[str, int]]) -> List[Tuple[str, int]]:
+    """The archive's real payload: ``__MACOSX`` cruft dropped, ``(path, size)`` kept."""
+    return [
+        (str(rel_path), int(size))
+        for rel_path, size in archive_entries
+        if not is_macosx_artifact(str(rel_path))
+    ]
+
+
+def _payload_present(
+    payload: Iterable[Tuple[str, int]], folder: AbstractSet[Tuple[str, int]]
+) -> bool:
+    """Whether every payload entry sits in the folder's listing, path casefolded."""
+    return all((rel_path.casefold(), size) in folder for rel_path, size in payload)
+
+
+def _payload_without_root(
+    payload: Iterable[Tuple[str, int]], entry_root: str
+) -> Optional[List[Tuple[str, int]]]:
+    """Every payload entry with ``entry_root``'s first segment split off.
+
+    ``None`` as soon as one entry sits outside the root. The first segment is split
+    off rather than sliced by the length of a casefolded prefix: casefolding may
+    change a string's length, and a slice would then cut the tail in the wrong
+    place.
+    """
+    wanted = (entry_root or "").casefold()
+    stripped: List[Tuple[str, int]] = []
+    for rel_path, size in payload:
+        head, separator, rest = rel_path.partition("/")
+        if not separator or head.casefold() != wanted:
+            return None
+        stripped.append((rest, size))
+    return stripped
+
+
+def archive_payload_contained(
+    archive_entries: Iterable[Tuple[str, int]],
+    folder_entries: Iterable[BundleEntry],
+    entry_root: Optional[str] = None,
+) -> bool:
+    """Whether this archive's payload is contained in this directory's listing.
+
+    The ONE containment predicate behind both pairing routes, so they cannot
+    disagree about what an archive's payload is or about when it fits a folder.
+    It judges two listings and a string; it never touches disk.
+
+    Containment, not equality: a lived-in directory legitimately holds more than
+    the archive that shipped it (extracted, then a second zip dropped in, then a
+    render saved by hand), and equality would refuse the very pairs this exists
+    for. Declared size is an archive header field, so this decides pairing and is
+    never an integrity claim: a lie in the header only makes a pairing wrong,
+    never a bundle corrupt. The skip is ``is_macosx_artifact`` - the same
+    predicate ``common_entry_root`` applies - so the two layers agree on what the
+    payload is, and an archive of cruft alone has verified nothing and is refused.
+
+    ``entry_root`` given is the strict strip-and-compare: every payload entry's
+    first segment must casefold-equal the root and the remainder plus its declared
+    size must sit in the folder. An entry outside the root is ``False``. There is
+    deliberately no identity shortcut on this route - trying one would silently
+    widen the rule that produced the root.
+
+    ``entry_root is None`` is the stem route, where nobody has named the wrapper.
+    The wrapper decision is therefore made ONCE for the whole archive, never per
+    entry and never twice: identity first (the archive's paths are already the
+    folder's paths), else a single ``common_entry_root`` strip. Two strips are
+    refused on purpose - ``a/files/x.stl`` must not verify against a directory
+    holding ``x.stl``, because that would pair a wrapper's wrapper with anything
+    nested one level deeper.
+    """
+    payload = _payload_entries(archive_entries)
+    if not payload:
+        return False
+    folder = {(entry.rel_path.casefold(), entry.size) for entry in folder_entries}
+    if entry_root is not None:
+        stripped = _payload_without_root(payload, entry_root)
+        return stripped is not None and _payload_present(stripped, folder)
+    if _payload_present(payload, folder):
+        return True
+    root = common_entry_root([rel_path for rel_path, _size in payload])
+    if root is None:
+        return False
+    stripped = _payload_without_root(payload, root)
+    return stripped is not None and _payload_present(stripped, folder)
+
+
 def _trim_marker_value(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -858,22 +950,30 @@ def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional
 
 
 def archive_owned_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
-    """The facts for a directory a verified archive owns but which has no text.
+    """The facts for a directory that a verified archive owns, whatever it holds.
 
     A vendor extraction can lose its README and still be one thing: twelve models
-    and two renders, no ``.txt`` anywhere. R3 needs all three roles, so it refuses
-    that tree and the directory would otherwise render no row at all even though
-    the archive beside it proves what it is. This is R3's evidence with the text
-    requirement dropped, rendered as the same ``generic-bundle`` / ``low`` row as
-    any other guess, so a promoted directory is creatable exactly like one; only a
-    directory the container rule refuses comes back as ``blocked`` /
-    ``archive_only``.
+    and two renders and no ``.txt`` anywhere, or a README and a stack of previews
+    beside the models, or models alone. R3 needs a model, an image and a text file,
+    so it refuses those trees and the directory would otherwise render no row at
+    all even though the archive beside it proves what it is. A verified pairing is
+    therefore the identity here and images and text are decoration: neither is
+    required, and a stray ``.txt`` does not disqualify. This is rendered as the
+    same ``generic-bundle`` / ``low`` row as any other guess, so a promoted
+    directory is creatable exactly like one; only a directory the container rule
+    refuses comes back as ``blocked`` / ``archive_only``.
 
-    ``_own_depth_model_count`` is reused deliberately: the Mf-h0p8 container bound
-    and the Mf-snd8 cardinality rule then apply here for free, and an ancestor
-    can never qualify on its children's models. Every provenance field stays
-    ``None`` - an entry root is evidence of WHICH thing this is, never of who made
-    it.
+    ``_own_depth_model_count`` is now the ONLY shape guard, and it is load-bearing:
+    the archive says WHICH thing the directory is, never that a pile of things is
+    one thing. That bound is what keeps a directory holding two or more unnamed
+    model-bearing subdirectories - or models buried at depth 2 - from being
+    promoted on an ancestor's or a child's models. It is reused deliberately, so
+    the Mf-h0p8 container bound and the Mf-snd8 cardinality rule apply here for
+    free and an ancestor can never qualify on its children's models. Do not soften
+    it to make a case pass: loosening it promotes piles.
+
+    Every provenance field stays ``None`` - an entry root or a stem is evidence of
+    WHICH thing this is, never of who made it.
 
     This function does NOT make a directory creatable and does NOT let R3 through:
     it only turns a listing into facts, and the service decides what to do with
@@ -883,6 +983,6 @@ def archive_owned_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
     and stops there.
     """
     counts = _counts(snapshot)
-    if _own_depth_model_count(snapshot) < 1 or counts.image < 1 or counts.text:
+    if _own_depth_model_count(snapshot) < 1:
         return None
     return _generic_facts(snapshot, counts, _cover_entry(snapshot), _model_entries(snapshot))
