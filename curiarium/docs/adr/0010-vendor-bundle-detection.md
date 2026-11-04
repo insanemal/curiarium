@@ -41,6 +41,10 @@ refusal are unchanged).
 at `medium` confidence - a `source_url` and nothing else - and every container
 guard now asks whether a confidence is inferred rather than whether it is `low`).
 
+**Extended:** ticket `Mf-hvck` (a fifth rule, R5 `title-name`, offers a folder of
+models whose NAME reads like a title at `low`, as a `bundle_service` post-pass
+rather than a `detect_bundle` branch; every provenance field stays `None`).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -78,14 +82,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 
 ## Decision
 
-1. **Four rules, strongest first, in a pure module.**
+1. **Five rules, strongest first; four of them are `detect_bundle`'s order.**
    `curiarium/api/bundle_detect.py` holds every judgement and performs no I/O:
    no `Session`, no `engine`, no `open()`, no `Path.read_*`, no `os.scandir`.
    It is handed a `BundleSnapshot` (a listing of `BundleEntry(rel_path, size)`)
    and the handful of documents the caller actually opened, and returns
    `BundleFacts` or `None`. Each rule carries a detector name, a confidence and
-   a metadata shape, and they are evaluated in this order - **R1, R2, R4, R3** -
-   the first one that fires decides the row:
+   a metadata shape. `detect_bundle` evaluates four of the five - **R1, R2, R4,
+   R3**, in that order - and the first one that fires decides the row:
 
    | # | Detector | Confidence | Shape | Fires when |
    |---|---|---|---|---|
@@ -93,6 +97,19 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    | R2 | `thingiverse-sibling-docs` | `high` | `sibling-docs` | the same pair shipped beside the files as `<bundle>_README` / `<bundle>_LICENSE` - as two files, or as two directories each holding one text file (the legacy flattening) - at least one of them present, and both markers present in whichever of the two documents holds them |
    | R4 | `thingiverse-id-name` | `medium` | `id-name` | nothing parses, but the bundle's name starts with a Thingiverse id (`NNNNNNN_Title` - 4+ digits then `_`) and the tree holds at least one model **at the bundle's own depth** (the same bound R3 uses); the id is provenance inferred from the name, buying `source_url` / `thing_id` and nothing else |
    | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model **at the bundle's own depth** - depth 0, depth 1 under `files/`, or depth 1 under exactly one model-bearing subdirectory - plus one image and one text entry |
+
+   **R5 `title-name` / `low` is the fifth rule, and `detect_bundle` never
+   reaches it.** Its judgement lives in the same pure module - `is_title_name`
+   and `title_name_facts` - so it is testable from literals like the other four,
+   but `bundle_service` calls it as a post-pass over the folder walk, after the
+   archive promotion and before the `contained_keys` strip, never as a branch of
+   `detect_bundle` (Decision 21). A branch there would inherit the deepest-first
+   walk and hand a parent's row to its child. It fires on a name and one
+   own-depth model and, uniquely, `TITLE_NAME_BUNDLES_ENABLED` - the one switch,
+   read in one place (Decision 21) - which puts it last in strength and outside
+   the order above: `low`, `title-name`, every provenance field `None`.
+   The module lists five rules and `detect_bundle` runs four, so the order R1,
+   R2, R4, R3 is that function's and never the rule set's.
 
    `high` therefore means *the vendor told us*, never *there is a `.txt` file*.
    A README that exists but lacks the markers is not R1: both high-confidence
@@ -237,7 +254,8 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    names-only answer, because there the archive is that directory's provenance
    and never a pairing; and a stem twin that *fails* containment is consumed
    rather than retried under the entry-root name (Decision 19). Without a pairing
-   the same shape stays silent (Decision 18).
+   the same shape stays silent by this rule (Decision 18), save for R5's separate
+   name signal (Decision 21).
 
    `twin_verified` therefore no longer means "always true by construction" on a
    verified route: an entry-root pairing and a promoted or pair-only stem pairing
@@ -582,12 +600,22 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     bound and the `Mf-snd8` cardinality rule apply here for free - a pile of two
     or more unnamed model-bearing subdirectories, or models buried at depth 2,
     is refused even when its archive verifies, and an ancestor can never qualify
-    on its children's models. Without a pairing the same shape stays silent -
-    unless the folder's NAME reads like a title, which is R5's separate signal
-    and not a loosening of this shape rule (Decision 21) - because a pile of
-    models and a render is also what a half-extracted import looks like. The container rule still wins: a directory that *holds* bundles
-    keeps the blocked `archive_only` row and creates nothing, so a pile of models
-    with one zip somewhere inside it never qualifies. And a pairing qualifies the
+    on its children's models. Without a pairing the same shape stays silent,
+    because a pile of models and a render is also what a half-extracted import
+    looks like - that is the reason *this* rule does not fire, and it is aimed at
+    this rule alone.
+
+    **Amended by `Mf-hvck`.** R5 is a separate signal and does not loosen this
+    shape rule (Decision 21). A folder whose NAME reads like a title a person
+    chose is offered on that name at `low` even when its tree is nothing but
+    models and a render; it still needs one model at its own depth, and it is
+    still refused when it holds a bundle, sits inside one, or is already a row.
+    This is the first of the two sentences that rule falsified - the other is the
+    residual-silence paragraph in Decision 20.
+
+    The container rule still wins: a directory that *holds* bundles keeps the
+    blocked `archive_only` row and creates nothing, so a pile of models with one
+    zip somewhere inside it never qualifies. And a pairing qualifies the
     directory it names and no descendant. The two orders cover the containment
     cases: a containing guess loses to the promoted candidate (the strip drops
     it), and a promoted candidate inside a bundle never becomes a row at all,
@@ -825,10 +853,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     the folder's NAME reads like a title (`Mf-hvck`, Decision 21), which is the
     one signal R3 and R4 both leave on the table, and it is still only `low`. A
     folder whose models sit only at depth **2 or deeper** stays invisible under
-    both rules, because R5 reuses the same `_own_depth_model_count` bound instead
-    of inventing a second one: the sentence that once called this shape
+    all three rules, because R5 reuses the same `_own_depth_model_count` bound
+    instead of inventing a second one: the sentence that once called this shape
     `Mf-hvck`'s territory was wrong about where it would be solved, and it is
-    still nobody's rule.
+    still nobody's rule. This is the second of the two sentences `Mf-hvck`
+    corrected; the first is Decision 18's silence sentence.
 
 21. **A title-shaped name is a `low` bundle, and the rule is a service
     post-pass rather than a detection branch.** The owner's decision
