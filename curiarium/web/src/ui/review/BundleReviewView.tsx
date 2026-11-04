@@ -1,14 +1,21 @@
 import React from "react";
 import { Check } from "lucide-react";
 
-import type { BundleCover, BundleCreateItem, BundleDetectItem } from "../../lib/api/bundles";
+import type {
+  BundleCover,
+  BundleCreateItem,
+  BundleDetectItem,
+  BundleReport,
+} from "../../lib/api/bundles";
 // The type comes from the domain module, not the `../../lib/api` barrel: the
 // tests replace that barrel with a fixed object, so a named import from it
 // would throw "No export is defined on the mock".
 import type { ArchiveExtractResult } from "../../lib/api/imports";
 import { fileUrl } from "../../lib/api/mediaUrls";
 import { extOf } from "../../lib/assetKinds";
+import { copyText } from "../../lib/clipboard";
 import type { ResolvedTheme } from "../../lib/settings";
+import { notifyError, notifyInfo } from "../../lib/toast";
 import { useFileGrants } from "../../lib/useFileGrants";
 import ArchiveExtractAction from "../archive/ArchiveExtractAction";
 import ArchiveExtractDialog, { type ExtractTarget } from "../archive/ArchiveExtractDialog";
@@ -32,6 +39,15 @@ import {
   type BundleFilter,
 } from "./bundleRows";
 import { primeModelCovers } from "./bundleCovers";
+import {
+  duplicateGroupCount,
+  duplicateGroupLine,
+  duplicateReclaimableBytes,
+  duplicateReportText,
+  duplicateSummaryLine,
+  duplicateToggleLabel,
+  showsDuplicateReport,
+} from "./duplicateArchives";
 import ReviewQueueView from "./ReviewQueueView";
 import type { BundleDetectState } from "./useBundleDetect";
 import { bundleBadgeCount, describeQueueCount } from "./useReviewCounts";
@@ -191,6 +207,89 @@ function CoverThumb({
   // No cover is a real answer (`reason === "none"`), not a broken image: the
   // empty square keeps the cell, and with it the six-track grid, reserved.
   return <span className="review-thumb" aria-hidden="true" />;
+}
+
+/** Why the group list can be short even though it is never capped by `limit`. */
+const TRUNCATED_DUPLICATES =
+  "The walk stopped at the report limit, so this list is a lower bound: some duplicate groups may be missing.";
+
+/**
+ * The duplicate-archive notice: what the walk found on disk, and its report text
+ * to carry out of the app.
+ *
+ * Module-level on purpose: a parent re-render must not remount this component,
+ * or the operator's expanded list would collapse under them.
+ */
+function DuplicateArchivesPanel({ report }: { report: BundleReport }): React.ReactElement | null {
+  const [open, setOpen] = React.useState(false);
+  // No element at all, not an empty shell: this sits in `ReviewQueueView`'s
+  // notices, a flex column which leaves no track for an absent child, so there
+  // is nothing to hold - unlike `CoverThumb` in the six-track row grid.
+  if (!showsDuplicateReport(report)) return null;
+
+  const groups = report.duplicates ?? [];
+  const count = duplicateGroupCount(report);
+  const bytes = duplicateReclaimableBytes(report);
+  const text = duplicateReportText(report);
+
+  // The server's string, not one rebuilt from the groups: two formatters drift.
+  // It arrives as an argument rather than being closed over so the only call
+  // site is the button that proves the text exists.
+  const copyReport = async (reportText: string) => {
+    try {
+      await copyText(reportText);
+      notifyInfo("Copied the duplicate report to the clipboard");
+    } catch {
+      notifyError("Could not copy the duplicate report to the clipboard");
+    }
+  };
+
+  return (
+    <div className="review-panel" data-duplicate-report="">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium">{duplicateSummaryLine(count, bytes)}</span>
+        {/* Only offered when the server sent text: a copy that copies nothing
+            would only toast a lie. */}
+        {text !== null && (
+          <button type="button" className={SECONDARY_BUTTON} onClick={() => void copyReport(text)}>
+            Copy report
+          </button>
+        )}
+        {groups.length > 0 && (
+          <button
+            type="button"
+            className="review-filter"
+            aria-expanded={open}
+            onClick={() => setOpen(!open)}
+          >
+            {duplicateToggleLabel(groups.length, open, report.truncated)}
+          </button>
+        )}
+      </div>
+      {report.truncated && <p className="review-notice">{TRUNCATED_DUPLICATES}</p>}
+      {open && groups.length > 0 && (
+        <ul className="flex flex-col gap-1 text-[11px]">
+          {groups.map(group => (
+            <li key={group.sha256}>
+              <span className="flex flex-col gap-0.5">
+                <span>{duplicateGroupLine(group)}</span>
+                {group.paths.map(path => (
+                  <span key={path} className="font-mono break-all">
+                    {path}
+                  </span>
+                ))}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {/* The notice's whole point: it is a reading aid. Nothing here touches
+          the files, so it says so, and names the only next step there is. */}
+      <p className="text-[11px] opacity-70">
+        Nothing is deleted or moved here: copy the report and act outside the app.
+      </p>
+    </div>
+  );
 }
 
 /**
@@ -526,6 +625,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
           {`${countLabel(stale.length, "dismissal", "dismissals")} no longer match a bundle on disk.`}
         </p>
       )}
+      {report && <DuplicateArchivesPanel report={report} />}
     </>
   );
 

@@ -29,8 +29,13 @@ vi.mock("../ModelViewer", () => ({
 }));
 
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
-import type { BundleDetectItem, BundleReport } from "../../lib/api/bundles";
+import type {
+  BundleDetectItem,
+  BundleDuplicateGroup,
+  BundleReport,
+} from "../../lib/api/bundles";
 import type { SettleOutcome } from "../../lib/scanSettle";
+import { getToasts, resetToasts } from "../../lib/toast";
 import BundleReviewView from "./BundleReviewView";
 import { needsDecision } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
@@ -225,6 +230,39 @@ function makeReport(
   };
 }
 
+const DUPLICATE_GROUPS: BundleDuplicateGroup[] = [
+  { sha256: "a".repeat(64), size: 2048, paths: ["Moai.zip", "Moai (1).zip"], reclaimable_bytes: 2048 },
+  { sha256: "b".repeat(64), size: 1024, paths: ["Ender3.zip", "Ender3 (1).zip"], reclaimable_bytes: 1024 },
+];
+
+// Deliberately disagrees with duplicates_total_bytes (3072): a copy built from
+// the group fields would not equal this, so only a verbatim copy can pass.
+const DUPLICATES_TEXT = [
+  "# duplicate archives: 2 group(s), 5120 bytes reclaimable",
+  `# sha256 ${"a".repeat(64)} size 2048 reclaimable 2048`,
+  "keep\t2048\tMoai.zip",
+  "duplicate\t2048\tMoai (1).zip",
+  `# sha256 ${"b".repeat(64)} size 1024 reclaimable 1024`,
+  "keep\t1024\tEnder3.zip",
+  "duplicate\t1024\tEnder3 (1).zip",
+].join("\n");
+
+function withDuplicates(overrides: Partial<BundleReport> = {}): BundleReport {
+  return makeReport([moai], {
+    duplicates: DUPLICATE_GROUPS,
+    duplicates_total_bytes: 3072,
+    duplicates_text: DUPLICATES_TEXT,
+    ...overrides,
+  });
+}
+
+/** The duplicate notice, found by its own attribute: it is not a landmark. */
+function duplicatePanel(): HTMLElement {
+  const node = document.querySelector("[data-duplicate-report]");
+  if (!node) throw new Error("no duplicate panel");
+  return node as HTMLElement;
+}
+
 function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectState {
   return {
     report: makeReport([moai, cableClip, legacyVase, moaiZip]),
@@ -319,6 +357,7 @@ function VisibilityHarness({ initial }: { initial: BundleDetectState }) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetToasts();
   modelSnapshotProps.length = 0;
   listArchiveEntriesMock.mockReset();
   listArchiveEntriesMock.mockResolvedValue({ path: "Moai.zip", entries: ARCHIVE_ENTRIES });
@@ -328,6 +367,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(navigator, "clipboard");
 });
 
 describe("BundleReviewView states", () => {
@@ -1216,5 +1256,146 @@ describe("BundleReviewView covers", () => {
     const cells = rowElement("Cover").children.length;
     expect(cells).toBe(6);
     expect(rowElement("Preview").children.length).toBe(cells);
+  });
+});
+
+describe("BundleReviewView duplicate archives", () => {
+  it("announces the duplicate groups and their reclaimable size", () => {
+    renderView(makeState({ report: withDuplicates() }));
+
+    const panel = duplicatePanel();
+    expect(within(panel).getByText("2 duplicate groups - 3.0 KB reclaimable")).toBeTruthy();
+    // The notice is a reading aid, and says so where the operator reads it.
+    expect(panel.textContent).toContain("Nothing is deleted or moved here");
+    // Collapsed by default: the summary is the notice, the paths are on request.
+    expect(within(panel).queryByText("Moai (1).zip")).toBeNull();
+  });
+
+  it("copies the server's duplicate text verbatim, not one it rebuilt", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    renderView(makeState({ report: withDuplicates() }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy report" }));
+
+    // `DUPLICATES_TEXT` contradicts `duplicates_total_bytes`, so a client-side
+    // rebuild from the group fields could not match it.
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(DUPLICATES_TEXT));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(getToasts()[0].tone).toBe("info");
+  });
+
+  it("toasts an error instead of pretending it copied", async () => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    Object.defineProperty(document, "execCommand", { configurable: true, value: () => false });
+    renderView(makeState({ report: withDuplicates() }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy report" }));
+
+    await waitFor(() => expect(getToasts()[0]?.tone).toBe("error"));
+    Reflect.deleteProperty(document, "execCommand");
+  });
+
+  it("adds no element at all when the report has no duplicates", () => {
+    // Byte-for-byte: the whole queue's markup with the panel present, minus the
+    // panel's own serialisation, must equal the markup with no panel at all.
+    // A stray wrapper, an empty `<div>` or a leftover placeholder cannot pass.
+    renderView(makeState({ report: withDuplicates() }));
+    const panelHtml = duplicatePanel().outerHTML;
+    const queue = document.querySelector(".review-queue") as HTMLElement;
+    const withHtml = queue.innerHTML;
+    expect(withHtml).toContain(panelHtml);
+    cleanup();
+
+    // The second fixture is the payload an older server sends: the field omitted.
+    const withoutDuplicates = [
+      makeReport([moai], { duplicates: [], duplicates_total_bytes: 0, duplicates_text: "" }),
+      makeReport([moai]),
+    ];
+    for (const report of withoutDuplicates) {
+      renderView(makeState({ report }));
+      expect(document.querySelector("[data-duplicate-report]")).toBeNull();
+      expect((document.querySelector(".review-queue") as HTMLElement).innerHTML).toBe(
+        withHtml.replace(panelHtml, ""),
+      );
+      cleanup();
+    }
+  });
+
+  it("renders an en dash, never a false zero, when the walk was cut short", () => {
+    renderView(
+      makeState({
+        report: makeReport([moai], {
+          duplicates: [],
+          duplicates_total_bytes: 0,
+          duplicates_text: "",
+          truncated: true,
+        }),
+      }),
+    );
+
+    // The panel exists - silence would be the under-reporting the ticket forbids.
+    const text = duplicatePanel().textContent ?? "";
+    expect(text).toContain("\u2013");
+    expect(text).not.toContain("0 duplicate groups");
+    expect(text).not.toContain("0 B reclaimable");
+    // No text from the server, so no copy advertised.
+    expect(screen.queryByRole("button", { name: "Copy report" })).toBeNull();
+  });
+
+  it("says the walk was cut short rather than under-reporting", () => {
+    renderView(makeState({ report: withDuplicates({ truncated: true }) }));
+
+    const panel = duplicatePanel();
+    expect(
+      within(panel).getByText(
+        "The walk stopped at the report limit, so this list is a lower bound: some duplicate groups may be missing.",
+      ),
+    ).toBeTruthy();
+    const text = panel.textContent ?? "";
+    expect(text).toContain("Duplicate groups: \u2013");
+    expect(text).toContain("reclaimable size \u2013");
+    // An exact-looking "(2)" beside a `–` total would read as the whole list.
+    expect(within(panel).getByRole("button", { name: "Show the 2 listed groups" })).toBeTruthy();
+    expect(within(panel).queryByRole("button", { name: "Show groups (2)" })).toBeNull();
+  });
+
+  it("offers no destructive control", () => {
+    renderView(makeState({ report: withDuplicates() }));
+    fireEvent.click(screen.getByRole("button", { name: "Show groups (2)" }));
+
+    const names = screen.getAllByRole("button").map(button => button.textContent ?? "");
+    expect(names.length).toBeGreaterThan(0);
+    // Not even a disabled one: a control that names a delete is a claim that
+    // something here can delete.
+    expect(names.filter(name => /delete|remove|move|rename|prune|clean|purge/i.test(name))).toEqual(
+      [],
+    );
+  });
+
+  it("expands to the groups' sizes, copy counts and paths", () => {
+    renderView(makeState({ report: withDuplicates() }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Show groups (2)" }));
+
+    const panel = duplicatePanel();
+    expect(within(panel).getByText("2.0 KB - 2 copies - 2.0 KB reclaimable")).toBeTruthy();
+    expect(within(panel).getByText("Moai.zip")).toBeTruthy();
+    expect(within(panel).getByText("Moai (1).zip")).toBeTruthy();
+    expect(within(panel).getByText("Ender3 (1).zip")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide groups" }));
+    expect(within(panel).queryByText("Moai (1).zip")).toBeNull();
+  });
+
+  it("offers no copy when the server sent no report text", () => {
+    renderView(makeState({ report: withDuplicates({ duplicates_text: "" }) }));
+
+    // Nothing to copy means no button: a copy that copies nothing would only
+    // toast a lie.
+    expect(screen.queryByRole("button", { name: "Copy report" })).toBeNull();
+    expect(
+      within(duplicatePanel()).getByText("2 duplicate groups - 3.0 KB reclaimable"),
+    ).toBeTruthy();
   });
 });
