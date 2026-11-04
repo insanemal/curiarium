@@ -102,6 +102,19 @@ describe("matchesFilter", () => {
     expect(matchesFilter(blockedHigh, "low")).toBe(false);
     expect(matchesFilter(readyLow, "low")).toBe(true);
   });
+
+  it("keeps a medium row for the medium chip and not for the low one", () => {
+    const readyMedium = makeBundle({ key: "Dragon_5390184", confidence: "medium" });
+
+    expect(matchesFilter(readyMedium, "medium")).toBe(true);
+    expect(matchesFilter(readyHigh, "medium")).toBe(false);
+    expect(matchesFilter(readyLow, "medium")).toBe(false);
+
+    // The discriminating pair: folding `medium` into the low leg (or the reverse)
+    // makes one of these two assertions fail.
+    expect(matchesFilter(readyMedium, "low")).toBe(false);
+    expect(matchesFilter(readyLow, "medium")).toBe(false);
+  });
 });
 
 describe("isBlocked", () => {
@@ -398,26 +411,44 @@ describe("typedName", () => {
 });
 
 describe("confidenceLabel", () => {
-  it("names high and low confidence", () => {
+  it("names each confidence level", () => {
     expect(confidenceLabel("high")).toBe("High confidence");
+    expect(confidenceLabel("medium")).toBe("Medium confidence");
     expect(confidenceLabel("low")).toBe("Low confidence");
+    // An unknown value still reads as the lowest level we know.
+    expect(confidenceLabel("future-level")).toBe("Low confidence");
   });
 });
 
 describe("headline", () => {
   it("says no bundles were found", () => {
-    expect(headline(makeCounts())).toBe("0 bundles found - 0 high confidence, 0 low");
+    expect(headline(makeCounts())).toBe("0 bundles found - 0 high confidence, 0 medium, 0 low");
   });
 
   it("uses the singular for exactly one bundle", () => {
     expect(headline(makeCounts({ total: 1, high: 1 }))).toBe(
-      "1 bundle found - 1 high confidence, 0 low",
+      "1 bundle found - 1 high confidence, 0 medium, 0 low",
     );
   });
 
   it("uses the plural for two bundles", () => {
     expect(headline(makeCounts({ total: 2, high: 1, low: 1 }))).toBe(
-      "2 bundles found - 1 high confidence, 1 low",
+      "2 bundles found - 1 high confidence, 0 medium, 1 low",
+    );
+  });
+
+  it("says 0 medium for a payload that omits the medium count", () => {
+    // Built without the `medium` key at all, which is exactly what a report
+    // written before the medium confidence looks like. Dropping the `?? 0` in
+    // `headline` makes the middle number read `undefined`.
+    const line = headline(makeCounts({ total: 1, high: 1 }));
+    expect(line).toBe("1 bundle found - 1 high confidence, 0 medium, 0 low");
+    expect(line).not.toContain("undefined");
+  });
+
+  it("reads the middle number from the medium count", () => {
+    expect(headline(makeCounts({ total: 4, high: 1, medium: 2, low: 1 }))).toBe(
+      "4 bundles found - 1 high confidence, 2 medium, 1 low",
     );
   });
 });

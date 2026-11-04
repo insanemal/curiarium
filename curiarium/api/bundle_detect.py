@@ -8,7 +8,7 @@ no ``Session``, no ``engine``, no ``open()``, no ``Path.read_*``, no
 ``os.scandir`` - so every rule below can be tested from literals, and the one
 disk+DB layer (``bundle_service``) owns every byte this module is handed.
 
-The three rules, strongest first:
+The rules, strongest first:
 
 * R1 ``thingiverse-readme`` / ``high``: the bundle root holds ``README.txt``
   and/or ``LICENSE.txt`` - at least one - and the pair carries both of
@@ -22,6 +22,13 @@ The three rules, strongest first:
   files as ``<bundle>_README`` / ``<bundle>_LICENSE``, either as two files or as
   two directories each holding one text file (the legacy flattening). Same
   enrichment as R1.
+* R4 ``thingiverse-id-name`` / ``medium``: nothing parses, but the directory
+  name starts with a Thingiverse id (``5390184_Title``) and the tree has at
+  least one model at the bundle's own depth. The id buys the source URL and the
+  thing id - provenance inferred from a name - and nothing else: creator,
+  licence and licence URL stay ``None``. R4 outranks R3 because an inferred id
+  is strictly more than a shape guess; it still requires a model at the own
+  depth, so photos or a pile of subdirectories is not enough.
 * R3 ``generic-bundle`` / ``low``: nothing parses, but the tree still looks like
   one thing - at least one model at the bundle's own depth, one image and one
   text file. The model evidence may be at depth 0, at depth 1 under the named
@@ -60,8 +67,8 @@ that membership.
 Every heuristic in this module is proven by ``tests/test_bundle_detect.py``: the
 suffix table, the shared image-suffix constant, both parser shapes and their
 negative cases, the licence table, the display name, the twin key, the cover
-pick, and the rule precedence including the marker-less README falling to low
-confidence.
+pick, the id-in-a-name extraction, and the rule precedence including the
+marker-less README falling to low confidence and R4's medium reading.
 
 The module also owns the vocabulary for pairing an archive with a directory by
 its *entry root* rather than its filename (``common_entry_root``,
@@ -136,18 +143,35 @@ MODEL, IMAGE, TEXT, ARCHIVE, OTHER = "model", "image", "text", "archive", "other
 
 DETECTOR_THINGIVERSE_README = "thingiverse-readme"
 DETECTOR_THINGIVERSE_SIBLING = "thingiverse-sibling-docs"
+DETECTOR_THINGIVERSE_ID_NAME = "thingiverse-id-name"
 DETECTOR_GENERIC = "generic-bundle"
 CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"
+
+# The confidences that rest on inference rather than on a document the vendor
+# wrote: a shape guess and a name guess. Every container guard asks whether a
+# candidate's confidence is IN this set, so a future inferred confidence cannot
+# escape a guard merely by not being `low`.
+INFERRED_CONFIDENCES = frozenset({CONFIDENCE_MEDIUM, CONFIDENCE_LOW})
 
 SHAPE_ROOT_DOCS = "root-docs"
 SHAPE_SIBLING_DOCS = "sibling-docs"
+SHAPE_ID_NAME = "id-name"
 SHAPE_GENERIC = "generic"
 
 _ROOT_README = "readme.txt"
 _ROOT_LICENSE = "license.txt"
 _SIBLING_README = "_README"
 _SIBLING_LICENSE = "_LICENSE"
+
+# A Thingiverse export roots its own entries at `NNNNNNN_Title`, so a directory
+# carrying that shape carries provenance. Four digits, because three-digit runs
+# are common in ordinary names; a mandatory `_`, because `2024-10-31_backup` is
+# a date and not an export; `^`-anchored, because `my_5390184_thing` is the
+# operator's own naming and predates the export.
+_THINGIVERSE_ID_IN_NAME = re.compile(r"^(\d{4,})_")
+_THINGIVERSE_THING_URL = "https://www.thingiverse.com/thing:{}"
 
 # One pass over a README, anchored on the two marker phrases Thingiverse writes.
 # The alternation keeps a single scan and one decision per marker.
@@ -409,6 +433,12 @@ def display_name(name: str) -> str:
     if cleaned:
         return cleaned
     return " ".join(raw.replace("_", " ").split()) or "bundle"
+
+
+def thingiverse_id_from_name(name: str) -> Optional[str]:
+    """The Thingiverse id a vendor export puts first in its name, or ``None``."""
+    match = _THINGIVERSE_ID_IN_NAME.match(name)
+    return match.group(1) if match else None
 
 
 def twin_key(name: str) -> str:
@@ -909,16 +939,45 @@ def _generic_facts(
     cover: Optional[str],
     models: Tuple[str, ...],
 ) -> BundleFacts:
+    return _name_only_facts(DETECTOR_GENERIC, CONFIDENCE_LOW, SHAPE_GENERIC, snapshot, counts, cover, models)
+
+
+def _name_only_facts(
+    detector: str,
+    confidence: str,
+    shape: str,
+    snapshot: BundleSnapshot,
+    counts: BundleCounts,
+    cover: Optional[str],
+    models: Tuple[str, ...],
+    thing_id: Optional[str] = None,
+) -> BundleFacts:
+    """A row built from the tree's own shape, with no vendor document behind it.
+
+    Creator, licence and licence URL are **always** ``None`` here, and there is
+    deliberately no parameter that could set them. An id in a name says where a
+    thing came from, never who made it or what it may be reused for, and the
+    Creative Commons variants differ materially (`cc-nc` forbids the commercial
+    use `cc-sa` allows), so a guessed licence is a legal claim we are not
+    entitled to make - and inheriting one from a sibling bundle would launder a
+    guess into an attribution.
+
+    The name-derived id is the one piece of provenance allowed through, and the
+    URL and the id cannot disagree: the URL is built from the id, and the stored
+    ``thing_id`` is then read *back* out of that URL by the shipped resolver, so
+    ``thingiverse_thing_id_from_url(source_url) == thing_id`` by construction.
+    """
+    source_url = _THINGIVERSE_THING_URL.format(thing_id) if thing_id is not None else None
     return BundleFacts(
-        detector=DETECTOR_GENERIC,
-        confidence=CONFIDENCE_LOW,
-        metadata_shape=SHAPE_GENERIC,
+        detector=detector,
+        confidence=confidence,
+        metadata_shape=shape,
         title=display_name(snapshot.bundle_name),
         creator=None,
         licence=None,
         licence_url=None,
-        source_url=None,
-        thing_id=None,
+        source_url=source_url,
+        thing_id=thingiverse_thing_id_from_url(source_url) if source_url is not None else None,
         description=None,
         cover_entry=cover,
         counts=counts,
@@ -931,10 +990,18 @@ def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional
 
     ``docs`` is keyed by the bundle-relative path the caller actually opened, so
     this function can only parse what it was handed - it never reaches for disk.
+
+    The order is R1, R2, R4, R3. R4 sits **before** R3 on purpose: an id in the
+    name is provenance we inferred, which is strictly more than a shape guess, so
+    an id-named directory that would also satisfy R3's trio must read `medium`
+    and not `low`. Both R4 and R3 gate on the same ``_own_depth_model_count``
+    predicate, so the one model-bearing-directory cardinality bound governs both
+    and is computed once.
     """
     counts = _counts(snapshot)
     models = _model_entries(snapshot)
     cover = _cover_entry(snapshot)
+    own_models = _own_depth_model_count(snapshot)
 
     root_pair = _merge_pair(_root_pair_paths(snapshot), docs)
     if root_pair is not None:
@@ -944,7 +1011,20 @@ def detect_bundle(snapshot: BundleSnapshot, docs: Mapping[str, str]) -> Optional
     if sibling_pair is not None:
         return _high_facts(DETECTOR_THINGIVERSE_SIBLING, SHAPE_SIBLING_DOCS, snapshot, sibling_pair, counts, cover, models)
 
-    if _own_depth_model_count(snapshot) >= 1 and counts.image >= 1 and counts.text >= 1:
+    thing_id = thingiverse_id_from_name(snapshot.bundle_name)
+    if thing_id is not None and own_models >= 1:
+        return _name_only_facts(
+            DETECTOR_THINGIVERSE_ID_NAME,
+            CONFIDENCE_MEDIUM,
+            SHAPE_ID_NAME,
+            snapshot,
+            counts,
+            cover,
+            models,
+            thing_id,
+        )
+
+    if own_models >= 1 and counts.image >= 1 and counts.text >= 1:
         return _generic_facts(snapshot, counts, cover, models)
     return None
 

@@ -40,9 +40,13 @@ const PRIMARY_BUTTON = "text-xs px-2.5 py-1.5 rounded-md bg-accent disabled:opac
 const SECONDARY_BUTTON =
   "text-xs px-2.5 py-1.5 rounded-md border border-panel-strong disabled:opacity-60";
 
-/** The old card's colours, kept so a row's confidence reads the same way here. */
+/** The old card's colours, kept so a row's confidence reads the same way here:
+ *  high is the vendor telling us, medium is an id we inferred from the folder
+ *  name (worth a look), low is a shape guess. */
 function confidenceClass(confidence: string): string {
-  return confidence === "high" ? "text-emerald-400" : "text-amber-400";
+  if (confidence === "high") return "text-emerald-400";
+  if (confidence === "medium") return "text-amber-400";
+  return "text-zinc-500";
 }
 
 /** The row's rightmost column: an existing project outranks a dismissal. */
@@ -243,6 +247,10 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const selected = visible.filter(row => selectedKeys.includes(row.key));
   const creatableSelected = selected.filter(isCreatable);
   const extractableSelected = selected.filter(isArchiveOnly);
+  // Deliberately `low` only, never `medium`: the bulk bar sends `name_only: true`,
+  // which writes no source URL, and a medium row's whole point is the URL derived
+  // from the id in its folder name. A medium row is created from the detail panel,
+  // where the enrichment is written. Widening this line silently discards that URL.
   const lowCreatable = visible.filter(row => row.confidence === "low" && isCreatable(row));
   const stale = report?.stale_dismissals ?? [];
   const activeRow = filtered.find(row => row.key === activeKey) ?? null;

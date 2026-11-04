@@ -13,13 +13,16 @@ The heuristics pinned here:
 * the model and image suffix sets are the shipped ones;
 * both Thingiverse parsers, their negative shapes and the licence table
   (including "no invented URL");
-* `display_name` and `twin_key`;
-* the rule order R1 -> R2 -> R3 -> not-a-bundle, the marker-less README falling
-  to low confidence, the sibling pair in both its file and directory shapes,
-  R3's model depth bound (the depth-0, named-directory and single-subdirectory
-  shapes it accepts, the depth-2 and multi-subdirectory shapes it refuses, and
-  R1 still accepting a bundle whose models live under ``files/``), and the cover
-  pick including its tie-break.
+* `display_name` and `twin_key`, and `thingiverse_id_from_name` with its digit
+  floor, mandatory separator and start anchor;
+* the rule order R1 -> R2 -> R4 -> R3 -> not-a-bundle, the marker-less README
+  falling to low confidence, the sibling pair in both its file and directory
+  shapes, R4's `medium` reading with the name-derived URL and no invented
+  attribution, R4 yielding to both high rules, and R3's model depth bound (the
+  depth-0, named-directory and single-subdirectory shapes it accepts, the
+  depth-2 and multi-subdirectory shapes it refuses, and R1 still accepting a
+  bundle whose models live under ``files/``), and the cover pick including its
+  tie-break.
 """
 
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -1172,3 +1175,167 @@ def test_duplicate_report_text_keeps_one_path_and_lists_the_copies() -> None:
     assert f"# sha256 {DUPLICATE_DIGEST} size 500 reclaimable 500" in lines
     assert "keep\t500\tx/Copy.zip" in lines
     assert "duplicate\t500\tx/Copy (1).zip" in lines
+
+
+# --- R4: an id in the name --------------------------------------------------
+
+DRAGON_NAME = "5390184_ARTICULATED_ice_dragon__fixed_"
+DRAGON_URL = "https://www.thingiverse.com/thing:5390184"
+
+
+def test_r4_offers_an_id_named_model_only_directory_at_medium() -> None:
+    """AC-1: the ticket's export, models only, is offered at medium.
+
+    Mutation: delete R4 from ``detect_bundle`` and this snapshot returns
+    ``None`` (no image and no text means R3 cannot fire), so every assertion
+    below reds. Mutation: stamp the row with a creator or a licence and the
+    ``None`` assertions red - a name says where a thing came from, never who
+    made it or what it may be reused for.
+    """
+    facts = bundle_detect.detect_bundle(
+        snapshot(DRAGON_NAME, {"files/ARTICULATED_ice_dragon_fixed_p1.stl": 40}), {}
+    )
+
+    assert facts is not None
+    assert facts.confidence == bundle_detect.CONFIDENCE_MEDIUM
+    assert facts.detector == bundle_detect.DETECTOR_THINGIVERSE_ID_NAME
+    assert facts.metadata_shape == bundle_detect.SHAPE_ID_NAME
+    assert facts.source_url == DRAGON_URL
+    assert facts.thing_id == "5390184"
+    assert facts.creator is None
+    assert facts.licence is None
+    assert facts.licence_url is None
+    assert facts.description is None
+    assert bundle_detect.thingiverse_thing_id_from_url(facts.source_url) == facts.thing_id, (
+        "the URL and the id are the same statement, by construction"
+    )
+    assert facts.title == bundle_detect.display_name(DRAGON_NAME)
+
+
+def test_r4_refuses_a_model_only_directory_without_an_id() -> None:
+    """AC-2: the same shape under an ordinary name is offered by nothing.
+
+    Mutation: let R4 fire on any name (drop the id lookup) and both snapshots
+    come back as medium rows, so both assertions red.
+    """
+    assert bundle_detect.detect_bundle(snapshot("Plain_parts", {"files/a.stl": 40}), {}) is None
+    assert bundle_detect.detect_bundle(snapshot("Gear Bearing", {"files/a.stl": 40}), {}) is None
+
+
+def test_r4_outranks_r3_so_an_id_named_trio_reads_medium() -> None:
+    """R4 sits before R3: an inferred id is strictly more than a shape guess.
+
+    Mutation: move the R4 block after the R3 block and the id-named trio comes
+    back ``low``/``generic``, so the medium assertion reds. The second half
+    proves R3 itself is unchanged: the identical trio under a non-id name is
+    still ``low``, and it still invents no URL.
+    """
+    files = {"part.stl": 40, "render.png": 5, "notes.txt": 3}
+    id_named = bundle_detect.detect_bundle(snapshot(DRAGON_NAME, files), {})
+    plain = bundle_detect.detect_bundle(snapshot("Plain_trio", files), {})
+
+    assert id_named is not None
+    assert id_named.confidence == bundle_detect.CONFIDENCE_MEDIUM
+    assert id_named.metadata_shape == bundle_detect.SHAPE_ID_NAME
+    assert plain is not None
+    assert plain.confidence == bundle_detect.CONFIDENCE_LOW
+    assert plain.metadata_shape == bundle_detect.SHAPE_GENERIC
+    assert plain.source_url is None
+
+
+def test_r4_yields_to_both_high_rules() -> None:
+    """A vendor document always outranks the name, exactly as it outranks R3.
+
+    Mutation: put R4 first and this snapshot comes back medium with the
+    name-derived id, so both the high assertion and the document-id assertion
+    red.
+    """
+    files = {"README.txt": len(README_TEXT), "LICENSE.txt": len(LICENSE_TEXT), "part.stl": 40}
+    id_named = bundle_detect.detect_bundle(snapshot(DRAGON_NAME, files), r1_docs())
+    plain = bundle_detect.detect_bundle(snapshot("Neutral", files), r1_docs())
+
+    assert id_named is not None
+    assert id_named.confidence == bundle_detect.CONFIDENCE_HIGH
+    assert id_named.detector == bundle_detect.DETECTOR_THINGIVERSE_README
+    assert id_named.thing_id == "2493386", "the document's id, never the name's"
+    assert provenance(id_named) == provenance(plain), "the name changes nothing once a document speaks"
+
+
+def test_r4_requires_a_model_at_the_bundles_own_depth() -> None:
+    """A name is provenance, never evidence that this is one thing.
+
+    Mutation: drop the ``own_models >= 1`` leg of R4 and both snapshots are
+    offered - the photos-plus-notes directory on the trio's text, and the pile
+    of two unnamed model-bearing subdirectories on its children's models.
+    """
+    assert bundle_detect.detect_bundle(snapshot("5390184_photos", {"a.jpg": 1, "notes.txt": 5}), {}) is None
+    assert (
+        bundle_detect.detect_bundle(
+            snapshot("5390184_parts", {"Alpha/part.stl": 40, "Beta/part.stl": 41}), {}
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("5390184_ARTICULATED_ice_dragon__fixed_", "5390184"),
+        ("2024_parts", "2024"),
+        ("2024-10-31_backup", None),
+        ("my_5390184_thing", None),
+        ("606cdf0d5199b_thing", None),
+        ("539_x", None),
+        ("ARTICULATED_ice_5390184", None),
+    ],
+)
+def test_the_id_in_a_name_needs_a_digit_floor_a_separator_and_the_start(name: str, expected: Optional[str]) -> None:
+    """The extractor's four decisions, each killable by one mutation.
+
+    * ``\\d{4,}`` -> ``\\d+`` reds ``539_x`` (the four-digit floor);
+    * the mandatory ``_`` -> ``_?`` reds ``2024-10-31_backup`` (a date is not an
+      export);
+    * dropping ``^`` AND switching ``.match`` for ``.search`` reds
+      ``my_5390184_thing`` (the anchor).
+
+    Dropping ``^`` alone, or ``.match`` -> ``.search`` with ``^`` kept, are
+    provable no-ops: ``.match`` already anchors at position 0 and ``^`` already
+    anchors inside ``.search``, so the combined mutation is the killable one.
+    ``2024_parts`` is the knowingly accepted false positive of the digit floor;
+    it is pinned so a stricter regex that starts refusing it is a visible change.
+    """
+    assert bundle_detect.thingiverse_id_from_name(name) == expected
+
+
+def test_the_accepted_id_lookalike_is_offered_at_medium() -> None:
+    """A plain year prefix is indistinguishable from an id and is accepted.
+
+    ``2024_parts`` reads as a Thingiverse id, so the row is medium with the
+    derived URL and no attribution invented. The one lookalike the separator
+    rule refuses is ``2024-10-31_backup``, and the test above pins that refusal:
+    without it, every dated backup directory would claim a source URL. Mutation:
+    remove the separator floor and this test still passes while the refusal
+    above reds - the pair is what makes the trade visible.
+    """
+    facts = bundle_detect.detect_bundle(snapshot("2024_parts", {"part.stl": 40}), {})
+
+    assert facts is not None
+    assert facts.confidence == bundle_detect.CONFIDENCE_MEDIUM
+    assert facts.source_url == "https://www.thingiverse.com/thing:2024"
+    assert facts.thing_id == "2024"
+    assert facts.creator is None
+    assert facts.licence is None
+
+
+def test_inferred_confidences_holds_both_guesses_and_not_high() -> None:
+    """The set is the contract the container guards read.
+
+    Mutation: add a fourth inferred confidence and forget this set - or drop a
+    member - and the equality reds. Mutation: put ``high`` in the set and the
+    membership assertion reds; the whole point is that a high row is exempt from
+    the container guards because its documents sit at depth 0.
+    """
+    assert bundle_detect.INFERRED_CONFIDENCES == frozenset(
+        {bundle_detect.CONFIDENCE_MEDIUM, bundle_detect.CONFIDENCE_LOW}
+    )
+    assert bundle_detect.CONFIDENCE_HIGH not in bundle_detect.INFERRED_CONFIDENCES

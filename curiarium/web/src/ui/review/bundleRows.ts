@@ -4,12 +4,15 @@
 
 import type { BundleDetectCounts, BundleDetectItem } from "../../lib/api/bundles";
 
-export type BundleFilter = "all" | "ready" | "blocked" | "low";
+export type BundleFilter = "all" | "ready" | "blocked" | "medium" | "low";
 
 export const BUNDLE_FILTERS: { id: BundleFilter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "ready", label: "Ready" },
   { id: "blocked", label: "Blocked" },
+  // Ordered as the confidences read, high to low, so the chips are a ladder an
+  // operator can walk down rather than a set in arrival order.
+  { id: "medium", label: "Medium confidence" },
   { id: "low", label: "Low confidence" },
 ];
 
@@ -22,12 +25,17 @@ export const BLOCKED_REASON_LABELS: Record<string, string> = {
 
 export function headline(counts: BundleDetectCounts): string {
   const bundles = counts.total === 1 ? "1 bundle" : `${counts.total} bundles`;
-  return `${bundles} found - ${counts.high} high confidence, ${counts.low} low`;
+  // The `?? 0` is what makes an older payload safe: a report written before the
+  // medium confidence omits the field, and this shows `0 medium` rather than
+  // `undefined medium`.
+  const medium = counts.medium ?? 0;
+  return `${bundles} found - ${counts.high} high confidence, ${medium} medium, ${counts.low} low`;
 }
 
 export function matchesFilter(row: BundleDetectItem, filter: BundleFilter): boolean {
   if (filter === "ready") return row.status === "ready";
   if (filter === "blocked") return row.status !== "ready";
+  if (filter === "medium") return row.confidence === "medium";
   if (filter === "low") return row.confidence === "low";
   return true;
 }
@@ -77,7 +85,11 @@ export function needsDecision(row: BundleDetectItem): boolean {
 }
 
 export function confidenceLabel(confidence: string): string {
-  return confidence === "high" ? "High confidence" : "Low confidence";
+  if (confidence === "high") return "High confidence";
+  if (confidence === "medium") return "Medium confidence";
+  // The fallback stays: an unknown value from a newer server still reads as the
+  // lowest confidence we know, rather than printing nothing.
+  return "Low confidence";
 }
 
 export function statusLine(row: BundleDetectItem): string {

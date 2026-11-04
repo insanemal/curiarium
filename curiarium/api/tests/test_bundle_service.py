@@ -57,6 +57,11 @@ CAT_CREATED_BY = "This thing was created by Thingiverse user nervoussystem, and 
 CAT_TITLE_LINE = "2-color standing cat by nervoussystem on Thingiverse: https://www.thingiverse.com/thing:62536\n"
 CAT_URL = "https://www.thingiverse.com/thing:62536"
 
+# The id-named export from the ticket: the directory name itself is the
+# provenance, and the derived URL is the only thing it is allowed to state.
+DRAGON = "5390184_ARTICULATED_ice_dragon__fixed_"
+DRAGON_URL = "https://www.thingiverse.com/thing:5390184"
+
 # The Moai previews, in the order they are written. The fourth is the largest, so
 # it is the cover the report must pick.
 IMAGE_SIZES = (100, 400, 200, 900, 300)
@@ -1051,6 +1056,7 @@ def test_service_the_moai_bundle_is_ready_with_a_cover(isolated_storage: Path) -
     assert report["counts"] == {
         "total": 1,
         "high": 1,
+        "medium": 0,
         "low": 0,
         "ready": 1,
         "blocked": 0,
@@ -2536,3 +2542,367 @@ def test_service_a_duplicate_is_refused_by_create(isolated_storage: Path) -> Non
     assert created["created"] == 0
     assert created["results"][0]["reason"] == "unknown bundle"
     assert table_counts()["projects"] == 0
+
+
+# --- R4: an id in the name --------------------------------------------------
+
+
+def write_dragon(storage: Path) -> Path:
+    """The ticket's export: one model under ``files/`` and no preview, no text."""
+    bundle = storage / "import" / DRAGON
+    write_file(bundle / "files" / "ARTICULATED_ice_dragon_fixed_p1.stl", STL_BYTES)
+    return bundle
+
+
+def test_service_an_id_named_model_only_directory_is_offered_at_medium(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-1: the name buys a medium row with a derived URL and nothing else.
+
+    Mutation: delete R4 from ``detect_bundle`` and the report is empty, so the
+    row lookup itself reds. Mutation: stamp the row with a creator or a licence
+    and the ``None`` assertions red - and the create pass must carry the derived
+    URL through while still inventing no attribution.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == [f"import/{DRAGON}"]
+    row = row_for(report, f"import/{DRAGON}")
+    assert row["confidence"] == "medium"
+    assert row["detector"] == "thingiverse-id-name"
+    assert row["metadata_shape"] == "id-name"
+    assert row["source_url"] == DRAGON_URL
+    assert row["creator"] is None
+    assert row["licence"] is None
+    assert row["licence_url"] is None
+    assert row["status"] == "ready"
+    assert report["counts"]["medium"] == 1
+    assert report["counts"]["low"] == 0
+    assert report["counts"]["high"] == 0
+    assert report["counts"]["total"] == 1
+
+    created = create(client, headers, [{"key": row["key"]}])
+
+    assert created["created"] == 1
+    project_id = created["results"][0]["project_id"]
+    project = project_listing(client, headers)[project_id]
+    assert project["creator"] is None
+    assert project["licence"] is None
+    assert project["licence_url"] is None
+    assert project["source_url"] == DRAGON_URL, "the derived URL survives creation"
+    assert member_count(project_id) == 1
+    with Session(engine) as session:
+        stored = session.exec(select(Project)).one()
+    marker = json.loads(stored.metadata_json)["_bundle"]
+    assert marker["detector"] == "thingiverse-id-name"
+    assert marker["confidence"] == "medium"
+
+
+def test_service_a_doc_less_model_only_directory_without_an_id_is_still_refused(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-2: the same shape under an ordinary name stays invisible.
+
+    Mutation: let R4 fire on any name and the report offers a row here, so both
+    the empty-report assertions red and the create is no longer ``unknown
+    bundle``.
+    """
+    write_file(isolated_storage / "import" / "Plain_parts" / "files" / "a.stl", STL_BYTES)
+    scan()
+    headers = auth_header(client)
+
+    assert bundle_service.build_report()["bundles"] == []
+    assert bundle_service.iter_bundle_candidates(isolated_storage) == ([], False)
+
+    created = create(client, headers, [{"key": "import/Plain_parts"}])
+
+    assert created["created"] == 0
+    assert created["failed"] == 1
+    assert created["results"][0]["reason"] == "unknown bundle"
+    assert project_listing(client, headers) == {}
+
+
+def test_service_a_name_only_with_a_derived_url_is_not_sent_name_only_by_the_low_bar(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The bulk ``name_only: true`` path writes no provenance, medium included.
+
+    This is the service-side companion to the UI pin: the bulk bar only takes
+    rows whose confidence is exactly ``low``, because a ``medium`` row carries a
+    derived URL that ``name_only`` would throw away. Mutation: widen the bulk
+    bar to ``medium`` and the URL test below reds; the non-name-only create in
+    the test above proves the URL is there to lose.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    headers = auth_header(client)
+    row = row_for(detect(client, headers), f"import/{DRAGON}")
+    assert row["source_url"] == DRAGON_URL, "the row does carry a derived URL"
+
+    created = create(client, headers, [{"key": row["key"], "name_only": True}])
+
+    assert created["created"] == 1
+    project = project_listing(client, headers)[created["results"][0]["project_id"]]
+    assert project["source_url"] is None
+    assert project["creator"] is None
+    assert project["licence"] is None
+
+
+def write_children_pile(storage: Path) -> Path:
+    """An id-named pile holding two real child bundles plus its own loose trio."""
+    pile = storage / "import" / "5390184_pile"
+    write_file(pile / "loose.stl", STL_BYTES)
+    write_file(pile / "render.png", b"p" * 70)
+    write_text(pile / "notes.txt", "a loose trio")
+    for name, model in (("Child_A", "a.stl"), ("Child_B", "b.stl")):
+        write_file(pile / name / model, b"s" * 41)
+        write_file(pile / name / f"{name}.png", b"p" * 50)
+        write_text(pile / name / "notes.txt", "print at 0.2mm")
+    return pile
+
+
+def test_service_an_id_named_pile_beside_its_children_is_not_a_bundle(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The site-A witness: an inferred id never swallows a subtree.
+
+    The pile carries a full trio AND an id in its name, so R4 offers it at
+    ``medium``; only the widened site-A refusal keeps it out of the report.
+    Mutation: put site A back to ``== CONFIDENCE_LOW`` and the pile becomes a
+    creatable ``medium``/``ready`` row, so its absence assertion reds and the
+    create pass makes three projects instead of two.
+    """
+    write_children_pile(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    keys = [row["key"] for row in report["bundles"]]
+    assert "import/5390184_pile/Child_A" in keys
+    assert "import/5390184_pile/Child_B" in keys
+    assert row_for(report, "import/5390184_pile/Child_A")["status"] == "ready"
+    assert row_for(report, "import/5390184_pile/Child_B")["status"] == "ready"
+    assert all(row["key"] != "import/5390184_pile" for row in report["bundles"])
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert {candidate.key for candidate in candidates} == {
+        "import/5390184_pile/Child_A",
+        "import/5390184_pile/Child_B",
+    }
+
+    created = create(client, headers, [{"key": key} for key in keys])
+
+    assert created["created"] == 2
+    assert created["failed"] == 0
+    names = {project["name"] for project in project_listing(client, headers).values()}
+    assert names == {"Child A", "Child B"}, "the pile is never made into a project"
+
+
+def test_service_an_id_named_pile_with_its_stem_twin_is_blocked_and_reads_low(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A refused pairing is never stamped with the id provenance it was refused for.
+
+    The archive is exactly the pile's two loose files, so containment verifies
+    and only the container rule can refuse the promotion; the pair-only row then
+    reads the archive-owned facts, which are ``low``/``generic`` with no URL.
+    Mutation: un-widen site A and the pile is appended in the folder pass, so
+    the promotion pass skips it (``any(candidate.key == folder for candidate in
+    found)``) and there is no ``pair_only`` row at all - this test then sees a
+    ``ready``/``medium`` pile and fails.
+    """
+    loose_stl, loose_png = STL_BYTES, b"p" * 70
+    pile = write_children_pile(isolated_storage)
+    write_zip(
+        isolated_storage / "import" / "5390184_pile.zip",
+        {"5390184_pile/loose.stl": loose_stl, "5390184_pile/render.png": loose_png},
+    )
+    assert (pile / "loose.stl").stat().st_size == len(loose_stl)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert row_for(report, "import/5390184_pile/Child_A")["status"] == "ready"
+    assert row_for(report, "import/5390184_pile/Child_B")["status"] == "ready"
+    row = row_for(report, "import/5390184_pile")
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+    assert row["archive"] == {"rel_path": "import/5390184_pile.zip", "twin_verified": True}
+    assert row["confidence"] == "low"
+    assert row["detector"] == "generic-bundle"
+    assert row["metadata_shape"] == "generic"
+    assert row["source_url"] is None
+
+    created = create(client, headers, [{"key": row["key"]} for row in report["bundles"]])
+
+    assert created["created"] == 2
+    assert created["blocked"] == 1
+    assert created["failed"] == 0
+    names = {project["name"] for project in project_listing(client, headers).values()}
+    assert "pile" not in names, "the pile is refused, never made into a project"
+
+
+def test_service_an_id_named_directory_with_its_stem_twin_is_one_medium_row(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """One row: the directory is R4-detected, so the archive is provenance.
+
+    The promotion pass skips every key already in ``found`` and R4's gate is the
+    same ``_own_depth_model_count`` predicate, so an id-named directory is
+    always R4-detected and never promoted. Mutation: let the promotion pass win
+    - drop BOTH the ``twin in detected`` skip on the pairing pass and the
+    ``found`` skip on the promotion pass - and a second, ``archive_owned``
+    candidate appears for the same key, so this test sees two rows (the
+    directory would then also read ``low``/``generic-bundle``) and fails.
+    Removing either skip alone changes nothing here, because the other one
+    still protects this row.
+    """
+    write_file(isolated_storage / "import" / DRAGON / "part.stl", STL_BYTES)
+    write_zip(isolated_storage / "import" / f"{DRAGON}.zip", {f"{DRAGON}/part.stl": STL_BYTES})
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == [f"import/{DRAGON}"]
+    row = row_for(report, f"import/{DRAGON}")
+    assert row["confidence"] == "medium"
+    assert row["detector"] == "thingiverse-id-name"
+    assert row["status"] == "ready"
+    assert row["archive"] == {"rel_path": f"import/{DRAGON}.zip", "twin_verified": True}
+    assert report["counts"]["medium"] == 1
+    assert report["counts"]["low"] == 0
+
+    created = create(client, headers, [{"key": row["key"]}])
+
+    assert created["created"] == 1
+    assert member_count(created["results"][0]["project_id"]) == 1, "the archive attaches nothing"
+
+
+def test_service_an_id_named_medium_folder_holding_a_vendor_zip_is_stripped(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The site-B witness: a medium folder holding a zip-only bundle is a container.
+
+    The folder is offered at ``medium`` by R4 before the zip is ever read, so
+    only the widened site-B strip keeps it from swallowing the zip as a member.
+    Mutation: put site B back to ``== CONFIDENCE_LOW`` and the folder survives
+    into ``bundle_dirs``, ``_nested_archives`` deletes the zip row, and both
+    assertions below red - the folder is offered and the archive disappears.
+    """
+    bundle = isolated_storage / "import" / "5390184_set"
+    write_file(bundle / "a.stl", STL_BYTES)
+    write_zip(
+        bundle / "inner.zip",
+        {
+            "README.txt": README_TEXT.encode(),
+            "LICENSE.txt": LICENSE_TEXT.encode(),
+            "images/a.jpg": b"j" * 30,
+            "files/part.stl": STL_BYTES,
+        },
+    )
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    keys = {row["key"] for row in report["bundles"]}
+    assert "import/5390184_set" not in keys, "a guess holding another bundle is a container"
+    row = row_for(report, "import/5390184_set/inner.zip")
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+
+
+def test_create_refuses_a_medium_candidate_whose_assets_include_another_bundles(
+    isolated_storage: Path,
+) -> None:
+    """The site-C witness: the create-time belt covers every inferred confidence.
+
+    Mutation: put site C back to ``== CONFIDENCE_LOW`` and the medium candidate
+    falls through to the project insert, so a ``Project`` row exists and both
+    the empty-select assertion and the status assertion red.
+    """
+    inbox = isolated_storage / "Inbox"
+    write_file(inbox / "loose.stl", STL_BYTES)
+    write_file(inbox / "loose.jpg", b"j" * 60)
+    write_text(inbox / "notes.txt", "a loose trio")
+    moai_bundle(inbox / "Child")
+    scan()
+    snapshot = bundle_detect.BundleSnapshot(
+        bundle_name="Inbox",
+        rel_dir="Inbox",
+        entries=(
+            bundle_detect.BundleEntry(rel_path="loose.stl", size=len(STL_BYTES)),
+            bundle_detect.BundleEntry(rel_path="loose.jpg", size=60),
+            bundle_detect.BundleEntry(rel_path="notes.txt", size=13),
+        ),
+    )
+    candidate = bundle_service.BundleCandidate(
+        key="Inbox", snapshot=snapshot, archive_path=None, is_archive=False, confidence="medium"
+    )
+    row = {
+        "key": "Inbox",
+        "rel_path": "Inbox",
+        "name_suggestion": "Inbox",
+        "creator": None,
+        "licence": None,
+        "licence_url": None,
+        "source_url": None,
+        "description_excerpt": None,
+        "detector": "thingiverse-id-name",
+        "confidence": "medium",
+        "metadata_shape": "id-name",
+        "cover": {"asset_id": None, "rel_path": "Inbox/loose.jpg", "reason": "largest-image-unregistered", "url": None, "thumb_url": None},
+        "status": "ready",
+        "blocked_reason": None,
+        "archive": None,
+    }
+
+    result = bundle_service._create_one(
+        bundle_service.BundleCreateItem(key="Inbox", name_only=True), row, candidate, audit_ctx()
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "contains_bundles"
+    with Session(engine) as session:
+        assert session.exec(select(Project)).all() == [], "a refusal writes no Project row"
+
+
+def test_service_an_id_named_zip_is_an_archive_only_medium_row(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """``_zip_snapshot`` names an archive's snapshot from the zip's stem.
+
+    R4 therefore sees an id-shaped name for an archive too: a widening from
+    directories to archive snapshots, accepted and recorded in ADR 0010
+    Decision 20, and harmless because a zip-only row can never create.
+    Mutation: gate R4 on directories only (or drop the stem-name snapshot) and
+    this zip reads ``generic-bundle``/``low`` with no URL, so the medium and
+    ``source_url`` assertions red; the create stays blocked either way, which
+    is exactly why the widening is harmless.
+    """
+    write_zip(isolated_storage / "import" / f"{DRAGON}.zip", {"part.stl": STL_BYTES})
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == [f"import/{DRAGON}.zip"]
+    row = row_for(report, f"import/{DRAGON}.zip")
+    assert row["confidence"] == "medium"
+    assert row["detector"] == "thingiverse-id-name"
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "archive_only"
+    assert row["source_url"] == DRAGON_URL
+
+    created = create(client, headers, [{"key": row["key"]}])
+
+    assert created["blocked"] == 1
+    assert project_listing(client, headers) == {}

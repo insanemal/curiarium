@@ -68,7 +68,7 @@ class BundleDetectItemOut(BaseModel):
   licence_url: Optional[str] = None
   source_url: Optional[str] = None
   detector: str
-  # high | low, orthogonal to `status`: a legacy bundle is high confidence and blocked.
+  # high | medium | low, orthogonal to `status`: a legacy bundle is high confidence and blocked.
   confidence: str
   metadata_shape: str
   description_excerpt: Optional[str] = None
@@ -96,6 +96,7 @@ class BundleDetectCountsOut(BaseModel):
 
   total: int = 0
   high: int = 0
+  medium: int = 0
   low: int = 0
   ready: int = 0
   blocked: int = 0

@@ -37,6 +37,10 @@ whatever else it holds, and both routes now decide containment through one
 predicate; the stem rule's precedence and the entry-root rule's generic-root
 refusal are unchanged).
 
+**Extended:** ticket `Mf-ey4q` (a Thingiverse id in a bundle's name is provenance
+at `medium` confidence - a `source_url` and nothing else - and every container
+guard now asks whether a confidence is inferred rather than whether it is `low`).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -74,32 +78,43 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 
 ## Decision
 
-1. **Three rules, strongest first, in a pure module.**
+1. **Four rules, strongest first, in a pure module.**
    `curiarium/api/bundle_detect.py` holds every judgement and performs no I/O:
    no `Session`, no `engine`, no `open()`, no `Path.read_*`, no `os.scandir`.
    It is handed a `BundleSnapshot` (a listing of `BundleEntry(rel_path, size)`)
    and the handful of documents the caller actually opened, and returns
    `BundleFacts` or `None`. Each rule carries a detector name, a confidence and
-   a metadata shape, and they are evaluated in this order:
+   a metadata shape, and they are evaluated in this order - **R1, R2, R4, R3** -
+   the first one that fires decides the row:
 
    | # | Detector | Confidence | Shape | Fires when |
    |---|---|---|---|---|
    | R1 | `thingiverse-readme` | `high` | `root-docs` | the bundle root holds `README.txt` and/or `LICENSE.txt` - **at least one** of the two - and between them the pair carries both of Thingiverse's markers **in whichever document they were shipped**: `created by Thingiverse user <name>` with `licensed under <token>` on one side, `<title> by <creator> on Thingiverse: <url>` on the other |
    | R2 | `thingiverse-sibling-docs` | `high` | `sibling-docs` | the same pair shipped beside the files as `<bundle>_README` / `<bundle>_LICENSE` - as two files, or as two directories each holding one text file (the legacy flattening) - at least one of them present, and both markers present in whichever of the two documents holds them |
+   | R4 | `thingiverse-id-name` | `medium` | `id-name` | nothing parses, but the bundle's name starts with a Thingiverse id (`NNNNNNN_Title` - 4+ digits then `_`) and the tree holds at least one model **at the bundle's own depth** (the same bound R3 uses); the id is provenance inferred from the name, buying `source_url` / `thing_id` and nothing else |
    | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model **at the bundle's own depth** - depth 0, depth 1 under `files/`, or depth 1 under exactly one model-bearing subdirectory - plus one image and one text entry |
 
    `high` therefore means *the vendor told us*, never *there is a `.txt` file*.
    A README that exists but lacks the markers is not R1: both high-confidence
-   rules miss, and the bundle either falls through to R3 - low confidence, name
-   only, every provenance field `None` - or is not a bundle at all. The title is
-   the parsed licence title, else `display_name(bundle_name)` (a leading
-   `^\d+[_-]+` ordinal dropped, underscores to spaces, whitespace collapsed, no
-   dash rewriting); the creator is the created-by sentence's, the licence and
-   its URL come from an explicit token table, and an unknown token is echoed
-   back with **no** URL, because a guessed licence link is a legal statement we
-   are not entitled to make. The description is the document that carried the
-   created-by sentence, and it is `None` when nothing did. The cover is the
-   largest image, ties broken by path.
+   rules miss, and the bundle either falls through to R4, or to R3 - low
+   confidence, name only, every provenance field `None` - or is not a bundle at
+   all. The title is the parsed licence title, else `display_name(bundle_name)`
+   (a leading `^\d+[_-]+` ordinal dropped, underscores to spaces, whitespace
+   collapsed, no dash rewriting); the creator is the created-by sentence's, the
+   licence and its URL come from an explicit token table, and an unknown token
+   is echoed back with **no** URL, because a guessed licence link is a legal
+   statement we are not entitled to make. The description is the document that
+   carried the created-by sentence, and it is `None` when nothing did. The cover
+   is the largest image, ties broken by path.
+
+   R4 sits **before** R3 in that order, so an id-named directory that would also
+   satisfy R3's trio reads `medium` and not `low`: an id inferred from the
+   operator-visible name is strictly more than a shape guess, because it says
+   which thing, on which site, this came from. `medium` therefore means *we
+   inferred the provenance from the name the operator can see*, never *we read it
+   in a document the vendor wrote* - and it is a confidence of its own rather
+   than a shade of `low`, which is why the report counts it separately as
+   `counts.medium`.
 
    The model evidence for R3 is bounded to the bundle's own depth, in one of
    three shapes: a model at depth 0; a model at depth 1 under the named
@@ -134,7 +149,10 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    is unchanged. A model outside the allowed shapes fails closed - the directory
    is not offered rather than wrongly created - and `R3_MODEL_DIRS` is now only
    the named allowance: widening further means changing the cardinality rule,
-   not adding a name.
+   not adding a name. R4 shares that bound *and* that computation - `detect_bundle`
+   calls `_own_depth_model_count` once and both R4 and R3 gate on the result - so
+   the one cardinality rule governs a name-only offer exactly as it governs a
+   shape-only one.
 
 2. **Classification is suffix-only, and never looks at a stem.**
    `classify_entry` maps an entry to `model` / `image` / `text` / `archive` /
@@ -411,25 +429,26 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     make a project named `import` that swallows the library - the exact failure
     the "never create a project you cannot attach assets to" constraint was
     written to prevent, inverted. So `iter_bundle_candidates` keeps the strict
-    ancestors of every bundle it claims and skips a **low-confidence** candidate
+    ancestors of every bundle it claims and skips a candidate of **inferred
+    confidence** - `low`, or the `medium` of an id in the name (Decision 20) -
     whose key is in that set, *without* claiming it, so the rejected container's
     own files still bubble up to a legitimate ancestor instead of being
-    stripped. A low folder candidate that strictly contains a zip-only candidate
-    is dropped as well once the archive pass has run. **High-confidence
-    candidates are exempt**, and the exemption is a fact rather than a
-    convenience: their documents sit at depth 0, so they provably attach only
-    their own models - `test_a_parent_attaches_only_its_own_models` pins
+    stripped. A folder candidate of inferred confidence that strictly contains a
+    zip-only candidate is dropped as well once the archive pass has run.
+    **High-confidence candidates are exempt**, and the exemption is a fact rather
+    than a convenience: their documents sit at depth 0, so they provably attach
+    only their own models - `test_a_parent_attaches_only_its_own_models` pins
     `assets_total == 13` while the project attaches 1 - and demoting one would
-    silently lose a real bundle to a spurious subfolder. Low confidence is a
-    guess, and a guess must never swallow a subtree, including a subtree made of
-    other low candidates.
+    silently lose a real bundle to a spurious subfolder. An inferred confidence
+    is a guess, and a guess must never swallow a subtree, including a subtree
+    made of other inferred candidates.
 
     The attach set is unchanged: a created project still attaches exactly the
     model files its own snapshot names. Independently of detection, `_create_one`
-    refuses a low-confidence candidate whose registered assets under the key
-    outnumber the assets its own snapshot names (`len(assets) > len(own_assets)`
-    - that difference *is* another bundle's assets), returning `failed` with
-    reason `contains_bundles` before `project_service.create_project` runs.
+    refuses a candidate of inferred confidence whose registered assets under the
+    key outnumber the assets its own snapshot names (the `len(assets) >
+    len(own_assets)` difference *is* another bundle's assets), returning `failed`
+    with reason `contains_bundles` before `project_service.create_project` runs.
     Nothing is written and no half-created project can exist, because the guard
     precedes the project row. It is `failed`, never `blocked`: `blocked` keeps
     meaning database readiness (Mf-um7x), and a detection mistake must not
@@ -662,6 +681,149 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
       `Mf-t12a` would already have promoted it; its archive is rooted at `files/`,
       so the entry root could never name it; and its stem was consumed before any
       pass could verify it.
+
+20. **A Thingiverse id in the name is provenance, and it is the only provenance
+    a name can buy.** R4 reads `^(\d{4,})_` off the name and buys exactly one
+    thing with it: a `source_url`, and the `thing_id` derived back out of that
+    URL. Every other provenance field stays `None` - by construction, not by
+    discipline.
+
+    **The fault, measured.** On the owner's live library (131 top-level
+    directories, 8 of them named with a leading numeric id), 7 of the 8 are
+    detected and one is not: `5390184_ARTICULATED_ice_dragon__fixed_/`, holding a
+    single `files/ARTICULATED_ice_dragon_fixed_p1.stl`. It was invisible for a
+    *structural* reason, not a conservative one. R1 and R2 need a README or a
+    LICENSE document; R3 needs the model+image+text trio; the archive-pairing
+    rules need an archive it has no twin of - so every rule looks for evidence
+    this folder does not carry, except the one signal it does carry. `NNNNNNN_Title`
+    is the Thingiverse export convention, not a coincidence: the zip the operator
+    extracted roots its own entries at exactly that name, which is why the id can
+    be read as provenance at all. R4 reads it and adds exactly one row on that
+    library. Mutation: delete the R4 block from `detect_bundle` and that snapshot
+    returns `None` - with no image and no text, R3 cannot fire either - so the
+    report comes back empty and every assertion in the witness reds.
+
+    **The bound is the regex, and each bound is load-bearing.** `^(\d{4,})_` is
+    three decisions in seven characters, and each one has a named mutation and a
+    witness name. A digit floor: widening `\d{4,}` to `\d+` admits `539_x`, a
+    part number and not an export. A mandatory separator: making the `_` optional
+    (`_?`) admits `2024-10-31_backup`, so every dated backup directory would claim
+    a source URL. An anchor: the killable mutant is the *combined* unanchor - drop
+    the `^` **and** switch `.match` for `.search` - which admits
+    `my_5390184_thing`, the operator's own naming that merely quotes an id.
+    Dropping the `^` alone and switching to `.search` with the `^` kept are both
+    provable no-ops (`.match` already anchors at position 0, and `^` already
+    anchors inside `.search`), so a test that mutated only one of the two would
+    prove nothing - which is why the table names all seven strings rather than
+    only the three that fail.
+
+    **Both lookalikes are decided explicitly, and neither is an accident of the
+    regex.** `2024_parts` **is** offered, at `medium`, with `source_url`
+    `https://www.thingiverse.com/thing:2024`: a four-digit run followed by `_` is
+    the export shape, and the cost of that false positive is one row a human can
+    dismiss or fix. The residual risk is stated rather than hidden -
+    `find_existing_project` compares the normalised `url_utils.source_key`, not
+    the raw URL, so a genuine project imported from `thing:2024` can make this row
+    read `already_created`. That is visible, reversible, and never a write.
+    `2024-10-31_backup` is **not** offered, because the separator must be `_` and
+    a date-led backup name is not an export. `my_5390184_thing` is refused for
+    want of an anchor, `539_x` for want of a digit floor, `606cdf0d5199b_thing`
+    because its leading run is not all digits, and `ARTICULATED_ice_5390184`
+    because the id is neither at the start nor followed by a separator.
+
+    **Creator and licence stay null, always.** The id says where a thing came
+    from, never who made it or what it may be reused for. A guessed licence is a
+    legal statement we are not entitled to make: `cc-nc` forbids the commercial
+    use `cc-sa` allows, so the two differ materially and neither may be assumed
+    from a numeric prefix. Inheriting a creator or a licence from a sibling bundle
+    would be worse than guessing - it would launder a guess into an attribution.
+    `_name_only_facts` therefore has **no parameter** that could set them, and the
+    project is deliberately left visibly unattributed so that a human supplies
+    it. The one thing the id may carry is `source_url` / `thing_id`, and
+    `thing_id` is read *back* out of `source_url` through the shipped
+    `import_resolvers.thingiverse_thing_id_from_url`, so the URL and the id cannot
+    diverge - `thingiverse_thing_id_from_url(source_url) == thing_id` by
+    construction rather than by two code paths agreeing. Mutation: stamp a creator
+    or a licence onto the row and the `None` assertions in both witness tests red.
+
+    **R4 outranks R3 in the order, and never competes with R1 or R2.** An
+    id-named directory that also satisfies R3's model+image+text trio must read
+    `medium`: the id is a fact about the operator-visible name, the trio is a fact
+    about the tree, and the name is the more specific statement of which thing
+    this is. Both high rules still win outright, and their parsed `thing_id` is
+    the document's, never the name's - a bundle whose README names `2493386` and
+    whose directory is called `5390184_...` reports `2493386`. Mutations: move the
+    R4 block after R3 and an id-named trio comes back `low` / `generic`; move it
+    before R1 and the same bundle comes back `medium` carrying the wrong id. Both
+    reds are pinned.
+
+    **R4 always beats the archive-promotion pass, because both gate on the same
+    predicate.** The promotion pass skips any key already in `found`, and R4's own
+    gate is the same `_own_depth_model_count(snapshot) >= 1` bound, so an id-named
+    directory is *always* R4-detected and *never* promoted: one row, and its stem
+    twin is attached as provenance instead of being a pairing. Mutation: drop the
+    `twin in detected` skip on the pairing pass **and** the `found` skip on the
+    promotion pass and a second, `archive_owned` candidate appears for the same
+    key; removing either skip alone changes nothing, because the other still
+    protects the row.
+
+    The measured consequence is in `twin_verified`. A plain stem twin of a
+    directory some rule detects keeps the **names-only** basename comparison as an
+    operator remark (Decision 19), where before R4 that directory was promoted
+    through a **containment-verified** pairing - so the same on-disk pair can now
+    report the names-only answer. That delta is the price of the earlier, better
+    answer: a `medium` row carrying a source URL is worth more than a `low` row
+    carrying a stronger verification string, and it is names-only on both routes
+    anyway - no bytes are read either way.
+
+    **An id-named pile that has a verified twin is `pair_only`, not absent.** If
+    the id-shaped directory holds child bundles, the widened `claimed_ancestors`
+    refusal declines it in the folder pass. The promotion pass then finds a
+    verified stem twin and, because the key is a claimed ancestor, records the
+    directory in `pair_only_specs` instead of `found`: a `blocked` /
+    `archive_only` row that is visible, creates nothing, and whose facts read
+    `low` / `generic-bundle`. **A refusal is never stamped with the id provenance
+    it was refused for** - we refused the row *because* we decided it is a pile
+    and not a bundle, so the row says nothing about a Thingiverse id. An id-named
+    pile with **no** archive is simply absent, which is the same silence any other
+    pile gets. Mutation: un-widen the `claimed_ancestors` refusal and the pile is
+    a creatable `medium` / `ready` row beside its own two children, so the report
+    gains a third row and create-all makes three projects instead of two.
+
+    **The archive-snapshot widening is accepted.** `_zip_snapshot` names an
+    archive's snapshot from the zip's **stem**, so `detect_bundle` sees an
+    id-shaped name for a `5390184_x.zip` exactly as it does for a directory, and
+    R4 therefore fires on archive snapshots too - one row per id-named archive,
+    `medium`, `blocked` / `archive_only`. The ticket said "directory name"; this
+    is a deliberate widening of that wording, accepted, and it is harmless
+    *precisely* because Decision 6 already makes a zip-only row uncreatable: a
+    zip-only bundle can only be created through `POST /import/zip` and a scan, so
+    the extra row creates nothing and invites nothing. Mutation: gate R4 on
+    directories only and the same zip reads `generic-bundle` / `low` with no URL -
+    the medium reading is what the widening buys, and the create stays blocked
+    either way, which is exactly why it costs nothing.
+
+    **Both guard sites and the create-time belt are the whole regression surface,
+    so all three comparisons are one set.** The three `== CONFIDENCE_LOW` tests in
+    `bundle_service` are now membership of `bundle_detect.INFERRED_CONFIDENCES`.
+    An un-widened `claimed_ancestors` refusal lets a `medium` pile be a creatable
+    row beside both of its children. An un-widened `contained_keys` strip lets a
+    `medium` folder swallow a vendor zip as a "member", so the archive disappears
+    from the report entirely. An un-widened `_create_one` belt writes a `Project`
+    row for a candidate whose registered assets are another bundle's. Each has one
+    witness test, and each witness reds under exactly its own mutation, so the
+    three sites cannot be widened by accident or left behind one at a time. A
+    fourth inferred confidence could not escape any of them by omission, because
+    the guards ask about the set rather than about a list of literals.
+
+    **Residual silence, stated rather than hidden.** A doc-less, image-less,
+    model-only folder **without** a numeric id is still not offered, and that is
+    R3 unchanged rather than an oversight: a random folder of STLs is genuinely
+    indistinguishable from a bundle, and the owner's 117 low-confidence rows
+    already show what a weak rule costs. A folder whose models sit only at depth
+    **2 or deeper** stays invisible too, because R4 reuses R3's
+    `_own_depth_model_count` bound instead of inventing a second one - that shape
+    is `Mf-hvck`'s territory, not this rule's.
 
 ## Consequences
 
@@ -1038,6 +1200,38 @@ unchanged.
   nested `Clockwork v1.8 Download.zip` rooted at a subdirectory of the bundle
   produces no second row at all, because the member filter drops the candidate
   the pairing had just promoted.
+- The same two files also pin R4 (`Mf-ey4q`). In `tests/test_bundle_detect.py`,
+  from literals: the ticket's own snapshot -
+  `5390184_ARTICULATED_ice_dragon__fixed_` with a single
+  `files/ARTICULATED_ice_dragon_fixed_p1.stl` - is `medium` /
+  `thingiverse-id-name` / `id-name`, with the derived `source_url`, the `thing_id`
+  read back out of that URL, and creator, licence, licence URL and description
+  all `None`; the same shape under a non-id name is offered by nothing; R4
+  outranks R3 on one identical trio (the id-named one reads `medium`, the plain
+  one stays `low` with no URL) and yields to both high rules, whose `thing_id` is
+  the document's `2493386` and not the name's; R4's at-least-one-own-depth-model
+  gate refuses a photos-and-notes directory and a pile of two unnamed
+  model-bearing subdirectories; the seven-string regex table pins the digit
+  floor, the mandatory separator and the anchor, with three killable mutants (the
+  combined unanchor being the only one of the two unanchor forms that is
+  killable); `2024_parts` is the accepted lookalike, offered at `medium` with
+  `.../thing:2024`, while `2024-10-31_backup` is refused; and
+  `INFERRED_CONFIDENCES` equals exactly `{medium, low}` and does not contain
+  `high`. In `tests/test_bundle_service.py`, against a real temporary tree: the
+  id-named export is one `medium` row with `counts.medium == 1` that creates a
+  project without `name_only`, keeping the derived URL with `NULL` attribution
+  and a `_bundle` marker reading `thingiverse-id-name` / `medium`; the same
+  create with `name_only` discards the URL; the non-id doc-less folder is still
+  refused, with `unknown bundle` and no project; an id-named pile beside its two
+  children is absent from the report while both children are `ready`; that pile
+  with its stem twin is one `blocked` / `archive_only` row reading `low` /
+  `generic-bundle` with no URL, and create-all makes two projects and none named
+  after the pile; an id-named directory with a stem twin is one `medium` row
+  whose archive attaches nothing; an id-named `medium` folder holding a vendor
+  zip is stripped, so the zip stays its own `blocked` / `archive_only` row; a
+  `medium` candidate whose registered assets include another bundle's is refused
+  `contains_bundles` with no `Project` row written; and an id-named zip is an
+  `archive_only` `medium` row that creates nothing.
 
 ## Superseding conditions
 
@@ -1076,9 +1270,9 @@ This ADR is superseded if any of the following becomes true:
   depth-0 or named-directory model, starts qualifying on them;
 - a directory that contains bundles starts being offered as a bundle again, or a
   high-confidence candidate starts being demoted for containing one;
-- creation stops refusing a low candidate whose registered assets outnumber its
-  own snapshot's, or that refusal starts reporting `blocked` instead of
-  `failed`;
+- creation stops refusing a candidate of inferred confidence whose registered
+  assets outnumber its own snapshot's, or that refusal starts reporting
+  `blocked` instead of `failed`;
 - detection starts preferring a document by its filename again, beyond the fixed
   tie-break order `_root_pair_paths` / `_sibling_pair_paths` establish;
 - the pair merge stops requiring all four provenance fields before it reports
@@ -1094,4 +1288,13 @@ This ADR is superseded if any of the following becomes true:
 - `twin_verified` starts claiming "always true" again for a verified pairing, or
   a promoted stem row loses its report-time containment re-verification;
 - `_own_depth_model_count` stops being the only shape guard on
-  `archive_owned_facts`, or its cardinality bound widens to let a pile through.
+  `archive_owned_facts`, or its cardinality bound widens to let a pile through;
+- R4, or any other name-only rule, starts writing a creator, a licence or a
+  licence URL, or inherits one from a sibling bundle;
+- R3's trio is weakened for a folder that has no id in its name - a model alone,
+  or a model plus one other role, starts being offered as a `generic-bundle`;
+- the id regex widens past `^(\d{4,})_` - a bare digit run with no separator, an
+  optional separator, or an unanchored match;
+- a confidence that rests on inference stops being added to
+  `INFERRED_CONFIDENCES`, or a container guard goes back to comparing a
+  confidence literal instead of membership of that set.

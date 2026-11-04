@@ -57,6 +57,8 @@ export type BundleDetectItem = {
 export type BundleDetectCounts = {
   total: number;
   high: number;
+  /** Optional: a payload from before the medium confidence simply omits it, so readers use `?? 0`. */
+  medium?: number;
   low: number;
   ready: number;
   blocked: number;
