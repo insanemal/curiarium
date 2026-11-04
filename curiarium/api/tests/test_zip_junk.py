@@ -5,7 +5,7 @@ Explorer archive pre-ticked `__MACOSX/` sidecars, `.DS_Store`, `Thumbs.db` and
 `desktop.ini` for import. Worse, a root `.DS_Store` has no extension, so
 `filename_for_model_name` raised its 400 and the per-entry classifier re-raised
 every 400 - the whole import aborted instead of losing one entry. Now one
-predicate (``zip_junk.is_junk_entry``) decides what is junk, the listing reports
+predicate (``entry_policy.is_junk_entry``) decides what is junk, the listing reports
 the verdict, and the extractor refuses a junk entry before it can create a
 folder, an asset row or an audit row.
 
@@ -23,19 +23,21 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlmodel import Session, delete, select
+from zip_door_fixtures import install_zip_download
 
 import asset_file_service
 import asset_service
 import db
+import entry_policy
 import library_scan
 import main
 import schemas
 import settings_service
 import zip_service
 from db import engine
+from entry_policy import is_junk_entry
 from migrations import run_migrations
 from models import Asset, AssetFile, Folder, MfaRecoveryCode, Project, ProjectAsset, User, UserSession
-from zip_junk import is_junk_entry
 
 # The nasty archive the AC tests share: three real files at three depths and the
 # five pieces of OS metadata a macOS or Windows archiver adds on its own.
@@ -176,21 +178,6 @@ def folder_paths(folder_ids: set[str]) -> set[str]:
         return {"/".join(asset_service.folder_segments(session, folder_id)) for folder_id in folder_ids}
 
 
-def install_zip_download(monkeypatch: pytest.MonkeyPatch, archive: Path) -> None:
-    """Serve a fresh copy of `archive` to every route call.
-
-    The import route unlinks the temp file in its own `finally`, so a single
-    pre-written path would be gone for a second request in the same test; the
-    fake rewrites it instead.
-    """
-    monkeypatch.setattr(main, "normalize_import_url", lambda url: url)
-    monkeypatch.setattr(
-        main,
-        "download_import_to_temp",
-        lambda url, body: (make_nasty_zip(archive), "models.zip", "application/zip"),
-    )
-
-
 # --- the predicate ----------------------------------------------------------
 
 
@@ -302,7 +289,7 @@ def test_a_junk_only_selection_answers_200_and_writes_nothing(
     client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     storage = isolated_storage
-    install_zip_download(monkeypatch, tmp_path / "models.zip")
+    install_zip_download(monkeypatch, tmp_path / "models.zip", NASTY_ENTRIES)
     headers = auth_header(client)
     before, files_before = state(), files_under(storage)
 
@@ -328,9 +315,9 @@ def test_junk_does_not_count_toward_the_cumulative_cap(
     413; with it, the junk-only request is a 200 while a payload selection over
     the same cap still 413s.
     """
-    install_zip_download(monkeypatch, tmp_path / "models.zip")
+    install_zip_download(monkeypatch, tmp_path / "models.zip", NASTY_ENTRIES)
     headers = auth_header(client)
-    monkeypatch.setattr(zip_service, "IMPORT_ZIP_MAX_BYTES", 60)
+    monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 60)
 
     junk_only = client.post(
         "/import/zip",
@@ -391,7 +378,7 @@ def test_both_entries_doors_flag_the_same_junk(
     `list_zip_entries`, so a junk set that disagreed would mean two vocabularies.
     """
     storage = isolated_storage
-    install_zip_download(monkeypatch, tmp_path / "models.zip")
+    install_zip_download(monkeypatch, tmp_path / "models.zip", NASTY_ENTRIES)
     headers = auth_header(client)
 
     upload = client.post("/import/zip/entries", json={"url": "https://example.com/models.zip"}, headers=headers)

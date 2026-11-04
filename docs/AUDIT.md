@@ -189,7 +189,15 @@ change more than one fact or act on more than one target:
   `.Spotlight-*`, `$RECYCLE.BIN/`) is refused before the insert, and an entry
   whose filename has no extension fails the same way (Mf-ls9v). Both come back
   in the response's `failed` list on a 200, not as an error, so there is no row
-  and no `folder.*` row for a directory that only junk would have created.
+  and no `folder.*` row for a directory that only junk would have created. The
+  in-library door (`POST /import/archive`) applies the same OS-metadata
+  predicate through `entry_policy`: a selected member it refuses is never
+  written, and a selection that is entirely OS metadata writes no files at all,
+  so it records no `archive.extract` row - the same rule as a request whose
+  every destination already existed: a request that changes nothing writes
+  nothing. That door returns no `failed` list, because it is all-or-nothing.
+  The predicate governs extracted archive members only: an ordinary file upload
+  and a file already on disk (registered by the storage scan) are outside it.
 * `PATCH /users/{user_id}` - one row per changed field. Changing role and
   disabling in the same request writes `user.role_change` and `user.disable`.
 * `PATCH /folder/{folder_id}` - renaming and reparenting in the same request
