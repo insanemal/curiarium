@@ -44,8 +44,9 @@ The rules, strongest first:
   floor - and the tree holds at least one model at the folder's own depth. The
   name is the evidence, so creator, licence and URL stay ``None`` exactly as
   under R3. It is offered by ``bundle_service`` as a post-pass AFTER the archive
-  promotion, never by ``detect_bundle``: a deepest-first tree walk would
-  otherwise claim a child's row for its parent and lose an archive-owned row.
+  promotion, never by ``detect_bundle``: the folder pass is deepest-first, so a
+  rule inside it would claim a parent's row for its child and lose an
+  archive-owned row.
 
 Anything else is not a bundle and ``detect_bundle`` returns ``None``. A README
 that exists but lacks the markers is not R1 - both high-confidence rules miss and
@@ -1142,9 +1143,9 @@ def title_name_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
     provenance field is ``None`` - a name proves nothing about who made a thing
     or what it may be reused for. It is deliberately NOT a branch of
     ``detect_bundle``: the service runs it as a post-pass after the archive
-    promotion, because a deepest-first tree walk would otherwise migrate a
-    child's row into a parent and lose an archive-owned row (ADR 0010
-    Decision 21).
+    promotion, because the folder pass is deepest-first and a rule inside it
+    would migrate a parent's row into a child and lose an archive-owned row
+    (ADR 0010 Decision 21).
 
     ``_own_depth_model_count`` is the one shape guard and it is load-bearing:
     without a model at the folder's own depth the name alone is not a bundle,
