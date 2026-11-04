@@ -30,6 +30,26 @@ const RESULT: ArchiveExtractResult = {
 
 const TARGET: ExtractTarget = { path: "Moai.zip", label: "Moai.zip" };
 
+/**
+ * A promise the test settles by hand. Typed at the call site: an untyped
+ * deferred infers `unknown` and fails TS2345 where the mock wants
+ * `Promise<ArchiveListing>` / `Promise<ArchiveExtractResult>`.
+ */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(settle => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+/** The action's own busy-stage focus home, found structurally. */
+function busyHome(control: HTMLElement): HTMLElement {
+  const home = control.closest<HTMLElement>('[tabindex="-1"]');
+  if (!home) throw new Error("the control has no tabindex=-1 container");
+  return home;
+}
+
 /** List, confirm and extract through the shared action. */
 async function extractOnce(label = "Moai.zip"): Promise<void> {
   fireEvent.click(screen.getByRole("button", { name: `Extract ${label}` }));
@@ -149,6 +169,102 @@ describe("ArchiveExtractDialog", () => {
 
     expect(document.activeElement).toBe(tabbable[0]);
     expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it("takes a forward Tab from the listing stage's unlisted home to the first member", async () => {
+    const listing = deferred<Awaited<ReturnType<typeof listArchiveEntries>>>();
+    // Never settles, so the stage stays `listing` with every control disabled.
+    listArchiveEntriesMock.mockReturnValue(listing.promise);
+    const { onClose } = renderDialog();
+
+    // jsdom does not focus on a click; focus first so the press disables the
+    // active element and the action's recovery effect re-homes onto its
+    // container, which is inside the panel but not in the Tab ring.
+    const trigger = screen.getByRole("button", { name: "Extract Moai.zip" });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    // The accessible name is pinned by the button's `aria-label`, so the busy
+    // stage is found by its visible text, not its role name.
+    const listingControl = await screen.findByRole("button", { name: "Extract Moai.zip" });
+    await waitFor(() => expect(listingControl.textContent).toBe("Listing..."));
+    const home = busyHome(listingControl);
+    await waitFor(() => expect(document.activeElement).toBe(home));
+
+    const dialog = screen.getByRole("dialog");
+    const close = within(dialog).getByRole("button", { name: "Close" });
+    expect(home).not.toBe(dialog);
+
+    fireEvent.keyDown(home, { key: "Tab" });
+
+    expect(document.activeElement).toBe(close);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("takes a backward Tab from the listing stage's unlisted home to the member before it", async () => {
+    const listing = deferred<Awaited<ReturnType<typeof listArchiveEntries>>>();
+    listArchiveEntriesMock.mockReturnValue(listing.promise);
+    const { onClose } = renderDialog();
+
+    const trigger = screen.getByRole("button", { name: "Extract Moai.zip" });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const listingControl = await screen.findByRole("button", { name: "Extract Moai.zip" });
+    await waitFor(() => expect(listingControl.textContent).toBe("Listing..."));
+    const home = busyHome(listingControl);
+    await waitFor(() => expect(document.activeElement).toBe(home));
+
+    const dialog = screen.getByRole("dialog");
+    const close = within(dialog).getByRole("button", { name: "Close" });
+
+    fireEvent.keyDown(home, { key: "Tab", shiftKey: true });
+
+    expect(document.activeElement).toBe(close);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps both Tab directions inside the extracting stage's unlisted home", async () => {
+    const extracting = deferred<Awaited<ReturnType<typeof extractArchive>>>();
+    extractArchiveMock.mockReturnValue(extracting.promise);
+    const { onClose } = renderDialog();
+
+    const trigger = screen.getByRole("button", { name: "Extract Moai.zip" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const confirm = await screen.findByRole("button", { name: "Extract 2 files" });
+    confirm.focus();
+    fireEvent.click(confirm);
+
+    const extractingControl = await screen.findByRole("button", { name: "Extracting..." });
+    expect((extractingControl as HTMLButtonElement).disabled).toBe(true);
+    const home = busyHome(extractingControl);
+    await waitFor(() => expect(document.activeElement).toBe(home));
+
+    const dialog = screen.getByRole("dialog");
+    const close = within(dialog).getByRole("button", { name: "Close" });
+
+    fireEvent.keyDown(home, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
+
+    home.focus();
+    fireEvent.keyDown(home, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(close);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("takes a forward Tab from the batch progress paragraph to the member after it", () => {
+    renderDialog({ targets: [TARGET, { path: "Buddha.zip", label: "Buddha.zip" }] });
+    const dialog = screen.getByRole("dialog");
+    const trigger = within(dialog).getByRole("button", { name: "Extract Moai.zip" });
+    const close = within(dialog).getByRole("button", { name: "Close" });
+    const progress = screen.getByRole("status");
+
+    progress.focus();
+    fireEvent.keyDown(progress, { key: "Tab" });
+
+    expect(document.activeElement).toBe(trigger);
+    expect(document.activeElement).not.toBe(close);
   });
 
   it("returns the single result as an array", async () => {

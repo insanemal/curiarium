@@ -137,7 +137,11 @@ export default function ArchiveExtractDialog({
         event.preventDefault();
         return;
       }
-      wrapTab(panel, DIALOG_TABBABLE_SELECTOR, event);
+      // The action's busy stages (`listing`, `extracting`) pin focus on their
+      // own `tabindex="-1"` container: inside the panel, but not in the Tab
+      // ring, so the anchor rules alone would let Tab walk out of this
+      // `aria-modal` dialog. This dialog is the only caller opting in.
+      wrapTab(panel, DIALOG_TABBABLE_SELECTOR, event, { wrapFromUnlistedFocus: true });
     }
   }
 

@@ -26,6 +26,15 @@ export type TrapTabEvent = {
   preventDefault: () => void;
 };
 
+/**
+ * `wrapFromUnlistedFocus` is off by default: that is the historic behaviour, and
+ * a surface whose own root is `tabindex="-1"` (`FolderDrawer`, `FolderPicker`,
+ * `ZipImportModal`) relies on it. Opting in only matters for a surface that
+ * parks focus on an unlisted container of its own, such as a stage whose every
+ * control is disabled.
+ */
+export type TrapWrapOptions = { wrapFromUnlistedFocus?: boolean };
+
 /** A `<details>`' own disclosure control: its first direct-child `<summary>`. */
 function ownerSummary(details: Element): Element | null {
   for (const child of Array.from(details.children)) {
@@ -55,6 +64,11 @@ export function hiddenByClosedDetails(element: Element): boolean {
   return false;
 }
 
+/** Whether `candidate` comes after `element` in document order. */
+function follows(element: Element, candidate: Element): boolean {
+  return (element.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+}
+
 /** The natively tabbable members of `root`, in document order. */
 export function tabbableIn(root: Element, selector: string): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(
@@ -67,7 +81,12 @@ export function tabbableIn(root: Element, selector: string): HTMLElement[] {
  * inside another one. `FolderPicker` owns this exact semantics; the drawer
  * reuses it with its own selector.
  */
-export function wrapTab(root: Element, selector: string, event: TrapTabEvent): void {
+export function wrapTab(
+  root: Element,
+  selector: string,
+  event: TrapTabEvent,
+  options: TrapWrapOptions = {},
+): void {
   // A nested surface (the Sidebar's editor and its FolderPicker) owns Tab while
   // it is open: it preventDefaults, so the outer trap must not wrap as well.
   if (event.defaultPrevented) return;
@@ -80,6 +99,31 @@ export function wrapTab(root: Element, selector: string, event: TrapTabEvent): v
   const last = items[items.length - 1];
   const active = document.activeElement;
   const inside = root.contains(active);
+  // Opt-in: an unlisted focus home inside the surface (a `tabindex="-1"`
+  // container holding a stage whose controls are all disabled) is neither the
+  // first nor the last member, so the anchor rules below never fire and a real
+  // browser Tabs out of an `aria-modal` dialog. Move to the member a browser
+  // would have reached instead. `items` never holds the surface's own root
+  // (`querySelectorAll` returns descendants only), so a focused root resolves
+  // to the far end of the ring - where a browser leaving the surface lands too.
+  if (
+    options.wrapFromUnlistedFocus &&
+    active !== null &&
+    inside &&
+    !items.includes(active as HTMLElement)
+  ) {
+    // The handler moves focus itself, so it must preventDefault: otherwise a
+    // real browser Tabs a second time from the element just focused.
+    event.preventDefault();
+    if (event.shiftKey) {
+      const before = [...items].reverse().find(item => follows(item, active));
+      (before ?? last).focus();
+    } else {
+      const next = items.find(item => follows(active, item));
+      (next ?? first).focus();
+    }
+    return;
+  }
   if (event.shiftKey) {
     if (!inside || active === first) {
       event.preventDefault();
