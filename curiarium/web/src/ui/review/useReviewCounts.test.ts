@@ -137,6 +137,9 @@ function makeState(report: BundleReport | null): BundleDetectState {
     refresh: async () => undefined,
     create: async () => undefined,
     dismiss: async () => undefined,
+    // Extraction settling is the queue view's concern; this hook's fixtures
+    // report a settled scan so no timer is ever armed here.
+    afterExtract: async () => "settled" as const,
   };
 }
 

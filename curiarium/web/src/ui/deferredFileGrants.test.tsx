@@ -178,6 +178,7 @@ function cardProps(overrides: Partial<AssetCardProps> = {}): AssetCardProps {
     onAssetChanged: vi.fn(),
     onForgetMissing: vi.fn(),
     onRescanMissing: vi.fn(),
+    onExtractArchive: vi.fn(),
     rescanning: false,
     onClearPreparedPrint: vi.fn(),
     preparedClearing: false,

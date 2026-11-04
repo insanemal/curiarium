@@ -34,6 +34,12 @@ export type AssetCardProps = {
   onAssetChanged: (asset: Asset) => void;
   onForgetMissing: (asset: Asset) => void;
   onRescanMissing: (asset: Asset) => void;
+  /**
+   * Opens the shared archive-extract dialog for a library `.zip`. Required, no
+   * default, so a missed call site is a type error rather than a card menu that
+   * silently loses the door.
+   */
+  onExtractArchive: (asset: Asset) => void;
   rescanning: boolean;
   onClearPreparedPrint: (asset: Asset) => void;
   preparedClearing: boolean;
