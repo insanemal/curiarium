@@ -1,10 +1,11 @@
-import { useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import {
   extractArchive,
   listArchiveEntries,
   type ArchiveEntry,
   type ArchiveExtractResult,
 } from "../../lib/api";
+import { tabbableIn } from "../../lib/focusTrap";
 import { formatBytes } from "../../lib/format";
 
 type Props = {
@@ -27,6 +28,24 @@ const DETAIL_BUTTON = "px-3 py-2 rounded-md border border-panel-strong text-sm d
 // A compact bordered row button, for a dense list row or a settings card.
 const ROW_BUTTON =
   "text-xs px-2 py-1 rounded-md border border-panel-strong self-start disabled:opacity-60";
+
+/**
+ * What this action can Tab through: only buttons, so `DRAWER_TABBABLE_SELECTOR`
+ * (which also carries `summary` and `a[href]`) would let a Tab wrap onto a
+ * member this control never renders.
+ */
+const ACTION_TABBABLE_SELECTOR = 'button:not([tabindex="-1"])';
+
+/**
+ * The stage's one focus home: its first enabled control, or the container
+ * itself while every control in the stage is disabled (`listing`,
+ * `extracting`) - the same fallback `ZipImportModal` uses for its overlay.
+ * A disabled control is not a home: it refuses focus, and a browser has
+ * already blurred it.
+ */
+function focusActionHome(container: HTMLDivElement): void {
+  (tabbableIn(container, ACTION_TABBABLE_SELECTOR)[0] ?? container).focus();
+}
 
 function countLabel(count: number): string {
   return count === 1 ? "1 file" : `${count} files`;
@@ -68,6 +87,9 @@ export default function ArchiveExtractAction({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const previousStageRef = useRef<Stage | null>(null);
+
   const button = variant === "row" ? ROW_BUTTON : DETAIL_BUTTON;
   const primaryButton = `${button} bg-accent hover:bg-accent-strong`;
 
@@ -107,6 +129,34 @@ export default function ArchiveExtractAction({
     setStage("idle");
   }
 
+  // Recovery: every stage advance swaps this control's own controls, so the
+  // button that was just pressed leaves the DOM - or is still there with
+  // `disabled` on it, which a browser blurs and jsdom does not - and focus
+  // drops to <body>. <body> is outside the enclosing dialog's Tab trap and out
+  // of reach of its Escape handler, so re-enter on the new stage's first real
+  // control. A caret the user moved themselves, anywhere in the document, is
+  // left alone; the initial mount is skipped because this action also mounts in
+  // surfaces that own no focus of their own (a bulk-dialog batch remount, an
+  // aside), where grabbing it would yank a caret the user never lost.
+  useEffect(() => {
+    const previous = previousStageRef.current;
+    previousStageRef.current = stage;
+    if (previous === null || previous === stage) return;
+    const container = containerRef.current;
+    if (!container) return; // Below contributor nothing at all is rendered.
+    const active = document.activeElement;
+    const holdsLiveCaret =
+      active instanceof HTMLElement &&
+      active !== document.body &&
+      // Our own container is only ever this effect's busy home, never a caret
+      // a user chose: leaving focus there would lose listing -> error.
+      active !== container &&
+      active.isConnected &&
+      !active.hasAttribute("disabled");
+    if (holdsLiveCaret) return;
+    focusActionHome(container);
+  }, [stage]);
+
   // Every control here writes into the library, so a role below contributor gets
   // no control at all rather than a disabled button advertising a capability it
   // lacks. The early return sits after every hook so the hook order never changes.
@@ -115,7 +165,8 @@ export default function ArchiveExtractAction({
   if (stage === "confirm" || stage === "extracting") {
     const extracting = stage === "extracting";
     return (
-      <div className="flex flex-col gap-2">
+      // tabindex="-1": programmatically focusable, never in a trap's Tab cycle.
+      <div className="flex flex-col gap-2" ref={containerRef} tabIndex={-1}>
         <p className="text-sm text-muted">
           {`${countLabel(entries.length)}, ${formatBytes(totalBytes(entries))} — extract into a new folder beside the archive?`}
         </p>
@@ -137,7 +188,8 @@ export default function ArchiveExtractAction({
   }
 
   return (
-    <div className="flex flex-col gap-1">
+    // tabindex="-1": programmatically focusable, never in a trap's Tab cycle.
+    <div className="flex flex-col gap-1" ref={containerRef} tabIndex={-1}>
       <button
         type="button"
         aria-label={`Extract ${label}`}
