@@ -172,6 +172,35 @@ const moaiZip = makeBundle({
   archive: { rel_path: "Moai.zip", twin_verified: false },
 });
 
+/** A medium row: the folder name carried a Thingiverse id, so the source URL is
+ *  derived from it and no creator or licence is known. */
+const mediumDragon = makeBundle({
+  key: "Dragon_5390184",
+  rel_path: "Dragon_5390184",
+  title: "Articulated ice dragon",
+  name_suggestion: "Articulated ice dragon",
+  creator: null,
+  licence: null,
+  licence_url: null,
+  source_url: "https://www.thingiverse.com/thing:5390184",
+  detector: "thingiverse-id-name",
+  confidence: "medium",
+  metadata_shape: "id-name",
+  description_excerpt: null,
+  model_count: 1,
+  image_count: 0,
+  text_count: 0,
+  other_count: 0,
+  cover: {
+    asset_id: null,
+    rel_path: "dragon.stl",
+    reason: "largest-image-unregistered",
+    url: null,
+    thumb_url: null,
+  },
+  assets_total: 0,
+});
+
 function makeReport(
   bundles: BundleDetectItem[],
   overrides: Partial<BundleReport> = {},
@@ -183,6 +212,7 @@ function makeReport(
     counts: {
       total: bundles.length,
       high: bundles.filter(row => row.confidence === "high").length,
+      medium: bundles.filter(row => row.confidence === "medium").length,
       low: bundles.filter(row => row.confidence === "low").length,
       ready,
       blocked: bundles.length - ready,
@@ -406,6 +436,21 @@ describe("BundleReviewView filters", () => {
     expect(screen.getByText("Showing 2 of 4")).toBeTruthy();
   });
 
+  it("shows exactly the medium rows for the medium chip", () => {
+    renderView(makeState({ report: makeReport([moai, mediumDragon, cableClip]) }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Medium confidence" }));
+    expect(rowKeys()).toEqual(["Dragon_5390184"]);
+    expect(
+      screen.getByRole("button", { name: "Medium confidence" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+
+    // The low chip is its own set: a filter that folded the two together would
+    // return both rows here and prove nothing about the medium chord.
+    fireEvent.click(screen.getByRole("button", { name: "Low confidence" }));
+    expect(rowKeys()).toEqual(["Cable_clip"]);
+  });
+
   it("reveals dismissed rows once Show dismissed is on", () => {
     const dismissed = makeBundle({ key: "Dismissed_one", title: "Dismissed one", dismissed: true });
     const state = makeState({ report: makeReport([moai, dismissed]) });
@@ -418,6 +463,29 @@ describe("BundleReviewView filters", () => {
     expect(state.setShowDismissed).toHaveBeenCalledWith(true);
     expect(rowKeys()).toEqual(["Moai", "Dismissed_one"]);
     expect(screen.getByText("Showing 2 of 2")).toBeTruthy();
+  });
+});
+
+describe("BundleReviewView confidence", () => {
+  it("gives each confidence its own colour", () => {
+    renderView(makeState({ report: makeReport([moai, mediumDragon, cableClip]) }));
+
+    // The confidence span carries `title={confidenceLabel(...)}`, so the label is
+    // the stable handle on the right cell.
+    const high = screen.getByTitle("High confidence");
+    const medium = screen.getByTitle("Medium confidence");
+    const low = screen.getByTitle("Low confidence");
+
+    expect(high.className).toContain("text-emerald-400");
+    expect(medium.className).toContain("text-amber-400");
+    // Low is deliberately the muted zinc, not amber: amber now means "medium,
+    // worth a look", so amber on ~117 low rows would drown that signal.
+    expect(low.className).toContain("text-zinc-500");
+
+    // Three distinct colours, not three spans sharing one: a two-way
+    // `confidenceClass` collapses two of these into one string.
+    const classNames = [high, medium, low].map(node => node.className);
+    expect(new Set(classNames).size).toBe(3);
   });
 });
 
@@ -602,6 +670,33 @@ describe("BundleReviewView writes", () => {
       { key: "Cable_clip", name_only: true },
       { key: "Sword_hilt", name_only: true },
     ]);
+  });
+
+  it("never sends a medium row through the low bulk bar", () => {
+    const lowReady = makeBundle({ key: "Sword_hilt", title: "Sword hilt", confidence: "low" });
+    const state = makeState({
+      report: makeReport([moai, cableClip, mediumDragon, lowReady, legacyVase, moaiZip]),
+    });
+    renderView(state);
+
+    // The medium row is ready and creatable, so only the confidence test in
+    // `lowCreatable` keeps it out of the count and the payload.
+    expect(screen.getByRole("button", { name: /^Create low as name-only/ }).textContent).toBe(
+      "Create low as name-only (2)",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^Create low as name-only/ }));
+
+    // The bulk bar sends `name_only: true`, which writes no source URL - and a
+    // medium row's entire point is the URL derived from the id in its folder
+    // name. Such a row is created from the detail panel, where the enrichment is
+    // written, so widening `lowCreatable` would silently throw that URL away.
+    expect(state.create).toHaveBeenCalledWith([
+      { key: "Cable_clip", name_only: true },
+      { key: "Sword_hilt", name_only: true },
+    ]);
+    const items = vi.mocked(state.create).mock.calls[0][0];
+    expect(items.map(item => item.key)).not.toContain("Dragon_5390184");
   });
 
   it("dismisses the selection, and the detail panel's own row with the true flag", () => {

@@ -256,6 +256,11 @@
         "title": "Low",
         "type": "integer"
       },
+      "medium": {
+        "default": 0,
+        "title": "Medium",
+        "type": "integer"
+      },
       "ready": {
         "default": 0,
         "title": "Ready",

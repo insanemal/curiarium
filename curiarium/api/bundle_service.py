@@ -414,10 +414,12 @@ def _build_candidates(
     """
     folded = _subtree(files_by_dir)
     found: List[BundleCandidate] = []
-    # The strict ancestors of every bundle already claimed. A LOW candidate in
-    # this set contains a bundle and is therefore a container, never a bundle -
-    # a guess must never swallow a subtree. It is skipped *without* claiming, so
-    # its own files still bubble up to a legitimate ancestor.
+    # The strict ancestors of every bundle already claimed. An INFERRED candidate
+    # in this set contains a bundle and is therefore a container, never a bundle -
+    # a guess must never swallow a subtree. The guard covers every inferred
+    # confidence, not just `low`: a medium guess (an id in a name) can swallow a
+    # subtree exactly as a low shape guess can. It is skipped *without* claiming,
+    # so its own files still bubble up to a legitimate ancestor.
     claimed_ancestors: set = set()
     # A mutable view of each directory's OWN entries. Claiming a bundle drops its
     # whole branch from every ancestor, so a parent can only ever be a bundle in
@@ -434,7 +436,7 @@ def _build_candidates(
         facts = _detect_folder(root, snapshot)
         if facts is None:
             continue
-        if facts.confidence == bundle_detect.CONFIDENCE_LOW and rel_dir in claimed_ancestors:
+        if facts.confidence in bundle_detect.INFERRED_CONFIDENCES and rel_dir in claimed_ancestors:
             continue
         found.append(
             BundleCandidate(
@@ -561,8 +563,11 @@ def _build_candidates(
     # both kinds of archive-only row - an archive of its own, and a paired
     # directory the container rule refuses - plus every directory a verified
     # pairing promoted, because a promoted candidate is a bundle in its own right.
-    # A LOW folder strictly containing any of them holds nothing but another
-    # thing's payload and is therefore a container, never a bundle.
+    # A folder of INFERRED confidence that strictly contains any of them holds
+    # nothing but another thing's payload and is therefore a container, never a
+    # bundle. The guard covers every inferred confidence, not just `low`: a
+    # medium guess (an id in a name) containing a promoted or archive-only
+    # bundle is a pile exactly as a low one is.
     #
     # None of those rows is ever a *target* of the strip. A pair-only directory
     # and a promoted one are verified evidence rather than a guess, and the
@@ -584,7 +589,7 @@ def _build_candidates(
                 not candidate.is_archive
                 and not candidate.pair_only
                 and not candidate.archive_owned
-                and candidate.confidence == bundle_detect.CONFIDENCE_LOW
+                and candidate.confidence in bundle_detect.INFERRED_CONFIDENCES
                 and any(key.startswith(candidate.key + "/") for key in contained_keys)
             )
         ]
@@ -1328,6 +1333,7 @@ def _report_from_scan(
     counts = {
         "total": len(visible),
         "high": sum(1 for row in visible if row["confidence"] == bundle_detect.CONFIDENCE_HIGH),
+        "medium": sum(1 for row in visible if row["confidence"] == bundle_detect.CONFIDENCE_MEDIUM),
         "low": sum(1 for row in visible if row["confidence"] == bundle_detect.CONFIDENCE_LOW),
         "ready": sum(1 for row in visible if row["status"] == READY),
         "blocked": sum(1 for row in visible if row["status"] == BLOCKED),
@@ -1444,7 +1450,9 @@ def _create_one(
                 name=existing.name,
                 reason="already_created",
             )
-        if row["confidence"] == bundle_detect.CONFIDENCE_LOW:
+        # The create-time belt is the same rule: every inferred confidence is
+        # refused when its assets include another bundle's, not just `low`.
+        if row["confidence"] in bundle_detect.INFERRED_CONFIDENCES:
             assets = registered_assets(session, key)
             own_assets = [asset for asset in assets if asset.path in _own_paths(key, candidate)]
             if len(assets) > len(own_assets):
