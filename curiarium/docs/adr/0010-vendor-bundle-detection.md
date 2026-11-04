@@ -49,6 +49,8 @@ rather than a `detect_bundle` branch; every provenance field stays `None`).
 whose own model files are already contained in one hand-made project is reported
 as `already_created` and named on the wire by which identity matched).
 
+**Extended:** ticket `Mf-9ygi` (every bundle report carries a derived rule-set stamp and every row its stamp; a dev-only JSON serialiser + `--diff` makes two runs comparable or explicitly not; every candidate not offered carries the rule that refused it - the refused ledger is reported, the offered set is unchanged).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
