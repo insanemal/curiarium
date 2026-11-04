@@ -848,6 +848,12 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                     contributor and the route enforces `require_contribute`. */}
                 {activeRow.blocked_reason === "archive_only" && activeRow.archive?.rel_path && (
                   <ArchiveExtractAction
+                    // React reuses this instance across a row change, so a
+                    // mid-stage `stage`/`entries` would survive while `path`
+                    // and `label` move on - the operator would confirm one
+                    // archive and extract another. Keying remounts back to
+                    // idle, and the mount-time focus skip keeps the caret.
+                    key={activeRow.archive.rel_path}
                     canContribute={canContribute}
                     path={activeRow.archive.rel_path}
                     label={activeRow.title}
