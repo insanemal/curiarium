@@ -728,17 +728,18 @@ def scan_bundles(root: Path) -> BundleScan:
     """One walk of the storage tree: bundle candidates plus duplicate archives.
 
     Detection is one deepest-first pass. ``bundle_detect.detect_bundle`` applies R1 ->
-    R2 -> R3 strongest-first within a single directory, so the only ordering that
+    R2 -> R4 -> R3 strongest-first within a single directory, so the only ordering that
     pass needs is children before parents: a child bundle is claimed before its
     parent is evaluated, and claiming it removes it from the parent's view. The
     R5 name post-pass runs afterwards and shallowest-first, over keys no row
     already owns, so it can only add a row and never reorder a claim. A directory can therefore only ever be a bundle in its own right - it
     never inherits a child's models, and a directory that holds nothing but child
-    bundles is not a bundle at all. A LOW candidate whose key is a strict
-    ancestor of an already-claimed bundle is a *container* and is skipped without
-    claiming, so its own files still bubble up to a legitimate ancestor; a HIGH
-    candidate is exempt because its documents sit at depth 0 and it attaches only
-    its own models.
+    bundles is not a bundle at all. An INFERRED candidate - ``low``, or the
+    ``medium`` of an id in the name - whose key is a strict ancestor of an
+    already-claimed bundle is a *container* and is skipped without claiming, so
+    its own files still bubble up to a legitimate ancestor; a HIGH candidate is
+    exempt because its documents sit at depth 0 and it attaches only its own
+    models.
 
     Byte-identical archives are one bundle, so the walk also groups duplicates by
     content hash and suppresses every copy from both archive passes.

@@ -1134,7 +1134,7 @@ unchanged.
   marker but no creator invents no author), the licence table and its
   never-invent-a-URL rule, `display_name`'s ordinal stripping and dash
   preservation, `twin_key`, the cover pick and its tie-break, and the rule
-  precedence - R1 before R2 before R3, and a marker-less README falling to
+  precedence - R1 before R2 before R4 before R3, and a marker-less README falling to
   `generic-bundle` / `low` with every enrichment field `None`. It also pins R3's
   depth bound: a `files/` trio is `generic-bundle` / `low`, the depth-0 trio is
   unchanged, a model under `stl/` is not a bundle and a model below depth 1 is
