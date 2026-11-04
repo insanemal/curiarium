@@ -9,6 +9,7 @@ import {
   coverLine,
   createdProjectLine,
   headline,
+  isArchiveOnly,
   isBlocked,
   isCreatable,
   matchesFilter,
@@ -117,6 +118,34 @@ describe("isCreatable", () => {
     expect(isCreatable(makeBundle({ status: "ready", existing_project_id: "project-7" }))).toBe(
       false,
     );
+  });
+});
+
+describe("isArchiveOnly", () => {
+  // `BundleArchive.rel_path` is non-nullable on the wire, so the "no path"
+  // quadrant is forced here rather than widening the API type for a defensive
+  // branch.
+  const noPath = { rel_path: null as unknown as string, twin_verified: false };
+
+  it("treats only an archive-only row with an archive path as extractable", () => {
+    const archiveOnly = (archive: BundleDetectItem["archive"]) =>
+      makeBundle({ status: "blocked", blocked_reason: "archive_only", archive });
+
+    // The one quadrant that can be extracted: the label and the path agree.
+    expect(isArchiveOnly(archiveOnly({ rel_path: "Moai.zip", twin_verified: false }))).toBe(true);
+    // The label alone is not enough - there would be nothing to extract.
+    expect(isArchiveOnly(archiveOnly(null))).toBe(false);
+    expect(isArchiveOnly(archiveOnly(noPath))).toBe(false);
+    // A path on a row the scan already resolved is not an extraction to offer.
+    expect(
+      isArchiveOnly(
+        makeBundle({
+          status: "ready",
+          blocked_reason: null,
+          archive: { rel_path: "Moai.zip", twin_verified: true },
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

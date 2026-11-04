@@ -2,7 +2,12 @@ import React from "react";
 import { Check } from "lucide-react";
 
 import type { BundleCreateItem, BundleDetectItem } from "../../lib/api/bundles";
+// The type comes from the domain module, not the `../../lib/api` barrel: the
+// tests replace that barrel with a fixed object, so a named import from it
+// would throw "No export is defined on the mock".
+import type { ArchiveExtractResult } from "../../lib/api/imports";
 import ArchiveExtractAction from "../archive/ArchiveExtractAction";
+import ArchiveExtractDialog, { type ExtractTarget } from "../archive/ArchiveExtractDialog";
 import {
   BUNDLE_FILTERS,
   archiveLine,
@@ -12,6 +17,7 @@ import {
   coverLine,
   createdProjectLine,
   headline,
+  isArchiveOnly,
   isCreatable,
   matchesFilter,
   matchesVisibility,
@@ -92,6 +98,21 @@ function rowClassName(selected: boolean, active: boolean): string {
   return classes.join(" ");
 }
 
+/** What the queue says while the scan is still registering an extraction. */
+function settlingLine(results: ArchiveExtractResult[]): string {
+  const label = results.length === 1 ? results[0].path : `${results.length} archives`;
+  return `Extracting ${label} - waiting for the library scan to register the files. This queue updates itself.`;
+}
+
+/** The archives the given rows name. One rule feeds the blocked-reason cell,
+ *  the Enter key and the bulk bar, so all three doors extract the same set. */
+function extractTargets(rows: BundleDetectItem[]): ExtractTarget[] {
+  return rows.filter(isArchiveOnly).flatMap(row => {
+    const path = row.archive?.rel_path;
+    return path ? [{ path, label: row.title }] : [];
+  });
+}
+
 type Props = {
   state: BundleDetectState;
   /** Writes (create, dismiss, extract) are CONTRIBUTE actions; a viewer reads. */
@@ -119,6 +140,15 @@ export default function BundleReviewView({ state, canContribute }: Props) {
   const [selectedKeys, setSelectedKeys] = React.useState<string[]>([]);
   const [names, setNames] = React.useState<Record<string, string>>({});
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
+  // One dialog serves all three doors (card, blocked row, bulk bar). `returnKey`
+  // is the row to put focus back on when it closes, so a keyboard user who
+  // pressed Enter is not dropped on <body>.
+  const [extractRequest, setExtractRequest] = React.useState<{
+    targets: ExtractTarget[];
+    returnKey: string | null;
+  } | null>(null);
+  const [settling, setSettling] = React.useState<string | null>(null);
+  const [settleTimedOut, setSettleTimedOut] = React.useState(false);
   const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
   // Where the active row sat before a refetch reordered or removed it. A key
   // survives a reorder; the remembered index is only the fallback for a row
@@ -142,6 +172,7 @@ export default function BundleReviewView({ state, canContribute }: Props) {
   );
   const selected = visible.filter(row => selectedKeys.includes(row.key));
   const creatableSelected = selected.filter(isCreatable);
+  const extractableSelected = selected.filter(isArchiveOnly);
   const lowCreatable = visible.filter(row => row.confidence === "low" && isCreatable(row));
   const stale = report?.stale_dismissals ?? [];
   const activeRow = filtered.find(row => row.key === activeKey) ?? null;
@@ -194,6 +225,59 @@ export default function BundleReviewView({ state, canContribute }: Props) {
     void state.dismiss(selected.map(row => row.key), true);
   };
 
+  const openExtract = (targets: ExtractTarget[], returnKey: string | null) => {
+    if (!canContribute || targets.length === 0) return;
+    setSettleTimedOut(false);
+    setExtractRequest({ targets, returnKey });
+  };
+
+  const closeExtract = () => {
+    const key = extractRequest?.returnKey ?? null;
+    setExtractRequest(null);
+    if (key) rowRefs.current.get(key)?.focus();
+  };
+
+  const extractSelected = () => {
+    openExtract(extractTargets(extractableSelected), activeKey);
+  };
+
+  // Shared by the dialog and the detail pane's own `ArchiveExtractAction`, so
+  // the two doors cannot settle, or report, differently. `afterExtract` waits
+  // for the library walk to register the extracted files and then refetches:
+  // the hook owns the refetch, so this view never calls `refresh` for it.
+  const handleExtracted = (results: ArchiveExtractResult[]) => {
+    const written = results.filter(result => !result.already_present);
+    if (written.length === 0) {
+      // Nothing landed, so nothing will register: no notice, no wait.
+      setSettling(null);
+      setSettleTimedOut(false);
+      return;
+    }
+    setSettleTimedOut(false);
+    setSettling(settlingLine(results));
+    void state
+      .afterExtract(results)
+      .then(outcome => {
+        setSettleTimedOut(outcome === "timeout");
+      })
+      .catch(() => {
+        // A failed settle is indistinguishable from a slow one to the
+        // operator, and leaving it uncaught would be an unhandled rejection.
+        setSettleTimedOut(true);
+      })
+      .finally(() => {
+        setSettling(null);
+      });
+  };
+
+  // The timeout line tells the operator to refresh once the scan finishes, so
+  // acting on that advice has to clear it: a notice that outlives its own
+  // instructions is a lie the next reader would believe.
+  const refreshNow = () => {
+    setSettleTimedOut(false);
+    void state.refresh();
+  };
+
   const createActive = () => {
     if (activeRow) void state.create(createItems([activeRow]));
   };
@@ -210,9 +294,10 @@ export default function BundleReviewView({ state, canContribute }: Props) {
     rowRefs.current.get(row.key)?.focus();
   };
 
-  // Arrow keys, Home/End and Space: the mouse's two gestures, without one. A
+  // Arrow keys, Home/End, Space and Enter: the mouse's gestures, without one. A
   // click on the row body moves the detail target; the glyph toggles bulk
-  // selection. Space is the glyph's keyboard equivalent on the active row.
+  // selection. Space is the glyph's keyboard equivalent on the active row, and
+  // Enter is the blocked-reason cell's.
   const handleListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (filtered.length === 0) return;
     const last = filtered.length - 1;
@@ -238,6 +323,17 @@ export default function BundleReviewView({ state, canContribute }: Props) {
         event.preventDefault();
         if (canContribute && activeKey !== null) toggleSelection(activeKey);
         break;
+      case "Enter": {
+        // The blocked-reason cell is the mouse's door (it cannot be focusable
+        // inside an option); Enter is its keyboard equivalent, gated on the
+        // same `canContribute && isArchiveOnly` predicate so the two cannot
+        // disagree about who may extract.
+        event.preventDefault();
+        if (!canContribute || activeKey === null) break;
+        const row = filtered.find(item => item.key === activeKey);
+        if (row && isArchiveOnly(row)) openExtract(extractTargets([row]), row.key);
+        break;
+      }
       default:
         break;
     }
@@ -259,6 +355,9 @@ export default function BundleReviewView({ state, canContribute }: Props) {
         aria-selected={isSelected}
         // The row the detail panel describes, not only the row styled as current.
         aria-current={isActive ? "true" : undefined}
+        // Only the archive-only option advertises Enter, and `aria-keyshortcuts`
+        // is the one way to say so without adding a tab stop.
+        aria-keyshortcuts={canContribute && isArchiveOnly(row) ? "Enter" : undefined}
         data-bundle-row={row.key}
         tabIndex={isActive ? 0 : -1}
         className={rowClassName(isSelected, isActive)}
@@ -296,7 +395,27 @@ export default function BundleReviewView({ state, canContribute }: Props) {
         >
           {row.confidence}
         </span>
-        <span className="review-row-status">{statusLine(row)}</span>
+        {/* For a zip-only row the blocked reason IS the affordance: clicking
+            it extracts the archive in place. Deliberately not a <button>, not
+            `role="button"` and not `tabIndex` - nothing focusable may live
+            inside an option, or the listbox would have a second tab stop per
+            row (see the glyph above). Space is already bulk selection, so
+            Enter on the option is the keyboard equivalent. Every other row
+            keeps a plain, inert status cell. */}
+        {canContribute && isArchiveOnly(row) ? (
+          <span
+            className="review-row-status underline decoration-dotted underline-offset-2 hover:text-accent cursor-pointer"
+            title="Extract this archive in place (Enter)"
+            onClick={event => {
+              event.stopPropagation();
+              openExtract(extractTargets([row]), row.key);
+            }}
+          >
+            {statusLine(row)}
+          </span>
+        ) : (
+          <span className="review-row-status">{statusLine(row)}</span>
+        )}
         <span className="review-row-state">{rowState(row)}</span>
       </div>
     );
@@ -332,7 +451,7 @@ export default function BundleReviewView({ state, canContribute }: Props) {
       body = (
         <div className="review-error" role="alert">
           <p>{error}</p>
-          <button type="button" className={SECONDARY_BUTTON} onClick={() => void state.refresh()}>
+          <button type="button" className={SECONDARY_BUTTON} onClick={refreshNow}>
             Try again
           </button>
         </div>
@@ -419,6 +538,14 @@ export default function BundleReviewView({ state, canContribute }: Props) {
             <button
               type="button"
               className={SECONDARY_BUTTON}
+              disabled={busy || extractableSelected.length === 0}
+              onClick={extractSelected}
+            >
+              {`Extract selected archives (${extractableSelected.length})`}
+            </button>
+            <button
+              type="button"
+              className={SECONDARY_BUTTON}
               disabled={busy || selected.length === 0}
               onClick={dismissSelected}
             >
@@ -440,6 +567,15 @@ export default function BundleReviewView({ state, canContribute }: Props) {
               Clear filters
             </button>
           </div>
+        )}
+        {/* `review-notice` rather than a new class: the stylesheet owns the
+            queue's notice chrome, and this ticket's scope does not reach
+            `index.css`. */}
+        {(settling || settleTimedOut) && (
+          <p role="status" aria-live="polite" className="review-notice">
+            {settling ??
+              "The library scan is taking longer than expected. Refresh the queue when it finishes."}
+          </p>
         )}
         <div className="review-layout">
           <div
@@ -527,7 +663,12 @@ export default function BundleReviewView({ state, canContribute }: Props) {
                     path={activeRow.archive.rel_path}
                     label={activeRow.title}
                     variant="detail"
-                    onExtracted={() => void state.refresh()}
+                    // The two doors - this AT-safe button and the dialog the
+                    // blocked-reason cell / Enter / bulk bar open - share
+                    // `handleExtracted`, so neither can refresh differently.
+                    onExtracted={result => {
+                      handleExtracted([result]);
+                    }}
                   />
                 )}
               </>
@@ -548,7 +689,7 @@ export default function BundleReviewView({ state, canContribute }: Props) {
       // whole walk's totals, the way the old Settings card's aggregate did.
       summary={report === null ? undefined : headline(report.counts)}
       lastRefreshedAt={state.lastRefreshedAt}
-      onRefresh={() => void state.refresh()}
+      onRefresh={refreshNow}
       refreshing={loading || busy}
       notices={notices}
     >
@@ -560,6 +701,19 @@ export default function BundleReviewView({ state, canContribute }: Props) {
         </div>
       )}
       {body}
+      {extractRequest && (
+        <ArchiveExtractDialog
+          targets={extractRequest.targets}
+          canContribute={canContribute}
+          // Close first: that restores focus to the row that opened the
+          // dialog, then the settle starts from there.
+          onExtracted={results => {
+            closeExtract();
+            handleExtracted(results);
+          }}
+          onClose={closeExtract}
+        />
+      )}
     </ReviewQueueView>
   );
 }

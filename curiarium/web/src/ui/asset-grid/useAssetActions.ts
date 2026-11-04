@@ -19,6 +19,7 @@ import {
   updateAssetFolder,
   updateAssetMeta,
 } from "../../lib/api";
+import type { ArchiveExtractResult } from "../../lib/api/imports";
 import {
   applyFolderLocally,
   applyMetaLocally,
@@ -28,6 +29,7 @@ import {
 } from "../../lib/bulkUi";
 import { saveResponseToDisk } from "../../lib/download";
 import { primeGrants } from "../../lib/fileGrants";
+import { settleAfterExtract } from "../../lib/scanSettle";
 import type {
   EngravingSettings,
   SlicerSettings,
@@ -102,6 +104,7 @@ export type AssetActionsApi = {
   addToProject: (asset: Asset) => void;
   forgetMissingAsset: (asset: Asset) => void;
   rescanMissing: (asset: Asset) => Promise<void>;
+  refreshAfterExtract: (results: ArchiveExtractResult[]) => Promise<void>;
   pendingConfirm: ConfirmRequest | null;
   confirmBusy: boolean;
   setPendingConfirm: Dispatch<SetStateAction<ConfirmRequest | null>>;
@@ -407,6 +410,32 @@ export function useAssetActions({
     }
   });
 
+  const refreshAfterExtract = useStableCallback(async (results: ArchiveExtractResult[]) => {
+    try {
+      // The extract's `scan_started` flag is only a hint about a daemon thread:
+      // the walk may not have seen the new folder yet, so this waits for it in
+      // one place (`lib/scanSettle.ts`) before re-reading the listing. Without
+      // the wait the refetch races the scan and paints the pre-extract grid.
+      await settleAfterExtract(results, { onUnauthorized });
+      await refresh();
+      // Extraction registers new assets, so App's counts (sidebar badge, queue
+      // header) must refetch, exactly as `rescanMissing` does.
+      if (results.some(result => !result.already_present)) onAssetsFiled?.();
+    } catch (err) {
+      // The dialog's caller fires this without awaiting it, so every failure
+      // has to be caught here: `refresh` is the one call below that can reject
+      // (it is the grid's own loader), and an unhandled rejection would be the
+      // only trace of a listing that never came back.
+      if (err instanceof UnauthorizedError) {
+        onUnauthorized?.();
+        return;
+      }
+      notifyError(
+        err instanceof Error && err.message ? err.message : "Extraction refresh failed.",
+      );
+    }
+  });
+
   return {
     downloadingId,
     movingId,
@@ -425,6 +454,7 @@ export function useAssetActions({
     addToProject,
     forgetMissingAsset,
     rescanMissing,
+    refreshAfterExtract,
     pendingConfirm,
     confirmBusy,
     setPendingConfirm,

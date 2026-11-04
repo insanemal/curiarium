@@ -11,6 +11,8 @@ import {
   type BundleReport,
 } from "../../lib/api/bundles";
 import { UnauthorizedError } from "../../lib/api/http";
+import type { ArchiveExtractResult } from "../../lib/api/imports";
+import { settleAfterExtract, type SettleOutcome } from "../../lib/scanSettle";
 
 type Props = {
   /** Whether the review queue is open (and the role may write). */
@@ -31,6 +33,7 @@ export type BundleDetectState = {
   refresh: () => Promise<void>;
   create: (items: BundleCreateItem[]) => Promise<void>;
   dismiss: (keys: string[], dismissed: boolean) => Promise<void>;
+  afterExtract: (results: ArchiveExtractResult[]) => Promise<SettleOutcome>;
 };
 
 /**
@@ -57,6 +60,16 @@ export type BundleDetectState = {
  * back in the queue for whoever ever flipped it, which is the bug this queue
  * exists to avoid. Created rows are permanently done, so hiding them is the
  * default the ticket settles on.
+ *
+ * `afterExtract` exists because the view used to refresh *immediately* after the
+ * extraction POST (`BundleReviewView.tsx:530`), which cannot work: on the server
+ * `archive_service` ends with `scan_started = bool(seams.start_scan())` and
+ * `library_scan.start_scan()` only starts a daemon thread and returns at once, so
+ * a row turns `ready` only once the walk finds the twin folder with registered
+ * models (`bundle_service.py:1079-1095`). Nothing in the tree ever proved that
+ * fixed; waiting for the walk to settle is a new mechanism, not a repair of one.
+ * It is a plain async callback, never an effect - an effect would re-run under
+ * StrictMode and would need a dependency on the results array.
  */
 export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetectState {
   const [report, setReport] = React.useState<BundleReport | null>(null);
@@ -66,6 +79,11 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
   const [lastRefreshedAt, setLastRefreshedAt] = React.useState<number | null>(null);
   const [showDismissed, setShowDismissed] = React.useState(false);
   const [showCreated, setShowCreated] = React.useState(false);
+  // Mirrored every render (not only when `enabled` changes) so the settle loop
+  // below reads the queue's live open/closed state rather than the value it
+  // closed over when the extraction began.
+  const enabledRef = React.useRef(enabled);
+  enabledRef.current = enabled;
   // Newest request wins: a walk that started before a mutation's refetch must
   // never overwrite the newer report with its pre-mutation copy.
   const seq = React.useRef(0);
@@ -146,6 +164,23 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     [mutate],
   );
 
+  const afterExtract = React.useCallback(
+    async (results: ArchiveExtractResult[]): Promise<SettleOutcome> => {
+      if (!enabledRef.current) return "cancelled";
+      const outcome = await settleAfterExtract(results, {
+        cancelled: () => !enabledRef.current,
+        onUnauthorized,
+      });
+      // Leaving the queue cancels: nothing is mounted to paint the new report.
+      if (!enabledRef.current) return "cancelled";
+      // Through `refresh` rather than `getBundleReport` directly so its `seq`
+      // newest-wins guard covers an operator clicking Refresh mid-settle.
+      await refresh();
+      return outcome;
+    },
+    [onUnauthorized, refresh],
+  );
+
   return {
     report,
     // Before the first report arrives there is nothing to show yet, so report
@@ -161,5 +196,6 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     refresh,
     create,
     dismiss,
+    afterExtract,
   };
 }

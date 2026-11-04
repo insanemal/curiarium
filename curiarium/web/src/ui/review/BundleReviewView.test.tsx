@@ -12,6 +12,7 @@ vi.mock("../../lib/api", () => ({
 
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
 import type { BundleDetectItem, BundleReport } from "../../lib/api/bundles";
+import type { SettleOutcome } from "../../lib/scanSettle";
 import BundleReviewView from "./BundleReviewView";
 import { needsDecision } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
@@ -166,6 +167,7 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
     refresh: vi.fn(async () => {}),
     create: vi.fn(async () => {}),
     dismiss: vi.fn(async () => {}),
+    afterExtract: vi.fn(async (): Promise<SettleOutcome> => "settled"),
     ...overrides,
   };
 }
@@ -199,6 +201,20 @@ function rowElement(key: string): HTMLElement {
   const row = listbox().querySelector<HTMLElement>(`[data-bundle-row="${key}"]`);
   if (!row) throw new Error(`no row for ${key}`);
   return row;
+}
+
+/** The blocked-reason cell of a row: the mouse's door to the extract dialog. */
+function statusCell(key: string): HTMLElement {
+  const cell = rowElement(key).querySelector<HTMLElement>(".review-row-status");
+  if (!cell) throw new Error(`no status cell for ${key}`);
+  return cell;
+}
+
+/** The row's bulk-selection glyph, which is how a selection is made by mouse. */
+function selectionCheck(key: string): HTMLElement {
+  const glyph = rowElement(key).querySelector<HTMLElement>(".review-check");
+  if (!glyph) throw new Error(`no selection glyph for ${key}`);
+  return glyph;
 }
 
 function detailTitle(): string | null {
@@ -583,7 +599,7 @@ describe("BundleReviewView writes", () => {
     expect(within(detail()).queryByRole("button", { name: /^Extract / })).toBeNull();
   });
 
-  it("refreshes the queue once an archive extraction succeeds", async () => {
+  it("settles the scan and reports the extraction to the hook, so the row can turn ready", async () => {
     const state = makeState({ report: makeReport([moaiZip]) });
     renderView(state);
 
@@ -591,7 +607,15 @@ describe("BundleReviewView writes", () => {
     await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip"));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
-    await waitFor(() => expect(state.refresh).toHaveBeenCalled());
+    await waitFor(() => expect(state.afterExtract).toHaveBeenCalledTimes(1));
+    expect(state.afterExtract).toHaveBeenCalledWith([EXTRACT_RESULT]);
+    await waitFor(() =>
+      expect(screen.queryByText(/waiting for the library scan to register/)).toBeNull(),
+    );
+
+    // The hook owns the refetch: a refresh here would race the walk that has to
+    // register the extracted files before the row can read `ready`.
+    expect(state.refresh).not.toHaveBeenCalled();
     expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Moai.zip", entries: null });
   });
 
@@ -647,6 +671,146 @@ describe("BundleReviewView writes", () => {
     expect(within(detail()).queryByRole("button", { name: "Create project" })).toBeNull();
     expect(within(detail()).queryByLabelText("Name for Moai created")).toBeNull();
     expect(within(detail()).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+});
+
+describe("BundleReviewView archive extraction", () => {
+  it("opens the extract flow from an archive-only row's blocked reason", () => {
+    renderView(makeState());
+
+    // The detail target before the click: a click that reaches the row would
+    // move it to Moai_zip, so this is what proves `stopPropagation` works.
+    const before = detailTitle();
+    expect(before).toBe("Moai statue");
+
+    fireEvent.click(statusCell("Moai_zip"));
+
+    expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
+    expect(detailTitle()).toBe(before);
+  });
+
+  it("opens the extract flow from the keyboard with Enter on an archive-only row", () => {
+    renderView(makeState());
+
+    // Enter on a ready row opens nothing: only the archive-only row advertises
+    // the shortcut, and the two halves must agree about that.
+    fireEvent.keyDown(rowElement("Moai"), { key: "Enter" });
+    expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
+
+    // The handler keys off the active row, which End moves - exactly how the
+    // existing arrow/Space tests drive the listbox.
+    fireEvent.keyDown(rowElement("Moai"), { key: "End" });
+    expect(detailTitle()).toBe("Moai zip");
+    fireEvent.keyDown(rowElement("Moai_zip"), { key: "Enter" });
+
+    expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
+    // Advertised without a tab stop: the option says Enter, and nothing else does.
+    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
+    expect(rowElement("Moai").getAttribute("aria-keyshortcuts")).toBeNull();
+  });
+
+  it("gives a viewer no affordance on the blocked reason", () => {
+    renderView(makeState(), false);
+
+    fireEvent.click(rowElement("Moai_zip"));
+    expect(detailTitle()).toBe("Moai zip");
+
+    const cell = statusCell("Moai_zip");
+    expect(cell.getAttribute("title")).toBeNull();
+    fireEvent.click(cell);
+
+    expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
+    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: /^Extract / })).toBeNull();
+  });
+
+  it("says what the queue is waiting for while the scan registers the archive", async () => {
+    let settle: (outcome: SettleOutcome) => void = () => {};
+    const afterExtract = vi.fn(
+      () =>
+        new Promise<SettleOutcome>(resolve => {
+          settle = resolve;
+        }),
+    );
+    const state = makeState({ report: makeReport([moaiZip]), afterExtract });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
+    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip"));
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
+
+    const notice = await screen.findByText(/waiting for the library scan to register/);
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(afterExtract).toHaveBeenCalledWith([EXTRACT_RESULT]);
+
+    settle("settled");
+    await waitFor(() =>
+      expect(screen.queryByText(/waiting for the library scan to register/)).toBeNull(),
+    );
+    // A settle that finished is not a slow one, so the queue says nothing.
+    expect(screen.queryByText(/taking longer than expected/)).toBeNull();
+
+    cleanup();
+
+    // The walk can give up: the notice has to stop promising and say so.
+    renderView(
+      makeState({
+        report: makeReport([moaiZip]),
+        afterExtract: vi.fn(async (): Promise<SettleOutcome> => "timeout"),
+      }),
+    );
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
+    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip"));
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
+
+    const timedOut = await screen.findByText(/taking longer than expected/);
+    expect(timedOut.getAttribute("role")).toBe("status");
+
+    // That line tells the operator to refresh the queue, so taking its advice
+    // has to clear it: a notice that outlives its own instruction is a lie.
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() =>
+      expect(screen.queryByText(/taking longer than expected/)).toBeNull(),
+    );
+  });
+
+  it("offers the bulk extract only for a selection of archive-only rows", () => {
+    renderView(makeState());
+
+    // Nothing selected: the door is shut and its count says zero.
+    const none = screen.getByRole("button", {
+      name: "Extract selected archives (0)",
+    }) as HTMLButtonElement;
+    expect(none.disabled).toBe(true);
+
+    // One archive-only row: the button opens the same dialog the row does.
+    fireEvent.click(selectionCheck("Moai_zip"));
+    const one = screen.getByRole("button", {
+      name: "Extract selected archives (1)",
+    }) as HTMLButtonElement;
+    expect(one.disabled).toBe(false);
+    fireEvent.click(one);
+    expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
+    cleanup();
+
+    // Mixed: two rows are selected, but only the zip-only one is extractable.
+    renderView(makeState());
+    fireEvent.click(selectionCheck("Moai_zip"));
+    fireEvent.click(selectionCheck("Moai"));
+    expect(screen.getByText("2 bundles selected")).toBeTruthy();
+    const mixed = screen.getByRole("button", {
+      name: "Extract selected archives (1)",
+    }) as HTMLButtonElement;
+    expect(mixed.disabled).toBe(false);
+    cleanup();
+
+    // No zip-only row in the selection: the same button counts nothing.
+    renderView(makeState());
+    fireEvent.click(selectionCheck("Moai"));
+    const ready = screen.getByRole("button", {
+      name: "Extract selected archives (0)",
+    }) as HTMLButtonElement;
+    expect(ready.disabled).toBe(true);
   });
 });
 

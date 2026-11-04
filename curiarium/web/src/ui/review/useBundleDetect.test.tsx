@@ -9,6 +9,12 @@ vi.mock("../../lib/api/bundles", () => ({
   setBundleDismissed: vi.fn(),
 }));
 
+// The real settle loop polls for ten minutes; a hook test must never run it.
+vi.mock("../../lib/scanSettle", () => ({
+  settleAfterExtract: vi.fn(),
+  waitForScanSettle: vi.fn(),
+}));
+
 import {
   createBundles,
   getBundleReport,
@@ -17,11 +23,14 @@ import {
   type BundleReport,
 } from "../../lib/api/bundles";
 import { UnauthorizedError } from "../../lib/api/http";
+import type { ArchiveExtractResult } from "../../lib/api/imports";
+import { settleAfterExtract, type SettleOutcome } from "../../lib/scanSettle";
 import { useBundleDetect } from "./useBundleDetect";
 
 const getBundleReportMock = vi.mocked(getBundleReport);
 const createBundlesMock = vi.mocked(createBundles);
 const setBundleDismissedMock = vi.mocked(setBundleDismissed);
+const settleAfterExtractMock = vi.mocked(settleAfterExtract);
 
 function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
   return {
@@ -75,6 +84,16 @@ function makeReport(bundles: BundleDetectItem[] = []): BundleReport {
 
 const report = makeReport([makeBundle()]);
 
+/** The POST's answer for one extracted archive, as the view hands it back. */
+const extractResult: ArchiveExtractResult = {
+  path: "/library/Moai.zip",
+  destination: "/library/Moai statue",
+  files: 12,
+  bytes: 4096,
+  already_present: false,
+  scan_started: true,
+};
+
 /** A promise whose settlement the test drives, for ordering two responses. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -91,6 +110,7 @@ beforeEach(() => {
   createBundlesMock.mockResolvedValue({ created: 1, skipped: 0, blocked: 0, failed: 0, results: [] });
   setBundleDismissedMock.mockReset();
   setBundleDismissedMock.mockResolvedValue({ dismissed: ["Moai statue"], stale_dismissals: [] });
+  settleAfterExtractMock.mockReset();
 });
 
 afterEach(() => {
@@ -315,5 +335,127 @@ describe("useBundleDetect", () => {
     });
 
     expect(result.current.lastRefreshedAt).toBe(stamped);
+  });
+
+  // Proves the ordering the whole mechanism exists for: no refetch happens
+  // while the walk is still running, and the report the operator then sees is
+  // the post-settle one where the extracted bundle finally turned ready.
+  it("settles the library scan and then refetches, so an extracted bundle turns ready", async () => {
+    const zipOnly = makeReport([
+      makeBundle({
+        status: "blocked",
+        blocked_reason: "archive_only",
+        archive: { rel_path: "Moai.zip", twin_verified: false },
+      }),
+    ]);
+    const settled = makeReport([
+      makeBundle({
+        status: "ready",
+        blocked_reason: null,
+        archive: { rel_path: "Moai.zip", twin_verified: true },
+      }),
+    ]);
+    getBundleReportMock.mockResolvedValueOnce(zipOnly).mockResolvedValueOnce(settled);
+    const settle = deferred<SettleOutcome>();
+    settleAfterExtractMock.mockReturnValueOnce(settle.promise);
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(zipOnly));
+
+    let outcome!: Promise<SettleOutcome>;
+    act(() => {
+      outcome = result.current.afterExtract([extractResult]);
+    });
+
+    expect(settleAfterExtractMock).toHaveBeenCalledTimes(1);
+    expect(settleAfterExtractMock).toHaveBeenCalledWith(
+      [extractResult],
+      expect.objectContaining({ cancelled: expect.any(Function) }),
+    );
+    // Still one: the settle has not finished, so there is nothing new to fetch.
+    expect(getBundleReportMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      settle.resolve("settled");
+      await outcome;
+    });
+
+    expect(getBundleReportMock).toHaveBeenCalledTimes(2);
+    expect(result.current.report?.bundles[0]?.status).toBe("ready");
+    expect(result.current.report?.bundles[0]?.blocked_reason).toBeNull();
+    expect(await outcome).toBe("settled");
+  });
+
+  // This module's half of the contract only: it hands the results through
+  // untouched and refetches once afterwards. The two-settle / one-startLibraryScan
+  // / 409-swallowed proof belongs to lib/scanSettle.test.ts and is not repeated here.
+  it("re-kicks a scan when the extraction rode an already-running one", async () => {
+    const rodeRunningScan: ArchiveExtractResult = { ...extractResult, scan_started: false };
+    settleAfterExtractMock.mockResolvedValue("settled");
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    let outcome!: SettleOutcome;
+    await act(async () => {
+      outcome = await result.current.afterExtract([rodeRunningScan]);
+    });
+
+    // (a) the results array reached the settle unchanged, flag and all
+    expect(settleAfterExtractMock.mock.calls[0][0]).toEqual([rodeRunningScan]);
+    // (b) exactly one refetch followed the settle
+    expect(getBundleReportMock).toHaveBeenCalledTimes(2);
+    // (c) the settle's verdict is what the caller gets back
+    expect(outcome).toBe("settled");
+  });
+
+  // Proves the settle loop reads the live open/closed state: the `cancelled`
+  // predicate it was handed flips when the queue closes, and a closed queue
+  // paints no refetch.
+  it("stops waiting when the queue closes mid-settle", async () => {
+    const settle = deferred<SettleOutcome>();
+    settleAfterExtractMock.mockReturnValueOnce(settle.promise);
+
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useBundleDetect({ enabled }),
+      { initialProps: { enabled: true } },
+    );
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    let outcome!: Promise<SettleOutcome>;
+    act(() => {
+      outcome = result.current.afterExtract([extractResult]);
+    });
+
+    const cancelled = settleAfterExtractMock.mock.calls[0][1]?.cancelled;
+    expect(cancelled).toEqual(expect.any(Function));
+    expect(cancelled?.()).toBe(false);
+
+    rerender({ enabled: false });
+    expect(cancelled?.()).toBe(true);
+
+    await act(async () => {
+      settle.resolve("cancelled");
+      await outcome;
+    });
+
+    expect(await outcome).toBe("cancelled");
+    // Nothing is mounted to paint a new report, so nothing is fetched.
+    expect(getBundleReportMock).toHaveBeenCalledTimes(1);
+  });
+
+  // A closed queue must not start a ten-minute poll it would then have to abort.
+  it("does not settle a queue that is already closed", async () => {
+    const { result } = renderHook(() => useBundleDetect({ enabled: false }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let outcome!: SettleOutcome;
+    await act(async () => {
+      outcome = await result.current.afterExtract([extractResult]);
+    });
+
+    expect(settleAfterExtractMock).not.toHaveBeenCalled();
+    expect(outcome).toBe("cancelled");
+    expect(getBundleReportMock).not.toHaveBeenCalled();
   });
 });

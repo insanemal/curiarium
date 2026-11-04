@@ -44,6 +44,16 @@ export function isCreatable(row: BundleDetectItem): boolean {
   return !isBlocked(row) && !row.existing_project_id;
 }
 
+/** A row the queue may extract in place: it is blocked as an archive the scan
+ *  never saw, and it names the archive to extract. The path check is what makes
+ *  the label insufficient - a row without an archive path cannot be extracted,
+ *  so the blocked-reason cell, the Enter key and the bulk count all read this
+ *  one predicate and stay honest together: one rule feeds all three, so they
+ *  cannot drift apart. */
+export function isArchiveOnly(row: BundleDetectItem): boolean {
+  return row.blocked_reason === "archive_only" && Boolean(row.archive?.rel_path);
+}
+
 /** The two reveal toggles that widen what the queue shows. */
 export type VisibilityOptions = {
   showDismissed: boolean;
