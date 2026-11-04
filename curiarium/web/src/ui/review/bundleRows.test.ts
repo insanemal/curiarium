@@ -306,6 +306,97 @@ describe("createdProjectLine", () => {
       expect(line).not.toContain(projectId);
     }
   });
+
+  it("says 'Already in' and names the shared-files evidence for an asset match", () => {
+    expect(
+      createdProjectLine(
+        makeBundle({
+          existing_project_id: projectId,
+          existing_project_name: "Fates End - ClockworkMonster Tower",
+          existing_project_match: "assets",
+        }),
+      ),
+    ).toBe("Already in Fates End - ClockworkMonster Tower (matched by shared files)");
+  });
+
+  it("says the name is unavailable for an asset match rather than printing the id or nothing", () => {
+    for (const existing_project_name of [null, "", "   "]) {
+      const line = createdProjectLine(
+        makeBundle({
+          existing_project_id: projectId,
+          existing_project_name,
+          existing_project_match: "assets",
+        }),
+      );
+      expect(line).toBe(
+        "Already in a project (matched by shared files) - its name is unavailable.",
+      );
+      expect(line).not.toBe("");
+      expect(line).not.toContain(projectId);
+    }
+  });
+
+  it("trims a padded name before speaking it for an asset match", () => {
+    expect(
+      createdProjectLine(
+        makeBundle({
+          existing_project_id: projectId,
+          existing_project_name: "  Fates End - ClockworkMonster Tower  ",
+          existing_project_match: "assets",
+        }),
+      ),
+    ).toBe("Already in Fates End - ClockworkMonster Tower (matched by shared files)");
+  });
+
+  it("keeps the old line for the marker, source URL and name identities", () => {
+    // The copy is unchanged for the three identities the app either knows or
+    // guesses: only shared files need the weaker "Already in" phrasing.
+    for (const existing_project_match of ["marker", "source_url", "name"] as const) {
+      expect(
+        createdProjectLine(
+          makeBundle({
+            existing_project_id: projectId,
+            existing_project_name: "Moai statue",
+            existing_project_match,
+          }),
+        ),
+      ).toBe("Already created as project Moai statue");
+    }
+  });
+
+  it("keeps the old line when the payload omits the match, so undefined is not assets", () => {
+    expect(
+      createdProjectLine(
+        makeBundle({ existing_project_id: projectId, existing_project_name: "Moai statue" }),
+      ),
+    ).toBe("Already created as project Moai statue");
+  });
+});
+
+describe("a row already in a project by shared files", () => {
+  const assetMatched = makeBundle({
+    existing_project_id: "project-7",
+    existing_project_name: "Fates End - ClockworkMonster Tower",
+    existing_project_match: "assets",
+  });
+
+  it("is hidden by default, as the created bucket is", () => {
+    expect(matchesVisibility(assetMatched, { showDismissed: false, showCreated: false })).toBe(
+      false,
+    );
+  });
+
+  it("is visible once Show created is on", () => {
+    expect(matchesVisibility(assetMatched, { showDismissed: false, showCreated: true })).toBe(true);
+  });
+
+  it("does not count as needing a decision", () => {
+    expect(needsDecision(assetMatched)).toBe(false);
+  });
+
+  it("is not creatable, so it is never re-offered as new work", () => {
+    expect(isCreatable(assetMatched)).toBe(false);
+  });
 });
 
 describe("countLabel", () => {

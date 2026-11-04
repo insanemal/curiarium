@@ -88,6 +88,11 @@ class BundleDetectItemOut(BaseModel):
   # id - the client owns the honest nameless line.
   existing_project_id: Optional[str] = None
   existing_project_name: Optional[str] = None
+  # Which identity found it: marker | source_url | name | assets. On the wire
+  # because the four are not equally certain - a marker is proof the app made
+  # the project from this bundle, a source URL is strong, a name is a guess, and
+  # asset containment proves the FILES are the same but nothing about intent.
+  existing_project_match: Optional[str] = None
   dismissed: bool = False
 
 

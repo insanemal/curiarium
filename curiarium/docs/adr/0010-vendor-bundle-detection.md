@@ -45,6 +45,10 @@ guard now asks whether a confidence is inferred rather than whether it is `low`)
 models whose NAME reads like a title at `low`, as a `bundle_service` post-pass
 rather than a `detect_bundle` branch; every provenance field stays `None`).
 
+**Extended:** ticket `Mf-cf3c` (a fourth "already exists" identity - a bundle
+whose own model files are already contained in one hand-made project is reported
+as `already_created` and named on the wire by which identity matched).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -398,6 +402,83 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     that *cleans* to an existing one) is caught and converted to a `skipped`
     with the reason "project name already exists" - never a 500, and never a
     half-created project.
+
+    **A fourth identity: a hand-made project that already holds the bundle's own
+    files.** All three identities above ask what a project says about itself -
+    its marker, its source URL, its name - and a project the owner made by hand
+    over `17_ClockworkMonster/`'s files says none of the three. It has no
+    `_bundle` marker, because the app did not create it; no source URL, because
+    its origin is `own`; and its name, "Fates End - ClockworkMonster Tower", is
+    not equal, casefolded or otherwise, to the folder-derived suggestion
+    `ClockworkMonster`. Every older identity misses, the row is offered as new
+    work and counts toward the pending badge, and a create produces a SECOND
+    project over the same twelve files - the duplication one project per bundle
+    exists to prevent. Asset containment is the only identity that can see such
+    a project, because it is the only one that asks about the files rather than
+    about the record.
+
+    The rule is containment, and both halves of it are exact: the containment set
+    must be non-empty, and every asset in it must be a member of the SAME
+    project. Containment is not intersection - an asset with no membership
+    contributes nothing to any project's count, so a project holding only some of
+    the bundle's files can never reach the size of the set, and a large project
+    that happens to hold one file cannot claim a bundle it does not represent. An
+    empty containment set can never claim a bundle either, because the empty set
+    is contained in every project and the first project in row order would then
+    own every unscanned bundle in the library.
+
+    **What the containment set is, stated because it is a reading and not a
+    quotation.** The set is the models a create would actually attach - the
+    `models` local `_report_row` builds and the `model_assets` `_create_one`
+    attaches - and not every registered asset of the bundle. The ticket asks for
+    "every registered asset", and this is a deliberate reading of that sentence:
+    the app only ever attaches models to a project, so literal full-set
+    containment over the images and the text as well would report the owner's own
+    hand-made project as NOT owning the bundle it was made from, because a
+    bundle's previews and licence files are registered as assets by the scan and
+    never become project members. The acceptance criterion would then be false in
+    production, in exactly the case that motivated it. The alternative reading is
+    recorded in `## Alternatives considered`.
+
+    **Which identity is reported, and why it is on the wire.** The lookup answers
+    `ExistingProject(project, match)` with `match` one of `marker`,
+    `source_url`, `name` or `assets`, served as `existing_project_match` beside
+    the id and the name. The four are not equally certain: a marker is proof that
+    the app made this project from this bundle, a source URL is strong evidence
+    of the same origin, a name match is already a guess, and asset containment is
+    strong evidence about the files that says nothing about intent - a human may
+    have made that project for reasons of their own. The row copy therefore
+    splits: an `assets` match reads "Already in <project> (matched by shared
+    files)", and its nameless variant "Already in a project (matched by shared
+    files) - its name is unavailable.", while the other three keep the flat
+    "Already created as project X". `existing_project_match` is optional in the
+    client's `BundleDetectItem` type on purpose: a payload from before this
+    identity existed omits it, and `undefined` must mean "the server did not
+    say", never `assets`.
+
+    **Precedence, and why the marker stays cheapest.** The marker returns from
+    inside the single `Project` loop, before the source-URL lookup, the name match
+    or any membership read: it is proof, so it is also the first answer, and a
+    marker match never pays for the index at all. The name match returns before
+    the asset identity, and the asset identity is consulted last and lazily - a
+    caller that did not prebuild the index gets one built for it, so a direct
+    call to `find_existing_project` is still correct. The index itself,
+    `project_assets_index`, is one statement for the whole report, read before
+    any candidate is judged, so containment per row is a dictionary lookup and
+    the cost does not move with the candidate count.
+
+    **Determinism, because one asset may legitimately belong to two projects.**
+    Ties break on `(lower(project.name), project.id)`, so row order can never
+    decide which project owns a bundle, and that is the order the `Project` scan
+    already uses, so the two answers agree. A membership row whose project row is
+    missing is ignored, so a dangling row cannot claim a bundle.
+
+    **The create door, not just the report.** `_create_one` computes the model
+    set BEFORE it asks `find_existing_project`, so a `POST` that dodges the UI is
+    refused as `skipped` / `already_created` carrying the existing project's id,
+    rather than creating a second project over the same files. The report itself
+    still writes nothing: the hand-made project is never stamped with a marker,
+    which is what makes the identity a read and not a silent adoption.
 
 12. **`library_scan.RESERVED_DIRS` already owns `bundles/`.** The scanner prunes
     the top-level names `thumbs`, `bundles` and `.incoming`, so a top-level
@@ -1157,6 +1238,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 * Nothing here heals a folder row. A legacy bundle stays `blocked` until Mf-um7x
   (or a rescan) gives its `Folder` a `storage_path`, and the report is the
   surface that says which bundles are waiting on that.
+* **An asset-matched row is reported correctly and still chipped `Created`.**
+  `BundleReviewView.tsx`'s `rowState()` renders the chip `Created` for any row
+  carrying an `existing_project_id`, so the chip does not yet say "matched by
+  shared files" the way the detail line does. That file was owned by a concurrent
+  lane when this landed, so the coarse chip is a known, deliberate gap rather
+  than an oversight; the follow-up is ticket `Mc-noft`. Nothing about the claim
+  is wrong - the row is in a project, the bucket and the count are the
+  reporter's, and only the chip's wording is unfinished.
 * **A nested archive is opaque, so a directory whose only payload is a zip is not
   a bundle.** Its entries never count as evidence, which is what keeps the
   Clockwork directory one bundle and a zip-only directory from becoming one on
@@ -1219,6 +1308,24 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   and reporting only - the `duplicates` list and `duplicates_text`, size-first,
   and only within equal-size groups - and never for `twin_verified`, pairing or
   an integrity claim.
+- **Literal full-set containment over every registered asset of the bundle**
+  (models, images and text). Rejected, and this is the reading a reviewer has to
+  sign off on. A created project only ever holds the models, so an owner's
+  hand-made project over the bundle's files holds the models and not the previews
+  or the documents the scan also registered, and the rule would report that
+  project as NOT owning the bundle it was made from. It would be correct about
+  the wrong set, and the bug this ticket exists to fix would survive in exactly
+  the case that motivated it. The containment set is therefore the models a
+  create would attach, pinned by
+  `test_service_a_project_holding_the_models_owns_a_bundle_that_also_has_images`.
+- **The weaker intersection rule, where a project holding one of the bundle's
+  files claims it.** Rejected: one shared file is enough to hide a bundle behind
+  a project that has nothing to do with it - a generic `cube.stl`, a reused
+  render, a hand-copied document - and the row would leave the queue as already
+  created without anyone deciding it should. Containment keeps the claim to a
+  project that represents the whole bundle, and
+  `test_service_a_project_holding_some_of_the_files_does_not_claim_the_bundle`
+  is the witness: 11 of 12 models claims nothing.
 
 ## Rollback
 
@@ -1531,6 +1638,65 @@ unchanged.
   placement: moving R5 into `detect_bundle` reds 16 witnesses - 12 service and 4
   pure - because the deepest-first walk hands `LittleTup`'s row to its child and
   loses the promoted Clockwork row.
+- The same two files also pin the fourth identity (`Mf-cf3c`). In
+  `tests/test_bundle_service.py`, against a temporary root:
+  `test_service_a_hand_made_project_owns_a_bundle_by_its_files` builds the
+  owner's shape - an R5 `title-name` row over `import/17_ClockworkMonster` and a
+  hand-made project holding its twelve models - and asserts the row reports that
+  project's id and name with `existing_project_match` `assets`, stays `ready`,
+  counts into `already_created`, and leaves the project's metadata without a
+  `_bundle` marker, so the read route writes nothing;
+  `test_service_a_project_holding_the_models_owns_a_bundle_that_also_has_images`
+  pins the reading of "every registered asset" - 14 registered assets, of which
+  the project holds the 12 models, is still claimed -
+  `test_service_a_project_holding_some_of_the_files_does_not_claim_the_bundle`
+  holds 11 of the 12 models and asserts the row stays pending with no identity
+  and no `already_created`;
+  `test_service_an_empty_asset_list_never_claims_a_bundle` proves an empty
+  index, an empty containment set and an asset id with no membership each answer
+  `None` and leave a real bundle unclaimed;
+  `test_service_the_four_identities_keep_their_precedence` gives every project a
+  weaker identity as well and pins `marker`, `source_url`, `name`, `assets` in
+  that order, passing a poisoned membership index on the marker case so a path
+  that reads it raises instead of returning;
+  `test_service_one_project_asset_query_serves_every_candidate` listens on
+  `before_cursor_execute` and counts exactly one `project_asset` statement on a
+  two-candidate root and again on a five-candidate one;
+  `test_service_the_clockwork_parent_is_promoted_and_reports_its_owner` holds
+  the `Mf-v3i3` interaction and this decision true at once - the promoted parent
+  is the only row and that row reports the hand-made project by `assets`;
+  `test_service_a_create_for_an_asset_owned_bundle_is_a_skip` posts the create
+  and asserts `skipped` / `already_created` with the existing id, twelve members
+  unchanged and one `Project` row. In
+  `curiarium/web/src/ui/review/bundleRows.test.ts` the `createdProjectLine` cases
+  pin the two asset lines, the flat line for the other three identities and the
+  old line for a payload that omits the field, and the
+  `describe("a row already in a project by shared files")` block pins that such
+  a row is hidden by default, visible behind `Show created`, not counted by
+  `needsDecision` and not creatable. The two pre-existing witnesses that keep the
+  pairing rule honest stay green unchanged -
+  `test_service_an_archive_pairs_with_the_directory_its_entries_are_rooted_at`
+  and `test_service_a_nested_archive_is_a_member_not_a_second_bundle` - because
+  the containment set is read after the row set is decided, never before.
+- **The asset identity costs one statement per report, and the measured library
+  is a reproduction rather than the owner's.** The measurement was taken on a
+  synthetic library built to the ticket's shape in a temporary directory - 123
+  detected candidates and 91 projects over 369 assets - against the base build
+  (`c453e1a`) on the same tree. The base build ran 371 SQL statements for the
+  whole report, none of them `project_asset`, and reported `already_created` 0:
+  every one of the 123 candidates was offered as new work, which is the ticket's
+  bug at scale. With this decision the report runs 372 statements, exactly ONE of
+  which is the `project_asset` membership query, and reports `already_created`
+  91 of 123. The identity therefore costs one statement per report, not one per
+  candidate: the number does not move with the candidate count. Wall clock, best
+  of six interleaved runs, was 233.7 ms for the base build against 212.3 ms with
+  the change; that difference is run-to-run noise and NOT an improvement, because
+  the per-candidate `Project` scans dominate - 246 project statements either way
+  - and this change adds one statement. **The figure the ticket asks for is the
+  one on the owner's own 123-candidate / 91-project library, and that figure is
+  UNVERIFIED here:** the live deployment is off-limits to this work, and this
+  checkout's `curiarium.db` holds 0 projects, so the shape was reproduced and the
+  machine was not.
 
 ## Superseding conditions
 
@@ -1605,4 +1771,19 @@ This ADR is superseded if any of the following becomes true:
 - a promoted `archive_owned` row starts swallowing a candidate of `medium` or
   `high` confidence again (`bundle_detect.STRONG_CONFIDENCES`), or
   `STRONG_CONFIDENCES` widens to admit a confidence that rests on shape
-  inference alone.
+  inference alone;
+- the asset identity stops being consulted last - a marker, a source URL or a
+  name match stops winning over containment;
+- the marker stops returning from inside the `Project` loop, or a marker match
+  starts reading the membership index;
+- containment becomes an intersection - a project holding some of a bundle's
+  files starts claiming it - or an empty containment set starts claiming a
+  bundle, or a membership row whose project row is missing stops being ignored;
+- the containment set widens from the models a create would attach to every
+  registered asset of the bundle;
+- the tie-break between two projects holding the same files stops being
+  `(lower(project.name), project.id)`;
+- the membership index starts being built per candidate instead of once per
+  report;
+- `existing_project_match` stops being reported, or the client stops
+  distinguishing the assets identity from the app-created one.

@@ -130,8 +130,9 @@ member assets (``project_service.add_assets``), then the audit row
 transaction without refactoring them; a crash between the windows can leave a
 project with a marker and no members. It cannot duplicate one: every create pass
 first asks ``find_existing_project`` - the marker key, then the source URL, then
-an exact casefolded name - and a hit is ``skipped`` with the existing project id
-and the project is never touched. A human edit is therefore never overwritten by
+an exact casefolded name, then asset containment over the models a create would
+attach - and a hit is ``skipped`` with the existing project id and the project
+is never touched. A human edit is therefore never overwritten by
 a re-run, and the report says ``already_created`` before anyone presses create.
 
 **A bundle's project attaches only the files its snapshot names.** Detection is
@@ -170,7 +171,7 @@ import project_service
 import settings_service
 import zip_service
 from db import engine
-from models import Asset, Folder, Project
+from models import Asset, Folder, Project, ProjectAsset
 
 # The storage root bundle keys are resolved against. A module global so tests can
 # point it at a temp tree exactly like ``library_scan.STORAGE``.
@@ -209,6 +210,13 @@ CREATE_FAILED = "failed"
 # a reason on CREATE_FAILED, never a blocked_reason - `blocked` means database
 # readiness only (Mf-um7x).
 CONTAINS_BUNDLES = "contains_bundles"
+
+# Which of the four identities found an existing project. Reported because they
+# are not equally certain, so the client can say how sure it is.
+MATCH_MARKER = "marker"
+MATCH_SOURCE_URL = "source_url"
+MATCH_NAME = "name"
+MATCH_ASSETS = "assets"
 
 
 @dataclass(frozen=True)
@@ -980,6 +988,30 @@ def _folder_index(session: Session) -> Dict[str, str]:
     return index
 
 
+def project_assets_index(session: Session) -> Dict[str, Tuple[str, ...]]:
+    """Every asset's project memberships as ``{asset id: (project id, ...)}``.
+
+    Loaded once per report: deciding whether a project contains a bundle's files
+    is a dictionary lookup, not a table scan per candidate, so the cost is one
+    statement for the whole report however many bundles are offered.
+
+    Each tuple is ordered by ``(asset id, project id)`` so nothing downstream
+    depends on row order, and only assets with a ``storage_path`` are indexed -
+    the same refusal the rest of the report applies, because a row with no path
+    is not a file this bundle could contain.
+    """
+    index: Dict[str, List[str]] = {}
+    statement = (
+        select(ProjectAsset)
+        .join(Asset, Asset.id == ProjectAsset.asset_id)
+        .where(Asset.storage_path.is_not(None))
+        .order_by(ProjectAsset.asset_id, ProjectAsset.project_id)
+    )
+    for membership in session.exec(statement):
+        index.setdefault(membership.asset_id, []).append(membership.project_id)
+    return {asset_id: tuple(project_ids) for asset_id, project_ids in index.items()}
+
+
 class RegisteredAsset(NamedTuple):
     """One registered asset row, as the bundle report needs to read it.
 
@@ -1155,31 +1187,98 @@ def _bundle_marker(metadata_json: Optional[str]) -> dict:
     return marker if isinstance(marker, dict) else {}
 
 
+class ExistingProject(NamedTuple):
+    """The project a bundle already became, and which identity proved it.
+
+    The identity is reported because the four are not equally certain: a
+    ``_bundle`` marker is proof the app made this project from this bundle, a
+    source URL is strong evidence of the same origin, a name match is a guess,
+    and asset containment is strong evidence about the FILES that says nothing
+    about intent - a human may have made that project for their own reasons.
+    """
+
+    project: Project
+    match: str
+
+
+def _asset_owner(
+    index: Mapping[str, Tuple[str, ...]],
+    asset_ids: Sequence[str],
+    projects: Mapping[str, Project],
+) -> Optional[Project]:
+    """The one project that holds every wanted asset, or None.
+
+    Containment, not intersection: an asset id with no membership contributes
+    nothing, so a project holding only SOME of the files can never reach
+    ``len(asset_ids)`` and a large project that happens to hold one file cannot
+    claim a bundle it does not represent. An empty wanted set owns nothing. A
+    membership row whose project row is missing is ignored, so a dangling row
+    can never claim a bundle.
+
+    Ties break on ``(lower(project.name), project.id)``: row order must never
+    decide which project owns a bundle.
+    """
+    wanted = tuple(dict.fromkeys(asset_ids))
+    if not wanted:
+        return None
+    counts: Dict[str, int] = {}
+    for asset_id in wanted:
+        for project_id in index.get(asset_id, ()):
+            counts[project_id] = counts.get(project_id, 0) + 1
+    owners = [
+        projects[project_id]
+        for project_id, count in counts.items()
+        if count == len(wanted) and project_id in projects
+    ]
+    if not owners:
+        return None
+    return min(owners, key=lambda project: (project.name.lower(), project.id))
+
+
 def find_existing_project(
     session: Session,
     *,
     key: str,
     source_url: Optional[str],
     name: str,
-) -> Optional[Project]:
+    assets: Sequence[str] = (),
+    asset_index: Optional[Mapping[str, Tuple[str, ...]]] = None,
+) -> Optional[ExistingProject]:
     """The project this bundle already became, in the order that cannot lie.
 
-    The marker key is the identity a previous create wrote; the source URL covers
-    a project imported by hand from the same page; an exact casefolded name
-    covers a project made before the marker existed. Any hit means
-    ``already_created`` and the row is never touched again.
+    Four identities, strongest first. The marker key is the identity a previous
+    create wrote; the source URL covers a project imported by hand from the same
+    page; an exact casefolded name covers a project made before the marker
+    existed; asset containment covers a project a human made by hand over the
+    bundle's own files. Any hit means ``already_created`` and the row is never
+    touched again.
+
+    The marker returns from inside the loop on purpose: it is proof, so it is
+    also the cheapest answer - a marker match never reads the membership index.
     """
     wanted_name = (name or "").strip().casefold()
+    projects_by_id: Dict[str, Project] = {}
     by_name: Optional[Project] = None
     for project in session.exec(select(Project).order_by(func.lower(Project.name), Project.id)):
+        projects_by_id[project.id] = project
         if _bundle_marker(project.metadata_json).get("key") == key:
-            return project
+            return ExistingProject(project, MATCH_MARKER)
         if by_name is None and wanted_name and project.name.strip().casefold() == wanted_name:
             by_name = project
     existing = project_service.find_project_by_source(session, source_url)
     if existing is not None:
-        return existing
-    return by_name
+        return ExistingProject(existing, MATCH_SOURCE_URL)
+    if by_name is not None:
+        return ExistingProject(by_name, MATCH_NAME)
+    wanted = tuple(dict.fromkeys(asset for asset in assets if asset))
+    if not wanted:
+        # An empty containment set can never claim a bundle.
+        return None
+    # Lazy: a marker, source or name hit never pays for the index, and a caller
+    # that did not prebuild one still gets the asset identity.
+    index = asset_index if asset_index is not None else project_assets_index(session)
+    owner = _asset_owner(index, wanted, projects_by_id)
+    return ExistingProject(owner, MATCH_ASSETS) if owner is not None else None
 
 
 def _scope(path: str) -> str:
@@ -1301,6 +1400,7 @@ def _report_row(
     scope: str,
     candidate: BundleCandidate,
     folders: Mapping[str, str],
+    asset_index: Mapping[str, Tuple[str, ...]],
     dismissals: Mapping[str, dict],
 ) -> Optional[dict]:
     facts = _candidate_facts(root, candidate)
@@ -1310,6 +1410,9 @@ def _report_row(
     suggestion = (facts.title or "").strip() or "bundle"
     assets: List[RegisteredAsset] = []
     own_assets: List[RegisteredAsset] = []
+    # The asset ids this row would attach: a row that offers nothing to create
+    # has nothing assets can claim, so its containment set stays empty.
+    containment: List[str] = []
     if candidate.offers_archive_only:
         # Nothing to create, so nothing is looked up: a pair-only directory does
         # not even report the assets a scan may already hold under its key.
@@ -1321,6 +1424,12 @@ def _report_row(
         own = _own_paths(key, candidate)
         own_assets = [asset for asset in assets if asset.path in own]
         models = [asset for asset in own_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
+        # Deliberate reading of "every registered asset": the app only ever
+        # attaches MODELS to a project (``_create_one``'s ``model_assets``), so
+        # literal full-set containment over images and text too would report the
+        # owner's own hand-made project as NOT owning the bundle. The models are
+        # the containment set.
+        containment = [asset.id for asset in models]
         if key.casefold() not in folders:
             status, blocked_reason = BLOCKED, UNRESOLVED_DIRECTORY
         elif not models:
@@ -1333,12 +1442,19 @@ def _report_row(
             "rel_path": _qualify(scope, candidate.archive_path),
             "twin_verified": _archive_twin_verified(root, candidate.archive_path, candidate),
         }
-    existing = find_existing_project(session, key=key, source_url=facts.source_url, name=suggestion)
+    existing = find_existing_project(
+        session,
+        key=key,
+        source_url=facts.source_url,
+        name=suggestion,
+        assets=containment,
+        asset_index=asset_index,
+    )
     # One row read, two derived fields: the id is the identity, the name is what
     # a human can read. A blank/whitespace name is reported as None so the wire
     # never implies a name it does not have.
-    existing_project_id = existing.id if existing else None
-    existing_project_name = existing.name if existing else None
+    existing_project_id = existing.project.id if existing else None
+    existing_project_name = existing.project.name if existing else None
     if existing_project_name is not None and not existing_project_name.strip():
         existing_project_name = None
     return {
@@ -1365,6 +1481,7 @@ def _report_row(
         "archive": archive,
         "existing_project_id": existing_project_id,
         "existing_project_name": existing_project_name,
+        "existing_project_match": existing.match if existing else None,
         "dismissed": key in dismissals,
     }
 
@@ -1425,9 +1542,17 @@ def _report_from_scan(
     rows: List[dict] = []
     with Session(engine) as session:
         folders = _folder_index(session)
+        # One query for ALL candidates: containment is a dict lookup per row.
+        asset_index = project_assets_index(session)
         for candidate in scan.candidates:
             row = _report_row(
-                session, root=root, scope=scope, candidate=candidate, folders=folders, dismissals=dismissals
+                session,
+                root=root,
+                scope=scope,
+                candidate=candidate,
+                folders=folders,
+                asset_index=asset_index,
+                dismissals=dismissals,
             )
             if row is not None:
                 rows.append(row)
@@ -1525,6 +1650,8 @@ def _create_one(
     row: Optional[Mapping],
     candidate: Optional[BundleCandidate],
     ctx: audit.AuditContext,
+    *,
+    asset_index: Optional[Mapping[str, Tuple[str, ...]]] = None,
 ) -> dict:
     key = (item.key or "").strip()
     if row is None or candidate is None:
@@ -1544,24 +1671,35 @@ def _create_one(
         }
     }
     with Session(engine) as session:
-        existing = find_existing_project(session, key=key, source_url=enrichment["source_url"], name=name)
+        # The same set the report used: the files this bundle's snapshot names,
+        # never a nested child bundle's models under the recursive prefix. Hoisted
+        # so the existing-project check and the create-time belt read one query.
+        assets = registered_assets(session, key)
+        own = _own_paths(key, candidate)
+        own_assets = [asset for asset in assets if asset.path in own]
+        model_assets = [asset.id for asset in own_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
+        existing = find_existing_project(
+            session,
+            key=key,
+            source_url=enrichment["source_url"],
+            name=name,
+            assets=model_assets,
+            asset_index=asset_index,
+        )
         if existing is not None:
             return _result(
                 key,
                 CREATE_SKIPPED,
-                project_id=existing.id,
-                name=existing.name,
+                project_id=existing.project.id,
+                name=existing.project.name,
                 reason="already_created",
             )
         # The create-time belt is the same rule: every inferred confidence is
-        # refused when its assets include another bundle's, not just `low`.
-        if row["confidence"] in bundle_detect.INFERRED_CONFIDENCES:
-            assets = registered_assets(session, key)
-            own_assets = [asset for asset in assets if asset.path in _own_paths(key, candidate)]
-            if len(assets) > len(own_assets):
-                # The difference is another bundle's assets: refuse before the
-                # project row, so a refusal can never leave a half-created project.
-                return _result(key, CREATE_FAILED, reason=CONTAINS_BUNDLES)
+        # refused when its assets include another bundle's, not just `low`. The
+        # difference is another bundle's assets, and the refusal comes before
+        # the project row, so it can never leave a half-created project.
+        if row["confidence"] in bundle_detect.INFERRED_CONFIDENCES and len(assets) > len(own_assets):
+            return _result(key, CREATE_FAILED, reason=CONTAINS_BUNDLES)
         try:
             project = project_service.create_project(
                 session,
@@ -1584,15 +1722,6 @@ def _create_one(
         project_id = project.id
         project_name = project.name
 
-    with Session(engine) as session:
-        # The same set the report used: the files this bundle's snapshot names,
-        # never a nested child bundle's models under the recursive prefix.
-        own = _own_paths(key, candidate)
-        model_assets = [
-            asset.id
-            for asset in registered_assets(session, key)
-            if asset.path in own and _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES
-        ]
     added, skipped, failed = project_service.add_assets(project_id, model_assets)
     audit.record(
         audit.Event(
@@ -1634,11 +1763,14 @@ def create_bundles(items: Sequence[BundleCreateItem], ctx: audit.AuditContext) -
     report = _report_from_scan(scan, root=STORAGE, scope="", limit=MAX_SCAN_ENTRIES, include_dismissed=True)
     rows = {row["key"]: row for row in report["bundles"]}
     by_key = {candidate.key: candidate for candidate in scan.candidates}
+    # One query for the whole create pass, so a create is never O(items) queries.
+    with Session(engine) as session:
+        asset_index = project_assets_index(session)
     counters = {CREATE_CREATED: 0, CREATE_SKIPPED: 0, CREATE_BLOCKED: 0, CREATE_FAILED: 0}
     results: List[dict] = []
     for item in items:
         key = (item.key or "").strip()
-        result = _create_one(item, rows.get(key), by_key.get(key), ctx)
+        result = _create_one(item, rows.get(key), by_key.get(key), ctx, asset_index=asset_index)
         counters[result["status"]] += 1
         results.append(result)
     return {
