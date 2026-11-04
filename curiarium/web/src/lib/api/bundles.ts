@@ -7,11 +7,15 @@ import type { BatchFailure } from "./assets";
 import { apiBase } from "./baseUrl";
 import { UnauthorizedError, assertOk, readErrorMessage } from "./http";
 
-/** The largest image in a bundle, registered or not. `reason` says which. */
+/** The cover a created project would get, and why that one was chosen.
+ *  `reason` is `largest-image | largest-image-unregistered | model-preview | none`.
+ *  `url`/`thumb_url` are the served paths, set exactly when `asset_id` is. */
 export type BundleCover = {
   asset_id: string | null;
   rel_path: string | null;
   reason: string;
+  url: string | null;
+  thumb_url: string | null;
 };
 
 /** A twin zip: provenance for the folder that is the project's truth. */

@@ -135,13 +135,14 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import AbstractSet, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 from zipfile import BadZipFile
 
 from fastapi import HTTPException
 from sqlalchemy import func
 from sqlmodel import Session, select
 
+import asset_urls
 import audit
 import bundle_detect
 import db
@@ -173,6 +174,12 @@ ARCHIVE_ONLY = "archive_only"
 COVER_LARGEST_IMAGE = "largest-image"
 COVER_LARGEST_IMAGE_UNREGISTERED = "largest-image-unregistered"
 COVER_NONE = "none"
+# The bundle has no image; its own model is the face instead, rendered client-side.
+COVER_MODEL_PREVIEW = "model-preview"
+# MODEL_SUFFIXES minus what the client renderer has no loader for
+# (ModelViewer.loadObjectFromAsset: stl | 3mf | step | stp). A .lbrn2 is a
+# model a cover can never be rendered from, so it is never offered as one.
+PREVIEW_SUFFIXES = frozenset({".stl", ".3mf", ".step", ".stp"})
 
 CREATE_CREATED = "created"
 CREATE_SKIPPED = "skipped"
@@ -829,8 +836,28 @@ def _folder_index(session: Session) -> Dict[str, str]:
     return index
 
 
-def registered_assets(session: Session, rel_dir: str) -> List[Tuple[str, str, int, str]]:
-    """``(asset_id, storage_path, size, mime)`` for every asset under ``rel_dir``."""
+class RegisteredAsset(NamedTuple):
+    """One registered asset row, as the bundle report needs to read it.
+
+    A named tuple rather than six positional values: ``_cover`` sorts on ``size``
+    and ``path`` while the project gets ``id``, and a positional index in a sort
+    key is the kind of thing that silently swaps two strings.
+    """
+
+    id: str
+    path: str
+    size: int
+    mime: str
+    thumb_version: int
+    filename: str
+
+
+def registered_assets(session: Session, rel_dir: str) -> List[RegisteredAsset]:
+    """Every registered asset under ``rel_dir``, with what a report row needs.
+
+    ``thumb_version`` is normalised to 0 for an absent column (= no thumbnail),
+    and ``filename`` to an empty string, so neither reaches a URL builder as None.
+    """
     prefix = (rel_dir or "") + "/"
     statement = (
         select(Asset)
@@ -841,7 +868,14 @@ def registered_assets(session: Session, rel_dir: str) -> List[Tuple[str, str, in
         .order_by(Asset.storage_path)
     )
     return [
-        (asset.id, asset.storage_path or "", int(asset.size or 0), asset.mime or "")
+        RegisteredAsset(
+            id=asset.id,
+            path=asset.storage_path or "",
+            size=int(asset.size or 0),
+            mime=asset.mime or "",
+            thumb_version=int(asset.thumb_version or 0),
+            filename=asset.filename or "",
+        )
         for asset in session.exec(statement)
     ]
 
@@ -1048,16 +1082,62 @@ def _candidate_facts(root: Path, candidate: BundleCandidate) -> Optional[bundle_
     return _detect_folder(Path(root), candidate.snapshot)
 
 
-def _cover(assets: Sequence[Tuple[str, str, int, str]], facts: bundle_detect.BundleFacts) -> dict:
+def _cover(assets: Sequence[RegisteredAsset], facts: bundle_detect.BundleFacts) -> dict:
+    """The cover a created project would get, and the reason it got it.
+
+    The chain is ordered by source, never by size: a registered preview image
+    beats a referenced-but-unregistered one, which beats a model the client can
+    render, which beats no cover at all. An unregistered image outranks a
+    renderable model on purpose - a picture the vendor shipped is the bundle's
+    own face, while a rendered model is an inference. Size only breaks ties
+    inside one source.
+
+    ``url``/``thumb_url`` are set exactly when ``asset_id`` is: the pair is the
+    served paths for those bytes, so a row with no asset has nothing to serve.
+    """
     images = sorted(
-        (asset for asset in assets if _suffix(asset[1]) in bundle_detect.IMAGE_SUFFIXES),
-        key=lambda asset: (-asset[2], asset[1]),
+        (asset for asset in assets if _suffix(asset.path) in bundle_detect.IMAGE_SUFFIXES),
+        key=lambda asset: (-asset.size, asset.path),
     )
     if images:
-        return {"asset_id": images[0][0], "rel_path": images[0][1], "reason": COVER_LARGEST_IMAGE}
+        return _cover_of(images[0], COVER_LARGEST_IMAGE)
     if facts.cover_entry:
-        return {"asset_id": None, "rel_path": facts.cover_entry, "reason": COVER_LARGEST_IMAGE_UNREGISTERED}
-    return {"asset_id": None, "rel_path": None, "reason": COVER_NONE}
+        return _cover_none_fields(facts.cover_entry, COVER_LARGEST_IMAGE_UNREGISTERED)
+    # The bundle has no image at all. Its own registered, client-renderable models
+    # are still a face: prefer one that already has a thumbnail (a previous render),
+    # then the largest, then path order - the pick is a function of the rows.
+    models = sorted(
+        (asset for asset in assets if _suffix(asset.path) in PREVIEW_SUFFIXES),
+        key=lambda asset: (asset.thumb_version <= 0, -asset.size, asset.path),
+    )
+    if models:
+        return _cover_of(models[0], COVER_MODEL_PREVIEW)
+    return _cover_none_fields(None, COVER_NONE)
+
+
+def _cover_of(asset: RegisteredAsset, reason: str) -> dict:
+    """A cover backed by one registered asset, with its two served paths.
+
+    ``url`` and ``thumb_url`` are built through ``asset_urls`` so the report's
+    cover and the asset serializer can never offer two different shapes for the
+    same bytes. ``thumb_url`` is still None until a thumbnail row exists.
+    """
+    return {
+        "asset_id": asset.id,
+        "rel_path": asset.path,
+        "reason": reason,
+        "url": asset_urls.primary_url(asset.id, asset.filename),
+        "thumb_url": asset_urls.thumb_url(asset.id, asset.thumb_version),
+    }
+
+
+def _cover_none_fields(rel_path: Optional[str], reason: str) -> dict:
+    """A cover with no registered asset: a named-but-unserved path, or nothing.
+
+    ``url``/``thumb_url`` are None because there is no asset id to serve: the
+    invariant is that the pair is set exactly when ``asset_id`` is.
+    """
+    return {"asset_id": None, "rel_path": rel_path, "reason": reason, "url": None, "thumb_url": None}
 
 
 def _report_row(
@@ -1074,8 +1154,8 @@ def _report_row(
         return None
     key = _qualify(scope, candidate.key)
     suggestion = (facts.title or "").strip() or "bundle"
-    assets: List[Tuple[str, str, int, str]] = []
-    own_assets: List[Tuple[str, str, int, str]] = []
+    assets: List[RegisteredAsset] = []
+    own_assets: List[RegisteredAsset] = []
     if candidate.offers_archive_only:
         # Nothing to create, so nothing is looked up: a pair-only directory does
         # not even report the assets a scan may already hold under its key.
@@ -1085,8 +1165,8 @@ def _report_row(
         # Only the candidate's OWN entries decide status and cover: a registered
         # asset below a nested child bundle belongs to that bundle, not to this one.
         own = _own_paths(key, candidate)
-        own_assets = [asset for asset in assets if asset[1] in own]
-        models = [asset for asset in own_assets if _suffix(asset[1]) in bundle_detect.MODEL_SUFFIXES]
+        own_assets = [asset for asset in assets if asset.path in own]
+        models = [asset for asset in own_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
         if key.casefold() not in folders:
             status, blocked_reason = BLOCKED, UNRESOLVED_DIRECTORY
         elif not models:
@@ -1316,7 +1396,7 @@ def _create_one(
             )
         if row["confidence"] == bundle_detect.CONFIDENCE_LOW:
             assets = registered_assets(session, key)
-            own_assets = [asset for asset in assets if asset[1] in _own_paths(key, candidate)]
+            own_assets = [asset for asset in assets if asset.path in _own_paths(key, candidate)]
             if len(assets) > len(own_assets):
                 # The difference is another bundle's assets: refuse before the
                 # project row, so a refusal can never leave a half-created project.
@@ -1348,9 +1428,9 @@ def _create_one(
         # never a nested child bundle's models under the recursive prefix.
         own = _own_paths(key, candidate)
         model_assets = [
-            asset[0]
+            asset.id
             for asset in registered_assets(session, key)
-            if asset[1] in own and _suffix(asset[1]) in bundle_detect.MODEL_SUFFIXES
+            if asset.path in own and _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES
         ]
     added, skipped, failed = project_service.add_assets(project_id, model_assets)
     audit.record(

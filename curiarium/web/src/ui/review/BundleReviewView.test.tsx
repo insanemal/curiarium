@@ -10,6 +10,21 @@ vi.mock("../../lib/api", () => ({
   extractArchive: vi.fn(),
 }));
 
+// The cover's derived half renders a snapshot. Hoisted so the props can be
+// asserted (a null renderer would prove nothing), and lazy-resolved the same way
+// `ui/asset-grid/preview.test.tsx` does it. `generateModelSnapshot` is part of
+// the factory because `bundleCovers` imports it for its default renderer: a
+// missing key would make the fire-and-forget create path throw.
+const modelSnapshotProps = vi.hoisted(() => [] as Array<Record<string, unknown>>);
+
+vi.mock("../ModelViewer", () => ({
+  ModelSnapshot: (props: Record<string, unknown>) => {
+    modelSnapshotProps.push(props);
+    return null;
+  },
+  generateModelSnapshot: vi.fn(),
+}));
+
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
 import type { BundleDetectItem, BundleReport } from "../../lib/api/bundles";
 import type { SettleOutcome } from "../../lib/scanSettle";
@@ -52,7 +67,13 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     image_count: 5,
     text_count: 2,
     other_count: 0,
-    cover: { asset_id: "asset-1", rel_path: "images/hero.jpg", reason: "largest-image" },
+    cover: {
+      asset_id: "asset-1",
+      rel_path: "images/hero.jpg",
+      reason: "largest-image",
+      url: "/file/asset-1/hero.jpg",
+      thumb_url: "/thumb/asset-1.jpg?v=1",
+    },
     assets_total: 8,
     status: "ready",
     blocked_reason: null,
@@ -82,7 +103,13 @@ const cableClip = makeBundle({
   image_count: 1,
   text_count: 1,
   other_count: 0,
-  cover: { asset_id: null, rel_path: "preview.png", reason: "largest-image-unregistered" },
+  cover: {
+    asset_id: null,
+    rel_path: "preview.png",
+    reason: "largest-image-unregistered",
+    url: null,
+    thumb_url: null,
+  },
   assets_total: 0,
 });
 const legacyVase = makeBundle({
@@ -100,7 +127,13 @@ const legacyVase = makeBundle({
   model_count: 1,
   image_count: 2,
   text_count: 0,
-  cover: { asset_id: "asset-3", rel_path: "images/vase.jpg", reason: "largest-image" },
+  cover: {
+    asset_id: "asset-3",
+    rel_path: "images/vase.jpg",
+    reason: "largest-image",
+    url: "/file/asset-3/vase.jpg",
+    thumb_url: "/thumb/asset-3.jpg?v=2",
+  },
   assets_total: 3,
   status: "blocked",
   blocked_reason: "unresolved_directory",
@@ -123,7 +156,13 @@ const moaiZip = makeBundle({
   image_count: 0,
   text_count: 0,
   other_count: 1,
-  cover: { asset_id: null, rel_path: null, reason: "largest-image-unregistered" },
+  cover: {
+    asset_id: null,
+    rel_path: null,
+    reason: "largest-image-unregistered",
+    url: null,
+    thumb_url: null,
+  },
   assets_total: 1,
   status: "blocked",
   blocked_reason: "archive_only",
@@ -247,6 +286,7 @@ function VisibilityHarness({ initial }: { initial: BundleDetectState }) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  modelSnapshotProps.length = 0;
   listArchiveEntriesMock.mockReset();
   listArchiveEntriesMock.mockResolvedValue({ path: "Moai.zip", entries: ARCHIVE_ENTRIES });
   extractArchiveMock.mockReset();
@@ -937,5 +977,69 @@ describe("BundleReviewView detail panel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Blocked" }));
 
     expect(within(detail()).getByText("Select a bundle to see its details.")).toBeTruthy();
+  });
+});
+
+describe("BundleReviewView covers", () => {
+  function coverRow(cover: BundleDetectItem["cover"]): BundleDetectItem {
+    return makeBundle({ key: "Cover", title: "Cover bundle", rel_path: "Cover", cover });
+  }
+
+  it("renders a derived cover thumbnail from the served thumb url", () => {
+    const row = coverRow({
+      asset_id: "asset-7",
+      rel_path: "images/hero.jpg",
+      reason: "largest-image",
+      url: "/file/asset-7/hero.jpg",
+      thumb_url: "/thumb/asset-7.jpg?v=3",
+    });
+    const { container } = render(
+      <BundleReviewView state={makeState({ report: makeReport([row]) })} canContribute />,
+    );
+
+    const images = Array.from(container.querySelectorAll("img"));
+    expect(images.length).toBeGreaterThan(0);
+    for (const image of images) {
+      // `fileUrl()` prefixes the API base, so the path is contained, not equal.
+      expect(image.getAttribute("src")).toContain("/thumb/asset-7.jpg?v=3");
+      expect(image.getAttribute("alt")).toBe("");
+      expect(image.getAttribute("aria-hidden")).toBe("true");
+    }
+  });
+
+  it("renders the model snapshot as the row cover when only a preview is derivable", async () => {
+    const row = coverRow({
+      asset_id: "asset-9",
+      rel_path: "model.stl",
+      reason: "model-preview",
+      url: "/file/asset-9/model.stl",
+      thumb_url: null,
+    });
+    renderView(makeState({ report: makeReport([row]) }));
+
+    await waitFor(() => expect(modelSnapshotProps.length).toBeGreaterThan(0));
+    // The row cell and the detail fact are the two mounted sites, so every call
+    // has to carry the same derivation.
+    for (const props of modelSnapshotProps) {
+      expect(props).toMatchObject({ ext: "stl", assetId: "asset-9", showStatus: false });
+      expect(props.url).toContain("/file/asset-9/model.stl");
+    }
+  });
+
+  it("renders no image element for a bundle with no cover", () => {
+    const row = coverRow({
+      asset_id: null,
+      rel_path: null,
+      reason: "none",
+      url: null,
+      thumb_url: null,
+    });
+    const { container } = render(
+      <BundleReviewView state={makeState({ report: makeReport([row]) })} canContribute />,
+    );
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(modelSnapshotProps).toHaveLength(0);
+    expect(within(detail()).getByText("Cover: none")).toBeTruthy();
   });
 });

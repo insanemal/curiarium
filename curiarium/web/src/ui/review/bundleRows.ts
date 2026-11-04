@@ -113,11 +113,14 @@ export function countsLine(row: BundleDetectItem): string {
 }
 
 export function coverLine(row: BundleDetectItem): string {
-  if (!row.cover.rel_path) return "Cover: none";
-  if (row.cover.reason === "largest-image-unregistered") {
-    return `Cover ${row.cover.rel_path} (not registered)`;
-  }
-  return `Cover ${row.cover.rel_path}`;
+  // One branch per reason rather than a nested ternary: each reason's suffix is
+  // an independent fact, and a reader must be able to add a fourth without
+  // untangling the others.
+  const { reason, rel_path: relPath } = row.cover;
+  if (!relPath) return "Cover: none";
+  if (reason === "largest-image-unregistered") return `Cover ${relPath} (not registered)`;
+  if (reason === "model-preview") return `Cover ${relPath} (model preview)`;
+  return `Cover ${relPath}`;
 }
 
 export function archiveLine(row: BundleDetectItem): string | null {

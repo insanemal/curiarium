@@ -46,6 +46,28 @@
           }
         ],
         "title": "Rel Path"
+      },
+      "thumb_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Thumb Url"
+      },
+      "url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Url"
       }
     },
     "required": [

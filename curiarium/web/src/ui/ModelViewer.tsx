@@ -285,7 +285,7 @@ export function StepSizeNotice({ notice }: { notice: string | null }) {
 
 type SnapshotState = "idle" | "loading" | "error" | "skipped";
 
-type SnapshotJob = (
+export type SnapshotJob = (
   url: string,
   ext: string,
   width: number,
@@ -300,6 +300,9 @@ type ModelSnapshotProps = ModelViewerProps & {
   job?: SnapshotJob;
   /** Hands the persisted asset (fresh thumb_url) back to the caller's asset state. */
   onThumbnailSaved?: (asset: Asset) => void;
+  /** `false` silences the four status strings for a host with no room to say
+   *  them (a bundle row's cover cell); the snapshot itself still renders. */
+  showStatus?: boolean;
 };
 
 function noopThumbnailSaved(_asset: Asset) {}
@@ -324,6 +327,7 @@ export function ModelSnapshot({
   queue = previewQueue,
   job = generateModelSnapshot,
   onThumbnailSaved,
+  showStatus = true,
 }: ModelSnapshotProps) {
   const notifySaved = useStableCallback(onThumbnailSaved ?? noopThumbnailSaved);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -439,20 +443,16 @@ export function ModelSnapshot({
     };
   }, [url, ext, assetId, mode, requested, queue, job, notifySaved]);
 
-  return (
-    <div
-      ref={containerRef}
-      className="w-full h-full bg-panel-soft flex items-center justify-center rounded-md overflow-hidden"
-    >
-      {snapshot ? (
-        <img src={snapshot} alt="Preview" className="w-full h-full object-cover" />
-      ) : state === "loading" ? (
-        <span className="text-xs text-muted">Generating preview...</span>
-      ) : state === "skipped" ? (
-        <span className="text-xs text-muted">Preview budget reached</span>
-      ) : state === "error" ? (
-        <span className="text-xs text-muted">Preview unavailable</span>
-      ) : mode === "on-demand" && !requested ? (
+  // One flat chain rather than nested ternaries, so each state is one line.
+  // The on-demand button sits above the `showStatus` gate on purpose: it is an
+  // affordance, not a status, and hiding it would leave the host with no way to
+  // ask for a preview at all.
+  function previewChip(): React.ReactNode {
+    if (snapshot) {
+      return <img src={snapshot} alt="Preview" className="w-full h-full object-cover" />;
+    }
+    if (mode === "on-demand" && !requested) {
+      return (
         <button
           type="button"
           className="rounded-md border border-panel-strong px-3 py-2 text-xs font-medium hover:bg-panel-strong"
@@ -460,9 +460,21 @@ export function ModelSnapshot({
         >
           Generate preview
         </button>
-      ) : (
-        <span className="text-xs text-muted">Waiting to generate preview...</span>
-      )}
+      );
+    }
+    if (!showStatus) return null;
+    if (state === "loading") return <span className="text-xs text-muted">Generating preview...</span>;
+    if (state === "skipped") return <span className="text-xs text-muted">Preview budget reached</span>;
+    if (state === "error") return <span className="text-xs text-muted">Preview unavailable</span>;
+    return <span className="text-xs text-muted">Waiting to generate preview...</span>;
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="w-full h-full bg-panel-soft flex items-center justify-center rounded-md overflow-hidden"
+    >
+      {previewChip()}
     </div>
   );
 }
@@ -815,8 +827,12 @@ function findFirstElement(node: Document | Element, localName: string) {
  * in a worker that gets terminated on abort, as does the STEP/3MF download. It
  * still cannot interrupt a renderer draw, a `toDataURL` readback, or the
  * STL/OBJ XHR loads (three's loaders take no signal).
+ *
+ * `export`ed because a bundle cover with no image is rendered on create
+ * (`ui/review/bundleCovers.ts`), through the preview queue like every other
+ * job: the same budgets have to bound a background render.
  */
-async function generateModelSnapshot(
+export async function generateModelSnapshot(
   url: string,
   ext: string,
   width: number,

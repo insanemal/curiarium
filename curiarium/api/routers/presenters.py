@@ -3,8 +3,8 @@
 import json
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
 
+import asset_urls
 import project_service
 from models import Asset, AssetFile, Folder, Project
 from prepared_print import prepared_filename
@@ -34,9 +34,7 @@ def thumb_url_for(asset_id: Optional[str], thumb_version: int) -> Optional[str]:
     One helper for every `thumb_url`/`cover_thumb_url` field, so the versioned
     form cannot drift between the asset and project serializers.
     """
-    if not asset_id or thumb_version <= 0:
-        return None
-    return f"/thumb/{asset_id}.jpg?v={thumb_version}"
+    return asset_urls.thumb_url(asset_id, thumb_version)
 
 
 def prepared_print_payload(raw: Optional[str]) -> Optional[dict]:
@@ -68,11 +66,10 @@ def prepared_print_payload(raw: Optional[str]) -> Optional[dict]:
 
 def to_out(a: Asset) -> AssetOut:
     tags = json.loads(a.tags_json or "[]")
-    safe_filename = quote(a.filename or "", safe="")
     prepared = prepared_print_payload(a.prepared_metadata_json)
     if prepared:
         prepared["removable"] = bool(a.prepared_file_id)
-    primary_url = f"/file/{a.id}/{safe_filename}"
+    primary_url = asset_urls.primary_url(a.id, a.filename)
     slicer_url = f"/asset/{a.id}/prepared-print" if a.prepared_file_id else primary_url
     return AssetOut(
         id=a.id,

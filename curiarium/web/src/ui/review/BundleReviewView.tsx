@@ -1,13 +1,19 @@
 import React from "react";
 import { Check } from "lucide-react";
 
-import type { BundleCreateItem, BundleDetectItem } from "../../lib/api/bundles";
+import type { BundleCover, BundleCreateItem, BundleDetectItem } from "../../lib/api/bundles";
 // The type comes from the domain module, not the `../../lib/api` barrel: the
 // tests replace that barrel with a fixed object, so a named import from it
 // would throw "No export is defined on the mock".
 import type { ArchiveExtractResult } from "../../lib/api/imports";
+import { fileUrl } from "../../lib/api/mediaUrls";
+import { extOf } from "../../lib/assetKinds";
+import type { ResolvedTheme } from "../../lib/settings";
+import { useFileGrants } from "../../lib/useFileGrants";
 import ArchiveExtractAction from "../archive/ArchiveExtractAction";
 import ArchiveExtractDialog, { type ExtractTarget } from "../archive/ArchiveExtractDialog";
+import ErrorBoundary from "../ErrorBoundary";
+import { ModelSnapshot } from "../ModelViewer";
 import {
   BUNDLE_FILTERS,
   archiveLine,
@@ -25,6 +31,7 @@ import {
   typedName,
   type BundleFilter,
 } from "./bundleRows";
+import { primeModelCovers } from "./bundleCovers";
 import ReviewQueueView from "./ReviewQueueView";
 import type { BundleDetectState } from "./useBundleDetect";
 import { bundleBadgeCount, describeQueueCount } from "./useReviewCounts";
@@ -117,7 +124,65 @@ type Props = {
   state: BundleDetectState;
   /** Writes (create, dismiss, extract) are CONTRIBUTE actions; a viewer reads. */
   canContribute: boolean;
+  /** Only reaches the derived cover's renderer, which reads its colours from the
+   *  `--mv-*` variables; App does not thread it yet, so light is the default. */
+  theme?: ResolvedTheme;
 };
+
+/**
+ * The row's face: a served thumbnail when one exists, otherwise the bundle's own
+ * model rendered into one, otherwise nothing at all.
+ *
+ * Module-level on purpose: a parent re-render must not remount this component,
+ * because a remount would start the snapshot job over.
+ */
+function CoverThumb({
+  cover,
+  theme,
+}: {
+  cover: BundleCover;
+  theme: ResolvedTheme;
+}): React.ReactElement | null {
+  // The `<img>`/snapshot re-reads the grant cache on every render, so the cache
+  // has to stay warm while the row is mounted (`preview.tsx`'s idiom, where the
+  // same hook gates the modal's own preview). The result gates the image: the
+  // first request must never be unsigned.
+  const ready = useFileGrants([cover.url, cover.thumb_url]);
+  // A thumbnail saved after mount (the renderer's callback) replaces the served
+  // one without a refetch of the report.
+  const [thumb, setThumb] = React.useState<string | null>(null);
+  if (!ready) return null;
+  const path = thumb ?? cover.thumb_url;
+  if (path) {
+    return (
+      <span className="review-thumb" aria-hidden="true">
+        <img src={fileUrl(path)} alt="" aria-hidden="true" className="review-thumb-img" />
+      </span>
+    );
+  }
+  if (cover.reason === "model-preview" && cover.asset_id && cover.url) {
+    return (
+      <span className="review-thumb" aria-hidden="true">
+        <ErrorBoundary compact>
+          <React.Suspense fallback={null}>
+            <ModelSnapshot
+              url={fileUrl(cover.url)}
+              ext={extOf(cover.rel_path ?? "")}
+              assetId={cover.asset_id}
+              theme={theme}
+              // A 2.5rem cell has no room for "Preview budget reached", and the
+              // status is not what the operator is looking at: the face is.
+              showStatus={false}
+              onThumbnailSaved={saved => setThumb(saved.thumb_url ?? null)}
+            />
+          </React.Suspense>
+        </ErrorBoundary>
+      </span>
+    );
+  }
+  // No cover is a real answer (`reason === "none"`), not a broken image.
+  return null;
+}
 
 /**
  * The bundle queue: a dense list on the left, the active row's details on the
@@ -125,7 +190,7 @@ type Props = {
  * so this view only filters rows, holds a selection, a per-row name draft and
  * the active row.
  */
-export default function BundleReviewView({ state, canContribute }: Props) {
+export default function BundleReviewView({ state, canContribute, theme = "light" }: Props) {
   const {
     report,
     loading,
@@ -214,10 +279,14 @@ export default function BundleReviewView({ state, canContribute }: Props) {
     });
 
   const createSelected = () => {
+    // A cover must never block or fail a create: `primeModelCovers` swallows its
+    // own failures and is deliberately not awaited.
+    void primeModelCovers(creatableSelected, { mediaUrl: fileUrl });
     void state.create(createItems(creatableSelected));
   };
 
   const createLowAsNameOnly = () => {
+    void primeModelCovers(lowCreatable, { mediaUrl: fileUrl });
     void state.create(lowCreatable.map(row => ({ key: row.key, name_only: true })));
   };
 
@@ -279,7 +348,9 @@ export default function BundleReviewView({ state, canContribute }: Props) {
   };
 
   const createActive = () => {
-    if (activeRow) void state.create(createItems([activeRow]));
+    if (!activeRow) return;
+    void primeModelCovers([activeRow], { mediaUrl: fileUrl });
+    void state.create(createItems([activeRow]));
   };
 
   const dismissActive = () => {
@@ -367,6 +438,7 @@ export default function BundleReviewView({ state, canContribute }: Props) {
         }}
         onClick={() => setActiveKey(row.key)}
       >
+        <CoverThumb cover={row.cover} theme={theme} />
         <span className="review-row-name">
           {/* A plain span, not a checkbox: nothing focusable may live inside an
               option, or the listbox would have a second tab stop per row. The
@@ -603,6 +675,7 @@ export default function BundleReviewView({ state, canContribute }: Props) {
                   <span>{statusLine(activeRow)}</span>
                   <span className="font-mono">{activeRow.rel_path}</span>
                   <span>{countsLine(activeRow)}</span>
+                  <CoverThumb cover={activeRow.cover} theme={theme} />
                   <span>{coverLine(activeRow)}</span>
                   {activeArchive && <span>{activeArchive}</span>}
                   {activeRow.creator && <span>{`Creator ${activeRow.creator}`}</span>}

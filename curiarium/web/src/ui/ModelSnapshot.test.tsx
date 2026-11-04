@@ -437,3 +437,76 @@ describe("ModelSnapshot thumbnail persistence", () => {
     expect(screen.getByRole("img").getAttribute("src")).toContain("/thumb/a1.jpg?v=7");
   });
 });
+
+describe("ModelSnapshot status text", () => {
+  const STATUS_LINES = [
+    "Generating preview...",
+    "Preview budget reached",
+    "Preview unavailable",
+    "Waiting to generate preview...",
+  ];
+
+  it("renders no status text when showStatus is false", async () => {
+    // An exhausted queue settles on `skipped`, one of the four gated states.
+    const queue = new PreviewQueue({ sessionBudgetMs: 0 });
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const jobSpy = vi.fn(async () => "data:image/png;base64,AA==");
+
+    const { container } = render(
+      <ModelSnapshot
+        url="/api/assets/quiet/file"
+        ext="stl"
+        theme="light"
+        queue={queue}
+        job={jobSpy}
+        showStatus={false}
+      />,
+    );
+    fireIntersections();
+    await settleDwell();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    for (const line of STATUS_LINES) {
+      expect(screen.queryByText(line)).toBeNull();
+    }
+    // Nothing at all, not merely those four strings: the container stays mounted
+    // (the job still has to run) and stays silent.
+    expect(container.textContent).toBe("");
+    expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining("session budget exhausted"));
+  });
+
+  it("still renders the frame it did generate when showStatus is false", async () => {
+    const queue = new PreviewQueue();
+    const jobSpy = vi.fn(async () => "data:image/png;base64,AA==");
+
+    render(
+      <ModelSnapshot
+        url="/api/assets/quiet-frame/file"
+        ext="stl"
+        theme="light"
+        queue={queue}
+        job={jobSpy}
+        showStatus={false}
+      />,
+    );
+    fireIntersections();
+    await settleDwell();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByAltText("Preview").getAttribute("src")).toBe("data:image/png;base64,AA==");
+  });
+
+  it("keeps the on-demand button reachable when showStatus is false", () => {
+    // The button is an affordance, not a status, so `showStatus: false` must not
+    // take away the only way to ask for a preview.
+    render(
+      <ModelSnapshot url="/api/assets/quiet-button/file" ext="stl" theme="light" mode="on-demand" showStatus={false} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Generate preview" })).toBeTruthy();
+  });
+});
