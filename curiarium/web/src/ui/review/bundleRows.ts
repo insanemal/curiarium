@@ -100,6 +100,18 @@ export function statusLine(row: BundleDetectItem): string {
   return `Blocked - ${reason}`;
 }
 
+/** The bucket a row falls in for the queue's reveal toggles. This is the
+ *  reporter's verdict on whether the row is settled, not the row's words: an
+ *  existing project outranks a dismissal, because creating is the stronger
+ *  settlement of the two. */
+export type RowBucket = "created" | "dismissed" | null;
+
+export function rowBucket(row: BundleDetectItem): RowBucket {
+  if (row.existing_project_id) return "created";
+  if (row.dismissed) return "dismissed";
+  return null;
+}
+
 /** The detail line for a row that already became a project, or null when it did
  *  not. The id is the identity and is never spoken: a name we have is named, a
  *  name we do not have says so honestly rather than printing a uuid or nothing.
@@ -119,6 +131,35 @@ export function createdProjectLine(row: BundleDetectItem): string | null {
   }
   if (name) return `Already created as project ${name}`;
   return "Already created as a project - its name is unavailable.";
+}
+
+/** The row chip's words, kept apart from `rowBucket` on purpose. The bucket is
+ *  the reporter's verdict on whether the row is settled; the chip is the
+ *  narrower claim "who made this project?". A project the queue only found by
+ *  shared files is settled - hidden with the created rows - yet the app may not
+ *  have made it, so its chip must not say "Created". */
+export const ROW_STATE_CREATED = "Created";
+export const ROW_STATE_IN_PROJECT = "In project";
+export const ROW_STATE_DISMISSED = "Dismissed";
+
+/** A chip's words and, when the words abbreviate a longer sentence, that
+ *  sentence as the hover `title`. The non-interactive spans in the row use the
+ *  same idiom (`review-row-path`, `review-row-confidence`). */
+export type RowStateChip = { label: string; title: string | null };
+
+export function rowStateChip(row: BundleDetectItem): RowStateChip {
+  if (row.existing_project_id) {
+    // Only the asset identity is a claim about the files rather than the app's
+    // own record, so only it needs the weaker words. Its title is the same
+    // sentence the detail line speaks, so the chip and the panel cannot
+    // disagree.
+    if (row.existing_project_match === "assets") {
+      return { label: ROW_STATE_IN_PROJECT, title: createdProjectLine(row) };
+    }
+    return { label: ROW_STATE_CREATED, title: null };
+  }
+  if (row.dismissed) return { label: ROW_STATE_DISMISSED, title: null };
+  return { label: "", title: null };
 }
 
 export function countLabel(value: number, one: string, many: string): string {

@@ -451,7 +451,10 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     splits: an `assets` match reads "Already in <project> (matched by shared
     files)", and its nameless variant "Already in a project (matched by shared
     files) - its name is unavailable.", while the other three keep the flat
-    "Already created as project X". `existing_project_match` is optional in the
+    "Already created as project X". The queue's `review-row-state` chip makes the
+    same split in two words: an `assets` match chips "In project" and carries
+    that sentence as its hover title, while the other three chip `Created`.
+    `existing_project_match` is optional in the
     client's `BundleDetectItem` type on purpose: a payload from before this
     identity existed omits it, and `undefined` must mean "the server did not
     say", never `assets`.
@@ -1238,14 +1241,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 * Nothing here heals a folder row. A legacy bundle stays `blocked` until Mf-um7x
   (or a rescan) gives its `Folder` a `storage_path`, and the report is the
   surface that says which bundles are waiting on that.
-* **An asset-matched row is reported correctly and still chipped `Created`.**
-  `BundleReviewView.tsx`'s `rowState()` renders the chip `Created` for any row
-  carrying an `existing_project_id`, so the chip does not yet say "matched by
-  shared files" the way the detail line does. That file was owned by a concurrent
-  lane when this landed, so the coarse chip is a known, deliberate gap rather
-  than an oversight; the follow-up is ticket `Mc-noft`. Nothing about the claim
-  is wrong - the row is in a project, the bucket and the count are the
-  reporter's, and only the chip's wording is unfinished.
+* **An asset-matched row chips "In project", not "Created".** The chip is a
+  claim about who made the project, so it follows `existing_project_match`: the
+  shared-files identity reads "In project" and carries the detail line's own
+  sentence as its hover `title`, so the chip and the panel cannot disagree. The
+  bucket and the count are unchanged because they key on `existing_project_id`,
+  not on the words: the row is still hidden with the created rows, and an
+  asset-only queue still says "Every detected bundle has a project."
 * **A nested archive is opaque, so a directory whose only payload is a zip is not
   a bundle.** Its entries never count as evidence, which is what keeps the
   Clockwork directory one bundle and a zip-only directory from becoming one on
