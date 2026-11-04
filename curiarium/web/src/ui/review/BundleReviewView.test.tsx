@@ -393,6 +393,14 @@ function statusCell(key: string): HTMLElement {
   return cell;
 }
 
+/** The row's own words for who made the project, which is not the queue's
+ *  bucket verdict: the two are allowed to disagree. */
+function stateCell(key: string): HTMLElement {
+  const cell = rowElement(key).querySelector<HTMLElement>(".review-row-state");
+  if (!cell) throw new Error(`no state cell for ${key}`);
+  return cell;
+}
+
 /** The row's bulk-selection glyph, which is how a selection is made by mouse. */
 function selectionCheck(key: string): HTMLElement {
   const glyph = rowElement(key).querySelector<HTMLElement>(".review-check");
@@ -725,6 +733,71 @@ describe("BundleReviewView empty states", () => {
       expect(shown.sort()).toEqual([...testCase.toggles].sort());
     });
   }
+});
+
+describe("BundleReviewView existing-project chips", () => {
+  const projectId = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
+  const assetRow = makeBundle({
+    key: "Clockwork",
+    rel_path: "Clockwork",
+    title: "Clockwork",
+    existing_project_id: projectId,
+    existing_project_name: "Fates End - ClockworkMonster Tower",
+    existing_project_match: "assets",
+  });
+
+  it("says the bundle is in a project, not that the app created it", () => {
+    const state = makeState({ report: makeReport([assetRow]) });
+    render(<VisibilityHarness initial={state} />);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show created" }));
+
+    expect(stateCell("Clockwork").textContent).toBe("In project");
+    expect(stateCell("Clockwork").textContent).not.toBe("Created");
+    // The hover title is the detail line's own sentence, so the chip cannot
+    // abbreviate one claim while the panel makes another.
+    expect(stateCell("Clockwork").getAttribute("title")).toBe(
+      "Already in Fates End - ClockworkMonster Tower (matched by shared files)",
+    );
+    expect(
+      within(detail()).getByText(
+        "Already in Fates End - ClockworkMonster Tower (matched by shared files)",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("still says Created for the marker identity beside an asset row", () => {
+    const markedRow = makeBundle({
+      key: "Moai_marked",
+      rel_path: "Moai_marked",
+      title: "Moai marked",
+      existing_project_id: projectId,
+      existing_project_name: "Moai statue",
+      existing_project_match: "marker",
+    });
+    const state = makeState({ report: makeReport([markedRow, assetRow]) });
+    render(<VisibilityHarness initial={state} />);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show created" }));
+
+    // One render, two identities: the chip must follow the match, not the id.
+    expect(stateCell("Moai_marked").textContent).toBe("Created");
+    expect(stateCell("Clockwork").textContent).toBe("In project");
+  });
+
+  it("keeps an asset-matched row in the Show created bucket, off the count and out of the badge", () => {
+    renderView(makeState({ report: makeReport([assetRow]) }));
+
+    // The words changed; the bucket did not. The row is still settled, so the
+    // default view is the created empty state and never the mixed one.
+    expect(screen.queryByRole("listbox", { name: "Bundles to confirm" })).toBeNull();
+    expect(screen.getByText("Every detected bundle has a project.")).toBeTruthy();
+    expect(screen.getByText("Turn on Show created to see them.")).toBeTruthy();
+    expect(
+      screen.queryByText("Every detected bundle is dismissed or already has a project."),
+    ).toBeNull();
+    expect(headerCount()).toBe("0");
+  });
 });
 
 describe("BundleReviewView writes", () => {

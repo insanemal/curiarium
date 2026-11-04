@@ -34,6 +34,8 @@ import {
   isCreatable,
   matchesFilter,
   matchesVisibility,
+  rowBucket,
+  rowStateChip,
   statusLine,
   typedName,
   type BundleFilter,
@@ -65,21 +67,14 @@ function confidenceClass(confidence: string): string {
   return "text-zinc-500";
 }
 
-/** The row's rightmost column: an existing project outranks a dismissal. */
-function rowState(row: BundleDetectItem): string {
-  if (row.existing_project_id) return "Created";
-  if (row.dismissed) return "Dismissed";
-  return "";
-}
-
 /** Why a report with rows shows none of them. A project outranks a dismissal,
- *  exactly as `rowState` says, so a queue of one kind is never confused with a
+ *  exactly as `rowBucket` says, so a queue of one kind is never confused with a
  *  queue of the other. */
 type HiddenReason = "created" | "dismissed" | "mixed";
 
 function hiddenReason(rows: BundleDetectItem[]): HiddenReason {
-  if (rows.every(row => rowState(row) === "Created")) return "created";
-  if (rows.every(row => rowState(row) === "Dismissed")) return "dismissed";
+  if (rows.every(row => rowBucket(row) === "created")) return "created";
+  if (rows.every(row => rowBucket(row) === "dismissed")) return "dismissed";
   return "mixed";
 }
 
@@ -565,6 +560,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const renderRow = (row: BundleDetectItem) => {
     const isSelected = selectedKeys.includes(row.key);
     const isActive = row.key === activeKey;
+    const chip = rowStateChip(row);
     return (
       <div
         key={row.key}
@@ -634,7 +630,9 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
         ) : (
           <span className="review-row-status">{statusLine(row)}</span>
         )}
-        <span className="review-row-state">{rowState(row)}</span>
+        <span className="review-row-state" title={chip.title ?? undefined}>
+          {chip.label}
+        </span>
       </div>
     );
   };

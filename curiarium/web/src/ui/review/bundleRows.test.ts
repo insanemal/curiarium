@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import type { BundleDetectCounts, BundleDetectItem } from "../../lib/api/bundles";
 import {
+  ROW_STATE_CREATED,
+  ROW_STATE_DISMISSED,
+  ROW_STATE_IN_PROJECT,
   archiveLine,
   confidenceLabel,
   countLabel,
@@ -15,6 +18,8 @@ import {
   matchesFilter,
   matchesVisibility,
   needsDecision,
+  rowBucket,
+  rowStateChip,
   statusLine,
   typedName,
 } from "./bundleRows";
@@ -396,6 +401,110 @@ describe("a row already in a project by shared files", () => {
 
   it("is not creatable, so it is never re-offered as new work", () => {
     expect(isCreatable(assetMatched)).toBe(false);
+  });
+});
+
+describe("rowStateChip", () => {
+  const projectId = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
+  const assetMatched = makeBundle({
+    existing_project_id: projectId,
+    existing_project_name: "Fates End - ClockworkMonster Tower",
+    existing_project_match: "assets",
+  });
+
+  it("says In project for shared files, and never claims the app created it", () => {
+    const chip = rowStateChip(assetMatched);
+    expect(chip.label).toBe("In project");
+    expect(chip.label).not.toBe("Created");
+    expect(chip.title).toBe(
+      "Already in Fates End - ClockworkMonster Tower (matched by shared files)",
+    );
+  });
+
+  it("says In project with the nameless sentence when the project has no name", () => {
+    const chip = rowStateChip(
+      makeBundle({
+        existing_project_id: projectId,
+        existing_project_name: null,
+        existing_project_match: "assets",
+      }),
+    );
+    expect(chip.label).toBe("In project");
+    expect(chip.title).toBe(
+      "Already in a project (matched by shared files) - its name is unavailable.",
+    );
+  });
+
+  it("keeps Created for the three identities that are the app's own record or a guess", () => {
+    for (const existing_project_match of ["marker", "source_url", "name"] as const) {
+      expect(
+        rowStateChip(
+          makeBundle({
+            existing_project_id: projectId,
+            existing_project_name: "Moai statue",
+            existing_project_match,
+          }),
+        ),
+      ).toEqual({ label: "Created", title: null });
+    }
+  });
+
+  it("keeps Created when the payload omits the match, so undefined is not assets", () => {
+    // One fixture with the key absent, one with it explicitly null: both mean
+    // "the server did not say", and neither may borrow the assets words.
+    expect(rowStateChip(makeBundle({ existing_project_id: projectId }))).toEqual({
+      label: "Created",
+      title: null,
+    });
+    expect(
+      rowStateChip(makeBundle({ existing_project_id: projectId, existing_project_match: null })),
+    ).toEqual({ label: "Created", title: null });
+  });
+
+  it("says Dismissed for a dismissal and nothing at all for a fresh row", () => {
+    expect(rowStateChip(makeBundle({ dismissed: true }))).toEqual({
+      label: "Dismissed",
+      title: null,
+    });
+    expect(rowStateChip(makeBundle())).toEqual({ label: "", title: null });
+    expect(rowStateChip(makeBundle({ dismissed: true, existing_project_id: projectId }))).toEqual({
+      label: "Created",
+      title: null,
+    });
+  });
+
+  it("the three chip words are distinct", () => {
+    expect(new Set([ROW_STATE_CREATED, ROW_STATE_IN_PROJECT, ROW_STATE_DISMISSED]).size).toBe(3);
+  });
+});
+
+describe("rowBucket", () => {
+  const projectId = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
+
+  it("puts a row with a project in the created bucket, whatever the identity", () => {
+    for (const existing_project_match of [
+      "marker",
+      "source_url",
+      "name",
+      "assets",
+      undefined,
+    ] as const) {
+      expect(rowBucket(makeBundle({ existing_project_id: projectId, existing_project_match }))).toBe(
+        "created",
+      );
+    }
+  });
+
+  it("puts a dismissal in the dismissed bucket", () => {
+    expect(rowBucket(makeBundle({ dismissed: true }))).toBe("dismissed");
+  });
+
+  it("puts a fresh row in no bucket", () => {
+    expect(rowBucket(makeBundle())).toBeNull();
+  });
+
+  it("keeps a project ahead of a dismissal", () => {
+    expect(rowBucket(makeBundle({ dismissed: true, existing_project_id: projectId }))).toBe("created");
   });
 });
 
