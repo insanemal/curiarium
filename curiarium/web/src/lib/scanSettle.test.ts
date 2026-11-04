@@ -126,11 +126,33 @@ describe("waitForScanSettle", () => {
 
 describe("settleAfterExtract", () => {
   it("touches nothing when the extract wrote nothing", async () => {
+    // The every-destination-exists no-op: the server reports it as zero files
+    // with `already_present` true, so it is nothing written like any other.
     const results: ArchiveExtractResult[] = [
-      { ...RESULT, already_present: true, scan_started: false },
+      { ...RESULT, files: 0, bytes: 0, already_present: true, scan_started: false },
     ];
 
     await expect(settleAfterExtract(results)).resolves.toBe("settled");
+    expect(getLibraryScanStatusMock).not.toHaveBeenCalled();
+    expect(startLibraryScanMock).not.toHaveBeenCalled();
+  });
+
+  it("touches nothing when the archive held no extractable files", async () => {
+    // The server's junk-only early return: zero files with `already_present`
+    // false, so filtering on that flag alone counted a no-write as a write and
+    // kicked a full library rescan for it.
+    const results: ArchiveExtractResult[] = [
+      {
+        path: "Moai.zip",
+        destination: "Moai",
+        files: 0,
+        bytes: 0,
+        already_present: false,
+        scan_started: false,
+      },
+    ];
+
+    await expect(settleAfterExtract(results, {})).resolves.toBe("settled");
     expect(getLibraryScanStatusMock).not.toHaveBeenCalled();
     expect(startLibraryScanMock).not.toHaveBeenCalled();
   });

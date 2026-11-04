@@ -13,16 +13,25 @@
  * Domain modules only, never the `lib/api` barrel: `App`'s tests replace that
  * barrel with a fixed object, so a named import from it would throw "No export
  * is defined on the mock". `ui/review/useLibraryScan.ts` sets the precedent.
+ * `ui/asset-grid/assetGridMeta.ts` (imported for `RESCAN_TIMEOUT_MS`) does reach
+ * the barrel itself, so a test that both mocks `lib/api` and loads this module
+ * at runtime must keep the names it pulls real.
  */
 import { UnauthorizedError } from "./api/http";
 import { getLibraryScanStatus, startLibraryScan } from "./api/settings";
 import type { ArchiveExtractResult } from "./api/imports";
+import { RESCAN_TIMEOUT_MS } from "../ui/asset-grid/assetGridMeta";
 
-/** Matches `POLL_MS` in `ui/review/useLibraryScan.ts:42`, so both surfaces poll at one rate. */
+/**
+ * Matches `POLL_MS` in `ui/review/useLibraryScan.ts`. Both are private, so the
+ * comment is the only thing tying them together. The tree does hold a second
+ * rate: `ui/asset-grid/assetGridMeta.ts`'s `RESCAN_POLL_INTERVAL_MS` polls at
+ * 1000ms for the per-card Re-scan, which is its own waiter.
+ */
 export const SETTLE_POLL_MS = 1500;
 
-/** Matches `RESCAN_TIMEOUT_MS` in `ui/asset-grid/assetGridMeta.ts`, the other scan waiter. */
-export const SETTLE_TIMEOUT_MS = 10 * 60_000;
+/** `RESCAN_TIMEOUT_MS` itself - the other scan waiter's deadline, not a copy of it. */
+export const SETTLE_TIMEOUT_MS = RESCAN_TIMEOUT_MS;
 
 /**
  * `settled` - no scan was running any more, so the write is visible.
@@ -104,14 +113,15 @@ export async function waitForScanSettle(opts: SettleOptions = {}): Promise<Settl
  * only then is a fresh pass kicked, because a second start while the old walk
  * is still running would be refused. That gives two windows, never a third.
  *
- * Nothing written means nothing to wait for: an all-`already_present` batch
- * returns without touching the network at all.
+ * Nothing written means nothing to wait for: a batch of all-`already_present`
+ * results, or one whose entries were all junk (`files: 0`), returns without
+ * touching the network at all.
  */
 export async function settleAfterExtract(
   results: ArchiveExtractResult[],
   opts: SettleOptions = {},
 ): Promise<SettleOutcome> {
-  const written = results.filter(result => !result.already_present);
+  const written = results.filter(result => result.files > 0);
   if (written.length === 0) return "settled";
 
   const first = await waitForScanSettle(opts);

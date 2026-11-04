@@ -33,7 +33,11 @@ function countLabel(count: number): string {
 }
 
 function doneLine(result: ArchiveExtractResult): string {
+  // Two different nothings. This one is a destination that was already there;
+  // the one below is an archive whose entries all turned out to be junk.
   if (result.already_present) return "Already extracted - nothing to do.";
+  // Nothing was written, so no scan can register it: claiming one would lie.
+  if (result.files === 0) return "Nothing was written - the archive held no extractable files.";
   const scan = result.scan_started
     ? "A library scan has started."
     : "A library scan is already running.";

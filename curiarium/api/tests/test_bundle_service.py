@@ -1306,7 +1306,7 @@ def test_create_refuses_a_low_candidate_whose_assets_include_another_bundles(
         "description_excerpt": None,
         "detector": "generic-bundle",
         "confidence": "low",
-        "cover": {"asset_id": None, "rel_path": "Inbox/loose.jpg", "reason": "largest-image-unregistered"},
+        "cover": {"asset_id": None, "rel_path": "Inbox/loose.jpg", "reason": "largest-image-unregistered", "url": None, "thumb_url": None},
         "status": "ready",
         "blocked_reason": None,
         "archive": None,

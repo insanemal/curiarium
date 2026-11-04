@@ -195,7 +195,9 @@ change more than one fact or act on more than one target:
   written, and a selection that is entirely OS metadata writes no files at all,
   so it records no `archive.extract` row - the same rule as a request whose
   every destination already existed: a request that changes nothing writes
-  nothing. That door returns no `failed` list, because it is all-or-nothing.
+  nothing. That door returns no `failed` list: it skips a member by
+  classification and aborts the whole request (400/409/413) on everything else,
+  so it never partially fails an entry.
   The predicate governs extracted archive members only: an ordinary file upload
   and a file already on disk (registered by the storage scan) are outside it.
 * `PATCH /users/{user_id}` - one row per changed field. Changing role and

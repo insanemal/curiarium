@@ -142,7 +142,7 @@ function CoverThumb({
 }: {
   cover: BundleCover;
   theme: ResolvedTheme;
-}): React.ReactElement | null {
+}): React.ReactElement {
   // The `<img>`/snapshot re-reads the grant cache on every render, so the cache
   // has to stay warm while the row is mounted (`preview.tsx`'s idiom, where the
   // same hook gates the modal's own preview). The result gates the image: the
@@ -151,7 +151,11 @@ function CoverThumb({
   // A thumbnail saved after mount (the renderer's callback) replaces the served
   // one without a refetch of the report.
   const [thumb, setThumb] = React.useState<string | null>(null);
-  if (!ready) return null;
+  // The empty shell, never `null`: the row is a six-track grid, and a null child
+  // reserves no track at all, so a skipped cell would shift every cell after it
+  // one track left. This holds the cell from the first paint too - `useFileGrants`
+  // answers false on a cold cache while the grant is minted.
+  if (!ready) return <span className="review-thumb" aria-hidden="true" />;
   const path = thumb ?? cover.thumb_url;
   if (path) {
     return (
@@ -180,8 +184,9 @@ function CoverThumb({
       </span>
     );
   }
-  // No cover is a real answer (`reason === "none"`), not a broken image.
-  return null;
+  // No cover is a real answer (`reason === "none"`), not a broken image: the
+  // empty square keeps the cell, and with it the six-track grid, reserved.
+  return <span className="review-thumb" aria-hidden="true" />;
 }
 
 /**
@@ -315,7 +320,10 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   // for the library walk to register the extracted files and then refetches:
   // the hook owns the refetch, so this view never calls `refresh` for it.
   const handleExtracted = (results: ArchiveExtractResult[]) => {
-    const written = results.filter(result => !result.already_present);
+    // `files > 0` is the direct test of "something was written": a junk-only
+    // archive answers `files: 0` with `already_present: false`, so filtering on
+    // `already_present` would report a no-write as an extraction.
+    const written = results.filter(result => result.files > 0);
     if (written.length === 0) {
       // Nothing landed, so nothing will register: no notice, no wait.
       setSettling(null);

@@ -123,10 +123,11 @@ def extract_out(
                     ),
                 )
             if not plan.writable:
-                # A selection that can write nothing writes nothing: no twin
-                # directory, no scan kick and no audit row, exactly like the
-                # every-destination-exists no-op below. All of it was junk, or
-                # directory-like members, and neither is a payload byte.
+                # The other nothing-written outcome: no twin directory, no scan
+                # kick and no audit row. Every member was junk or directory-like,
+                # so no destination existed and `already_present` stays False;
+                # `already_present is False` with `files == 0` is this signature,
+                # where the every-destination-exists no-op below answers True.
                 return ArchiveExtractOut(
                     path=normalized,
                     destination=twin_rel,

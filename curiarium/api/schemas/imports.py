@@ -76,9 +76,12 @@ class ArchiveExtractRequest(BaseModel):
 class ArchiveExtractOut(BaseModel):
   """What an in-library extract did, or that it had nothing left to do.
 
-  `already_present` is the idempotent outcome: every destination existed, so the
-  request wrote nothing, started no scan and wrote no audit row. `destination`
-  is library-relative, the twin directory beside the zip.
+  Two outcomes write nothing, and `(files, already_present)` tells them apart.
+  `already_present=True` is the idempotent one: every destination already
+  existed. `already_present=False` with `files=0` is the junk-only one: the
+  selection had nothing writable, every member being OS metadata or
+  directory-like. Neither wrote a file, started a scan or wrote an audit row.
+  `destination` is library-relative, the twin directory beside the zip.
   """
 
   path: str

@@ -84,7 +84,15 @@ describe("ArchiveExtractAction", () => {
   });
 
   it("says nothing was written when the destination already exists", async () => {
-    extractArchiveMock.mockResolvedValue({ ...RESULT, already_present: true, scan_started: false });
+    // Zero files here too: both nothing-written outcomes report `files: 0`, and
+    // this branch has to be read first or it would borrow the junk-only wording.
+    extractArchiveMock.mockResolvedValue({
+      ...RESULT,
+      files: 0,
+      bytes: 0,
+      already_present: true,
+      scan_started: false,
+    });
     render(<ArchiveExtractAction canContribute path="Moai.zip" label="Moai.zip" />);
 
     await extractOnce();
@@ -92,6 +100,25 @@ describe("ArchiveExtractAction", () => {
     const status = await screen.findByRole("status");
     expect(status.textContent).toBe("Already extracted - nothing to do.");
     expect(status.textContent).not.toContain("Extracted");
+  });
+
+  it("says nothing was written when the archive held no extractable files", async () => {
+    // Junk-only: the server writes nothing and starts no scan, but it is not
+    // `already_present` either, so it needs its own line - and no scan claim.
+    extractArchiveMock.mockResolvedValue({
+      ...RESULT,
+      files: 0,
+      bytes: 0,
+      already_present: false,
+      scan_started: false,
+    });
+    render(<ArchiveExtractAction canContribute path="Moai.zip" label="Moai.zip" />);
+
+    await extractOnce();
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toContain("Nothing was written");
+    expect(status.textContent).not.toContain("A library scan");
   });
 
   it("calls onExtracted exactly once on success", async () => {

@@ -22,7 +22,7 @@
     "type": "object"
   },
   "ArchiveExtractOut": {
-    "description": "What an in-library extract did, or that it had nothing left to do.\n\n`already_present` is the idempotent outcome: every destination existed, so the\nrequest wrote nothing, started no scan and wrote no audit row. `destination`\nis library-relative, the twin directory beside the zip.",
+    "description": "What an in-library extract did, or that it had nothing left to do.\n\nTwo outcomes write nothing, and `(files, already_present)` tells them apart.\n`already_present=True` is the idempotent one: every destination already\nexisted. `already_present=False` with `files=0` is the junk-only one: the\nselection had nothing writable, every member being OS metadata or\ndirectory-like. Neither wrote a file, started a scan or wrote an audit row.\n`destination` is library-relative, the twin directory beside the zip.",
     "properties": {
       "already_present": {
         "title": "Already Present",

@@ -441,6 +441,44 @@ def test_a_junk_only_archive_selection_writes_nothing_and_records_no_audit_row(
     assert tree(storage) == before, "a refused selection changes nothing"
 
 
+def test_the_two_nothing_written_outcomes_are_distinguishable(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`files == 0` alone cannot tell them apart; `already_present` can.
+
+    A junk-only selection writes nothing because it had nothing writable, so no
+    destination existed and `already_present` stays False. An extract whose every
+    destination already exists writes nothing for the opposite reason and answers
+    True. The pair is the signature: `(0, False)` versus `(0, True)`.
+    """
+    storage = isolated_storage
+    write_door_archive(storage / "Nasty.zip")
+    headers = auth_header(client)
+    stub_scan(monkeypatch)
+
+    first = extract_archive(client, headers)
+    assert first["files"] == len(DOOR_PAYLOAD), first
+
+    repeated = extract_archive(client, headers)
+    assert repeated["files"] == 0, repeated
+    assert repeated["already_present"] is True, repeated
+    assert repeated["scan_started"] is False, repeated
+
+    junk_only = client.post(
+        "/import/archive", json={"path": "Nasty.zip", "entries": sorted(DOOR_JUNK)}, headers=headers
+    )
+    assert junk_only.status_code == 200, junk_only.text
+    junk_body = junk_only.json()
+    assert junk_body["files"] == 0, junk_body
+    assert junk_body["already_present"] is False, junk_body
+    assert junk_body["scan_started"] is False, junk_body
+
+    assert (junk_body["files"], junk_body["already_present"]) != (
+        repeated["files"],
+        repeated["already_present"],
+    ), "the two nothing-written outcomes are indistinguishable through the response"
+
+
 # --- the sentinel: all four doors ask the one predicate --------------------
 
 

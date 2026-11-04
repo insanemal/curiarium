@@ -600,11 +600,11 @@ html, body, #root { height: 100%; }
   .review-row-state { @apply text-[11px] font-semibold; color: var(--mv-text-subtle); }
 
   /* The row's leading cell: a served thumbnail or a rendered frame in a fixed
-     square, so a row that has a face keeps the columns beside it aligned with
-     one that does not. The panel background and border make the square read as
-     a slot rather than a hole. A bundle with no cover renders nothing here at
-     all (CoverThumb returns null), so the column stays empty rather than
-     offering a broken image. */
+     square, so every row keeps the same columns. The panel background and border
+     make the square read as a slot rather than a hole. Every row always renders
+     this span - an empty square for a `none` cover, or for one whose grants are
+     not settled yet - precisely so the six-track grid on `.review-row` never
+     shifts, rather than offering a broken image. */
   .review-thumb {
     @apply grid h-10 w-10 place-items-center overflow-hidden rounded-md border;
     border-color: var(--mv-border-strong);

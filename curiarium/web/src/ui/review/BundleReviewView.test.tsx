@@ -20,7 +20,10 @@ const modelSnapshotProps = vi.hoisted(() => [] as Array<Record<string, unknown>>
 vi.mock("../ModelViewer", () => ({
   ModelSnapshot: (props: Record<string, unknown>) => {
     modelSnapshotProps.push(props);
-    return null;
+    // A marker, not `null`: the props alone cannot tell the row cell from the
+    // detail fact (they are identical), so the two sites are only countable if
+    // each one leaves something in the DOM to find.
+    return <span data-model-snapshot="" />;
   },
   generateModelSnapshot: vi.fn(),
 }));
@@ -639,7 +642,7 @@ describe("BundleReviewView writes", () => {
     expect(within(detail()).queryByRole("button", { name: /^Extract / })).toBeNull();
   });
 
-  it("settles the scan and reports the extraction to the hook, so the row can turn ready", async () => {
+  it("reports the extraction to the hook and leaves the refetch to it", async () => {
     const state = makeState({ report: makeReport([moaiZip]) });
     renderView(state);
 
@@ -653,10 +656,39 @@ describe("BundleReviewView writes", () => {
       expect(screen.queryByText(/waiting for the library scan to register/)).toBeNull(),
     );
 
+    // This view's half is the report. The row actually turning `ready` is the
+    // hook's half, pinned by `useBundleDetect.test.tsx`'s "settles the library
+    // scan and then refetches, so an extracted bundle turns ready".
     // The hook owns the refetch: a refresh here would race the walk that has to
     // register the extracted files before the row can read `ready`.
     expect(state.refresh).not.toHaveBeenCalled();
     expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Moai.zip", entries: null });
+  });
+
+  it("promises no scan and reports nothing when the extract wrote no files", async () => {
+    // The server's junk-only early return: no bytes, no scan, and
+    // `already_present: false` because no destination existed to be already there.
+    extractArchiveMock.mockResolvedValue({
+      path: "Moai.zip",
+      destination: "Moai",
+      files: 0,
+      bytes: 0,
+      already_present: false,
+      scan_started: false,
+    });
+    const state = makeState({ report: makeReport([moaiZip]) });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
+    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip"));
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
+
+    // The dialog's own done line is the anchor that says the round trip finished.
+    await screen.findByText("Nothing was written - the archive held no extractable files.");
+    // A junk-only extract registers nothing, so the wait would be a fiction and
+    // the notice would promise a refetch that no scan will ever justify.
+    expect(screen.queryByText(/waiting for the library scan to register/)).toBeNull();
+    expect(state.afterExtract).not.toHaveBeenCalled();
   });
 
   it("shows a read-only view with rows and details but no write control", () => {
@@ -1024,6 +1056,11 @@ describe("BundleReviewView covers", () => {
       expect(props).toMatchObject({ ext: "stl", assetId: "asset-9", showStatus: false });
       expect(props.url).toContain("/file/asset-9/model.stl");
     }
+    // The loop above is satisfied by one call, so it cannot prove both sites are
+    // mounted. The props are identical at both, so the containers are the only
+    // thing that tells them apart - and either site going missing turns this red.
+    expect(rowElement("Cover").querySelector(".review-thumb [data-model-snapshot]")).not.toBeNull();
+    expect(detail().querySelector(".review-thumb [data-model-snapshot]")).not.toBeNull();
   });
 
   it("renders no image element for a bundle with no cover", () => {
@@ -1041,5 +1078,48 @@ describe("BundleReviewView covers", () => {
     expect(container.querySelector("img")).toBeNull();
     expect(modelSnapshotProps).toHaveLength(0);
     expect(within(detail()).getByText("Cover: none")).toBeTruthy();
+  });
+
+  it("keeps the cover cell in the row for a bundle with no cover", () => {
+    const row = coverRow({
+      asset_id: null,
+      rel_path: null,
+      reason: "none",
+      url: null,
+      thumb_url: null,
+    });
+    renderView(makeState({ report: makeReport([row]) }));
+
+    // jsdom does no layout, so the structure that guarantees the six-track grid
+    // is what gets pinned: a `null` CoverThumb is not a grid item at all, which
+    // left the leading track empty and shifted every later cell one track left.
+    expect(rowElement("Cover").querySelector(".review-thumb")).not.toBeNull();
+  });
+
+  it("gives a no-cover row the same six cells as a model-preview row", () => {
+    const noCover = coverRow({
+      asset_id: null,
+      rel_path: null,
+      reason: "none",
+      url: null,
+      thumb_url: null,
+    });
+    const preview = makeBundle({
+      key: "Preview",
+      title: "Preview bundle",
+      rel_path: "Preview",
+      cover: {
+        asset_id: "asset-9",
+        rel_path: "model.stl",
+        reason: "model-preview",
+        url: "/file/asset-9/model.stl",
+        thumb_url: null,
+      },
+    });
+    renderView(makeState({ report: makeReport([noCover, preview]) }));
+
+    const cells = rowElement("Cover").children.length;
+    expect(cells).toBe(6);
+    expect(rowElement("Preview").children.length).toBe(cells);
   });
 });
