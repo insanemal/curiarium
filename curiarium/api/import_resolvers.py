@@ -26,20 +26,27 @@ from schemas import ImportRequest
 class CredentialRefusal(HTTPException):
     """A refusal whose cause is the credential this server sent, not the site's answer.
 
-    The status and the detail are exactly what the same branch answered before
-    this class existed, so a client that pinned the string keeps working; only
-    the class is new, which is what lets a caller tell "the cookie this server
-    sent is dead" from "the site refused an anonymous request" without parsing
-    English. ``project_import._is_gated`` matches it with ``isinstance``, the
-    same way ``entry_policy.is_entry_failure`` matches ``AssetFilenameError``.
+    The detail is exactly what the same branch answered before this class
+    existed, so a client that pinned the string keeps working; the status is
+    the vendor's own except for a 401, which the paragraph below explains. The
+    class is what lets a caller tell "the cookie this server sent is dead" from
+    "the site refused an anonymous request" without parsing English.
+    ``project_import._is_gated`` matches it with ``isinstance``, the same way
+    ``entry_policy.is_entry_failure`` matches ``AssetFilenameError``.
 
     Every detail a subclass path raises composes one site's remedy through that
     site's composer (``_thingiverse_cookie_detail`` or
     ``_makerworld_cookie_detail``), so each remedy is written once.
+
+    The vendor's status is carried through unchanged except for 401, which is
+    reported as 403 on purpose: the web client throws ``UnauthorizedError`` on a
+    401 before it reads ``detail``, so a 401 would hide the remedy. The remap
+    lives here, in the one place every refusal passes through, so no site that
+    raises this class can forget it.
     """
 
     def __init__(self, status_code: int, detail: str) -> None:
-        super().__init__(status_code=status_code, detail=detail)
+        super().__init__(status_code=403 if status_code == 401 else status_code, detail=detail)
 
 
 # One remedy, formatted twice. The paste lives under Settings > Import sources and
@@ -432,11 +439,10 @@ def _refuse_makerworld_credential(err: HTTPError, makerworld_cookie: Optional[st
     Two things about the order here are load-bearing. Without a cookie this
     returns before ``err.read()`` is called at all, so the caller's
     ``find_download_url`` rescue and the generic 400 are byte-identical by
-    construction rather than by assertion. And the vendor's status is carried
-    through unchanged except for 401, which is reported as 403 on purpose: the
-    web client throws ``UnauthorizedError`` on a 401 before it reads ``detail``,
-    so a 401 would hide the remedy. The vendor's own code stays in the lead, so
-    nothing about the answer is hidden either way.
+    construction rather than by assertion. And the vendor's own code stays in the
+    lead, because the status a client sees is not always the vendor's: a 401
+    arrives as 403 (see ``CredentialRefusal``), so the lead is the one place the
+    vendor's own code still shows.
     """
     if not makerworld_cookie or err.code not in {401, 403, 429}:
         return None
@@ -446,7 +452,7 @@ def _refuse_makerworld_credential(err: HTTPError, makerworld_cookie: Optional[st
         message = None
     vendor = _makerworld_bounded_message(message)
     lead = f"MakerWorld refused the download API for {subject} (HTTP {err.code}): {vendor}. {_MAKERWORLD_PAID_HEDGE}"
-    raise CredentialRefusal(status_code=403 if err.code == 401 else err.code, detail=_makerworld_cookie_detail(lead))
+    raise CredentialRefusal(status_code=err.code, detail=_makerworld_cookie_detail(lead))
 
 
 def fetch_makerworld_instance_download_url(

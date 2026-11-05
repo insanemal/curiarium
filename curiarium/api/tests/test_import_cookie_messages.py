@@ -30,6 +30,15 @@ from config import IMPORT_HTML_MAX_BYTES
 # One thing page: both refusals are reached with the same URL.
 PAGE_URL = "https://www.thingiverse.com/thing:5390184"
 
+# 401 is reported as 403 on purpose: the web client throws UnauthorizedError on a
+# 401 before it reads `detail`, so a 401 would hide the remedy. Pinned as data
+# rather than re-derived in the test, the way the sibling module pins it.
+REFUSAL_CODES = [
+    pytest.param(401, 403, id="401-reported-as-403"),
+    pytest.param(403, 403, id="403-carried-through"),
+    pytest.param(429, 429, id="429-carried-through"),
+]
+
 
 class StubFetch:
     """Raises the scripted ``HTTPError`` - the only outcome these refusals need."""
@@ -408,13 +417,16 @@ def test_a_transport_failure_without_a_cookie_keeps_answering_none(
 # --- the files step --------------------------------------------------------
 
 
-@pytest.mark.parametrize("code", [401, 403, 429])
-def test_a_files_api_refusal_names_the_thing_it_was_reading(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+@pytest.mark.parametrize("code, expected", REFUSAL_CODES)
+def test_a_files_api_refusal_names_the_thing_it_was_reading(
+    monkeypatch: pytest.MonkeyPatch, code: int, expected: int
+) -> None:
     """A 200 token then a refusal: the reachable "no file" shape, and it is the cookie's fault.
 
-    All three statuses are scripted because the status is carried through
-    unchanged (`err.code or 400`), so a 401 stays a 401 - the web client's
-    handling of that status is Ma-3vov's, not this ticket's.
+    All three vendor statuses are scripted. A 401 is reported as 403 on purpose:
+    the web client throws ``UnauthorizedError`` on a 401 before it reads
+    ``detail``, so a 401 would hide the remedy. The ``(HTTP {code})`` in the
+    detail still carries the vendor's own status, so nothing is hidden either.
     """
     fetch = script(
         monkeypatch,
@@ -426,7 +438,7 @@ def test_a_files_api_refusal_names_the_thing_it_was_reading(monkeypatch: pytest.
         import_resolvers.resolve_thingiverse_download_url(PAGE_URL, "session=abc")
 
     detail = caught.value.detail
-    assert caught.value.status_code == code
+    assert caught.value.status_code == expected
     assert "refused the download API for thing 5390184" in detail
     assert f"(HTTP {code})" in detail
     assert "Unauthorized" in detail
@@ -434,6 +446,22 @@ def test_a_files_api_refusal_names_the_thing_it_was_reading(monkeypatch: pytest.
     assert "direct download link" not in detail
     assert "session=abc" not in detail
     assert fetch.urls == [AUTH_VIEW_URL, FILES_URL]
+
+
+def test_a_view_token_401_is_reported_as_403_and_still_names_the_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other Thingiverse 401 door: the class remaps it, so neither site can forget."""
+    script(monkeypatch, http_error(401, b'{"error": "Unauthorized"}'))
+
+    with pytest.raises(import_resolvers.CredentialRefusal) as caught:
+        import_resolvers.fetch_thingiverse_view_token(PAGE_URL, "session=abc")
+
+    detail = caught.value.detail
+    assert caught.value.status_code == 403
+    assert "Unauthorized" in detail
+    assert detail.endswith(import_resolvers.THINGIVERSE_COOKIE_REMEDY)
+    assert "session=abc" not in detail
 
 
 def test_a_huge_files_step_refusal_cannot_bury_the_remedy(monkeypatch: pytest.MonkeyPatch) -> None:
