@@ -22,6 +22,16 @@ from file_utils import is_json_content_type
 from safe_http import safe_urlopen
 from schemas import ImportRequest
 
+# The one remedy both Thingiverse cookie refusals share. It names both surfaces on
+# purpose: the paste lives under Settings > Import sources and wins over
+# THINGIVERSE_COOKIE (see resolve_thingiverse_cookie), so naming only one of them
+# sends half the operators to a control they cannot use.
+THINGIVERSE_COOKIE_REMEDY = (
+    "Paste the Cookie header from a signed-in browser session under Settings > Import sources, "
+    "or set the THINGIVERSE_COOKIE environment variable on the server and restart the API. "
+    "Nothing was changed."
+)
+
 
 def makerworld_html_headers(referer: Optional[str] = None, cookie: Optional[str] = None) -> dict:
     headers = {
@@ -768,11 +778,13 @@ def fetch_thingiverse_view_token(page_url: str, thingiverse_cookie: Optional[str
         except Exception:
             message = None
         if err.code in {401, 403, 429}:
-            detail = message or (
-                "Thingiverse blocked the request. Paste the Cookie header from your browser session "
-                "in Settings to import."
-            )
-            raise HTTPException(status_code=err.code or 400, detail=detail) from err
+            # parse_json_error_message already stripped the vendor text, so the only
+            # thing it needs is a bound: a JSON body must not bury the remedy.
+            vendor = f"{message[:300]} " if message else "Thingiverse blocked the request. "
+            raise HTTPException(
+                status_code=err.code or 400,
+                detail=f"{vendor}{THINGIVERSE_COOKIE_REMEDY}",
+            ) from err
         return None
     except URLError:
         return None
@@ -910,7 +922,10 @@ def resolve_thingiverse_download_url(page_url: str, thingiverse_cookie: Optional
         if not thingiverse_cookie:
             raise HTTPException(
                 status_code=403,
-                detail="Thingiverse requires a session cookie to fetch download links.",
+                detail=(
+                    "Thingiverse requires a session cookie to fetch download links. "
+                    f"{THINGIVERSE_COOKIE_REMEDY}"
+                ),
             )
         return None
     api_candidates = [

@@ -6,10 +6,10 @@ the seam every test replaces - the name the module actually calls, not
 installs socket tripwires, so "the stub answered" cannot be a coincidence.
 
 Every refusal is pinned by the two things an operator reads: the status and the
-detail. The detail names ``THINGIVERSE_COOKIE`` as an environment variable,
-because that is what this deployment really has, and it never says "Settings" -
-the shipped ``fetch_thingiverse_view_token`` message is wrong about that and must
-not be copied.
+detail. These refusals name ``THINGIVERSE_COOKIE``, the deployment-wide default,
+and never name a UI control: the enrichment call sends no cookie of its own, so a
+pointer at Settings would name a field this path never reads. The import path,
+which does send one, names both surfaces - see ``test_import_cookie_messages.py``.
 
 The only files read are the Thingiverse page fixtures inside this module's tree,
 so the in-container build context carries them (AGENTS.md guardrail 3).
@@ -138,8 +138,9 @@ def test_a_page_decodes_with_the_charset_it_announces(monkeypatch: pytest.Monkey
 def test_a_rate_limit_names_the_environment_variable_and_never_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """429 is the measured failure of unauthenticated traffic, so the remedy is the cookie.
 
-    Mutation: copy ``fetch_thingiverse_view_token``'s "in Settings" message and
-    this fails - and so would the operator, because there is no such field.
+    Mutation: widen this to name a UI control and this fails - the enrichment call
+    sends no cookie, so a pointer at Settings would send the operator to a field
+    this path never reads.
     """
     stub(monkeypatch, error=http_error(429))
 
