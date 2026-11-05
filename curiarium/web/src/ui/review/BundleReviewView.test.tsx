@@ -39,7 +39,12 @@ import type { SettleOutcome } from "../../lib/scanSettle";
 import { getToasts, resetToasts } from "../../lib/toast";
 import Toaster from "../Toaster";
 import BundleReviewView from "./BundleReviewView";
-import { needsDecision } from "./bundleRows";
+import {
+  ENRICH_NONE_REASON,
+  NO_SOURCE_PAGE_REASON,
+  bulkEnrichTitle,
+  needsDecision,
+} from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
 
 const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
@@ -1129,11 +1134,18 @@ describe("BundleReviewView source-page enrichment", () => {
     expect(state.enrich).toHaveBeenCalledWith(["Dragon_5390184"], { refresh: true });
   });
 
-  it("renders no enrichment door for a row that names no source page", () => {
+  it("renders no enrichment door for a row that names no source page, and gives the reason instead", () => {
     renderView(makeState({ report: makeReport([cableClip]) }));
 
     expect(detail().querySelector("[data-bundle-enrich]")).toBeNull();
     expect(screen.queryByRole("button", { name: /source page/ })).toBeNull();
+
+    const reason = detail().querySelector<HTMLElement>("[data-bundle-enrich-reason]");
+    expect(reason?.textContent).toBe(NO_SOURCE_PAGE_REASON);
+    // Not a live region: a third one in the aside would re-announce this on
+    // every ArrowDown.
+    expect(reason?.getAttribute("role")).toBeNull();
+    expect(reason?.getAttribute("aria-live")).toBeNull();
   });
 
   it("counts only the enrichable selected rows in the bulk label", () => {
@@ -1150,8 +1162,76 @@ describe("BundleReviewView source-page enrichment", () => {
 
     // Moai has both fields (no gap) and Cable_clip has no source, so only the
     // dragon is enrichable even though three rows are selected.
-    fireEvent.click(screen.getByRole("button", { name: "Enrich selected (1)" }));
+    const mixed = screen.getByRole("button", {
+      name: "Enrich selected (1 of 3)",
+    }) as HTMLButtonElement;
+    expect(mixed.getAttribute("title")).toBe(bulkEnrichTitle(1, 3));
+    expect(mixed.getAttribute("title")).toContain("1 of the 3");
+    expect(mixed.disabled).toBe(false);
+
+    fireEvent.click(mixed);
     expect(state.enrich).toHaveBeenCalledWith(["Dragon_5390184"]);
+  });
+
+  it("says a wholly unenrichable selection is (0 of 3) rather than a bare zero", () => {
+    // All three refuse at the same gate - none names a source page - while their
+    // row status differs (an archive when a zip could be extracted, a generic
+    // folder, an unresolved directory). One gate, three row shapes: the count is
+    // not a quirk of one detector.
+    const state = makeState({ report: makeReport([moaiZip, cableClip, legacyVase]) });
+    renderView(state);
+
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+
+    const none = screen.getByRole("button", {
+      name: "Enrich selected (0 of 3)",
+    }) as HTMLButtonElement;
+    expect(none.disabled).toBe(true);
+    expect(none.getAttribute("title")).toBe(ENRICH_NONE_REASON);
+
+    fireEvent.click(none);
+    expect(state.enrich).not.toHaveBeenCalled();
+  });
+
+  it("keeps the reason beside the extract door it does not displace", () => {
+    renderView(makeState({ report: makeReport([moaiZip]) }));
+
+    expect(detail().querySelector("[data-bundle-enrich-reason]")?.textContent).toBe(
+      NO_SOURCE_PAGE_REASON,
+    );
+    // The zip-only door is still a real action, so the sentence must not shove
+    // it aside: both stand, one for the door that is absent, one for the door
+    // that is present.
+    expect(within(detail()).getByRole("button", { name: "Extract Moai zip" })).toBeTruthy();
+  });
+
+  it("flips both the reason and the door when ArrowDown leaves a source-less row", () => {
+    renderView(makeState({ report: makeReport([moaiZip, mediumDragon]) }));
+
+    // Moai_zip is the active row: it has no page, so the reason stands and the
+    // door does not.
+    expect(detail().querySelector("[data-bundle-enrich-reason]")?.textContent).toBe(
+      NO_SOURCE_PAGE_REASON,
+    );
+    expect(within(detail()).queryByRole("button", { name: "Enrich from source page" })).toBeNull();
+
+    fireEvent.keyDown(rowElement("Moai_zip"), { key: "ArrowDown" });
+
+    // The dragon does name a page, so the sentence goes and the door appears:
+    // the two claims are the same predicate read from both sides.
+    expect(detailTitle()).toBe("Articulated ice dragon");
+    expect(detail().querySelector("[data-bundle-enrich-reason]")).toBeNull();
+    expect(within(detail()).getByRole("button", { name: "Enrich from source page" })).toBeTruthy();
+  });
+
+  it("gives a viewer neither the door nor the reason", () => {
+    renderView(makeState({ report: makeReport([cableClip]) }), false);
+
+    // The sentence lives inside `canContribute`: it stands where the door would,
+    // and a viewer has no door to be missing. Pinned so a later ticket has to
+    // relocate it on purpose rather than lose it by accident.
+    expect(detail().querySelector("[data-bundle-enrich-reason]")).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: /source page/ })).toBeNull();
   });
 
   it("caps the bulk request at 25 and says how many it leaves behind", () => {

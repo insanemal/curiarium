@@ -7,10 +7,13 @@ import {
   type BundleEnrichment,
 } from "../../lib/api/bundles";
 import {
+  ENRICH_NONE_REASON,
+  NO_SOURCE_PAGE_REASON,
   ROW_STATE_CREATED,
   ROW_STATE_DISMISSED,
   ROW_STATE_IN_PROJECT,
   archiveLine,
+  bulkEnrichTitle,
   canEnrich,
   canRecheck,
   confidenceLabel,
@@ -19,6 +22,7 @@ import {
   coverLine,
   createdProjectLine,
   enrichSelectionLabel,
+  enrichUnavailableLine,
   enrichmentLine,
   hasThingSource,
   headline,
@@ -794,7 +798,6 @@ describe("enrichmentLine", () => {
 describe("enrichSelectionLabel", () => {
   it("counts the enrichable selection when it fits", () => {
     expect(enrichSelectionLabel(1, 1)).toBe("Enrich selected (1)");
-    expect(enrichSelectionLabel(1, 3)).toBe("Enrich selected (1)");
     expect(enrichSelectionLabel(ENRICH_MAX_KEYS, ENRICH_MAX_KEYS)).toBe("Enrich selected (25)");
   });
 
@@ -803,5 +806,140 @@ describe("enrichSelectionLabel", () => {
       "Enrich selected (25 of 26)",
     );
     expect(enrichSelectionLabel(30, 30)).toBe("Enrich selected (25 of 30)");
+  });
+
+  it("names the shortfall when part of the selection cannot be enriched", () => {
+    expect(enrichSelectionLabel(1, 3)).toBe("Enrich selected (1 of 3)");
+    // Nothing is sendable at all: the label must still say three were selected,
+    // so a reader never sees a bare `(0)` and mistakes it for an empty choice.
+    expect(enrichSelectionLabel(0, 3)).toBe("Enrich selected (0 of 3)");
+    // The one cell where the cap shortfall and the unenrichable shortfall
+    // collide: 25 rows are sendable and 25 is also the cap, so the words are
+    // true under either cause.
+    expect(enrichSelectionLabel(25, 30)).toBe("Enrich selected (25 of 30)");
+    expect(enrichSelectionLabel(0, 0)).toBe("Enrich selected (0)");
+  });
+});
+
+describe("enrichUnavailableLine", () => {
+  const GAP = { creator: null, licence: null, licence_url: null } as const;
+
+  // Three source-less detector shapes: none names a vendor page, so the row
+  // offers no enrichment door for one and the same reason.
+  const sourceLess: [string, BundleDetectItem][] = [
+    [
+      "a generic bundle",
+      makeBundle({
+        ...GAP,
+        source_url: null,
+        detector: "generic-bundle",
+        confidence: "low",
+        metadata_shape: "generic",
+      }),
+    ],
+    [
+      "an archive bundle",
+      makeBundle({
+        ...GAP,
+        source_url: null,
+        detector: "archive-bundle",
+        confidence: "low",
+        status: "blocked",
+        blocked_reason: "archive_only",
+        archive: { rel_path: "Moai.zip", twin_verified: false },
+      }),
+    ],
+    [
+      "a title-name row",
+      makeBundle({ ...GAP, source_url: null, detector: "title-name", confidence: "low" }),
+    ],
+  ];
+
+  it.each(sourceLess)("says why a %s has no door", (_label, row) => {
+    expect(enrichUnavailableLine(row)).toBe(NO_SOURCE_PAGE_REASON);
+  });
+
+  it("stays silent for a low-confidence row that does name a source page", () => {
+    // The gate is `hasThingSource`, not the detector or the confidence: the
+    // same generic-bundle shape with a URL gains the door, so the sentence goes.
+    const row = makeBundle({
+      ...GAP,
+      detector: "generic-bundle",
+      confidence: "low",
+      metadata_shape: "generic",
+    });
+    expect(enrichUnavailableLine(row)).toBeNull();
+  });
+
+  const silent: [string, BundleDetectItem][] = [
+    // A page to read: the door exists, so there is nothing to explain.
+    ["the row names a source page", makeBundle({ ...GAP })],
+    // Both fields are filled: another line already says so.
+    ["neither creator nor licence is empty", makeBundle({ source_url: null })],
+    [
+      "the page already answered",
+      makeBundle({
+        ...GAP,
+        source_url: null,
+        enrichment: {
+          source_url: "https://www.thingiverse.com/thing:5390184",
+          fetched_at: "2026-11-05T12:00:00+00:00",
+          fields: ["creator"],
+        },
+      }),
+    ],
+    // A settled project says so in `createdProjectLine` instead.
+    ["the row is already a project", makeBundle({ ...GAP, source_url: null, existing_project_id: PROJECT_ID })],
+  ];
+
+  it.each(silent)("stays silent when %s", (_label, row) => {
+    expect(enrichUnavailableLine(row)).toBeNull();
+  });
+
+  it("never speaks where canEnrich would have agreed", () => {
+    for (const [, row] of [...sourceLess, ...silent]) {
+      if (enrichUnavailableLine(row) !== null) {
+        expect(canEnrich(row)).toBe(false);
+        expect(hasThingSource(row)).toBe(false);
+      }
+    }
+  });
+});
+
+describe("bulkEnrichTitle", () => {
+  it("says nothing when the label already says everything", () => {
+    expect(bulkEnrichTitle(3, 3)).toBeUndefined();
+    expect(bulkEnrichTitle(0, 0)).toBeUndefined();
+    expect(bulkEnrichTitle(ENRICH_MAX_KEYS, ENRICH_MAX_KEYS)).toBeUndefined();
+  });
+
+  it("names the cap when the request has to leave rows behind", () => {
+    const cap = bulkEnrichTitle(30, 30);
+    expect(cap).toBeDefined();
+    expect(cap).toContain(String(ENRICH_MAX_KEYS));
+    expect(cap).toContain("later pass");
+    expect(cap).not.toBe(enrichSelectionLabel(30, 30));
+    // The same branch, further past the cap: 26 sendable, 30 selected.
+    expect(bulkEnrichTitle(ENRICH_MAX_KEYS + 1, 30)).toContain(String(ENRICH_MAX_KEYS));
+  });
+
+  it("gives the wholly unenrichable selection the none reason verbatim", () => {
+    // A disabled button is not focusable, so this title is unreachable by
+    // keyboard: the `(0 of 3)` count form has to stand alone.
+    expect(bulkEnrichTitle(0, 3)).toBe(ENRICH_NONE_REASON);
+  });
+
+  it("names both counts for a partial shortfall without accusing every row", () => {
+    const partial = bulkEnrichTitle(1, 3);
+    expect(partial).toContain("1 of the 3");
+    // An already-enriched row in the selection must not be told it lacks a page,
+    // so the single-cause sentence must not appear: the four gates are listed
+    // instead. Compared against the constant, not the phrase, because the
+    // honest disjunction says `no source page` as one gate of four.
+    expect(partial).not.toContain(NO_SOURCE_PAGE_REASON);
+
+    const collided = bulkEnrichTitle(ENRICH_MAX_KEYS, 30);
+    expect(collided).toContain("25 of the 30");
+    expect(collided).not.toContain(NO_SOURCE_PAGE_REASON);
   });
 });
