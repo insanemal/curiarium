@@ -25,6 +25,7 @@ import { ModelSnapshot } from "../ModelViewer";
 import {
   BUNDLE_FILTERS,
   archiveLine,
+  bulkEnrichTitle,
   canEnrich,
   canRecheck,
   confidenceLabel,
@@ -33,6 +34,7 @@ import {
   coverLine,
   createdProjectLine,
   enrichSelectionLabel,
+  enrichUnavailableLine,
   enrichmentLine,
   headline,
   isArchiveOnly,
@@ -374,6 +376,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const activeCreatedLine = activeRow === null ? null : createdProjectLine(activeRow);
   const activeEnrichmentLine = activeRow === null ? null : enrichmentLine(activeRow);
   const activeEnrichLabel = activeRow === null ? null : enrichActionLabel(activeRow);
+  const activeEnrichReason = activeRow === null ? null : enrichUnavailableLine(activeRow);
 
   // The active key, not an index: a refetch reorders rows and an index would
   // silently point at a different bundle after every mutation.
@@ -804,6 +807,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
               type="button"
               className={SECONDARY_BUTTON}
               data-bundle-enrich-selected="true"
+              title={bulkEnrichTitle(enrichableSelected.length, selected.length)}
               disabled={busy || enrichableSelected.length === 0}
               onClick={enrichSelected}
             >
@@ -943,6 +947,19 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                         >
                           {activeEnrichLabel}
                         </button>
+                      )}
+                      {activeEnrichReason !== null && (
+                        // Deliberately NOT a live region and not `role=alert`:
+                        // the queue already speaks through exactly two polite
+                        // regions (the selection count and the notice, both
+                        // outside this aside), and a third would re-announce
+                        // this same sentence on every ArrowDown.
+                        // It lives inside `canContribute` because it stands where
+                        // the door would: a viewer sees neither the door nor the
+                        // reason why there is none.
+                        <span className="review-detail-reason" data-bundle-enrich-reason="true">
+                          {activeEnrichReason}
+                        </span>
                       )}
                     </div>
                   </>

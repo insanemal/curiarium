@@ -80,6 +80,24 @@ export function canEnrich(row: BundleDetectItem): boolean {
   );
 }
 
+/** Why a row offers no enrichment door. It is a fact about the row - it names no
+ *  vendor page to read - and it is said exactly where `canEnrich` refuses for
+ *  that reason: the same four gates, with the one that failed pulled out. Every
+ *  other absent door stays silent, because another line already speaks it (a
+ *  filled Creator or Licence for `needsEnrichment`, `enrichmentLine` for an
+ *  answered page, `createdProjectLine` for a settled project), so this sentence
+ *  never decays into "something is missing". */
+export const NO_SOURCE_PAGE_REASON =
+  "No source page: this bundle was matched from its files, not from a vendor page.";
+
+export function enrichUnavailableLine(row: BundleDetectItem): string | null {
+  if (hasThingSource(row)) return null;
+  if (!needsEnrichment(row)) return null;
+  if (row.enrichment) return null;
+  if (row.existing_project_id) return null;
+  return NO_SOURCE_PAGE_REASON;
+}
+
 /** The detail pane's re-check door: the page answered before and the row is
  *  still live, so asking again (with `refresh: true`) is a real action. A row
  *  that took nothing yet belongs to `canEnrich` instead, not both. */
@@ -113,14 +131,42 @@ export function enrichmentLine(row: BundleDetectItem): string | null {
   return `From the source page: ${fields} (${when})`;
 }
 
-/** The bulk bar's words. The server caps a request at `ENRICH_MAX_KEYS`, so the
- *  label makes the truncation visible instead of letting the server reject the
- *  request. `enrichable` is the count this button acts on; `selected` is the
- *  whole selection, named only by the truncated form so the reader can see how
- *  much was left behind. */
+/** The bulk bar's words. Two different shortfalls share one form - `(N of M)` -
+ *  because they answer the same question: how much of what I selected will this
+ *  send?
+ *
+ *  The order below is load-bearing. The cap branch comes first: at (30, 30) the
+ *  cap alone decides the sentence, and a shortfall branch ahead of it would say
+ *  `(30)`, a claim the request cannot keep and a byte-pinned expectation in two
+ *  suites. The only cell where the two shortfalls collide is (25, 30) - 25 rows
+ *  are sendable and 25 is also the cap - and it reads `(25 of 30)`, true under
+ *  either cause. Every other collision is `(0 of M)`, where nothing is sent and
+ *  the cause is always the same one. */
 export function enrichSelectionLabel(enrichable: number, selected: number): string {
-  if (enrichable <= ENRICH_MAX_KEYS) return `Enrich selected (${enrichable})`;
-  return `Enrich selected (${ENRICH_MAX_KEYS} of ${selected})`;
+  if (enrichable > ENRICH_MAX_KEYS) return `Enrich selected (${ENRICH_MAX_KEYS} of ${selected})`;
+  if (enrichable < selected) return `Enrich selected (${enrichable} of ${selected})`;
+  return `Enrich selected (${enrichable})`;
+}
+
+/** What the bulk button says when none of the selected rows can be enriched.
+ *  It is a `title`, so it is the secondary channel only: a disabled button is
+ *  not focusable, and the count form `(0 of 3)` has to be honest on its own. */
+export const ENRICH_NONE_REASON =
+  "None of the selected bundles can be enriched: each has no source page, no empty creator or licence, or already has a page or a project.";
+
+/** The bulk button's hover sentence, or undefined when the label already says
+ *  everything. It names all four `canEnrich` gates rather than the missing
+ *  source alone, so it can never accuse an already-enriched row of having no
+ *  page - the tooltip must not contradict the count it hangs on. */
+export function bulkEnrichTitle(enrichable: number, selected: number): string | undefined {
+  const sent = Math.min(enrichable, ENRICH_MAX_KEYS);
+  if (sent === selected) return undefined;
+  if (enrichable > ENRICH_MAX_KEYS) {
+    // The cap outranks the shortfall, exactly as the label's branches do.
+    return `The server takes at most ${ENRICH_MAX_KEYS} bundles per request, so it sends ${ENRICH_MAX_KEYS} of the ${enrichable} that can be enriched, leaving ${enrichable - ENRICH_MAX_KEYS} for a later pass.`;
+  }
+  if (enrichable === 0) return ENRICH_NONE_REASON;
+  return `${enrichable} of the ${selected} selected can be enriched; the rest have no source page, no empty creator or licence, or already have a page or a project.`;
 }
 
 /** A row the queue may extract in place: it is blocked as an archive the scan

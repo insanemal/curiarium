@@ -645,6 +645,10 @@ html, body, #root { height: 100%; }
 
   .review-detail-actions { @apply flex flex-wrap items-center gap-2; }
 
+  /* The sentence that stands where an absent enrichment door would: it reads as
+     an aside, not as a control, so it takes the muted token and no border. */
+  .review-detail-reason { @apply text-[11px]; color: var(--mv-text-muted); }
+
   .review-loading { @apply text-[13px]; color: var(--mv-text-muted); }
 
   /* Alert tone from the existing palette: a bordered panel at full text
