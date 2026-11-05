@@ -28,6 +28,7 @@ __all__ = [
   "BundleEnrichRequest",
   "BundleEnrichResponse",
   "BundleEnrichmentOut",
+  "BundleGroupOut",
   "BundleRefusalOut",
   "BundleReportOut",
   "BundleRuleSetOut",
@@ -51,6 +52,14 @@ class BundleArchiveOut(BaseModel):
 
   rel_path: str
   twin_verified: bool
+
+
+class BundleGroupOut(BaseModel):
+  """One model-bearing group inside a compound folder, and whether it is somebody else's thing."""
+
+  name: str
+  model_count: int
+  foreign: bool
 
 
 class BundleDuplicateGroupOut(BaseModel):
@@ -90,6 +99,10 @@ class BundleDetectItemOut(BaseModel):
   image_count: int = 0
   text_count: int = 0
   other_count: int = 0
+  # Only a compound row fills this (`compound-bundle` / low: one product in
+  # several parts). Additive and defaulted, so every pre-existing payload still
+  # validates.
+  groups: List[BundleGroupOut] = []
   cover: BundleCoverOut
   assets_total: int = 0
   # ready | blocked

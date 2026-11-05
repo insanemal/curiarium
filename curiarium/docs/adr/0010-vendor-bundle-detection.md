@@ -67,6 +67,13 @@ decision is unchanged - `tests/test_bundles_api.py` now actually asserts the bod
 against the model, which is what makes the pre-existing "the report body matches the
 pinned schema" claim in Verification true rather than aspirational).
 
+**Extended:** 2026-11-05 - ticket `Mf-8xrc` (a seventh rule, R7 `compound-bundle`,
+offers ONE row for a folder holding one product in several model-bearing parts,
+carrying a group breakdown with any foreign group named, as a post-pass after
+every other pass; it mints no refusal vocabulary, no row any other rule offered
+is rewritten, and the low/name-derived rule absorbs only what its own shape
+generalises - the full reasoning and the measurement are Decision 23).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -104,13 +111,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 
 ## Decision
 
-1. **Six rules, strongest first; four of them are `detect_bundle`'s order.**
+1. **Seven rules, strongest first; four of them are `detect_bundle`'s order.**
    `curiarium/api/bundle_detect.py` holds every judgement and performs no I/O:
    no `Session`, no `engine`, no `open()`, no `Path.read_*`, no `os.scandir`.
    It is handed a `BundleSnapshot` (a listing of `BundleEntry(rel_path, size)`)
    and the handful of documents the caller actually opened, and returns
    `BundleFacts` or `None`. Each rule carries a detector name, a confidence and
-   a metadata shape. `detect_bundle` evaluates four of the five - **R1, R2, R4,
+   a metadata shape. `detect_bundle` evaluates four of the seven - **R1, R2, R4,
    R3**, in that order - and the first one that fires decides the row:
 
    | # | Detector | Confidence | Shape | Fires when |
@@ -120,10 +127,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    | R4 | `thingiverse-id-name` | `medium` | `id-name` | nothing parses, but the bundle's name starts with a Thingiverse id (`NNNNNNN_Title` - 4+ digits then `_`) and the tree holds at least one model **at the bundle's own depth** (the same bound R3 uses); the id is provenance inferred from the name, buying `source_url` / `thing_id` and nothing else |
    | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model **at the bundle's own depth** - depth 0, depth 1 under `files/`, or depth 1 under exactly one model-bearing subdirectory - plus one image and one text entry |
    | R6 | `archive-bundle` | `low` | `archive-root` | an ARCHIVE whose payload - at least one model and at least one image - sits under a SINGLE root entry directory and ships no text file |
+   | R7 | `compound-bundle` | `low` | `compound` | a FOLDER holds one product in several model-bearing parts - no model at its own strict depth and at least two model-bearing groups sharing a family token (Leg A), or it holds models of its own, every group below it is foreign, its own models are the strict majority, and at least one group carries a vendor id (Leg B) - and it is carried as one row with a group breakdown; `detect_bundle` never reaches it |
 
    **R5 `title-name` / `low` is the fifth rule, and `detect_bundle` never
    reaches it.** Its judgement lives in the same pure module - `is_title_name`
-   and `title_name_facts` - so it is testable from literals like the other five,
+   and `title_name_facts` - so it is testable from literals like the other six,
    but `bundle_service` calls it as a post-pass over the folder walk, after the
    archive promotion and before the `contained_keys` strip, never as a branch of
    `detect_bundle` (Decision 21). A branch there would inherit the deepest-first
@@ -140,9 +148,27 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    lower. A directory whose payload is the same shape stays refused exactly as
    it always was.
 
-   The module lists six rules and `detect_bundle` runs four, so the order R1,
-   R2, R4, R3 is that function's and never the rule set's. R5 and R6 are the two
-   rules that fire outside it, and neither can lower a row the other produced.
+   **R7 `compound-bundle` / `low` is the seventh rule, and it runs after every
+   other pass.** `compound_bundle_facts` lives in the same pure module, so it is
+   testable from literals like the other six, but `bundle_service` calls it as a
+   post-pass at the very END of `_build_candidates` - after the folder pass,
+   pairing, the zip-only pass, the archive promotion, the R5 name pass and the
+   `contained_keys` strip - and never as a branch of `detect_bundle`. The reason
+   is R5's reason exactly: the folder walk is deepest-first, so a branch there
+   would hand a compound parent's row to its first child and lose the row that
+   child owns. It fires on a folder whose models sit only in subdirectories and
+   share a family token, or on a folder whose own models outnumber one foreign
+   group, and it mints **no** refusal vocabulary - `REFUSAL_RULES` is unchanged
+   and there is no `compound_bundle_decision`, because a directory it declines
+   already carries an earlier pass's reason. One switch,
+   `COMPOUND_BUNDLES_ENABLED`, read only inside `compound_bundle_facts`; `low`,
+   `compound-bundle`, `compound`, every provenance field `None`. Decision 23 has
+   the clauses, the markers, the two legs and the measurement.
+
+   The module lists seven rules and `detect_bundle` runs four, so the order R1,
+   R2, R4, R3 is that function's and never the rule set's. R5, R6 and R7 are the
+   three rules that fire outside it, and none of them can rewrite a row another
+   produced.
 
    `high` therefore means *the vendor told us*, never *there is a `.txt` file*.
    A README that exists but lacks the markers is not R1: both high-confidence
@@ -584,6 +610,38 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     precedes the project row. It is `failed`, never `blocked`: `blocked` keeps
     meaning database readiness (Mf-um7x), and a detection mistake must not
     masquerade as an unresolved `Folder`.
+
+    **R7 is this rule's ONE bounded exception, and it re-judges nothing.** A
+    compound row is created by `_compound_pass` at the very end of
+    `_build_candidates`, AFTER the `contained_keys` strip has run, so it is never
+    itself judged by `iter_bundle_candidates` and never enters that set as a
+    candidate the strip could drop. It never rewrites a verdict either: the pass
+    skips any key that is already a row (`key in offered`) and any key that sits
+    strictly inside one (`_strictly_inside_any`), both before a snapshot is even
+    built, so a directory some rule offered keeps its row, its detector and its
+    confidence untouched. Absorbing rows is the only thing it does to the row
+    set, and **it may absorb a STRONG row only in the Leg B shape** - the shape
+    where the folder holds models of its own and this rule is exactly what made
+    them invisible (Decision 23). Both halves, and the LOW case the guard alone
+    protects, are pinned by name:
+    `test_service_a_bundle_that_is_already_offered_is_never_compounded` gives a
+    `thingiverse-readme`/`high` parent every predicate R7 asks for and asserts it
+    stays byte-for-byte as it was, and
+    `test_service_an_offered_low_folder_is_never_recompounded` gives an OFFERED
+    LOW row the Leg B shape, where the offered-key guard is the only thing
+    protecting it, and
+    `test_service_a_git_dump_keeps_its_separate_product_rows` asserts endorphin's
+    eight rows survive with neither a compound row nor a rewritten one. So a
+    refused container stays refused, and a compound row is an ordinary folder row
+    like any other: `blocked` / `unresolved_directory` on the live library until
+    its `Folder` resolves, creatable on exactly the same terms. **Reversal:** every
+    row a compound absorbed is named `member-of-bundle` in the refusal ledger - the
+    depth-1 ones additionally as a group on the row itself - and the verdict is
+    recomputed from disk on every read, so removing or widening R7 is a rule-table
+    edit plus its own witnesses. Nothing about it is stored, migrated or
+    re-judged, and `contains_bundles` is untouched: a compound answers that belt
+    because its snapshot is the whole subtree rather than a claimed-children view,
+    not because it is exempt from it.
 
 16. **A document says what it is; the filename is a tie-break.** Detection was
     originally keyed to file names: `README.txt` had to carry `created by
@@ -1171,6 +1229,20 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     review. This rule is explicitly not the answer for compound layouts; the
     shape has still to be explained, and `Mf-5dnx` tracks it.
 
+    **Amended by `Mf-8xrc`.** The shape has now been explained and the class has
+    its own rule: R7 `compound-bundle` (Decision 23) runs after this pass, and
+    `import/Stagetop` is ONE `compound-bundle` / `low` row with groups 45 and 15
+    instead of the eleven rows its children carry on the measured library. The
+    warning above turned out to be unnecessary in the measured library - this rule
+    never offers the parent at all, because it HOLDS rows and `_relates_to_any`'s
+    holds-a-taken-key leg skips it (the refused ledger named it
+    `R3:trio-no-image`, from the folder pass; after R7 the folder is OFFERED, and
+    the before/after artifacts record the change) - but the caveat was right about
+    the class, and R7 is the rule it says it was not. With
+    `COMPOUND_BUNDLES_ENABLED` off, every absorbed row comes back unchanged, which
+    `test_service_the_switch_off_restores_every_absorbed_row` pins on the
+    fixture's eleven child rows.
+
     **The scope is wider than the measured eleven, and the risks are stated
     rather than hidden.** A title-named folder holding models plus an image, or
     models plus a text file, is also offered - shapes R3 refuses for want of the
@@ -1265,6 +1337,263 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     and `Fates End Dice Jails 5-8.zip`, `R3:trio-no-image` for the models-only
     archives - so no new `REFUSAL_*` word exists and the refusal ledger's
     vocabulary is unchanged.
+
+23. **One folder holding one product in several parts is ONE `low` row, and the
+    rule is a post-pass with a vocabulary of shapes rather than of refusals.**
+    `Mf-8xrc` adds R7 `compound-bundle` / `low` / `compound`. The owner's
+    explanation (2026-11-05) is the whole premise: *"StageTop is a folder that
+    contains lots of parts to make one customizable thing ... So is 'The
+    Rocket'. It's one project with lots of variants. Not lots of separate
+    projects."* A compound layout has two honest answers - one row with a
+    breakdown, or one row per part - and the ticket chose the breakdown, because
+    a row can name the parts and say they belong together while eleven separate
+    rows on the measured library cannot.
+
+    **The ticket's four discriminators, quoted verbatim, because each one is
+    decided below.** *"VARIANT FAMILY: groups share a family token
+    (The_Rocket--<variant>--Side_Spool_Mount, 8 groups) or repeat the same model
+    count per group (8 x exactly 12). Strong signal of one product with
+    variants."* *"VERSION WAVES: groups share a product token with each other
+    ('StageTop Wave One - Personal Use', 'Wave 1.5'), often with a second level
+    of nesting (Core / Accessories / Legs / PlayTiles)."* *"REPO DUMP, must be
+    refused: repository metadata present (.git, .github, _layouts, _sass, docs)
+    and/or each group carrying its own thing id - endorphin is a git checkout
+    holding five DIFFERENT products, and today's behaviour (descend, offer each)
+    is correct. Do not regress it."* *"FOREIGN GROUP, flagged not split: a group
+    whose name carries a vendor thing id or whose root has its own README/LICENSE
+    is not part of this product (xbox360_shell's 'Wallmount for Lenovo Tab M10
+    Plus Gen3 - 5461913'). Name it on the row; the operator splits it at
+    confirmation (C2)."*
+
+    **The clauses, in the order `compound_bundle_facts` decides them.** (1) The
+    switch `COMPOUND_BUNDLES_ENABLED`, read inside that function and nowhere
+    else. (2) Repository metadata: `has_repo_markers` asks whether the
+    snapshot's FIRST path segment is one of `COMPOUND_REPO_MARKERS`, and
+    `bundle_service._inside_repository_dump` independently refuses a key that is
+    a marker-bearing root or sits anywhere below one, so no payload directory of
+    a checkout can be compounded either. (3) At least one model-bearing group:
+    `compound_groups` is every depth-1 first segment holding at least one model
+    anywhere below it, sorted by `(casefold, name)` so the row is a function of
+    the tree rather than of readdir order, and models at depth 0 are the folder's
+    own and never a group. Clause (3) is an explicit statement of a condition both
+    legs already imply (`if not groups: return None` and `len(groups) >= 1`), kept
+    so a folder with no groups reads as "no groups" rather than as a leg that
+    failed quietly. A top-level `__MACOSX` entry is skipped when groups
+    are named, but still counted as a model - the `._*` copies are real files on
+    the measured disk, which is why the Rocket reads 12 per group. (4) Leg A
+    **or** Leg B. (5) Two or more groups carrying their own thing id refuse -
+    `COMPOUND_OWN_ID`, 5+ digits, the recall predicate - and that check sits BEFORE
+    the family evidence so the reasons come in the measured order. (6) Leg A
+    additionally needs the family token; Leg B needs none.
+
+    **A token is a maximal alphanumeric run of the casefolded name, and the
+    predicate is written inline rather than stamped.** `_compound_tokens` splits
+    on anything non-alphanumeric in Python, because the separators a vendor chose
+    (`_`, `--`, ` - `) say nothing about the words they separate - the same choice
+    `is_title_name` makes when its branches are written out instead of encoded in
+    a table. `rule_set_tables` therefore records the tables a rule READS
+    (`COMPOUND_GLUE_TOKENS`, `COMPOUND_TOKEN_MIN_LENGTH`, the two id regexes and
+    the rest), not the Python predicate that consumes them: the stamp proves what
+    DATA a row was decided from, not a copy of the code that decides it. The glue
+    table is closed at four words and the measured witness is `the` (all eight
+    Rocket names carry it), though `the` is refused twice over - it is also three
+    characters, so the length floor refuses it with the table empty. `with` is the
+    only glue word the length floor does not also refuse, and emptying the table
+    is what makes `with widget`/`with gadget` a compound; `and` and `for` are the
+    same shape of word, and a longer stopword list would be a guess rather than a
+    measurement.
+
+    **The marker table is decided by the walk's own pruning.**
+    `COMPOUND_REPO_MARKERS` is a set of entry NAMES, never a directory listing,
+    because `library_scan._walk_storage` prunes hidden DIRECTORIES and yields
+    hidden FILES:
+
+    | Marker | Reachable from the snapshot? | Witness |
+    |---|---|---|
+    | `.git` | as a FILE only - a `.git` directory is pruned before the module sees it | endorphin holds a `.git` directory and it never reaches `has_repo_markers` |
+    | `.github` | not at all - a hidden directory, pruned | endorphin holds one, unreachable |
+    | `.gitmodules` | as a file | none on endorphin; it is the file form the walk yields, beside a linked worktree's `.git` file |
+    | `_config.yml` | as a file | endorphin |
+    | `_includes` | as a directory name - the first segment of the files inside it | endorphin |
+    | `_layouts` | as a directory name | endorphin, and `test_repository_metadata_refuses_a_compound` pins it as `_layouts/page.html` |
+    | `_sass` | as a directory name | endorphin |
+    | `gemfile` | as a file, casefolded | endorphin, and the same test pins `Gemfile` |
+    | `gemfile.lock` | as a file | endorphin |
+
+    **`docs` was DELETED from that list, and the deletion is not the mirror of
+    the additions.** `docs` is an ordinary payload directory name - it is one of
+    R5's `TITLE_PART_NAMES`, a name this ADR already reads as "part" and not
+    "product" - and no measured tree is distinguished by it, while every vendor
+    export that happens to ship `docs/` would be refused as a checkout for
+    holding one. The six markers endorphin actually reaches (`_config.yml`,
+    `_includes`, `_layouts`, `_sass`, `Gemfile`, `Gemfile.lock`) are witnesses of
+    **visibility** on ONE tree rather than six independent measurements of what a
+    checkout is: what they prove is that the walk can see those shapes at all.
+    And endorphin is refused **twice over** - by these markers and by two groups
+    carrying their own thing ids (`3D Printer Electronics Enclosure - 5414731`,
+    `Ender 5 Dual Y Stepper NEMA 17 Mount - 4591932`) - so removing either leg
+    alone leaves it refused, which is why neither leg is load-bearing by itself
+    and why a name with no witness could go.
+
+    **Leg A is the ticket's rule sentence, and it has TWO measured witnesses.**
+    No model at the folder's own depth - `root_model_count`, which counts
+    STRICTLY depth 0 and is deliberately not `_own_depth_model_count`, because
+    that function answers 15 for `import/Stagetop` (the `Wave 1.5` models, which
+    are a child's pile) and would make every wrapper a product of its own - plus
+    at least `COMPOUND_MIN_GROUPS` (2) groups sharing a family token.
+    `import/Stagetop` is the first: token `wave`, 60 models as 45 + 15.
+    `import/Rocket Filement support` is the second: eight groups of exactly 12
+    sharing five words, of which `_compound_family_token` returns the first
+    surviving one in sorted order, `mount`. Two, and no more, on the measured
+    tree.
+
+    **Leg B is the ticket's "fix the loss", and it has exactly ONE measured
+    witness.** The folder holds models of its own, EVERY group below it is
+    foreign, its own models are the strict majority, and at least one group
+    carries a real vendor id (`COMPOUND_FOREIGN_ID`, 6-8 digits). The witness is
+    `import/xbox360_shell`: 27 own models against one foreign group of 4, so the
+    27 that were invisible while the parent was refused as a container are covered
+    by a row again. The id requirement is what stops a root-heavy folder holding
+    two unrelated README-bearing sub-projects from merging on nothing but "most
+    of the models are at the top", and the strict majority is the anti-swallow
+    floor. Leg B asks for **no** token:
+    `test_leg_b_needs_every_group_foreign_and_dominant_own_models` builds a
+    passing shape whose groups share no word at all, which is the point - the
+    vendor id and the majority are its evidence, and a token would be a third
+    guess stacked on two.
+
+    **The two id regexes are deliberately separate constants pointing in
+    opposite directions.** `COMPOUND_FOREIGN_ID` is 6-8 digits and precision: its
+    question is "is this group somebody ELSE's thing", and its floor is six
+    because five-digit runs are ordinary part numbers, so a false positive puts a
+    foreign flag on a real part. `COMPOUND_OWN_ID` is 5+ digits and recall: its
+    question is "is this group a whole product of its own", it is broader on
+    purpose, and the cost of over-matching is only that a compound is declined. A
+    refusal may afford to be wrong; a flag may not.
+
+    **Foreign is two mechanical questions about the group's OWN root.** The
+    group's name carries a vendor id, or the group's own depth-1 document stems to
+    README / LICENSE / LICENCE (`COMPOUND_GROUP_DOC_STEMS`): `<group>/README.txt`
+    yes, `<group>/docs/README.txt` no, because a document one level down is
+    payload rather than a claim of ownership.
+
+    **The equal-model-count leg was DECLINED, and it is the ticket's own second
+    half of VARIANT FAMILY.** "or repeat the same model count per group (8 x
+    exactly 12)" is not implemented. It has no measured witness of its own: the
+    Rocket matches it AND shares tokens, so the leg adds nothing to the only shape
+    that would exercise it, and an equal count with no shared token is a pile of
+    same-sized things rather than one product. It is declined for the reason R5's
+    suffix table is declined - a table of counts is a guess about sizes somebody
+    chose, and this rule keeps its evidence to words and ids.
+
+    **The row is `low` and name-derived: nothing here states provenance.** It is
+    built by `_name_only_facts`, which has no parameter that could set them, so
+    the title is `display_name` and creator, licence, licence URL, source URL,
+    thing id and description are ALL `None` **by construction** rather than by a
+    test. A folder holding one product in two editions says nothing about who made
+    it or what it may be reused for, and the groups inherit the same honesty:
+    `BundleGroup` carries a name, a model count and a `foreign` flag, and nothing
+    else.
+
+    **One group is a wrapper, not a product in several parts.**
+    `COMPOUND_MIN_GROUPS` is 2, because a single group carries no "several parts"
+    evidence at all; `test_a_single_model_bearing_group_is_not_compound` pins the
+    floor and, in the same test, the two bounds Leg B still needs - the vendor id,
+    and a STRICT majority (3 own against 3 foreign is refused, not compounded).
+    The SAME bound is the own-id refusal threshold (`own_ids >=
+    COMPOUND_MIN_GROUPS`), so it answers both questions on purpose: two parts make
+    a family and two products make a pile, and changing it moves both;
+    `test_two_groups_with_their_own_vendor_ids_refuse_the_leg_b_shape` builds a
+    shape that is Leg B on every other count and reds if the constant is raised.
+
+    **The hidden-directory limitation is stated rather than papered over.** The
+    walk prunes hidden DIRECTORIES, so a checkout whose ONLY marker is `.git/` is
+    caught by the own-id leg or not at all - a paid checkout with two groups, two
+    editions and no ids on either would be compounded. `include_hidden` exists in
+    `library_scan._walk_storage`, but a rule about one folder's contents is not
+    the place to widen the library's pruning for every other caller.
+
+    **The absorption is deliberately low-suppresses-high, because owner decision
+    2 says so.** `import/xbox360_shell`'s foreign `Wallmount ...` row is
+    `thingiverse-readme` / `high` and is absorbed by a `low` compound row: "one
+    row, with the foreign group flagged". Three things keep that evidence
+    recoverable rather than lost - the group NAME stays on the row
+    (`BundleGroup("Wallmount for Lenovo Tab M10 Plus Gen3 - 5461913", 4, True)`),
+    the absorbed key is named `member-of-bundle` in the refusal ledger, and
+    detection is recomputed from disk at create time, so the high evidence was
+    never overwritten, only unoffered. C2 owns the created project's membership
+    and the flagged group's split and C3 owns the presentation; neither is in this
+    slice, and this ADR says only what detection reports.
+
+    **Two numbers in the plan were wrong, and the disk wins.** Stagetop is **60**
+    parts, not 56: the plan's 56 with groups 41/15 was a `.stl`-only count, while
+    `MODEL_SUFFIXES` is `IMPORT_ALLOWED_EXTS` minus `.zip` and therefore includes
+    `.step` - the four `.step` files (`PlayTile - Blank - Corner.step`,
+    `- Half.step`, `- Full.step`, `- Quarter.step`)
+    live in `StageTop Wave One - Personal Use/PlayTiles/PlayTile - Blank/`, and
+    measured by the detector's own table the groups are 45 (41 `.stl` + 4
+    `.step`) and 15. The ticket's "60 parts" was RIGHT and the plan had drifted;
+    it is pinned as `counts.model == 60` with groups `45`/`15`. The genuine ticket
+    drift runs the other way: endorphin yields **8** separate product rows, not
+    the ticket's 5 (2 `thingiverse-readme`/`high`, 3 `title-name`/`low`, 3
+    `generic-bundle`/`low`), and 8 is the correct behaviour - "five DIFFERENT
+    products" is what that checkout is *about*, not what is on it. Stagetop also
+    yields **eleven** rows today, not the ten the plan's summary table said,
+    because `StageTop Wave One - Personal Use/PlayTiles/Accessory` is a
+    `title-name` row of its own beside the ten `generic-bundle` ones.
+
+    **Repository metadata is checked on every ANCESTOR inside the walk, not only
+    on the candidate.** `_inside_repository_dump` walks a key's parents through
+    `_parent` and refuses the key if any of them bears a marker, so nothing
+    strictly below a checkout can be compounded. Without that leg
+    `import/endorphin/STLs` - three `stage-N` directories that share the token
+    `stage` and are three `title-name`/`low` rows today - would be compounded into
+    one row and swallow three rows of a checkout holding five different products.
+
+    **A compound may only absorb rows no stronger than its own shape
+    generalises.** A Leg A family - models only in subdirectories - replaces LOW
+    guesses, and the eleven Stagetop children (eleven in the fixture too, since
+    the fixture is the measured tree, `PlayTiles/Accessory` included) and the
+    eight Rocket variants are exactly that. Absorbing a STRONG row needs the Leg
+    B shape, which is why
+    `_compound_absorbs` asks `root_model_count` and refuses when the absorbed set
+    holds a `STRONG_CONFIDENCES` row and the folder has no model of its own. The
+    witness is `vendor/` holding two Thingiverse exports that share the word
+    "bundle": that is a pile of two whole products, and R7 must leave both `high`
+    rows alone - `test_service_a_bundle_that_is_already_offered_is_never_compounded`
+    pins it on the parent that IS offered, while
+    `test_service_a_leg_a_family_never_absorbs_a_high_row` pins it on
+    `vendor/Alpha Bundle` + `vendor/Beta Bundle`, where nothing is offered at the
+    parent, Leg A's token leg passes on the shared word, and only the absorption
+    bound refuses. Without the bound the rule would lower two undisputed `high`
+    verdicts to one `low` row.
+
+    **The measurement, quoted from the artifacts.** before/after on the owner's
+    library, base `585f12917cd2b12c0c5f91f435a1fe8dffb55796`, root
+    `/mnt/ceph/3D_models`, `--limit 400`, rule set `2026-11-04.2` /
+    `072a1505299394483222ec7cd103c9d85c9008345827b8ea21288857905f3e09` ->
+    `2026-11-05.1` /
+    `2dcd2b7064aee98a815fee6b8d1d6a26d9f11646571406f99ca35b0a7170b032`: rows
+    **201 -> 184**, `high` 112 -> 111, `low` 88 -> 72, `medium` 1 -> 1. Added (3):
+    `import/Stagetop` (Leg A, 60 models, groups 45/15), `import/Rocket Filement
+    support` (Leg A, 96 models, 8 groups of 12), `import/xbox360_shell` (Leg B, 31
+    models, 27 own + the foreign group of 4). Removed (20): the eleven Stagetop
+    children and the eight Rocket variants (absorbed) plus the one `high`
+    `import/xbox360_shell/Wallmount for Lenovo Tab M10 Plus Gen3 - 5461913` row
+    (absorbed, named on the compound row and in the ledger). The ledger moves
+    exactly as the rule says: 20 paths that had no entry now read
+    `member-of-bundle`, 3 parents leave it because they are offered, and 25
+    entries change rule - 22 archives from `twin-consumed` /
+    `promotion:no-own-depth-model` to `nested-member`, which is the Mf-74x5 answer
+    for a zip inside a detected bundle, and 3 mid-level directories from
+    `R3:no-own-depth-model` to `member-of-bundle`. `import/endorphin` is
+    unchanged: the same 8 rows, no compound row, no rewritten verdict. `--diff`
+    prints "comparable: NO - the rule set changed" and "the row delta below is
+    caused by the rule change, not by the corpus" while still naming every row,
+    and that is the correct verdict on a detector change rather than an error: a
+    like-for-like corpus comparison is exactly what a rule-set stamp exists to
+    refuse. The database counts read **NOT MEASURED**, `assets` and `projects`
+    both `null`, because the development database is empty - nulls, not zeros.
 
 ## Consequences
 
@@ -1367,6 +1696,22 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   those models counted. A duplicate whose only twin is a bundle member is not
   reported as reclaimable when the member was the suppressed copy, which is the
   safe direction and is stated rather than hidden.
+* **A `low` rule now covers 60 parts, 96 parts and 27 models on a shared word and
+  a majority, and that is the accepted trade.** Three rows replace twenty on the
+  owner's library - the eleven Stagetop children, the eight Rocket variants and
+  the one foreign `high` row - for 201 -> 184 rows overall; nothing is deleted, no
+  file is moved and the disk is unchanged. On that library all three new rows are
+  `blocked` / `unresolved_directory`, so a blocked row stays blocked because the
+  folder does not resolve and not because a detector said so; and where such a
+  folder does resolve, what a create attaches is its own snapshot, which is
+  exactly how `xbox360_shell`'s 27 previously invisible models come back. The
+  judgement behind the row is the weakest this document sanctions - a token two
+  group names share, or a majority of models at the top plus one vendor id - and
+  it is deliberately correctable rather than final: C2 (`Mf-ao6r`) owns the
+  created project's membership and the flagged group's split and C3 (`Mf-aaqi`)
+  owns grouping the members by folder, so the operator's remedy for a wrong
+  compound row is the same as for any other `low` row - reject it, dismiss it, or
+  fix the created project.
 
 ## Alternatives considered
 
@@ -1847,6 +2192,78 @@ unchanged.
   `test_service_models_only_and_multi_root_archives_stay_refused` and
   `test_service_every_archive_is_offered_or_refused_with_a_named_rule` (the
   Mf-9ygi ledger invariant with the new rows in the mix).
+- **R7's witnesses are named, and each one reds a different mutation.** In
+  `tests/test_bundle_detect.py`, from literal snapshots built from the measured
+  trees: `test_a_compound_folder_is_low_name_derived_and_names_every_group` (the
+  60-part Stagetop tree as `compound-bundle` / `low` / `compound` with groups
+  `45`/`15`, family token `wave`, and every provenance field `None` - dropping the
+  group breakdown reds it, and a `.stl`-only count turns 60 into the plan's stale
+  56); `test_detect_bundle_still_refuses_the_snapshot_compound_facts_offers` (the
+  same listing answers `None` from `detect_bundle`, which is what pins the
+  placement); `test_repository_metadata_refuses_a_compound` (both reachable
+  marker shapes, a `Gemfile` file and `_layouts/page.html`, plus a NEGATIVE
+  witness - a `Gemfile` one level INSIDE a group does not refuse the folder,
+  because the marker leg is the folder's own first segments only);
+  `test_two_groups_with_their_own_vendor_ids_are_not_compound` (the own-id
+  refusal, with the shared token `octopus` asserted to exist first so the refusal
+  cannot be the Leg A token leg wearing its name);
+  `test_two_groups_with_their_own_vendor_ids_refuse_the_leg_b_shape` (a Leg B
+  shape whose two groups both carry 7-digit ids, so only the own-id threshold - the
+  same `COMPOUND_MIN_GROUPS` - refuses it, which reds if that constant is raised);
+  `test_a_family_token_must_be_a_word` (a shared token only binds when it is a
+  product word: `the` is refused twice over, by glue and by the length floor,
+  `with` is glue and the only glue word the length floor does not also refuse,
+  `files` a part name, `abc` below the length floor, `2024` all digits, each
+  refused while `wander` fires, so the table cannot pass by refusing everything);
+  `test_compound_groups_are_a_function_of_the_tree_not_of_readdir_order`
+  (`Zeta Parts` / `alpha parts` list in casefold order, which raw order would
+  reverse); `test_apple_double_cruft_is_not_a_group` (a top-level `__MACOSX` is
+  never a group, while `_counts.model` still counts the cruft);
+  `test_a_foreign_group_is_named_and_never_split` (31 models as 27 + 4, one group,
+  `foreign` true); `test_a_foreign_group_is_known_by_its_own_root_document`
+  (`README.txt`, `LICENSE.txt` and `LICENCE` at the group's own root all read
+  foreign, `<group>/docs/README.txt` does not, and the deep case then refused);
+  `test_leg_b_does_not_merge_two_readme_bearing_unrelated_groups` and
+  `test_leg_b_needs_every_group_foreign_and_dominant_own_models` (Leg B's three
+  bounds, one shape each, the passing one sharing no token);
+  `test_a_single_model_bearing_group_is_not_compound` (the group floor, the vendor
+  id and the strict majority);
+  `test_root_models_are_strictly_at_depth_zero_and_the_wave_15_leg_is_not_one_of_them`
+  (`root_model_count` 0 while `_own_depth_model_count` answers 15 on the same
+  Stagetop listing, which is the leg R7 must not use); and
+  `test_compound_facts_is_none_when_the_switch_is_off` (one switch, the 96-part
+  Rocket while it is on, and token `mount`). In `tests/test_bundle_service.py`,
+  through `build_report` and `iter_bundle_candidates` against temporary roots:
+  `test_service_stagetop_is_one_row_with_two_groups` and
+  `test_service_the_rocket_is_one_row_with_eight_groups` (eleven child rows in the
+  fixture - it is the measured tree, `PlayTiles/Accessory` included - and one row
+  out; eight in, one out), `test_service_a_git_dump_keeps_its_separate_product_rows`
+  (endorphin's rows survive and no compound row appears),
+  `test_service_xbox360_shell_has_a_row_covering_its_own_models_and_naming_the_foreign_group`
+  (the 27 own models reachable through `_own_paths`, the group named, the absorbed
+  key `member-of-bundle` in the ledger),
+  `test_service_a_compound_row_creates_one_project_with_every_part` (a resolved
+  compound row creates ONE project attaching all 31 models, so "creatable on
+  exactly the same terms" is a measured claim; `own_assets == assets`, so the
+  `contains_bundles` belt cannot fire, and splitting the foreign group is C2's job
+  (`Mf-ao6r`)),
+  `test_service_a_folder_with_one_model_bearing_group_is_not_compound`,
+  `test_service_a_bundle_that_is_already_offered_is_never_compounded` (the overlap
+  guard, on a `high` parent that answers every R7 predicate),
+  `test_service_an_offered_low_folder_is_never_recompounded` (the same guard on an
+  OFFERED LOW row that is Leg B's shape, where deleting `key in offered` is the
+  mutation and nothing else protects the row),
+  `test_service_a_leg_a_family_never_absorbs_a_high_row` (two undisputed HIGH
+  Thingiverse exports sharing the word `bundle`, refused only by the STRONG-row
+  half of `_compound_absorbs`) and
+  `test_service_the_switch_off_restores_every_absorbed_row` (the switch off
+  returns exactly the eleven child rows the fixture writes). In
+  `tests/test_bundles_api.py`,
+  `test_the_compound_row_serves_its_groups` (the live route serves 60 models as
+  `45`/`15`, and an ordinary row answers `groups: []` rather than a missing key)
+  and `test_the_committed_openapi_fixture_declares_the_group_component` (the
+  committed fixture declares `BundleGroupOut`'s three required fields, so a
+  skipped regeneration cannot leave stale-but-valid JSON).
 
 ## Superseding conditions
 
@@ -1937,3 +2354,22 @@ This ADR is superseded if any of the following becomes true:
   report;
 - `existing_project_match` stops being reported, or the client stops
   distinguishing the assets identity from the app-created one.
+- R7 starts absorbing a row a STRONGER rule offered outside the Leg B shape - a
+  Leg A family (models only in subdirectories) starts replacing a `high` or
+  `medium` verdict, which is the two-Thingiverse-exports-under-`vendor/` pile and
+  a lower-confidence rule overruling a higher one;
+- R7 starts firing without a family token on Leg A, or without the vendor id on
+  Leg B, or with a single model-bearing group - each leg's evidence is what makes
+  the row a claim rather than a guess;
+- the compound row stops carrying its group breakdown, or a group's `foreign` flag
+  stops being derived from the name's vendor id and the group's OWN root document
+  (a `docs/README.txt` or any deeper document starts counting as ownership);
+- the compound row becomes creatable from a directory that does not resolve, i.e.
+  it stops being an ordinary folder row and its creatability starts keying on the
+  detector again;
+- a compound row starts being judged by the container strip (`iter_bundle_candidates`
+  drops it for holding its own parts), or starts rewriting the verdict of a
+  directory another rule offered - the `key in offered` / `_strictly_inside_any`
+  guards are the whole of that promise;
+- repository metadata stops being checked on the ancestors inside the walk, so a
+  payload directory of a checkout can be compounded on a shared word.
