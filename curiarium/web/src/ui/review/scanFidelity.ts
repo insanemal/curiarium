@@ -9,13 +9,17 @@ import { formatReviewCount } from "./useReviewCounts";
 
 /**
  * Whether the report has anything to say about the scan itself. DELIBERATELY
- * not gated on `truncated`: truncation only ever cut the bundle ROWS, and
- * `refused` is never capped by `limit`, so a cut-short walk says nothing about
- * the ledger. A notice that appeared *only* because a walk was cut short would
- * be inventing a theme it has no data for; what makes it real is the server
- * having said something. (`showsDuplicateReport` does include `truncated`, and
- * that difference is the point: a truncated duplicate list is provably partial,
- * while a truncated ledger is not - so one must speak and the other must not.)
+ * not gated on `truncated`: what makes the notice real is the server having
+ * said something, not the walk having finished. A cut-short walk *does* make
+ * its ledger partial, but that partiality is already worded where it belongs -
+ * `refusedCount` turns a truncated count into a dash - so the notice gains
+ * nothing from `truncated`, and a payload carrying neither `refused` nor
+ * `rule_set` has nothing to say however truncated it is: a notice raised there
+ * would be inventing a theme it has no data for. (`showsDuplicateReport` does
+ * include `truncated`, and the difference is subject matter, not provability.
+ * There the walked list itself is the subject, so silence would be silent
+ * under-reporting; here the rule set - which no walk touches - can still be
+ * spoken for. One must speak and the other need not.)
  */
 export function showsScanFidelity(report: BundleReport): boolean {
   return Array.isArray(report.refused) || report.rule_set != null;

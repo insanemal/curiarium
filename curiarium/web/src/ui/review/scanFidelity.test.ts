@@ -55,9 +55,10 @@ describe("showsScanFidelity", () => {
   });
 
   it("stays hidden for a truncated walk that said nothing about the scan", () => {
-    // The deliberate difference from `showsDuplicateReport`: truncation cut the
-    // bundle ROWS and never the ledger, so a cut-short walk is not evidence
-    // about refusals at all. Red if `|| report.truncated` were copied over.
+    // The deliberate difference from `showsDuplicateReport`: the walk IS cut
+    // short here, so a ledger would be partial - but this payload has no
+    // ledger and no rule set, so there is nothing to qualify.
+    // Red if `|| report.truncated` were copied over.
     expect(showsScanFidelity(makeReport({ truncated: true }))).toBe(false);
   });
 });
