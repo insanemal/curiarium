@@ -24,6 +24,7 @@ import ErrorBoundary from "../ErrorBoundary";
 import { ModelSnapshot } from "../ModelViewer";
 import {
   BUNDLE_FILTERS,
+  ENRICH_NONE_REASON,
   archiveLine,
   bulkEnrichTitle,
   canEnrich,
@@ -826,6 +827,19 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                 ? "No bundles selected"
                 : `${countLabel(selected.length, "bundle", "bundles")} selected`}
             </span>
+            {selected.length > 0 && enrichableSelected.length === 0 && (
+              // A disabled control's title is not reliably surfaced as a
+              // tooltip, and the control is not focusable, so the button's
+              // `title` alone is unreachable and the same sentence is rendered
+              // as text. Last in the row, and `basis-full` gives it a line of
+              // its own with nothing after it. Deliberately NOT a live
+              // region and not `role=alert`: the bar already speaks the count
+              // through `.review-selection`, and a polite region here would
+              // re-announce this same sentence on every selection change.
+              <span className="review-detail-reason basis-full" data-bundle-enrich-none-reason="true">
+                {ENRICH_NONE_REASON}
+              </span>
+            )}
           </div>
         )}
         {/* Filtered empty is a third state: the rows exist, the filter hid

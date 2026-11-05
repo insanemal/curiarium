@@ -1168,6 +1168,9 @@ describe("BundleReviewView source-page enrichment", () => {
     expect(mixed.getAttribute("title")).toBe(bulkEnrichTitle(1, 3));
     expect(mixed.getAttribute("title")).toContain("1 of the 3");
     expect(mixed.disabled).toBe(false);
+    // The visible sentence belongs to the wholly-unenrichable case only: a
+    // partial shortfall is spoken by the counts, not by a paragraph.
+    expect(screen.queryByText(ENRICH_NONE_REASON)).toBeNull();
 
     fireEvent.click(mixed);
     expect(state.enrich).toHaveBeenCalledWith(["Dragon_5390184"]);
@@ -1181,6 +1184,11 @@ describe("BundleReviewView source-page enrichment", () => {
     const state = makeState({ report: makeReport([moaiZip, cableClip, legacyVase]) });
     renderView(state);
 
+    // Nothing is selected yet: the bar says so, and the sentence that explains a
+    // wholly-unenrichable selection must not speak while the count says none.
+    expect(screen.getByText("No bundles selected")).toBeTruthy();
+    expect(screen.queryByText(ENRICH_NONE_REASON)).toBeNull();
+
     fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
 
     const none = screen.getByRole("button", {
@@ -1188,6 +1196,19 @@ describe("BundleReviewView source-page enrichment", () => {
     }) as HTMLButtonElement;
     expect(none.disabled).toBe(true);
     expect(none.getAttribute("title")).toBe(ENRICH_NONE_REASON);
+
+    // A disabled control's title is not reliably surfaced as a tooltip, and the
+    // control is not focusable, so the same sentence is also rendered visibly -
+    // but as plain text: `.review-selection` already speaks the count, and this
+    // must not become a live region too.
+    const reason = screen.getByText(ENRICH_NONE_REASON);
+    expect(reason.getAttribute("data-bundle-enrich-none-reason")).toBe("true");
+    expect(reason.getAttribute("aria-live")).toBeNull();
+    expect(reason.getAttribute("role")).toBeNull();
+    // Last in the bar, and `basis-full` gives it a line of its own; nothing
+    // follows it, so no button is pushed down with it.
+    expect(reason.parentElement?.lastElementChild).toBe(reason);
+    expect(reason.className).toContain("basis-full");
 
     fireEvent.click(none);
     expect(state.enrich).not.toHaveBeenCalled();

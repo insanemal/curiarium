@@ -148,11 +148,13 @@ export function enrichSelectionLabel(enrichable: number, selected: number): stri
   return `Enrich selected (${enrichable})`;
 }
 
-/** What the bulk button says when none of the selected rows can be enriched.
- *  It is a `title`, so it is the secondary channel only: a disabled button is
- *  not focusable, and the count form `(0 of 3)` has to be honest on its own. */
+/** What the bulk bar says when none of the selected rows can be enriched. It is
+ *  the disabled button's `title`, but a disabled control's title is not reliably
+ *  surfaced as a tooltip, and the control is not focusable, so the same sentence
+ *  is also rendered as visible text - and the count form `(0 of 3)` has to be
+ *  honest on its own. */
 export const ENRICH_NONE_REASON =
-  "None of the selected bundles can be enriched: each has no source page, no empty creator or licence, or already has a page or a project.";
+  "None of the selected bundles can be enriched: each either names no source page, already has a creator and a licence, was already read from its page, or is already a project. A bundle that was already read from its page, and is not already a project, can be re-checked one at a time with 'Re-check source page'.";
 
 /** The bulk button's hover sentence, or undefined when the label already says
  *  everything. It names all four `canEnrich` gates rather than the missing
@@ -166,7 +168,7 @@ export function bulkEnrichTitle(enrichable: number, selected: number): string | 
     return `The server takes at most ${ENRICH_MAX_KEYS} bundles per request, so it sends ${ENRICH_MAX_KEYS} of the ${enrichable} that can be enriched, leaving ${enrichable - ENRICH_MAX_KEYS} for a later pass.`;
   }
   if (enrichable === 0) return ENRICH_NONE_REASON;
-  return `${enrichable} of the ${selected} selected can be enriched; the rest have no source page, no empty creator or licence, or already have a page or a project.`;
+  return `${enrichable} of the ${selected} selected can be enriched; the others either name no source page, already have a creator and a licence, were already read from their page, or are already a project.`;
 }
 
 /** A row the queue may extract in place: it is blocked as an archive the scan

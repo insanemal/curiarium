@@ -924,8 +924,10 @@ describe("bulkEnrichTitle", () => {
   });
 
   it("gives the wholly unenrichable selection the none reason verbatim", () => {
-    // A disabled button is not focusable, so this title is unreachable by
-    // keyboard: the `(0 of 3)` count form has to stand alone.
+    // A disabled control's title is not reliably surfaced as a tooltip and the
+    // control is not focusable, so the title alone is unreachable: the same
+    // sentence is rendered beside the button, and the `(0 of 3)` count form
+    // still has to stand alone.
     expect(bulkEnrichTitle(0, 3)).toBe(ENRICH_NONE_REASON);
   });
 
