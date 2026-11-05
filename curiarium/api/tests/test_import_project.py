@@ -15,8 +15,12 @@ monkeypatched on `main`, which is the patch surface the routes resolve at call
 time.
 """
 
+import io
 import json
+import socket
+from email.message import Message
 from pathlib import Path
+from urllib.error import HTTPError
 from zipfile import ZipFile
 
 import pytest
@@ -28,6 +32,7 @@ import asset_file_service
 import asset_service
 import audit
 import db
+import import_resolvers
 import import_service
 import library_scan
 import main
@@ -105,6 +110,26 @@ THINGIVERSE_PAID_PAGE = """
 </script>
 </head></html>
 """
+
+# A free page that names its file, so a fall-through past the refusal has
+# somewhere to go: find_download_url finds this href and re-enters the fetch,
+# which the scripted page fetch answers with an AssertionError.
+THINGIVERSE_PAGE_WITH_A_FILE_LINK = """
+<html><head>
+<meta property="og:title" content="Free Thing">
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"thing":{"name":"Free Thing","creator":{"name":"Thing Maker"}}}}}
+</script>
+</head><body><a href="https://cdn.thingiverse.com/assets/cube.stl">cube.stl</a></body></html>
+"""
+
+THINGIVERSE_PAGE_WITHOUT_A_THING_ID = """
+<html><head><title>Explore</title></head><body>nothing to download here</body></html>
+"""
+
+THINGIVERSE_URL = "https://www.thingiverse.com/thing:5390184"
+THINGIVERSE_AUTH_VIEW_URL = "https://www.thingiverse.com/api/v2/auth/view"
+THINGIVERSE_FILES_URL = "https://www.thingiverse.com/api/v2/things/5390184/files"
 
 
 @pytest.fixture(autouse=True)
@@ -199,6 +224,84 @@ def stub_attempt(monkeypatch: pytest.MonkeyPatch, attempt: ImportAttempt | ZipAt
     monkeypatch.setattr(main, "import_asset_attempt", resolve)
     monkeypatch.setattr(main, "download_zip_attempt", resolve)
     return calls
+
+
+class ScriptedResponse:
+    """A 200 the real fetcher can consume: headers, geturl, a bounded read, close."""
+
+    def __init__(self, body: bytes, content_type: str, url: str) -> None:
+        self.body = body
+        self.url = url
+        self.headers = Message()
+        self.headers["Content-Type"] = content_type
+
+    def read(self, size: int = -1) -> bytes:
+        return self.body if size < 0 else self.body[:size]
+
+    def geturl(self) -> str:
+        return self.url
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> "ScriptedResponse":
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        return False
+
+
+def script_page(monkeypatch: pytest.MonkeyPatch, html: str, url: str) -> list[str]:
+    """Answer the page fetch exactly once; a second call is an unscripted fall-through."""
+    calls: list[str] = []
+
+    def fetch(request, *, timeout):
+        calls.append(request.full_url)
+        if len(calls) > 1:
+            raise AssertionError(f"a refused import must not fetch again: {request.full_url}")
+        return ScriptedResponse(html.encode(), "text/html; charset=utf-8", url)
+
+    monkeypatch.setattr(import_service, "safe_urlopen", fetch)
+    return calls
+
+
+def script_resolver(monkeypatch: pytest.MonkeyPatch, *outcomes: object) -> list[str]:
+    """Answer the Thingiverse resolver's own fetch, recording each URL it asked for."""
+    urls: list[str] = []
+    queue = list(outcomes)
+
+    def fetch(request, *, timeout):
+        urls.append(request.full_url)
+        if not queue:
+            raise AssertionError(f"unscripted resolver fetch of {request.full_url}")
+        outcome = queue.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(import_resolvers, "safe_urlopen", fetch)
+    return urls
+
+
+def resolver_http_error(code: int, body: bytes) -> HTTPError:
+    """A vendor refusal with a readable JSON body, so parse_json_error_message runs."""
+    headers = Message()
+    headers["Content-Type"] = "application/json"
+    return HTTPError(THINGIVERSE_URL, code, f"HTTP {code}", headers, io.BytesIO(body))
+
+
+def pin_thingiverse_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve any host to a public address so a door test needs no resolver.
+
+    ``_resolve_import`` validates the URL before it fetches and that validation is
+    a real ``getaddrinfo``; the fetch itself is scripted, so nothing connects. A
+    public address keeps the SSRF guard's own decision out of these tests.
+    """
+
+    def fake_getaddrinfo(host: str, port, *_args, **_kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
 
 # --- page metadata ----------------------------------------------------------
@@ -782,3 +885,126 @@ def test_the_route_answers_with_the_project_and_the_gate(monkeypatch: pytest.Mon
     assert body["project"]["source_url"] == "https://makerworld.com/en/models/2-paid"
     assert body["project"]["metadata_json"] == {"_files": "user-supplied"}
     assert body["project"]["asset_count"] == 0
+
+
+# --- a dead credential is not a gated model (Mm-alfd) ----------------------
+
+
+def test_a_credential_refusal_on_a_free_page_raises_and_creates_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The remedy must reach the operator, not GATED_IMPORT_DETAIL."""
+    target = page(THINGIVERSE_URL, THINGIVERSE_FREE_PAGE)
+    refusal = import_resolvers.CredentialRefusal(
+        status_code=403,
+        detail="Thingiverse answered the view-token request without a token. " + import_resolvers.THINGIVERSE_COOKIE_REMEDY,
+    )
+    stub_attempt(monkeypatch, ImportAttempt(page=target, error=refusal))
+    before = project_count()
+
+    with pytest.raises(import_resolvers.CredentialRefusal) as caught:
+        project_import.import_into_project(THINGIVERSE_URL, ImportProjectRequest(url=THINGIVERSE_URL))
+
+    assert caught.value is refusal
+    assert project_count() == before, "a refused credential must leave no project behind"
+
+
+def test_a_credential_refusal_on_a_paid_page_still_takes_the_details_only_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page's own flag is checked first, so a paid page keeps its outcome."""
+    target = page(THINGIVERSE_URL, THINGIVERSE_PAID_PAGE)
+    refusal = import_resolvers.CredentialRefusal(
+        status_code=403,
+        detail="Thingiverse refused the download API for thing 5390184 (HTTP 403). "
+        + import_resolvers.THINGIVERSE_COOKIE_REMEDY,
+    )
+    stub_attempt(monkeypatch, ImportAttempt(page=target, error=refusal))
+
+    outcome = project_import.import_into_project(THINGIVERSE_URL, ImportProjectRequest(url=THINGIVERSE_URL))
+
+    assert outcome.gated is True
+    assert outcome.message == GATED_IMPORT_DETAIL
+    assert json.loads(project_row(outcome.project_id).metadata_json) == {"_files": "user-supplied"}
+
+
+def test_a_tokenless_view_token_at_the_door_refuses_the_cookie_and_creates_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The AC at the door: the real _resolve_import, the real raise, no project.
+
+    The page HTML names a real file, so a fall-through past the refusal would
+    fetch a second time and trip the scripted page fetch. The resolver's recorded
+    URLs prove the import stopped at the token step.
+    """
+    pin_thingiverse_dns(monkeypatch)
+    page_calls = script_page(monkeypatch, THINGIVERSE_PAGE_WITH_A_FILE_LINK, THINGIVERSE_URL)
+    resolver_urls = script_resolver(monkeypatch, ScriptedResponse(b"{}", "application/json", THINGIVERSE_URL))
+    captured: dict[str, ImportAttempt] = {}
+    real_attempt = import_service.import_asset_attempt
+
+    def capture(url: str, body, *, origin=None) -> ImportAttempt:
+        captured["attempt"] = real_attempt(url, body, origin=origin)
+        return captured["attempt"]
+
+    monkeypatch.setattr(main, "import_asset_attempt", capture)
+    before = project_count()
+
+    with pytest.raises(import_resolvers.CredentialRefusal) as caught:
+        project_import.import_into_project(
+            THINGIVERSE_URL, ImportProjectRequest(url=THINGIVERSE_URL, thingiverse_cookie="session=abc")
+        )
+
+    assert isinstance(captured["attempt"].error, import_resolvers.CredentialRefusal)
+    assert caught.value is captured["attempt"].error
+    assert caught.value.status_code == 403
+    assert caught.value.detail.endswith(import_resolvers.THINGIVERSE_COOKIE_REMEDY)
+    assert "Settings > Import sources" in caught.value.detail
+    assert "signed-out or expired" in caught.value.detail, "this is the no-token row, not an unreadable body"
+    assert "direct download link" not in caught.value.detail
+    assert page_calls == [THINGIVERSE_URL]
+    assert resolver_urls == [THINGIVERSE_AUTH_VIEW_URL]
+    assert project_count() == before
+
+
+def test_a_free_page_whose_files_api_refuses_creates_no_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Row F at the door: the files step refuses, so nothing is written."""
+    pin_thingiverse_dns(monkeypatch)
+    page_calls = script_page(monkeypatch, THINGIVERSE_PAGE_WITH_A_FILE_LINK, THINGIVERSE_URL)
+    resolver_urls = script_resolver(
+        monkeypatch,
+        ScriptedResponse(b'{"access": "tok"}', "application/json", THINGIVERSE_URL),
+        resolver_http_error(403, b'{"error": "Unauthorized"}'),
+    )
+    before = project_count()
+
+    with pytest.raises(import_resolvers.CredentialRefusal) as caught:
+        project_import.import_into_project(
+            THINGIVERSE_URL, ImportProjectRequest(url=THINGIVERSE_URL, thingiverse_cookie="session=abc")
+        )
+
+    assert caught.value.status_code == 403
+    assert "refused the download API for thing 5390184" in caught.value.detail
+    assert caught.value.detail.endswith(import_resolvers.THINGIVERSE_COOKIE_REMEDY)
+    assert "direct download link" not in caught.value.detail
+    assert page_calls == [THINGIVERSE_URL]
+    assert resolver_urls == [THINGIVERSE_AUTH_VIEW_URL, THINGIVERSE_FILES_URL]
+    assert project_count() == before, "a files-step refusal must not leave an empty project"
+
+
+def test_a_thingiverse_url_with_no_thing_id_still_answers_the_direct_link_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R16: with no thing id the cookie is not implicated, so today's 400 stands."""
+    pin_thingiverse_dns(monkeypatch)
+    url = "https://www.thingiverse.com/explore"
+    page_calls = script_page(monkeypatch, THINGIVERSE_PAGE_WITHOUT_A_THING_ID, url)
+    resolver_urls = script_resolver(monkeypatch)
+    before = project_count()
+
+    with pytest.raises(HTTPException) as caught:
+        project_import.import_into_project(url, ImportProjectRequest(url=url, thingiverse_cookie="session=abc"))
+
+    assert caught.value.status_code == 400
+    assert caught.value.detail == "No downloadable model file found. Use a direct download link."
+    assert page_calls == [url]
+    assert resolver_urls == [], "no thing id means no resolver request at all"
+    assert project_count() == before

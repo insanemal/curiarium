@@ -35,6 +35,7 @@ import zip_service
 from asset_service import AssetOrigin
 from import_metadata import PageMetadata, parse_page_metadata
 from import_policy import GATED_IMPORT_DETAIL
+from import_resolvers import CredentialRefusal
 from models import Asset
 from schemas import ImportProjectRequest
 from url_utils import canonical_url
@@ -77,10 +78,17 @@ def _is_gated(page, metadata: PageMetadata, error: HTTPException) -> bool:
     With a page, an explicit boolean flag in it is the primary detector, and a
     401/403 from the site is the real one - that is the site refusing anonymous
     access while the page itself was readable.
+
+    A ``CredentialRefusal`` is the third answer and never a gated one: the site
+    refused the credential this server sent, so the operator's fix is the cookie
+    remedy and not a purchase. The page's own flag is still checked FIRST, so a
+    paid page that also refuses the credential keeps its details-only outcome.
     """
     if page is None:
         return False
-    return metadata.gated or error.status_code in GATED_STATUS_CODES
+    if metadata.gated:
+        return True
+    return not isinstance(error, CredentialRefusal) and error.status_code in GATED_STATUS_CODES
 
 
 def _zip_assets(attempt, body: ImportProjectRequest, origin: Optional[AssetOrigin]) -> Tuple[List[Asset], List[str]]:
