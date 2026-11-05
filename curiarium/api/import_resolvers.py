@@ -22,6 +22,25 @@ from file_utils import is_json_content_type
 from safe_http import safe_urlopen
 from schemas import ImportRequest
 
+
+class CredentialRefusal(HTTPException):
+    """A refusal whose cause is the credential this server sent, not the site's answer.
+
+    The status and the detail are exactly what the same branch answered before
+    this class existed, so a client that pinned the string keeps working; only
+    the class is new, which is what lets a caller tell "the cookie this server
+    sent is dead" from "the site refused an anonymous request" without parsing
+    English. ``project_import._is_gated`` matches it with ``isinstance``, the
+    same way ``entry_policy.is_entry_failure`` matches ``AssetFilenameError``.
+
+    Every detail a subclass path raises composes ``THINGIVERSE_COOKIE_REMEDY``
+    through ``_thingiverse_cookie_detail``, so the remedy is written once.
+    """
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(status_code=status_code, detail=detail)
+
+
 # The one remedy both Thingiverse cookie refusals share. It names both surfaces on
 # purpose: the paste lives under Settings > Import sources and wins over
 # THINGIVERSE_COOKIE (see resolve_thingiverse_cookie), so naming only one of them
@@ -730,12 +749,73 @@ def thingiverse_thing_id_from_url(url: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+# --- the cookie refusals ---------------------------------------------------
+#
+# One lead per observed shape, and every one of them is joined to
+# THINGIVERSE_COOKIE_REMEDY by _thingiverse_cookie_detail, so no sentence here
+# restates the remedy. Only the no-token lead may diagnose the credential: a
+# body this server could not read is not evidence that the cookie is dead, only
+# that it went unchecked.
+
+_VIEW_TOKEN_ABSENT = (
+    "Thingiverse answered the view-token request with an empty body, so this server could not check the cookie it sent."
+)
+_VIEW_TOKEN_UNVERIFIABLE = (
+    "Thingiverse answered the view-token request with a body this server cannot read, which is what a Cloudflare "
+    "challenge looks like, so the cookie it sent went unchecked."
+)
+_VIEW_TOKEN_TOO_LARGE = (
+    f"Thingiverse's view-token answer was larger than the import cap ({IMPORT_HTML_MAX_BYTES} bytes), so this "
+    "server did not read it and the cookie it sent went unchecked."
+)
+_VIEW_TOKEN_NO_TOKEN = (
+    "Thingiverse answered the view-token request without a token, so the cookie it was sent is signed-out or expired."
+)
+
+
+def _thingiverse_cookie_detail(lead: str) -> str:
+    """The one composer: a lead sentence, then the remedy both surfaces share."""
+    return f"{lead} {THINGIVERSE_COOKIE_REMEDY}"
+
+
+def _vendor_prefix(message: Optional[str], fallback: str = "Thingiverse blocked the request.") -> str:
+    """The vendor's own words, bounded, or ``fallback`` when it gave none.
+
+    ``parse_json_error_message`` already stripped the vendor text, so the only
+    thing it needs is a bound: a JSON body must not bury the remedy that follows
+    it. Both callers take the bound, so the files step cannot push the remedy off
+    the screen any more than the view-token step can.
+    """
+    return message[:300] if message else fallback
+
+
+def _refuse_credential(cookie_sent: bool, lead: str) -> None:
+    """Refuse, or answer ``None`` when no cookie was implicated.
+
+    Every shape this guards is evidence about the credential only if one was
+    actually sent; without one the caller's ``find_download_url`` rescue stays
+    exactly as it was, which is what keeps a public page importable.
+    """
+    if not cookie_sent:
+        return None
+    raise CredentialRefusal(status_code=403, detail=_thingiverse_cookie_detail(lead))
+
+
 def fetch_thingiverse_json(
     url: str,
     page_url: str,
     thingiverse_cookie: Optional[str],
     token: Optional[str],
+    thing_id: str,
 ) -> Optional[Any]:
+    """One download-API answer for ``thing_id``, or ``None`` when it carries no URL.
+
+    ``thing_id`` is here only to name the thing in a refusal: a 401/403/429 from
+    the API while a cookie was sent is the same dead-credential answer the
+    view-token step gives, and it is useless to the operator without the thing it
+    was reading. Without a cookie the vendor's word stands unchanged.
+    """
+    cookie_sent = bool(thingiverse_cookie)
     req = Request(url, headers=thingiverse_api_headers(referer=page_url, cookie=thingiverse_cookie, token=token))
     try:
         resp = safe_urlopen(req, timeout=IMPORT_TIMEOUT_SECONDS)
@@ -746,44 +826,14 @@ def fetch_thingiverse_json(
         except Exception:
             message = None
         if err.code in {401, 403, 429}:
-            raise HTTPException(status_code=err.code or 400, detail=message or "Thingiverse request failed") from err
-        return None
-    except URLError:
-        return None
-
-    with resp:
-        raw = resp.read(IMPORT_HTML_MAX_BYTES + 1)
-        if len(raw) > IMPORT_HTML_MAX_BYTES:
-            return None
-        content_type = resp.headers.get("Content-Type", "")
-        if not is_json_content_type(content_type):
-            trimmed = raw.lstrip()
-            if not trimmed.startswith((b"{", b"[")):
-                return None
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-
-
-def fetch_thingiverse_view_token(page_url: str, thingiverse_cookie: Optional[str]) -> Optional[str]:
-    api_url = "https://www.thingiverse.com/api/v2/auth/view"
-    req = Request(api_url, headers=thingiverse_api_headers(referer=page_url, cookie=thingiverse_cookie))
-    try:
-        resp = safe_urlopen(req, timeout=IMPORT_TIMEOUT_SECONDS)
-    except HTTPError as err:
-        message = None
-        try:
-            message = parse_json_error_message(err.read())
-        except Exception:
-            message = None
-        if err.code in {401, 403, 429}:
-            # parse_json_error_message already stripped the vendor text, so the only
-            # thing it needs is a bound: a JSON body must not bury the remedy.
-            vendor = f"{message[:300]} " if message else "Thingiverse blocked the request. "
-            raise HTTPException(
+            vendor = _vendor_prefix(message, "Thingiverse request failed")
+            if not cookie_sent:
+                raise HTTPException(status_code=err.code or 400, detail=vendor) from err
+            raise CredentialRefusal(
                 status_code=err.code or 400,
-                detail=f"{vendor}{THINGIVERSE_COOKIE_REMEDY}",
+                detail=_thingiverse_cookie_detail(
+                    f"Thingiverse refused the download API for thing {thing_id} (HTTP {err.code}): {vendor}"
+                ),
             ) from err
         return None
     except URLError:
@@ -799,19 +849,83 @@ def fetch_thingiverse_view_token(page_url: str, thingiverse_cookie: Optional[str
             if not trimmed.startswith((b"{", b"[")):
                 return None
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
+            return json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return None
-    if isinstance(data, dict):
-        token = data.get("access") or data.get("token") or data.get("access_token")
+
+
+def fetch_thingiverse_view_token(page_url: str, thingiverse_cookie: Optional[str]) -> Optional[str]:
+    """The download-API view token, or ``None`` when no cookie was implicated.
+
+    With a cookie, every answer this cannot use becomes a refusal carrying the
+    shared remedy, because the operator's next step is the same for all of them:
+    re-paste the cookie. Without one they still answer ``None``, so the caller's
+    ``find_download_url`` rescue survives - these shapes are evidence about a
+    credential that was actually sent. A transport failure is NOT one of them: it
+    answers a 502 that carries no remedy, because a server that could not be
+    reached says nothing about the cookie.
+    """
+    api_url = "https://www.thingiverse.com/api/v2/auth/view"
+    cookie_sent = bool(thingiverse_cookie)
+    req = Request(api_url, headers=thingiverse_api_headers(referer=page_url, cookie=thingiverse_cookie))
+    try:
+        resp = safe_urlopen(req, timeout=IMPORT_TIMEOUT_SECONDS)
+    except HTTPError as err:
+        message = None
+        try:
+            message = parse_json_error_message(err.read())
+        except Exception:
+            message = None
+        if err.code in {401, 403, 429}:
+            detail = _thingiverse_cookie_detail(_vendor_prefix(message))
+            if not cookie_sent:
+                raise HTTPException(status_code=err.code or 400, detail=detail) from err
+            raise CredentialRefusal(status_code=err.code or 400, detail=detail) from err
+        if not cookie_sent:
+            return None
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Thingiverse answered HTTP {err.code} for the view-token request, which this import does not "
+                "read. Nothing was changed."
+            ),
+        ) from err
+    except URLError as err:
+        if not cookie_sent:
+            return None
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Thingiverse did not answer in time or could not be reached for the view-token request. Check "
+                "this server's network access and try again; nothing was changed."
+            ),
+        ) from err
+
+    with resp:
+        raw = resp.read(IMPORT_HTML_MAX_BYTES + 1)
+        if len(raw) > IMPORT_HTML_MAX_BYTES:
+            return _refuse_credential(cookie_sent, _VIEW_TOKEN_TOO_LARGE)
+        content_type = resp.headers.get("Content-Type", "")
+        if not is_json_content_type(content_type):
+            trimmed = raw.lstrip()
+            if not trimmed.startswith((b"{", b"[")):
+                return _refuse_credential(cookie_sent, _VIEW_TOKEN_UNVERIFIABLE)
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            lead = _VIEW_TOKEN_ABSENT if not raw.strip() else _VIEW_TOKEN_UNVERIFIABLE
+            return _refuse_credential(cookie_sent, lead)
+    if not isinstance(data, dict):
+        return _refuse_credential(cookie_sent, _VIEW_TOKEN_UNVERIFIABLE)
+    token = data.get("access") or data.get("token") or data.get("access_token")
+    if isinstance(token, str) and token.strip():
+        return token.strip()
+    inner = data.get("data")
+    if isinstance(inner, dict):
+        token = inner.get("access") or inner.get("token") or inner.get("access_token")
         if isinstance(token, str) and token.strip():
             return token.strip()
-        inner = data.get("data")
-        if isinstance(inner, dict):
-            token = inner.get("access") or inner.get("token") or inner.get("access_token")
-            if isinstance(token, str) and token.strip():
-                return token.strip()
-    return None
+    return _refuse_credential(cookie_sent, _VIEW_TOKEN_NO_TOKEN)
 
 
 def fetch_thingiverse_thing_page(thing_id: str, thingiverse_cookie: Optional[str]) -> str:
@@ -920,21 +1034,22 @@ def resolve_thingiverse_download_url(page_url: str, thingiverse_cookie: Optional
         return None
     token = fetch_thingiverse_view_token(page_url, thingiverse_cookie)
     if not token:
-        if not thingiverse_cookie:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Thingiverse requires a session cookie to fetch download links. "
-                    f"{THINGIVERSE_COOKIE_REMEDY}"
-                ),
-            )
-        return None
+        # Reachable only without a cookie: with one, fetch_thingiverse_view_token
+        # answers a refusal or a 502 instead of None, so this sentence can never
+        # be the answer to a live credential.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Thingiverse requires a session cookie to fetch download links. "
+                f"{THINGIVERSE_COOKIE_REMEDY}"
+            ),
+        )
     api_candidates = [
         f"https://www.thingiverse.com/api/v2/things/{thing_id}/files",
         f"https://www.thingiverse.com/api/v2/things/{thing_id}",
     ]
     for api_url in api_candidates:
-        data = fetch_thingiverse_json(api_url, page_url, thingiverse_cookie, token)
+        data = fetch_thingiverse_json(api_url, page_url, thingiverse_cookie, token, thing_id)
         if not data:
             continue
         url = find_download_url_in_json(data, api_url)
