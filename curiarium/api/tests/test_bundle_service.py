@@ -4783,9 +4783,10 @@ STAGETOP_LAYOUT = {
 }
 
 # Each Rocket variant holds 6 real `.stl` under `<group>/<group>/` plus the 6
-# macOS AppleDouble `._*.stl` copies under `<group>/__MACOSX/<group>/`. Both
-# classify as MODEL, which is why the disk the owner measured says 12 per group
-# and 96 in total.
+# macOS AppleDouble `._*.stl` copies under `<group>/__MACOSX/<group>/`. Both are
+# on the disk the owner measured, but only the 6 real ones are library content:
+# since Mf-94od the count asks the scan's basename predicate, so a group reads 6
+# and the row 48, not the 12 / 96 a walk-count reads.
 ROCKET_MODELS_PER_GROUP = 6
 
 XBOX_OWN_MODELS = 27
@@ -4852,7 +4853,7 @@ def write_stagetop(storage: Path) -> tuple:
 
 
 def write_rocket(storage: Path) -> tuple:
-    """The measured Rocket tree: 8 variants of exactly 12 models each."""
+    """The measured Rocket tree: 8 variants of 6 models plus 6 AppleDouble copies."""
     root = storage / "import" / ROCKET
     for group in ROCKET_GROUPS:
         for index in range(ROCKET_MODELS_PER_GROUP):
@@ -4953,13 +4954,14 @@ def test_service_stagetop_is_one_row_with_two_groups(
 def test_service_the_rocket_is_one_row_with_eight_groups(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """AC: the Rocket is ONE row with eight variants of exactly 12 models each.
+    """AC: the Rocket is ONE row with eight variants of exactly six models each.
 
-    The AppleDouble copies are counted on purpose: they are real files on the
-    measured disk and both they and the real `.stl` classify as MODEL, so a group
-    reads 12 and the row reads 96. Mutation: count only the real `.stl` and the
-    eight 12s become eight 6s; order the groups by anything but their name and the
-    name list reds.
+    The measured disk holds six real `.stl` and six AppleDouble `._*` copies per
+    group. Since Mf-94od the count asks the library scan's own basename
+    predicate, so the copies name no model: a group reads 6 and the row reads 48,
+    which is what the project holds. Mutation: count through the suffix alone and
+    the eight 6s become eight 12s; order the groups by anything but their name
+    and the name list reds.
     """
     group_keys = write_rocket(isolated_storage)
     scan()
@@ -4970,10 +4972,10 @@ def test_service_the_rocket_is_one_row_with_eight_groups(
     row = row_for(report, f"import/{ROCKET}")
     assert row["detector"] == "compound-bundle"
     assert row["confidence"] == "low"
-    assert row["model_count"] == 96
+    assert row["model_count"] == 48
     groups = service_row(f"import/{ROCKET}")["groups"]
     assert [group["name"] for group in groups] == list(ROCKET_GROUPS)
-    assert [group["model_count"] for group in groups] == [12] * len(ROCKET_GROUPS)
+    assert [group["model_count"] for group in groups] == [6] * len(ROCKET_GROUPS)
     assert all(group["foreign"] is False for group in groups)
 
     ledger = refusal_ledger(report)
@@ -5358,17 +5360,17 @@ def test_service_creating_from_a_compound_row_makes_one_project_with_every_part(
     assert marker["cover"]["group"] == STAGETOP_WAVE_ONE
 
 
-def test_the_row_counts_what_the_walk_saw_and_the_project_holds_what_the_scan_registered(
+def test_the_row_counts_exactly_what_the_scan_registered(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """A walk-vs-registration pin that holds with NO exclusion code at all.
+    """AC-2: the compound row and the project it creates agree on the Rocket's 48.
 
-    The Rocket's 96 walk-counted models are 48 real `.stl` plus 48 AppleDouble
-    `._*` copies; library_scan registers only the real ones, so the row counts 12
-    per group and the project holds 6. No code excludes dotfiles - this test is
-    the named reason a future `library_scan` change reds instead of silently
-    shifting 48 -> 96. Mutation: register the AppleDouble copies and the set
-    equality and the after-create `assets_added` both move.
+    The measured disk holds 48 real `.stl` and 48 AppleDouble `._*` copies. Since
+    Mf-94od the detector asks the library scan's own basename predicate, so the
+    row counts 48 (six per group), the registered model assets are 48, and the
+    project's `storage_path` set is the SAME 48 with no `._` path in it. Mutation:
+    count the sidecars again and the row reads 96 while the project still holds
+    48, which is exactly the double-count this ticket exists to remove.
     """
     write_rocket(isolated_storage)
     insert_folder_row(ROCKET, f"import/{ROCKET}")
@@ -5380,23 +5382,52 @@ def test_the_row_counts_what_the_walk_saw_and_the_project_holds_what_the_scan_re
     assert created["created"] == 1
     result = created["results"][0]
     assert result["assets_added"] == 48
+
+    row = service_row(f"import/{ROCKET}")
+    assert row["model_count"] == 48
+    assert [group["model_count"] for group in row["groups"]] == [6] * len(ROCKET_GROUPS)
+    # A skipped entry is in NO bucket: not a model, and not "other" either.
+    assert row["other_count"] == 0
+
     marker = project_marker(result["project_id"])
-    assert [(group["model_count"], group["attached"]) for group in marker["groups"]] == [(12, 6)] * len(ROCKET_GROUPS)
+    assert [(group["model_count"], group["attached"]) for group in marker["groups"]] == [
+        (6, 6)
+    ] * len(ROCKET_GROUPS)
 
     real = {
         f"import/{ROCKET}/{group}/{group}/part-{index}.stl"
         for group in ROCKET_GROUPS
         for index in range(ROCKET_MODELS_PER_GROUP)
     }
-    counted = real | {
-        f"import/{ROCKET}/{group}/__MACOSX/{group}/._part-{index}.stl"
-        for group in ROCKET_GROUPS
-        for index in range(ROCKET_MODELS_PER_GROUP)
-    }
-    assert project_storage_paths(result["project_id"]) == real
-    for path in counted - real:
-        assert path.rsplit("/", 1)[-1].startswith("._"), path
-        assert path not in project_storage_paths(result["project_id"]), path
+    attached = project_storage_paths(result["project_id"])
+    assert attached == real, "the project holds the real `.stl` and nothing else"
+    # The load-bearing assertion: this reads the REGISTERED rows, so it reds if a
+    # `._*` sidecar ever registers (the walk-built `real` set could not say that).
+    assert attached == registered_model_paths(f"import/{ROCKET}")
+
+
+def test_the_stagetop_row_still_reads_60_with_no_appledouble_on_disk(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-2's non-regression witness: a tree with no AppleDouble keeps its count.
+
+    Stagetop holds 56 `.stl` and 4 `.step` on the measured disk and no `._*`
+    copies at all, so the predicate change must leave its row at 60 with groups
+    45/15. Mutation: make the predicate skip a real suffix or a `.step` and this
+    row drops below 60 even though nothing on its disk moved.
+    """
+    write_stagetop(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers, limit=1000), f"import/{STAGETOP}")
+
+    assert row["model_count"] == 60
+    assert [(group["name"], group["model_count"]) for group in row["groups"]] == [
+        (STAGETOP_WAVE_ONE, 45),
+        (STAGETOP_WAVE, 15),
+    ]
+    assert not any("._" in path for path in registered_model_paths(f"import/{STAGETOP}"))
 
 
 def test_service_xbox360_shell_creates_one_project_with_all_31_parts(
@@ -5805,11 +5836,13 @@ def test_the_compound_marker_names_the_groups_and_their_counts(
 ) -> None:
     """The marker's group list is the row's, in order, plus what was attached.
 
-    ``model_count`` is what the WALK counted and ``attached`` is what the scan
-    registered, which is why the Rocket reads 12/6 and the account still adds up:
-    for the xbox tree 31 attached minus the foreign 4 is the product's own 27.
-    Mutation: count `attached` from the snapshot instead of the registered models
-    and the Rocket's marker reads 12/12.
+    Since Mf-94od `model_count` is what the SCAN registers, and `attached` is the
+    same registered set filtered by the exclusion, so an unexcluded compound
+    reads `6/6` per Rocket group and only an EXCLUSION can separate the two. The
+    account still adds up: for the xbox tree 31 attached minus the foreign 4 is
+    the product's own 27. Mutation: count `attached` from the snapshot instead of
+    the registered models and the excluded xbox case below reds, because the
+    excluded foreign group would still report its 4 as attached.
     """
     write_stagetop(isolated_storage)
     write_rocket(isolated_storage)
@@ -5836,7 +5869,7 @@ def test_the_compound_marker_names_the_groups_and_their_counts(
         assert all(group["included"] is True for group in marker["groups"]), name
 
     rocket_marker = project_marker(created["results"][1]["project_id"])
-    assert [(group["model_count"], group["attached"]) for group in rocket_marker["groups"]] == [(12, 6)] * len(
+    assert [(group["model_count"], group["attached"]) for group in rocket_marker["groups"]] == [(6, 6)] * len(
         ROCKET_GROUPS
     )
 

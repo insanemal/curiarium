@@ -125,6 +125,9 @@ log = logging.getLogger(__name__)
 RESERVED_DIRS = {"thumbs", "bundles", ".incoming"}
 # OS/tool debris that is never a library item.
 IGNORED_FILENAMES = {"Thumbs.db", "desktop.ini", ".DS_Store"}
+# A name starting with this is hidden. Hidden FILE names are skipped unless the
+# caller asked for them; hidden DIRECTORIES are pruned by the walk itself.
+HIDDEN_NAME_PREFIX = "."
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 # Extensions whose stem is a usable display name. This is a snapshot of the
 # module constant on purpose - NOT parse_mount_import_exts(MOUNT_IMPORT_EXTS_RAW):
@@ -419,6 +422,24 @@ def iter_directories(root: Path, *, include_hidden: bool = False) -> Iterator[Tu
     one implementation: this is a documented alias, not a second walker.
     """
     return _walk_storage(root, include_hidden=include_hidden)
+
+
+def is_skipped_name(name: str, *, include_hidden: bool = False) -> bool:
+    """Whether the scan refuses a FILE NAME outright, before any other policy.
+
+    This is the one rule both doors ask: ``_register_tree`` calls it to decide
+    what to register, and ``bundle_detect`` calls it to decide what counts as a
+    model, so a Mac-made tree's AppleDouble ``._a.stl`` sidecars cannot count on
+    one side and be skipped on the other (Mf-94od).
+
+    It is deliberately a predicate over a BASENAME, not a rel path: the scan's
+    own rule is exactly this expression, and a rule expressed over the name is
+    what the two doors can share without one of them re-deriving the other's
+    walk. The hidden-DIRECTORY prune in ``_walk_storage`` keeps its own test
+    because it answers a different question, about a directory rather than an
+    entry.
+    """
+    return name in IGNORED_FILENAMES or (not include_hidden and name.startswith(HIDDEN_NAME_PREFIX))
 
 
 def _name_parts(filename: str) -> Tuple[str, str]:
@@ -937,7 +958,7 @@ def _register_tree(session: Session, plan: TreePlan, state: ScanState, seen: set
             # one directory's accepted files, kept only until its names are derived
             accepted: List[Tuple[str, int]] = []
             for entry in file_entries:
-                if entry.name in IGNORED_FILENAMES or (not plan.include_hidden and entry.name.startswith(".")):
+                if is_skipped_name(entry.name, include_hidden=plan.include_hidden):
                     with _state_lock:
                         state.ignored += 1
                     continue

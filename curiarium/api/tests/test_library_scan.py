@@ -774,6 +774,94 @@ def test_counters_account_for_every_library_file(temp_library: Path) -> None:
     assert second.registered + second.known + second.failed == len(files)
 
 
+def test_is_skipped_name_is_the_one_rule_both_doors_ask() -> None:
+    """The basename predicate the scan registers by, and what a hidden-name door means.
+
+    `bundle_detect` asks this exact function for its model count, so the truth
+    table is the shared contract rather than a copy of one door's behaviour.
+    Mutation: change either half of the expression (a debris name admitted, or the
+    hidden half made unconditional) and a line below reds. It is a pure
+    predicate, so the REGISTRATION side - what `_register_tree` actually skips -
+    is pinned by `test_a_nested_macosx_tree_registers_its_dead_file_and_skips_the_sidecar`
+    and `test_a_hidden_directory_is_never_walked` below, not here.
+    """
+    skipped = {
+        "plain.stl": False,
+        "._plain.stl": True,
+        ".hidden.stl": True,
+        "__MACOSX": False,
+        "Thumbs.db": True,
+        ".DS_Store": True,
+        "desktop.ini": True,
+    }
+    for name, expected in skipped.items():
+        assert library_scan.is_skipped_name(name) is expected, name
+
+    # `include_hidden=True` admits a dot NAME but never a debris name: the two
+    # halves of the predicate are independent.
+    assert library_scan.is_skipped_name("._plain.stl", include_hidden=True) is False
+    assert library_scan.is_skipped_name(".hidden.stl", include_hidden=True) is False
+    assert library_scan.is_skipped_name(".DS_Store", include_hidden=True) is True
+    assert library_scan.is_skipped_name("Thumbs.db", include_hidden=True) is True
+
+
+def test_a_nested_macosx_tree_registers_its_dead_file_and_skips_the_sidecar(
+    temp_library: Path,
+) -> None:
+    """The premise the whole Mf-94od fix rests on, measured through `_register_tree`.
+
+    The scan REGISTERS a non-dot file under a nested `__MACOSX` - only its dot
+    NAMES are skipped - which is why the detector may not be wired to
+    `entry_policy.is_junk_entry` (that vocabulary refuses `__MACOSX` outright and
+    would UNDER-count a real part). Recorded as a docstring claim in three places
+    before this test existed; an absence-only assertion cannot red when someone
+    changes the rule, and this one can.
+
+    Mutation: skip anything under a `__MACOSX` directory and `dead` stops
+    registering while `run.registered` and `run.ignored` both move.
+    """
+    storage = temp_library
+    _write_under(storage, "mac/real.stl", b"solid real\n")
+    _write_under(storage, "mac/__MACOSX/mac/dead.stl", b"solid dead\n")
+    _write_under(storage, "mac/__MACOSX/mac/._real.stl", b"sidecar\n")
+
+    run = scan_storage_root()
+
+    assert set(_library_rows("mac/")) == {"mac/real.stl", "mac/__MACOSX/mac/dead.stl"}
+    assert run.registered == 2
+    assert run.ignored == 1, "exactly the `._*` sidecar, by name"
+
+
+def test_a_hidden_directory_is_never_walked(temp_library: Path) -> None:
+    """The walk's OWN dot rule, which `is_skipped_name` deliberately does not cover.
+
+    `_register_tree` asks the predicate about a NAME; pruning a hidden DIRECTORY
+    is a different question answered by `_walk_storage`, and until Mf-94od nothing
+    could red if that prune were deleted. The two halves are independent, so a
+    tree can hold a hidden directory that would otherwise register a real model.
+
+    Mutation: drop `if not include_hidden and entry.name.startswith(".")` and
+    `g/.secret/x.stl` registers, so `run.registered` and the walked set move.
+    """
+    storage = temp_library
+    _write_under(storage, "g/.secret/x.stl", b"solid hidden\n")
+    _write_under(storage, "g/kept.stl", b"solid kept\n")
+
+    run = scan_storage_root()
+
+    assert set(_library_rows("g/")) == {"g/kept.stl"}
+    assert run.registered == 1
+
+    walked = [rel_dir for rel_dir, _entries, _ignored in library_scan._walk_storage(storage)]
+    assert walked == ["", "g"]
+    # The prune is a DOOR, not a refusal: asking with it open walks the directory
+    # (the mount door uses this for a source whose dot-directories are content).
+    walked_open = [
+        rel_dir for rel_dir, _entries, _ignored in library_scan._walk_storage(storage, include_hidden=True)
+    ]
+    assert walked_open == ["", "g", "g/.secret"]
+
+
 def test_folders_come_only_from_directories_that_register_files(temp_library: Path) -> None:
     storage = temp_library
     _write_under(storage, "revisited/kept.stl", b"solid kept\n")

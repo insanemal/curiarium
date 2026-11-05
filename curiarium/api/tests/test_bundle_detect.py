@@ -1896,8 +1896,16 @@ def test_a_text_file_hands_the_listing_back_to_r3_even_at_depth_two() -> None:
 # LITERALS on purpose: an edit to any row-deciding table changes the derived hash
 # and this test reds, which is the whole point of the stamp - the 114 -> 112 delta
 # of Mf-9ygi could not be explained because nothing recorded what the rules were.
-RULE_SET_VERSION = "2026-11-05.1"
-RULE_SET_STAMP = "2dcd2b7064aee98a815fee6b8d1d6a26d9f11646571406f99ca35b0a7170b032"
+# The two stamped constants that live in ANOTHER module, with the name they have
+# there: the sweep has to rebind the owner, because `rule_set_tables` reads the
+# owning module and a patch of this module's own name would move nothing (Mf-94od).
+RULE_SET_TABLE_HOMES = {
+    "SKIPPED_FILENAMES": (library_scan, "IGNORED_FILENAMES"),
+    "HIDDEN_NAME_PREFIX": (library_scan, "HIDDEN_NAME_PREFIX"),
+}
+
+RULE_SET_VERSION = "2026-11-05.2"
+RULE_SET_STAMP = "0f317ee0fa2ff200a703a8c10be1c6f565d50d4263b3629a1004dffee7c0c911"
 
 # Every constant `rule_set_tables` captures, with a replacement that differs from
 # the shipped value. The names are also the exact key set of the derived table, so
@@ -1927,6 +1935,10 @@ ROW_DECIDING_TABLES = {
     "SHAPE_ARCHIVE_ROOT": "archive-root-v2",
     "MODEL_SUFFIXES": frozenset({".obj"}),
     "IMAGE_SUFFIXES": frozenset({".webp"}),
+    # The scan's own two tables, stamped because the model count now asks them
+    # (Mf-94od). Each replacement differs from the shipped value on its own.
+    "SKIPPED_FILENAMES": frozenset({"~$lock.tmp"}),
+    "HIDDEN_NAME_PREFIX": "~",
     "BUNDLE_TEXT_EXTS": frozenset({".nfo"}),
     "R3_MODEL_DIRS": frozenset({"parts"}),
     "GENERIC_CONTAINER_ROOTS": frozenset({"stuff"}),
@@ -1970,8 +1982,10 @@ def test_the_rule_set_stamp_is_pinned_so_a_table_edit_cannot_go_unnoticed() -> N
 
     Mutation: change one constant any row-deciding path reads and the pinned hash
     stops matching - which is exactly the audit trail Mf-9ygi's 114 -> 112
-    investigation lacked. This bump is Mf-8xrc's rule table change: R7 added the
-    ten ``COMPOUND_*`` tables, which must move in the same commit as the rule.
+    investigation lacked. This bump is Mf-94od's rule table change: the model
+    count asks the library scan's own basename predicate, so `SKIPPED_FILENAMES`
+    and `HIDDEN_NAME_PREFIX` join the stamp and the version moves with them. The
+    previous bump was Mf-8xrc's ten `COMPOUND_*` tables.
     """
     assert bundle_detect.RULE_SET_VERSION == RULE_SET_VERSION
     assert bundle_detect.RULE_SET_STAMP == RULE_SET_STAMP
@@ -1992,7 +2006,12 @@ def test_every_row_deciding_table_is_inside_the_derived_stamp(monkeypatch: pytes
 
     for name, replacement in ROW_DECIDING_TABLES.items():
         with monkeypatch.context() as patched:
-            patched.setattr(bundle_detect, name, replacement)
+            # The two scan tables live in `library_scan` and are stamped by value
+            # from there, so the sweep must rebind them WHERE THEY LIVE: patching
+            # this module's own name would prove nothing and would not move the
+            # stamp (Mf-94od).
+            owner, attribute = RULE_SET_TABLE_HOMES.get(name, (bundle_detect, name))
+            patched.setattr(owner, attribute, replacement)
             assert bundle_detect.rule_set_stamp() != baseline, f"{name} is not inside the rule-set stamp"
 
     assert bundle_detect.rule_set_stamp() == baseline
@@ -2013,6 +2032,11 @@ def test_the_stamp_covers_the_image_table_and_the_title_word_explicitly() -> Non
         "flags": bundle_detect._TITLE_WORD.flags,
     }
     assert tables["_MACOSX_ROOT"] == bundle_detect._MACOSX_ROOT
+    # Mf-94od's entry: the two scan tables are captured by value, from the scan
+    # module itself, and the predicate is the SAME function object.
+    assert tables["SKIPPED_FILENAMES"] == sorted(library_scan.IGNORED_FILENAMES)
+    assert tables["HIDDEN_NAME_PREFIX"] == library_scan.HIDDEN_NAME_PREFIX
+    assert bundle_detect.is_skipped_name is library_scan.is_skipped_name
     assert tables["_LICENCE_TABLE"]["cc_by"] == ["CC BY", "https://creativecommons.org/licenses/by/4.0/"]
 
 
@@ -2149,11 +2173,17 @@ def stagetop_files() -> Dict[str, int]:
 
 
 def rocket_files() -> Dict[str, int]:
-    """``import/Rocket Filement support``: 8 groups of 12, six real plus six AppleDouble."""
+    """``import/Rocket Filement support``: 8 groups of 6 REAL models, plus the sidecars.
+
+    The measured disk holds 6 real ``.stl`` under ``<group>/<group>/`` and 6
+    AppleDouble ``._*`` copies under the NESTED ``<group>/__MACOSX/<group>/``.
+    Both are on disk; only the six real ones are library content, so the group
+    reads 6 and the row 48 (Mf-94od).
+    """
     files: Dict[str, int] = {}
     for group in ROCKET_GROUPS:
-        files.update(_models(f"{group}/files", 6))
-        files.update({f"{group}/__MACOSX/files/._part{index:02d}.stl": 10 for index in range(6)})
+        files.update(_models(f"{group}/{group}", 6))
+        files.update({f"{group}/__MACOSX/{group}/._part{index:02d}.stl": 10 for index in range(6)})
     return files
 
 
@@ -2402,18 +2432,255 @@ def test_compound_groups_are_a_function_of_the_tree_not_of_readdir_order() -> No
 
 
 def test_apple_double_cruft_is_not_a_group() -> None:
-    """A top-level ``__MACOSX`` never names a group, but it is still a MODEL.
+    """A top-level ``__MACOSX`` never names a group, and its sidecar is no model.
 
     Mutation: group on ``parts[0]`` with no artifact check and the junk directory
-    becomes a group of its own (and changes a breakdown an operator reads). The
-    model count is pinned as UNCHANGED on purpose: the ``._*`` copies are real
-    files on the measured disk, which is why the Rocket reads 12 per group.
+    becomes a group of its own. The count is pinned at ONE on purpose: since
+    Mf-94od a ``._*`` sidecar is not counted anywhere, because the library scan
+    does not register it and the row describes what the library HOLDS.
     """
     files = {"Widget Wrapper/part00.stl": 10, "__MACOSX/Widget Wrapper/._part00.stl": 10}
     judged = snapshot("cruft", files)
 
     assert [group.name for group in bundle_detect.compound_groups(judged)] == ["Widget Wrapper"]
-    assert bundle_detect._counts(judged).model == 2, "the cruft is still counted as a model"
+    assert bundle_detect._counts(judged).model == 1, "the sidecar is not a model"
+
+
+# --- the model count asks the scan's own predicate (Mf-94od) -----------------
+
+
+def counted_sites(judged: bundle_detect.BundleSnapshot) -> tuple:
+    """Every MODEL count site, asked together so no one site can drift alone."""
+    return (
+        bundle_detect._counts(judged).model,
+        bundle_detect._model_entries(judged),
+        bundle_detect.compound_groups(judged),
+        bundle_detect.root_model_count(judged),
+        bundle_detect._own_depth_model_count(judged),
+    )
+
+
+def test_a_bare_appledouble_sidecar_is_not_a_model() -> None:
+    """``a.stl`` + ``._a.stl`` in one group is ONE part, not two (the ticket's AC).
+
+    A ``._`` sidecar is a resource fork. The library scan skips it by name, so a
+    row that counts what the scan registers must skip it too. Mutation: count
+    through ``classify_entry`` alone and every site below reads two.
+    """
+    judged = snapshot("Widget", {"a.stl": 10, "._a.stl": 10})
+
+    counts, entries, groups, root, own = counted_sites(judged)
+
+    assert counts == 1
+    assert entries == ("a.stl",)
+    assert groups == ()
+    assert root == 1
+    assert own == 1
+    # Counted in NO bucket, OTHER included: a skipped entry is not an unclassified
+    # file either. Mutation: `counts[OTHER] += 1` before the `continue` and the
+    # Rocket would report `other_count: 48` with nothing else moving.
+    other = bundle_detect._counts(judged)
+    assert (other.model, other.image, other.text, other.other, other.archive) == (1, 0, 0, 0, 0)
+
+
+def test_a_nested_macosx_appledouble_sidecar_is_not_a_model() -> None:
+    """The measured Rocket shape at depth 3: ``<group>/__MACOSX/<group>/._x.stl``.
+
+    This is the disk's own nesting, not a flat sidecar, and it is why the fix
+    asks the scan's BASENAME rule instead of its junk vocabulary: the scan
+    registers a non-dot file under a nested ``__MACOSX`` (measured:
+    ``g/__MACOSX/g/plain.stl`` registers), so wiring ``is_junk_entry`` in would
+    under-count a real part. Mutation: count the sidecars and the two groups read
+    two each and the row reads four.
+    """
+    files: Dict[str, int] = {}
+    for group in ROCKET_GROUPS[:2]:
+        files[f"{group}/{group}/part.stl"] = 10
+        files[f"{group}/__MACOSX/{group}/._part.stl"] = 10
+    judged = snapshot("Rocket Filement support", files)
+
+    counts, entries, groups, root, own = counted_sites(judged)
+
+    assert counts == 2
+    assert set(entries) == {f"{group}/{group}/part.stl" for group in ROCKET_GROUPS[:2]}
+    assert [(group.name, group.model_count) for group in groups] == [
+        (ROCKET_GROUPS[0], 1),
+        (ROCKET_GROUPS[1], 1),
+    ]
+    assert root == 0
+    assert own == 0
+
+
+def test_a_hidden_model_name_is_not_counted() -> None:
+    """``.hidden.stl`` is not a model, and ``is_junk_entry`` calls it NOT junk.
+
+    That is exactly why the fix cannot be wired to the junk predicate: that
+    vocabulary recognises ``._`` sidecars and OS debris, and an ordinary name with
+    a leading dot is invisible to it. The scan's basename rule is the one that
+    skips it, so the count asks that rule. Mutation: replace the scan predicate
+    with ``entry_policy.is_junk_entry`` and this row reads two.
+    """
+    from entry_policy import is_junk_entry
+
+    assert is_junk_entry(".hidden.stl") is False, "the junk predicate cannot see a bare leading dot"
+
+    judged = snapshot("Widget", {"a.stl": 10, ".hidden.stl": 10})
+
+    counts, entries, groups, root, own = counted_sites(judged)
+
+    assert counts == 1
+    assert entries == ("a.stl",)
+    assert groups == ()
+    assert root == 1
+    assert own == 1
+
+
+def test_an_appledouble_preview_is_still_evidence_and_the_cover_rule_sees_it() -> None:
+    """The evidence view keeps the WALK reading; only the COUNT asks the scan.
+
+    `._cover.png` is not registered by the library scan, so it is counted in no
+    bucket. Narrowing the EVIDENCE view too would refuse a real bundle whose only
+    preview is an AppleDouble copy - a worse error than a cover pick that is never
+    attached, and an unregistered cover already has a named reason
+    (`largest-image-unregistered`). Mutation: route `_cover_entry` through
+    `is_counted_entry` and a bundle whose only image is a sidecar loses its face.
+    The DECISION-level half of this is
+    `test_a_sidecar_only_preview_still_offers_the_row` below: keeping the cover
+    pick wide is worthless if the row is refused before the cover is consulted.
+    """
+    judged = snapshot("Widget", {"a.stl": 10, "._cover.png": 20})
+
+    assert bundle_detect._counts(judged).image == 0, "the sidecar is not a counted image"
+    assert bundle_detect._cover_entry(judged) == "._cover.png", "but it is still evidence"
+
+
+def test_a_sidecar_only_preview_still_offers_the_row() -> None:
+    """R3's trio gate keeps the EVIDENCE reading, so a preview is still a preview.
+
+    The reported counts are registration-based, but the gate that decides whether
+    a row is OFFERED asks whether the folder HAS a preview and a document. If it
+    read the narrowed counts, a bundle whose only preview is an AppleDouble
+    sidecar would newly refuse `R3:trio-no-image` - the exact "worse error"
+    Decision 25 declines, and a verdict change this ticket did not earn.
+
+    Three pins, because the verdict and the reason are separate lines: the trio
+    gate must not read the counts, the `R3:trio-no-image` REASON must not either
+    (a folder with a sidecar preview and no document is `trio-no-text`, not
+    `trio-no-image`), and the one verdict that DOES move is the accepted risk R3 -
+    a tree whose only model is a sidecar holds no geometry, so it refuses
+    `R3:no-own-depth-model` instead of offering a phantom part.
+    """
+    judged = snapshot("Widget", {"a.stl": 10, "._cover.png": 20, "._notes.txt": 20})
+
+    decision = bundle_detect.detect_bundle_decision(judged, {})
+
+    assert decision.refusal is None, "a sidecar-only preview must not refuse the row"
+    assert decision.facts is not None
+    assert decision.facts.detector == bundle_detect.DETECTOR_GENERIC
+    # ... and the row still REPORTS what the scan would register: no image, no text.
+    counts = bundle_detect._counts(judged)
+    assert (counts.image, counts.text) == (0, 0)
+
+    # The REASON line is the other half: an image the walk sees but the scan does
+    # not register is still an image this row is not refused FOR.
+    preview_only = snapshot("Widget", {"a.stl": 10, "._cover.png": 20})
+    assert (
+        bundle_detect.detect_bundle_decision(preview_only, {}).refusal
+        == bundle_detect.REFUSAL_R3_TRIO_NO_TEXT
+    ), "the refusal must name the missing document, not the present preview"
+
+    # The verdict that DOES move, and it is the honest one: no registered model.
+    phantom_only = snapshot("Widget", {"._a.stl": 10, "._cover.png": 20, "._notes.txt": 20})
+    assert (
+        bundle_detect.detect_bundle_decision(phantom_only, {}).refusal
+        == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+    ), "a tree whose only model is a sidecar holds no geometry"
+
+
+def test_the_document_candidates_keep_the_walk_reading_too() -> None:
+    """The third evidence consumer: a sidecar document is still worth opening.
+
+    `generic_doc_candidates` decides which file the caller OPENS for provenance,
+    which is evidence rather than a count. Mutation: filter it through
+    `is_counted_entry` and a tree whose only notes are AppleDouble loses its one
+    chance at a title and a licence.
+    """
+    judged = snapshot("Widget", {"a.stl": 10, "._notes.txt": 20})
+
+    assert bundle_detect.generic_doc_candidates(judged) == ("._notes.txt",)
+    assert bundle_detect._counts(judged).text == 0, "and it is still not a counted document"
+
+
+def test_the_count_driven_doors_read_the_narrowed_counts_on_purpose() -> None:
+    """R6 and R7 decide FROM counts, so they move with the rule - and they should.
+
+    The R3 ladder keeps the walk reading because "does this folder have a
+    preview" is evidence. These two doors ask a different question and answer it
+    about what the library HOLDS: R6 asks whether the vendor shipped a document
+    and a preview beside the models, R7 asks whether every group is a real pile of
+    parts. A resource fork is neither, so a skipped entry must not count for them.
+
+    Mutation, both directions: count a `._README.txt` as text and the archive row
+    that R6 was written for stops being offered; count sidecar-only groups as
+    groups and a folder holding no geometry becomes a compound row.
+    """
+    # R6's trio reads the buckets: a sidecar document is not a document, so the
+    # archive stays offerable ...
+    archived = snapshot(
+        "archive",
+        {"Root/part.stl": 10, "Root/render.png": 20, "Root/._README.txt": 30},
+    )
+    assert bundle_detect._counts(archived).text == 0
+    assert bundle_detect.single_root_archive_facts(archived) is not None
+    # ... while a REAL document keeps R6 out of R3's way, exactly as before.
+    with_text = snapshot(
+        "archive",
+        {"Root/part.stl": 10, "Root/render.png": 20, "Root/README.txt": 30},
+    )
+    assert bundle_detect.single_root_archive_facts(with_text) is None
+
+    # R7's group leg reads them too: groups whose models are all AppleDouble name
+    # no group at all, so the folder is not a compound row.
+    sidecar_groups = {
+        f"{group}/__MACOSX/{group}/._part.stl": 10 for group in ROCKET_GROUPS[:3]
+    }
+    judged = snapshot("Rocket Filement support", sidecar_groups)
+    assert bundle_detect.compound_groups(judged) == ()
+    assert bundle_detect.compound_bundle_facts(judged) is None, "no geometry, no compound row"
+
+
+def test_bundle_detect_asks_the_scan_its_own_predicate() -> None:
+    """One rule, two doors: the detector re-exports the scanner's own predicate.
+
+    The truth table includes the case the plan gate had to correct - a non-dot
+    file under a nested ``__MACOSX`` is REGISTERED - and ``include_hidden=True``
+    is asked of the same function rather than re-derived. Mutation: give the
+    detector its own copy of the rule and the identity assertions red before any
+    count can drift.
+    """
+    assert bundle_detect.is_skipped_name is library_scan.is_skipped_name
+    assert bundle_detect.is_counted_entry("a.stl") is True
+
+    counted = {
+        "a.stl": True,
+        "._a.stl": False,
+        ".hidden.stl": False,
+        "__MACOSX/a.stl": True,
+        "g/__MACOSX/g/plain.stl": True,
+        "g/plain.stl": True,
+        "Thumbs.db": False,
+    }
+    for rel_path, expected in counted.items():
+        assert bundle_detect.is_counted_entry(rel_path) is expected, rel_path
+
+    # The nested `__MACOSX` entry above is the premise the whole fix rests on, and
+    # the SCANNER side of it is pinned where it belongs:
+    # `test_library_scan.py::test_a_nested_macosx_tree_registers_its_dead_file_and_skips_the_sidecar`.
+
+    # The hidden door is the SAME function, so admitting dot names is one flag.
+    assert library_scan.is_skipped_name("._a.stl", include_hidden=True) is False
+    assert library_scan.is_skipped_name(".hidden.stl", include_hidden=True) is False
+    assert library_scan.is_skipped_name(".DS_Store", include_hidden=True) is True
 
 
 def test_a_single_model_bearing_group_is_not_compound() -> None:
@@ -2456,10 +2723,11 @@ def test_compound_facts_is_none_when_the_switch_is_off(monkeypatch: pytest.Monke
     """One switch turns R7 off for every caller, and the stamp is not order-dependent.
 
     Mutation: read the flag anywhere but inside ``compound_bundle_facts`` (or
-    nowhere) and the rule cannot be turned off at all. The 8 x 12 Rocket pile is
-    the ticket's other witness: 96 parts in 8 groups while the switch is on. The
-    ``monkeypatch.context()`` restores the flag, so a later stamp comparison still
-    sees the shipped tables.
+    nowhere) and the rule cannot be turned off at all. The Rocket is the
+    ticket's other witness: 48 parts in 8 groups while the switch is on, six per
+    group, because the 48 AppleDouble sidecars are not library content (Mf-94od).
+    The ``monkeypatch.context()`` restores the flag, so a later stamp comparison
+    still sees the shipped tables.
     """
     judged = snapshot("Rocket Filement support", rocket_files())
 
@@ -2469,8 +2737,8 @@ def test_compound_facts_is_none_when_the_switch_is_off(monkeypatch: pytest.Monke
 
     facts = bundle_detect.compound_bundle_facts(judged)
     assert facts is not None
-    assert facts.counts.model == 96
+    assert facts.counts.model == 48
     assert tuple(group.name for group in facts.groups) == ROCKET_GROUPS
-    assert all(group.model_count == 12 for group in facts.groups)
+    assert all(group.model_count == 6 for group in facts.groups)
     assert bundle_detect._compound_family_token(facts.groups) == "mount"
     assert bundle_detect.rule_set_stamp() == RULE_SET_STAMP, "the context restores the flag"

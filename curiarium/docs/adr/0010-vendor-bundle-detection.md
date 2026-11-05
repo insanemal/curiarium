@@ -1418,7 +1418,8 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     decided below.** *"VARIANT FAMILY: groups share a family token
     (The_Rocket--<variant>--Side_Spool_Mount, 8 groups) or repeat the same model
     count per group (8 x exactly 12). Strong signal of one product with
-    variants."* *"VERSION WAVES: groups share a product token with each other
+    variants."* [the "12" is the double count corrected in the declined-leg
+    clause below and in Decision 25: the real shape is 8 x exactly 6] *"VERSION WAVES: groups share a product token with each other
     ('StageTop Wave One - Personal Use', 'Wave 1.5'), often with a second level
     of nesting (Core / Accessories / Legs / PlayTiles)."* *"REPO DUMP, must be
     refused: repository metadata present (.git, .github, _layouts, _sass, docs)
@@ -1443,9 +1444,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     own and never a group. Clause (3) is an explicit statement of a condition both
     legs already imply (`if not groups: return None` and `len(groups) >= 1`), kept
     so a folder with no groups reads as "no groups" rather than as a leg that
-    failed quietly. A top-level `__MACOSX` entry is skipped when groups
-    are named, but still counted as a model - the `._*` copies are real files on
-    the measured disk, which is why the Rocket reads 12 per group. (4) Leg A
+    failed quietly. A top-level `__MACOSX` entry is still skipped when groups are
+    named, but the `._*` copies under it no longer count as models: the count
+    asks the library scan's own basename predicate (`is_counted_model`), the scan
+    registers neither the sidecars nor a hidden name, and the Rocket therefore
+    reads 6 per group and 48 in total (Mf-94od, Decision 25). (4) Leg A
     **or** Leg B. (5) Two or more groups carrying their own thing id refuse -
     `COMPOUND_OWN_ID`, 5+ digits, the recall predicate - and that check sits BEFORE
     the family evidence so the reasons come in the measured order. (6) Leg A
@@ -1507,10 +1510,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     are a child's pile) and would make every wrapper a product of its own - plus
     at least `COMPOUND_MIN_GROUPS` (2) groups sharing a family token.
     `import/Stagetop` is the first: token `wave`, 60 models as 45 + 15.
-    `import/Rocket Filement support` is the second: eight groups of exactly 12
-    sharing five words, of which `_compound_family_token` returns the first
-    surviving one in sorted order, `mount`. Two, and no more, on the measured
-    tree.
+    `import/Rocket Filement support` is the second: eight groups of exactly 6
+    (six real `.stl` each; the 48 AppleDouble `._*` sidecars are not library
+    content) sharing five words, of which `_compound_family_token` returns the
+    first surviving one in sorted order, `mount`. Two, and no more, on the
+    measured tree.
 
     **Leg B is the ticket's "fix the loss", and it has exactly ONE measured
     witness.** The folder holds models of its own, EVERY group below it is
@@ -1544,7 +1548,9 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 
     **The equal-model-count leg was DECLINED, and it is the ticket's own second
     half of VARIANT FAMILY.** "or repeat the same model count per group (8 x
-    exactly 12)" is not implemented. It has no measured witness of its own: the
+    exactly 12)" is not implemented, and the ticket's own example number was made
+    of the double count this ADR's Decision 25 removes: the real shape is 8 x
+    exactly 6. It has no measured witness of its own: the
     Rocket matches it AND shares tokens, so the leg adds nothing to the only shape
     that would exercise it, and an equal count with no shared token is a pile of
     same-sized things rather than one product. It is declined for the reason R5's
@@ -1641,7 +1647,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `2dcd2b7064aee98a815fee6b8d1d6a26d9f11646571406f99ca35b0a7170b032`: rows
     **201 -> 184**, `high` 112 -> 111, `low` 88 -> 72, `medium` 1 -> 1. Added (3):
     `import/Stagetop` (Leg A, 60 models, groups 45/15), `import/Rocket Filement
-    support` (Leg A, 96 models, 8 groups of 12), `import/xbox360_shell` (Leg B, 31
+    support` (Leg A, 96 models, 8 groups of 12 in the artifact's own reading -
+    Mf-94od then showed that 48 of those 96 were AppleDouble `._*` sidecars and
+    the library content is 48 models in 8 groups of 6, so Decision 25 restates
+    the figures in THIS decision that describe current behaviour: the Leg A
+    counts, the 8 x 6 witness and residual 5. The artifact reading above stays
+    as it was taken), `import/xbox360_shell` (Leg B, 31
     models, 27 own + the foreign group of 4). Removed (20): the eleven Stagetop
     children and the eight Rocket variants (absorbed) plus the one `high`
     `import/xbox360_shell/Wallmount for Lenovo Tab M10 Plus Gen3 - 5461913` row
@@ -1667,7 +1678,8 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     project per compound row, never one per group; every included part attached;
     the confirmation list shows every group with its part count; and only a
     foreign, separable group may be excluded. Nothing detection reports changes;
-    the rule set and its stamp are untouched (`2026-11-05.1` / `2dcd2b70...`). All
+    the rule set and its stamp are untouched by THIS decision (`2026-11-05.1` /
+    `2dcd2b70...`; Mf-94od's later bump to `2026-11-05.2` is Decision 25's). All
     four clauses are pinned:
     `test_service_creating_from_a_compound_row_makes_one_project_with_every_part`
     (one project, 60 parts, and a set equality of attached `Asset.storage_path`
@@ -1730,11 +1742,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `shape: "compound"`; `groups`, a list of
     `{name, model_count, foreign, included, attached}` in the row's own group
     order; and `cover`, `{asset_id, rel_path, reason, group}`. `model_count` is
-    what the WALK counted, AppleDouble `._*` copies included; `attached` is how
-    many registered MODEL assets of that group are in the attach set. So a later
-    reader can see 12 counted / 6 attached and the account still adds up, and
-    `test_a_non_compound_marker_is_unchanged_in_both_directions` pins the six-,
-    six- and nine-key split in both directions.
+    what the SCAN registers (since Mf-94od the count asks the scan's own basename
+    predicate, so an AppleDouble `._*` sidecar names no model); `attached` is how
+    many registered MODEL assets of that group are in the attach set. On a group
+    with no exclusion the two agree - the Rocket reads 6 and 6 - and they differ
+    only by an EXCLUSION, which `attached` carries alone. The account still adds
+    up, and `test_a_non_compound_marker_is_unchanged_in_both_directions` pins the
+    six-, six- and nine-key split in both directions.
 
     The marker's `cover.rel_path` is STORAGE-root-relative on every leg, and that
     is a settled invariant rather than a coincidence, because `_cover`'s own legs
@@ -1749,12 +1763,18 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `test_excluding_the_foreign_group_creates_one_project_of_its_own_27` (the
     registered leg, `group: null` for a cover that belongs to no group).
 
-    The 96-vs-48 fact is the same shape
-    at library scale: the Rocket's row counts 96 and its project holds 48, and NO
-    code excludes dotfiles - the difference is walk-versus-registration, pinned by
-    `test_the_row_counts_what_the_walk_saw_and_the_project_holds_what_the_scan_registered`
-    so a future `library_scan` change reds with a name instead of silently
-    shifting 48 -> 96.
+    **Count equals registration, and that is now an invariant rather than a
+    coincidence.** Before Mf-94od the Rocket's row counted 96 while its project
+    held 48, because a suffix-only role made an AppleDouble `._a.stl` a MODEL
+    while `library_scan` skipped the name: the two doors disagreed about what a
+    model file is, which is exactly the invariant Decision 2 states. The
+    detector now counts through the scan's own basename predicate, so the row's
+    `model_count` IS what the scan registers (48 on the Rocket, six per group)
+    and `attached` differs only where an exclusion removed a group. Pinned by
+    `test_the_row_counts_exactly_what_the_scan_registered`, which asserts the row,
+    the registered model set and the project's `storage_path` set are the same 48
+    with no `._` path in any of them, so a future `library_scan` change reds with
+    a name instead of silently shifting 48 -> 96.
 
     **Three refusals, all `failed`, never `blocked`.** `unknown_group` means no
     group carries that name, matched exactly and case-sensitively because a group
@@ -1836,8 +1856,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
        0 projects - and the Stagetop cover is a prediction, not a measurement.
     4. The cover re-pick is pinned; the CLIENT's primed thumbnail is not, because
        it was rendered for the un-excluded cover (Mf-15xj's window).
-    5. The AppleDouble gap between `model_count` and `attached` is measured on the
-       Rocket alone; no other `._*`-heavy group is.
+    5. The AppleDouble gap between `model_count` and `attached` is CLOSED by
+       Mf-94od (Decision 25): the two numbers now share one predicate and differ
+       only by an exclusion. The residual that replaces it is narrower - no
+       `._*`-heavy tree other than the Rocket is measured, so a hidden-name shape
+       this ADR has not seen is untested rather than known-safe.
     6. A compound created WITH a group included can never be split later.
     7. The converse of the validation ordering: a stale group name masks
        `already_created`.
@@ -1863,6 +1886,132 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     toggled in the detail pane does not travel with a bulk create. That is pinned
     by the seven `BundleReviewView compound groups` vitest cases, the last of
     which is the bulk-door witness.
+
+25. **The model count asks the library scan's own basename predicate, so one
+    predicate decides what is a file in both doors.** `Mf-94od` fixes the measured
+    disagreement behind the batch-47 finding: `classify_entry` decides a role from
+    the suffix alone (Decision 2, deliberately), so a bare `._a.stl` beside
+    `a.stl` was a MODEL while `library_scan` skipped it by name; a Mac-made tree
+    with AppleDouble sidecars therefore read up to twice its real part count on
+    the row while the project the same row created held the real files. The
+    Rocket was the witness: 8 groups, each six real `.stl` plus six `._*.stl`,
+    read as 96 models in 8 groups of 12 while the scan registered 48 and the
+    project attached 48. It was never a new bug - git history shows the scan's
+    dot-name skip predates the detector's suffix table.
+
+    **The fix is one extracted predicate, asked by both doors.** `library_scan`
+    gains `HIDDEN_NAME_PREFIX = "."` and `is_skipped_name(name, *,
+    include_hidden=False)`, a VERBATIM extraction of the expression
+    `_register_tree` used to inline (`name in IGNORED_FILENAMES or (not
+    include_hidden and name.startswith('.'))`); `_register_tree` calls it, and
+    `_walk_storage`'s hidden-DIRECTORY prune keeps its own separate test
+    (`test_a_hidden_directory_is_never_walked`, which reds if the prune is
+    deleted) because it answers a different question, about a directory rather
+    than a name; the registration side of the basename rule is pinned end to end
+    by `test_a_nested_macosx_tree_registers_its_dead_file_and_skips_the_sidecar`,
+    so the scan's behaviour is bit-identical and only the detector's count moves.
+    `bundle_detect` re-exports
+    the predicate (`bundle_detect.is_skipped_name is
+    library_scan.is_skipped_name`), STAMPS the two tables it is built from by
+    reading them from `library_scan` directly rather than copying them here (a
+    captured alias would freeze a stale table while the predicate kept reading the
+    module that owns it), and
+    adds `is_counted_entry(rel_path)` / `is_counted_model(rel_path, size)`;
+    `classify_entry` stays SUFFIX-ONLY and `is_macosx_artifact` stays
+    TOP-LEVEL-ONLY, because each answers a different question.
+
+    **The predicate is the scanner's actual rule, and the junk vocabulary is
+    deliberately NOT the one asked.** `entry_policy.is_junk_entry` was the
+    scheduler's first proposal and the plan gate measured it wrong: the scan
+    REGISTERS a non-dot file under a nested `__MACOSX/` (measured:
+    `g/__MACOSX/g/plain.stl` -> REGISTERED), so routing the detector through the
+    junk predicate would UNDER-count a real part; and `is_junk_entry` answers
+    `False` for a plain `.hidden.stl`, so it would miss the hidden name the scan
+    does skip. The basename predicate is the rule both doors can truthfully share.
+
+    **Five counting sites ask it, and a skipped entry is counted in NO bucket.**
+    `_counts` asks `is_counted_entry` and counts a skipped name in neither MODEL
+    nor OTHER (the buckets are the REPORTED counts, so OTHER included);
+    `_own_depth_model_count`, `_model_entries`, `root_model_count` and
+    `compound_groups` ask `is_counted_model`; each of the three tests below
+    asserts all five together so no one site can drift alone.
+
+    **Evidence keeps the WALK reading everywhere it is consulted, because
+    evidence is not a count.** `_cover_entry` and the document candidates are the
+    obvious consumers. The less obvious one is the VERDICT: `detect_bundle_decision`'s
+    R3 trio gate and its `R3:trio-no-image`/`-no-text` reasons ask
+    `_walk_has_role`, not the narrowed buckets, so a bundle whose only preview and
+    only document are AppleDouble sidecars is still OFFERED. Reading the counts
+    there would refuse a real bundle whose only preview is `._cover.png` - a worse
+    error than a cover pick that is never registered, and an unregistered cover
+    already has a named reason (`largest-image-unregistered`). So on the measured
+    library no row's offer/refusal moves - 0 added, 0 removed, and no detector,
+    confidence, status or refusal change - and the one verdict the R3 LADDER can
+    move is the one it should: a tree whose only own-depth model is a sidecar now
+    refuses `R3:no-own-depth-model` instead of offering a phantom part (risk R3,
+    pinned, and it cost no measured row). All three evidence consumers are pinned
+    rather than asserted in prose
+    (`test_an_appledouble_preview_is_still_evidence_and_the_cover_rule_sees_it`,
+    `test_a_sidecar_only_preview_still_offers_the_row`,
+    `test_the_document_candidates_keep_the_walk_reading_too`).
+
+    **Two rules decide FROM the counts, so they move with them - deliberately.**
+    R6's archive trio (`single_root_archive_facts`: text, model and image
+    presence) and R7's group leg (`compound_groups`, `root_model_count`, and the
+    compound absorb guard in `bundle_service`) read the narrowed buckets, not the
+    walk, because they ask what the library HOLDS rather than whether a preview
+    exists: a resource fork is not a document, not a preview and not a part of a
+    product. Both directions are pinned
+    (`test_the_count_driven_doors_read_the_narrowed_counts_on_purpose`): a sidecar
+    `._README.txt` no longer keeps R6 out of the missing-document hole, and
+    groups whose models are all sidecars name no group at all. Neither direction
+    fired on the measured tree.
+
+    **The tables and the stamp move with the rule.** `SKIPPED_FILENAMES` and
+    `HIDDEN_NAME_PREFIX` join `rule_set_tables()` by value and the declared-table
+    key set, `RULE_SET_VERSION` becomes `2026-11-05.2` and the derived stamp
+    `0f317ee0fa2ff200a703a8c10be1c6f565d50d4263b3629a1004dffee7c0c911`,
+    re-pinned in `test_the_rule_set_stamp_is_pinned_so_a_table_edit_cannot_go_unnoticed`.
+    The serialised artifact gains the row's role `counts` (plus the row's own
+    `groups` and its `metadata_shape` as `shape`) and the schema moves to
+    `bundle-report/3`, because the baseline row carried no count at all and a
+    96 -> 48 rule change was invisible in the artifact that recorded it;
+    `diff_artifacts`/`format_diff` name a `counts_changed` block, compare it PER
+    ROW (one schema-2 row must not suppress the deltas the other rows prove), and
+    say "counts not recorded" for an older artifact rather than inventing a delta.
+
+    **The measurement, and what the diff can and cannot say.** before/after on
+    `/mnt/ceph/3D_models` (read-only), rule set `2026-11-05.1` -> `2026-11-05.2`:
+    the Rocket row moves 96 -> 48 models and its eight group counts 12 -> 6;
+    `import/Stagetop` is unchanged at 60 with 0 AppleDouble on disk; 0 rows added,
+    0 removed, and no detector, confidence, status or refusal change. One row
+    outside the Rocket moves a NON-model count - `Mini_Statue_of_the_Goddess_Hylia`
+    loses `other_count` 1 -> 0, because a file named `.png` under its `images/` is
+    a hidden NAME with no suffix and now falls in no bucket; its model count and
+    its verdict are untouched. `--diff` reports NOT COMPARABLE by rule set, and that is the R6
+    precedent rather than an error - a rule-set stamp exists to refuse a
+    like-for-like comparison across a rule change. Row-level artifacts live under
+    `.plans/measurements/` and are never committed.
+
+    **One residual stays, ticketed rather than widened.** A zip LISTING's
+    `__MACOSX/foo/plain.stl` is still counted although extraction refuses it: the
+    junk vocabulary lives in a FastAPI-bound module mirrored by `zipJunk.ts` under
+    `test_junk_vocabulary_mirror.py`, and moving it to a dependency-free home is
+    its own ticket. A second, narrower conditional is named rather than hidden:
+    `is_counted_entry` asks the scan's DEFAULT hidden door, so the two numbers
+    agree only while both doors skip hidden names - opening the MOUNT door with
+    `IMPORT_MOUNT_INCLUDE_HIDDEN=1` makes that scan register the `._*` sidecars the
+    detector still refuses, which separates `model_count` from `attached` again.
+    That flag is off by default and no measured tree is imported through it, so it
+    is a named conditional and an untested one. The count's own edges are
+    otherwise shared with the walk - hidden directories pruned for both doors,
+    `RESERVED_DIRS` the same walk, symlinks and non-regular entries dropped for
+    both, `Thumbs.db`/`.DS_Store` OTHER-or-skipped by name, and
+    `.git`/`.gitmodules` read as NAMES by `has_repo_markers`, untouched. The
+    handler that keeps the predicate honest is a BASENAME, so it can only prune
+    what the walk offers it: a ZIP INTERIOR is never walked (the archive is read
+    as a listing), and a `.secret/x.stl` inside one is still counted - the
+    `__MACOSX` residual above is the same door, not a second one.
 
 ## Consequences
 
@@ -1965,7 +2114,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   those models counted. A duplicate whose only twin is a bundle member is not
   reported as reclaimable when the member was the suppressed copy, which is the
   safe direction and is stated rather than hidden.
-* **A `low` rule now covers 60 parts, 96 parts and 27 models on a shared word and
+* **A `low` rule now covers 60 parts, 48 parts and 27 models on a shared word and
   a majority, and that is the accepted trade.** Three rows replace twenty on the
   owner's library - the eleven Stagetop children, the eight Rocket variants and
   the one foreign `high` row - for 201 -> 184 rows overall; nothing is deleted, no
@@ -2509,7 +2658,7 @@ unchanged.
   `test_root_models_are_strictly_at_depth_zero_and_the_wave_15_leg_is_not_one_of_them`
   (`root_model_count` 0 while `_own_depth_model_count` answers 15 on the same
   Stagetop listing, which is the leg R7 must not use); and
-  `test_compound_facts_is_none_when_the_switch_is_off` (one switch, the 96-part
+  `test_compound_facts_is_none_when_the_switch_is_off` (one switch, the 48-part
   Rocket while it is on, and token `mount`). In `tests/test_bundle_service.py`,
   through `build_report` and `iter_bundle_candidates` against temporary roots:
   `test_service_stagetop_is_one_row_with_two_groups` and
@@ -2542,6 +2691,56 @@ unchanged.
   and `test_the_committed_openapi_fixture_declares_the_group_component` (the
   committed fixture declares `BundleGroupOut`'s three required fields, so a
   skipped regeneration cannot leave stale-but-valid JSON).
+- **Decision 25's witnesses are named, over one predicate and two doors.** In
+  `tests/test_bundle_detect.py`:
+  `test_a_bare_appledouble_sidecar_is_not_a_model` (`a.stl` + `._a.stl` is one
+  part), `test_a_nested_macosx_appledouble_sidecar_is_not_a_model` (the measured
+  Rocket shape at depth 3, the two groups reading one each) and
+  `test_a_hidden_model_name_is_not_counted` (`.hidden.stl`, with
+  `entry_policy.is_junk_entry` asserted NOT junk in the same test - the reason the
+  fix cannot be wired to that predicate). Each asserts
+  `_counts().model`, `_model_entries`, `compound_groups`, `root_model_count` AND
+  `_own_depth_model_count` together, so no counting site can drift alone.
+  `test_bundle_detect_asks_the_scan_its_own_predicate` asserts the identity with
+  `library_scan.is_skipped_name` plus the seven-path truth table (including a
+  non-dot file under a nested `__MACOSX`, which the scan REGISTERS) and
+  `include_hidden=True`; `test_an_appledouble_preview_is_still_evidence_and_the_cover_rule_sees_it`
+  and `test_a_sidecar_only_preview_still_offers_the_row` pin the deliberate
+  evidence-view divergence at every place that consults it - the cover pick, R3's
+  trio gate, the `trio-no-image`/`-no-text` REASONS, and the verdict that does
+  move (a sidecar-only model refuses `R3:no-own-depth-model`);
+  `test_the_document_candidates_keep_the_walk_reading_too` pins the document
+  candidates, and
+  `test_the_count_driven_doors_read_the_narrowed_counts_on_purpose` pins the two
+  count-driven doors (R6's trio, R7's group leg) in both directions; and
+  `test_the_rule_set_stamp_is_pinned_so_a_table_edit_cannot_go_unnoticed` /
+  `test_every_row_deciding_table_is_inside_the_derived_stamp` pin
+  `2026-11-05.2` and assert `ROW_DECIDING_TABLES` gained `SKIPPED_FILENAMES` and
+  `HIDDEN_NAME_PREFIX`, the latter swept by rebinding `library_scan` itself
+  (`RULE_SET_TABLE_HOMES`) so the stamp provably tracks the tables the predicate
+  reads. In `tests/test_library_scan.py`,
+  `test_is_skipped_name_is_the_one_rule_both_doors_ask` pins the truth table,
+  `test_a_nested_macosx_tree_registers_its_dead_file_and_skips_the_sidecar` pins
+  the premise the fix rests on through `_register_tree` (a non-dot file under a
+  nested `__MACOSX` REGISTERS, the `._` sidecar does not, and the ignored counter
+  says one), and `test_a_hidden_directory_is_never_walked` pins the walk's own
+  prune, open and closed; the pre-existing `.hidden.stl` registration tests stay
+  green untouched. In
+  `tests/test_bundle_service.py`,
+  `test_the_row_counts_exactly_what_the_scan_registered` (Rocket row 48, groups
+  `[(6, 6)] * 8`, `other_count` 0 so a skipped name is in no bucket, registered
+  models == project `storage_path` set == 48, no `._` path in either) and
+  `test_the_stagetop_row_still_reads_60_with_no_appledouble_on_disk` (the
+  non-regression witness) run through `TestClient(main.app)`. In
+  `tests/test_bundle_serialize.py`,
+  `test_a_row_carries_its_counts_so_a_rule_change_is_visible` and
+  `test_the_diff_names_a_count_change_and_admits_an_old_artifact_without_one`
+  pin the schema-3 row and the honest "not recorded" for a schema-2 artifact;
+  `test_one_schema_2_row_does_not_suppress_the_deltas_the_others_prove`,
+  `test_a_diff_with_no_common_row_does_not_invent_a_counts_verdict` and
+  `test_the_unchanged_summary_does_not_survive_a_count_change` pin the three
+  edges of that block - a partial artifact, no common rows, and the summary that
+  must not read "unchanged" when the only movement is a count.
 - **Decision 24's witnesses are named, and each one reds a different mutation.**
   In `tests/test_bundle_service.py`, against temporary roots built from the
   measured trees:
@@ -2549,10 +2748,9 @@ unchanged.
   (the Stagetop row creates ONE project holding all 60 parts, asserted by set
   equality over `Asset.storage_path` against every registered model, with the
   marker naming both groups 45/15 - attaching one group reds it);
-  `test_the_row_counts_what_the_walk_saw_and_the_project_holds_what_the_scan_registered`
-  (the Rocket counts 12 per group and attaches 6, so the AppleDouble gap is a
-  named fact rather than a silent drift - registering the `._*` copies moves both
-  the marker and `assets_added`);
+  `test_the_row_counts_exactly_what_the_scan_registered`
+  (the Rocket's row counts 48 and attaches 48, six per group, and no `._` path is
+  in either set - the count-equals-registration invariant Decision 25 records);
   `test_service_xbox360_shell_creates_one_project_with_all_31_parts` (27 own
   parts plus the foreign 4, cover `model-preview` on the mount's
   `bracket-0.stl` with `cover.group` naming the mount - the 40-byte tie broken by
