@@ -68,6 +68,17 @@ The rules, strongest first:
   never reached by a directory. The restraint is explicit: an archive with
   models and nothing else stays refused, because there is no evidence it is one
   thing rather than a dump.
+* R7 ``compound-bundle`` / ``low`` (Mf-8xrc): a directory holding ONE product in
+  several model-bearing parts - ``StageTop Wave One - Personal Use`` beside
+  ``Wave 1.5``, or eight ``The_Rocket--<variant>--Side_Spool_Mount`` groups - is
+  one row that names its groups instead of eleven, or instead of none when a
+  container rule refuses the parent. Either the folder holds no models of its
+  own and at least two groups that share a family token, or it holds the
+  majority of the models and every group below it is foreign (a vendor id in the
+  name, or a README/LICENSE at the group's own root). Repository metadata, and
+  two or more groups carrying their own thing ids, refuse it. ``low`` and
+  name-derived: nothing here states provenance. Like R5 it is a post-pass, never
+  a branch of ``detect_bundle``, and it mints no refusal vocabulary of its own.
 
 Anything else is not a bundle and ``detect_bundle`` returns ``None``. A README
 that exists but lacks the markers is not R1 - both high-confidence rules miss and
@@ -126,7 +137,7 @@ renders text; it never deletes, renames or moves a file.
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePath
 from typing import AbstractSet, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -184,7 +195,7 @@ SHAPE_ARCHIVE_ROOT = "archive-root"
 # The rule-set version, bumped by hand whenever a row-deciding table changes.
 # It is a human-readable companion to the derived stamp below: the version says
 # *which* revision a report was taken at, the stamp proves *what* the tables were.
-RULE_SET_VERSION = "2026-11-04.2"
+RULE_SET_VERSION = "2026-11-05.1"
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"
@@ -229,6 +240,64 @@ TITLE_NAME_BUNDLES_ENABLED = True
 # lowercase single word; the lowercase clause in `is_title_name` is what
 # refuses an ALL-CAPS label, because `STAGETOP` is a product code, not a title.
 _TITLE_WORD = re.compile(r"[A-Z][A-Za-z0-9]*")
+
+# R7's vocabulary (Mf-8xrc): one directory holding ONE product in several
+# model-bearing parts, which is one row carrying its group breakdown rather than
+# eleven rows - or none at all when the parent is refused as a container.
+DETECTOR_COMPOUND = "compound-bundle"
+SHAPE_COMPOUND = "compound"
+# The ONE switch for R7. Read only inside `compound_bundle_facts`, so turning the
+# rule off is one edit and every caller (scan, report, create) follows - the same
+# shape as R5's switch. It has no refusal word of its own: see
+# `compound_bundle_facts` on why R7 mints no vocabulary.
+COMPOUND_BUNDLES_ENABLED = True
+# A compound needs at least TWO model-bearing groups. One group is a plain
+# wrapper, and a single group carries no "several parts" evidence at all.
+# The SAME "two things" bound is used for both questions on purpose: two parts
+# make a family (the group floor) and two products make a pile (the own-id
+# refusal threshold, where `own_ids >= COMPOUND_MIN_GROUPS` means each group is
+# a whole product rather than a part). A change to this constant therefore moves
+# BOTH questions - it is deliberately one bound and not two, because both ask
+# "is this several things rather than one".
+COMPOUND_MIN_GROUPS = 2
+# The family token must be STRICTLY longer than this, so a three-letter word
+# never binds two groups. Three is the floor that still admits `Rock`/`Wave`
+# while refusing the `of`, `v1` and `stl` shapes that only look shared.
+COMPOUND_TOKEN_MIN_LENGTH = 3
+# The words that hold a name together rather than name a product. Deliberately
+# FOUR words and no general stopword table: a stopword list is a guess about
+# names someone thought of. The measured witness is `the` (all eight Rocket
+# names carry it), but `the` is refused TWICE over - it is also only three
+# characters, so the length floor refuses it with this table empty. `with` is
+# the one glue word the length floor does not also refuse, so emptying this
+# table is what makes `with widget`/`with gadget` a compound: that pair is the
+# table's behavioural witness. `and` and `for` are the same shape of word, and
+# the table is closed at four because a longer stopword list is a guess. A
+# family token has to survive an explicit list, never a fuzzy match.
+COMPOUND_GLUE_TOKENS = frozenset({"and", "for", "the", "with"})
+# What a repository checkout ships. These are ENTRY NAMES, never a directory
+# listing: the library walk prunes hidden DIRECTORIES (so `.git/` and `.github/`
+# are structurally unreachable) and yields hidden FILES (so the `.git` file of a
+# linked worktree and a `.gitmodules` file are reachable). A checkout holding
+# several different products is already handled correctly by descending, so R7
+# must refuse rather than regress it.
+COMPOUND_REPO_MARKERS = frozenset(
+    {".git", ".github", ".gitmodules", "_config.yml", "_includes", "_layouts", "_sass", "gemfile", "gemfile.lock"}
+)
+# A document at a group's own root belongs to that group, not to the wrapper:
+# `<group>/README.md` is somebody's thing, `<group>/docs/README.md` is payload.
+# Stems only, so the suffix a person chose never decides the question.
+COMPOUND_GROUP_DOC_STEMS = frozenset({"readme", "license", "licence"})
+# Two id regexes, DELIBERATELY separate and pointing in opposite directions.
+# FOREIGN (6-8 digits): precision - is this group somebody ELSE's thing, i.e. a
+# vendor thing id that cannot be this product's own part number? Six is the floor
+# because five-digit runs are common in part numbers.
+COMPOUND_FOREIGN_ID = re.compile(r"(?:^|[-_ ])\d{6,8}(?:$|[-_ ])")
+# OWN (5+ digits): recall - does this group carry an id of its own, i.e. is it a
+# whole product rather than a part? Broader on purpose, because this predicate
+# only ever REFUSES: a group that is its own product must not be swallowed, and
+# the cost of over-matching is a compound we decline to claim.
+COMPOUND_OWN_ID = re.compile(r"(?:^|[-_ ])\d{5,}(?:$|[-_ ])")
 
 _ROOT_README = "readme.txt"
 _ROOT_LICENSE = "license.txt"
@@ -384,6 +453,17 @@ def rule_set_tables() -> dict:
         "TITLE_SINGLE_WORD_FLOOR": TITLE_SINGLE_WORD_FLOOR,
         "TITLE_NAME_BUNDLES_ENABLED": TITLE_NAME_BUNDLES_ENABLED,
         "_TITLE_WORD": _regex_table(_TITLE_WORD),
+        # R7's vocabulary: one product in several parts.
+        "DETECTOR_COMPOUND": DETECTOR_COMPOUND,
+        "SHAPE_COMPOUND": SHAPE_COMPOUND,
+        "COMPOUND_BUNDLES_ENABLED": COMPOUND_BUNDLES_ENABLED,
+        "COMPOUND_MIN_GROUPS": COMPOUND_MIN_GROUPS,
+        "COMPOUND_TOKEN_MIN_LENGTH": COMPOUND_TOKEN_MIN_LENGTH,
+        "COMPOUND_GLUE_TOKENS": sorted(COMPOUND_GLUE_TOKENS),
+        "COMPOUND_REPO_MARKERS": sorted(COMPOUND_REPO_MARKERS),
+        "COMPOUND_GROUP_DOC_STEMS": sorted(COMPOUND_GROUP_DOC_STEMS),
+        "COMPOUND_FOREIGN_ID": _regex_table(COMPOUND_FOREIGN_ID),
+        "COMPOUND_OWN_ID": _regex_table(COMPOUND_OWN_ID),
         # The document names and marker grammar.
         "_ROOT_README": _ROOT_README,
         "_ROOT_LICENSE": _ROOT_LICENSE,
@@ -463,6 +543,15 @@ class BundleCounts:
 
 
 @dataclass(frozen=True)
+class BundleGroup:
+    """One model-bearing group inside a compound folder: its name, models, and whether it is somebody else's thing."""
+
+    name: str
+    model_count: int
+    foreign: bool
+
+
+@dataclass(frozen=True)
 class BundleFacts:
     """What one detect call concluded about one snapshot."""
 
@@ -479,6 +568,9 @@ class BundleFacts:
     cover_entry: Optional[str]
     counts: BundleCounts
     model_entries: Tuple[str, ...]
+    # Only R7 fills this. A row with no groups is every row this module produced
+    # before it, so the default keeps every existing keyword constructor intact.
+    groups: Tuple[BundleGroup, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1494,3 +1586,240 @@ def title_name_decision(snapshot: BundleSnapshot) -> Detection:
     if _own_depth_model_count(snapshot) < 1:
         return Detection(facts=None, refusal=REFUSAL_R5_NO_OWN_DEPTH_MODEL)
     return Detection(facts=title_name_facts(snapshot), refusal=None)
+
+
+# --- R7: one product in many parts (Mf-8xrc) ---
+#
+# Like R5, this rule lives beside `detect_bundle` rather than inside it. The
+# folder walk is deepest-first, so a branch there would hand a parent's compound
+# row to its first child and lose a row the child owns; the service calls
+# `compound_bundle_facts` as a post-pass instead.
+
+
+def root_model_count(snapshot: BundleSnapshot) -> int:
+    """Models at STRICTLY depth 0: the bundle root itself, nothing below it.
+
+    Deliberately NOT ``_own_depth_model_count``. That function also counts the
+    models of ONE model-bearing subdirectory as the folder's own, because R3/R5
+    read "one folder in, models out" as one thing. Here that leg is the problem:
+    it returns 15 for ``import/Stagetop`` - the ``Wave 1.5`` models, which sit
+    one level down - so every wrapper with a single model-bearing child would
+    read a child's pile as its own product and R7 would fire on every wrapper.
+    The 41 ``.stl`` of ``StageTop Wave One - Personal Use`` are spread across
+    five subdirectories, so the same function reads that group as a pile and
+    returns 0: neither number answers "does this folder hold models of its own".
+
+    Public because it is asked in two places and must be asked the same way:
+    R7's Leg A/leg B split here, and ``bundle_service._compound_absorbs``, which
+    needs the same number to decide whether a LOW compound row may replace a row
+    a stronger rule produced.
+    """
+    return sum(
+        1
+        for entry in snapshot.entries
+        if len(entry.rel_path.split("/")) == 1 and classify_entry(entry.rel_path, entry.size) == MODEL
+    )
+
+
+def has_repo_markers(snapshot: BundleSnapshot) -> bool:
+    """Whether the listing's first path segment names repository metadata.
+
+    The first segment only, so a ``.git`` file inside a payload directory is not
+    evidence about the folder being judged. ``COMPOUND_REPO_MARKERS`` is a set of
+    entry NAMES: the walk prunes hidden directories, so the markers that survive
+    to here are the files (a linked worktree's ``.git``, a ``.gitmodules``).
+    """
+    for entry in snapshot.entries:
+        if entry.rel_path.split("/")[0].casefold() in COMPOUND_REPO_MARKERS:
+            return True
+    return False
+
+
+def _compound_tokens(name: str) -> frozenset:
+    """The casefolded alphanumeric runs of ``name`` - no regex, no suffix table.
+
+    Splitting on anything non-alphanumeric is what makes ``The_Rocket--Circles``
+    and ``StageTop Wave One - Personal Use`` comparable: the separators a vendor
+    chose (``_``, ``--``, `` - ``) say nothing about the words they separate.
+    """
+    tokens = set()
+    run: List[str] = []
+    for character in name.casefold():
+        if character.isalnum():
+            run.append(character)
+        elif run:
+            tokens.add("".join(run))
+            run = []
+    if run:
+        tokens.add("".join(run))
+    return frozenset(tokens)
+
+
+def compound_groups(snapshot: BundleSnapshot) -> Tuple[BundleGroup, ...]:
+    """Every model-bearing group at depth 1, with its model count and its foreignness.
+
+    A group is a first path segment that holds at least one model anywhere below
+    it; models at depth 0 belong to the folder itself and are never a group. The
+    tuple is sorted by ``(casefold, name)`` so the row is a function of the tree,
+    never of readdir order.
+
+    ``foreign`` means "this group is somebody else's thing, name it and do not
+    split it" (the ticket's FOREIGN GROUP discriminator): its name carries a
+    vendor id (``COMPOUND_FOREIGN_ID``), or the group's OWN root holds a
+    README/LICENSE - ``<group>/<doc>``, exactly depth 1 of the group, because a
+    document one level deeper is payload rather than a claim of ownership.
+    """
+    counts: Dict[str, int] = {}
+    for entry in snapshot.entries:
+        if classify_entry(entry.rel_path, entry.size) != MODEL:
+            continue
+        # AppleDouble cruft must never NAME a group: a top-level `__MACOSX`
+        # would otherwise appear as a junk group in the breakdown (and could
+        # silently change whether the folder is compound-shaped at all). Only
+        # group MEMBERSHIP skips it. The MODEL COUNT is deliberately untouched,
+        # here and in `root_model_count`: the `._*` copies are real files on the
+        # measured disk and count exactly as they always have (the Rocket reads
+        # 12 per group and 96 in total - 6 real + 6 `._*`), so the two numbers
+        # cannot disagree about what is on disk.
+        if is_macosx_artifact(entry.rel_path):
+            continue
+        parts = entry.rel_path.split("/")
+        if len(parts) < 2:
+            continue
+        counts[parts[0]] = counts.get(parts[0], 0) + 1
+
+    own_docs = set()
+    for entry in snapshot.entries:
+        parts = entry.rel_path.split("/")
+        if len(parts) != 2:
+            continue
+        if PurePath(parts[1]).stem.casefold() in COMPOUND_GROUP_DOC_STEMS:
+            own_docs.add(parts[0])
+
+    return tuple(
+        BundleGroup(
+            name=name,
+            model_count=counts[name],
+            foreign=bool(COMPOUND_FOREIGN_ID.search(name)) or name in own_docs,
+        )
+        for name in sorted(counts, key=lambda group_name: (group_name.casefold(), group_name))
+    )
+
+
+def _compound_family_token(groups: Sequence[BundleGroup]) -> Optional[str]:
+    """The one word ALL the group names share, or ``None``.
+
+    This is the ticket's "variant family / version waves" evidence reduced to the
+    one mechanical question both measured shapes answer: do these names share a
+    word that names the product?
+    ``StageTop Wave One - Personal Use`` and ``Wave 1.5`` share ``wave``; the
+    eight ``The_Rocket--<variant>--Side_Spool_Mount`` groups share five words and
+    this function returns the first of them in sorted order, ``mount``. Either
+    is the family's word - the predicate asks whether ONE exists, never which.
+
+    The first sorted surviving token wins, so the answer never depends on set
+    iteration order. A token must be strictly longer than
+    ``COMPOUND_TOKEN_MIN_LENGTH``, not all digits (``1``/``5`` out of ``Wave
+    1.5``), not a part name (``TITLE_PART_NAMES``: a shared ``files`` names a
+    part, not a product) and not glue (``COMPOUND_GLUE_TOKENS``: ``the`` binds a
+    sentence, not a family). No suffix table, no fuzzy matching and no
+    equal-count leg: an equal count with no shared token is a pile of same-sized
+    things, and it has no measured witness in the library.
+    """
+    if not groups:
+        return None
+    shared = frozenset(_compound_tokens(groups[0].name))
+    for group in groups[1:]:
+        shared = shared & _compound_tokens(group.name)
+    for token in sorted(shared):
+        if len(token) <= COMPOUND_TOKEN_MIN_LENGTH:
+            continue
+        if token.isdigit():
+            continue
+        if token in TITLE_PART_NAMES or token in COMPOUND_GLUE_TOKENS:
+            continue
+        return token
+    return None
+
+
+def compound_bundle_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
+    """R7: the facts for one product in several parts, or ``None``.
+
+    The checks run in the measured order, and the first failure returns ``None``:
+
+    1. the switch ``COMPOUND_BUNDLES_ENABLED`` (read HERE and nowhere else);
+    2. repository metadata - a git checkout holding several different products
+       is already handled correctly by descending, so R7 must not claim it.
+       ``import/endorphin`` is refused TWICE over, by this leg and by the own-id
+       leg below, so removing either one alone leaves it refused;
+    3. at least one model-bearing group;
+    4. one of the two legs:
+
+       * **Leg A** (the ticket's rule sentence): nothing at depth 0 and at least
+         ``COMPOUND_MIN_GROUPS`` groups - ``import/Stagetop`` (45 + 15) and
+         ``import/Rocket Filement support`` (8 x 12) are the witnesses;
+       * **Leg B** (the ticket's "fix the loss"): the folder holds models of its
+         own, every group below it is foreign, the folder's own models are the
+         majority and at least one group carries a vendor id. This is what gives
+         ``import/xbox360_shell`` a row again - its 27 models were invisible
+         because its parent is refused as a container - and its ONE measured
+         witness is exactly that folder (27 > 4). The id requirement stops a
+         root-heavy folder holding two unrelated README-bearing sub-projects
+         from being merged, and the majority floor is the anti-swallow bound;
+
+    5. the own-id refusal: two or more groups carrying their own thing id are
+       each their own product, not parts of one. This is the recall predicate
+       and the endorphin/Unsorted refusal, checked BEFORE the family evidence so
+       the reasons come in the measured order;
+    6. Leg A additionally needs the family token; Leg B needs none, because the
+       vendor id and the majority floor are its evidence.
+
+    The row is ``low`` and name-derived: nothing here states provenance, so
+    title is ``display_name`` and creator, licence, licence URL, source URL,
+    thing id and description are ALL ``None`` by construction - ``_name_only_facts``
+    has no parameter that could set them.
+
+    R7 mints NO refusal vocabulary: ``REFUSAL_RULES`` is unchanged and there is
+    no ``compound_bundle_decision``. A directory this rule declines already
+    carries an R3/R4/R5/container-rule reason from an earlier pass, and a new
+    string would either clobber a true reason or create dead vocabulary. The
+    stated trade-off - a compound-shaped git dump reads ``R3:no-own-depth-model``
+    or ``container-rule``, never "repo dump" - belongs in the ADR, not in a
+    refusal word that would then need its own provenance.
+    """
+    if not COMPOUND_BUNDLES_ENABLED:
+        return None
+    if has_repo_markers(snapshot):
+        return None
+    groups = compound_groups(snapshot)
+    if not groups:
+        return None
+
+    root_models = root_model_count(snapshot)
+    leg_a = root_models == 0 and len(groups) >= COMPOUND_MIN_GROUPS
+    leg_b = (
+        root_models >= 1
+        and len(groups) >= 1
+        and all(group.foreign for group in groups)
+        and root_models > sum(group.model_count for group in groups)
+        and any(COMPOUND_FOREIGN_ID.search(group.name) for group in groups)
+    )
+    if not (leg_a or leg_b):
+        return None
+
+    own_ids = sum(1 for group in groups if COMPOUND_OWN_ID.search(group.name))
+    if own_ids >= COMPOUND_MIN_GROUPS:
+        return None
+    if leg_a and _compound_family_token(groups) is None:
+        return None
+
+    facts = _name_only_facts(
+        DETECTOR_COMPOUND,
+        CONFIDENCE_LOW,
+        SHAPE_COMPOUND,
+        snapshot,
+        _counts(snapshot),
+        _cover_entry(snapshot),
+        _model_entries(snapshot),
+    )
+    return replace(facts, groups=groups)

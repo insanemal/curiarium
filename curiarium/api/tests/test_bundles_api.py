@@ -750,3 +750,97 @@ def test_an_enriched_project_is_never_edited_by_a_later_enrich(
     assert project["licence"] == "CC BY-NC-SA"
     row = row_for(report_for(client, contributor), DRAGON_KEY)
     assert row["creator"] == "P1lotz", "the report still shows what the page supplied"
+
+
+# --- a compound row carries its group breakdown (Mf-8xrc) --------------------
+
+STAGETOP_KEY = "import/Stagetop"
+STAGETOP_EDITION = "StageTop Wave One - Personal Use"
+OPENAPI_BUNDLES_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "openapi" / "components" / "bundles.json"
+)
+
+
+def stagetop_bundle(root: Path) -> Path:
+    """The owner's Stagetop tree: one product in two editions, 60 model files.
+
+    The counts are by `bundle_detect.MODEL_SUFFIXES`: `PlayTile - Blank` ships four
+    `.stl` with four `.step` beside them, and `.step` counts, so the row reads 60
+    and not 56. `PlayTiles/Accessory` is a `title-name` row on disk and is written
+    here too. Nothing sits at the parent's own depth: the models live 45 in the
+    first edition's ten part folders and 15 in `Wave 1.5`.
+    """
+    layout = {
+        "Accessories": (5, 0),
+        "Core": (3, 0),
+        "Legs": (5, 0),
+        "PlayTiles/PlayTile - 1x1": (4, 0),
+        "PlayTiles/PlayTile - 2x2": (4, 0),
+        "PlayTiles/PlayTile - 4x4": (3, 0),
+        "PlayTiles/PlayTile - Blank": (4, 4),
+        "PlayTiles/Accessory": (4, 0),
+        "Rails/Rail - Elite": (5, 0),
+        "Rails/Rail - Standard": (4, 0),
+    }
+    edition = root / "import" / "Stagetop" / STAGETOP_EDITION
+    for folder, (stl_count, step_count) in layout.items():
+        group = edition / folder
+        for index in range(stl_count):
+            write_file(group / f"part-{index}.stl", STL_BYTES)
+        for index in range(step_count):
+            write_file(group / f"part-{index}.step", b"ISO-10303-21;\n")
+        write_file(group / "cover.jpg", b"j")
+        write_text(group / "notes.txt", "notes\n")
+    wave = root / "import" / "Stagetop" / "Wave 1.5"
+    for index in range(15):
+        write_file(wave / f"part-{index}.stl", STL_BYTES)
+    write_file(wave / "cover.jpg", b"j")
+    write_text(wave / "notes.txt", "notes\n")
+    return root / "import" / "Stagetop"
+
+
+def test_the_compound_row_serves_its_groups(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """The live route serves the breakdown: one row, 60 models, 45 + 15 in two groups.
+
+    Mutation: drop `groups` from `BundleDetectItemOut` and the response model silently
+    drops the key (the Mf-nivh/Mf-au4k defect), so this reds.
+    """
+    stagetop_bundle(isolated_storage)
+    moai_bundle(isolated_storage)
+    scan()
+
+    report = report_for(client, contributor)
+
+    rows = [row for row in report["bundles"] if row["key"] == STAGETOP_KEY]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["detector"] == "compound-bundle"
+    assert row["confidence"] == "low"
+    assert row["metadata_shape"] == "compound"
+    assert row["model_count"] == 60
+    assert row["groups"] == [
+        {"name": STAGETOP_EDITION, "model_count": 45, "foreign": False},
+        {"name": "Wave 1.5", "model_count": 15, "foreign": False},
+    ]
+    assert row_for(report, MOAI)["groups"] == [], "an ordinary row answers with an empty list, not a missing key"
+
+
+def test_the_committed_openapi_fixture_declares_the_group_component() -> None:
+    """The group is a pinned component with three required fields, and the row carries it.
+
+    The rewrite run SKIPS, so a skipped regeneration would otherwise leave
+    stale-but-valid JSON: this assertion is what catches it.
+    """
+    fixture = json.loads(OPENAPI_BUNDLES_FIXTURE.read_text(encoding="utf-8"))
+
+    assert "BundleGroupOut" in fixture
+    group = fixture["BundleGroupOut"]
+    assert sorted(group["required"]) == ["foreign", "model_count", "name"]
+    assert {name: prop["type"] for name, prop in group["properties"].items()} == {
+        "name": "string",
+        "model_count": "integer",
+        "foreign": "boolean",
+    }
+    assert "groups" in fixture["BundleDetectItemOut"]["properties"]

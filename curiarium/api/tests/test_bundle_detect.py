@@ -1896,8 +1896,8 @@ def test_a_text_file_hands_the_listing_back_to_r3_even_at_depth_two() -> None:
 # LITERALS on purpose: an edit to any row-deciding table changes the derived hash
 # and this test reds, which is the whole point of the stamp - the 114 -> 112 delta
 # of Mf-9ygi could not be explained because nothing recorded what the rules were.
-RULE_SET_VERSION = "2026-11-04.2"
-RULE_SET_STAMP = "072a1505299394483222ec7cd103c9d85c9008345827b8ea21288857905f3e09"
+RULE_SET_VERSION = "2026-11-05.1"
+RULE_SET_STAMP = "2dcd2b7064aee98a815fee6b8d1d6a26d9f11646571406f99ca35b0a7170b032"
 
 # Every constant `rule_set_tables` captures, with a replacement that differs from
 # the shipped value. The names are also the exact key set of the derived table, so
@@ -1937,6 +1937,16 @@ ROW_DECIDING_TABLES = {
     "TITLE_SINGLE_WORD_FLOOR": 8,
     "TITLE_NAME_BUNDLES_ENABLED": False,
     "_TITLE_WORD": re.compile(r"[A-Z][a-z]+"),
+    "DETECTOR_COMPOUND": "compound-bundle-v2",
+    "SHAPE_COMPOUND": "compound-v2",
+    "COMPOUND_BUNDLES_ENABLED": False,
+    "COMPOUND_MIN_GROUPS": 5,
+    "COMPOUND_TOKEN_MIN_LENGTH": 9,
+    "COMPOUND_GLUE_TOKENS": frozenset({"vs"}),
+    "COMPOUND_REPO_MARKERS": frozenset({".hg"}),
+    "COMPOUND_GROUP_DOC_STEMS": frozenset({"copying"}),
+    "COMPOUND_FOREIGN_ID": re.compile(r"(?i)^vendor-(\d+)-"),
+    "COMPOUND_OWN_ID": re.compile(r"(?i)^thing-(\d+)-"),
     "_ROOT_README": "readme.md",
     "_ROOT_LICENSE": "licence.md",
     "_SIBLING_README": "_ABOUT",
@@ -1960,8 +1970,8 @@ def test_the_rule_set_stamp_is_pinned_so_a_table_edit_cannot_go_unnoticed() -> N
 
     Mutation: change one constant any row-deciding path reads and the pinned hash
     stops matching - which is exactly the audit trail Mf-9ygi's 114 -> 112
-    investigation lacked. This bump is Mf-tcrw's rule table change: R6 added
-    ``DETECTOR_ARCHIVE_BUNDLE`` and ``SHAPE_ARCHIVE_ROOT``.
+    investigation lacked. This bump is Mf-8xrc's rule table change: R7 added the
+    ten ``COMPOUND_*`` tables, which must move in the same commit as the rule.
     """
     assert bundle_detect.RULE_SET_VERSION == RULE_SET_VERSION
     assert bundle_detect.RULE_SET_STAMP == RULE_SET_STAMP
@@ -2079,3 +2089,388 @@ def test_the_title_refusals_are_ordered_like_the_rule(monkeypatch: pytest.Monkey
     assert fired.refusal is None
     assert fired.facts is not None
     assert fired.facts.detector == bundle_detect.DETECTOR_TITLE_NAME
+
+
+# --- R7: one product in many parts (Mf-8xrc) ---------------------------------
+
+# The real directory names, because every number below was measured on these
+# trees: no invented fixture can prove the owner's library reads as one row.
+STAGETOP = "Stagetop"
+STAGETOP_WAVE_ONE = "StageTop Wave One - Personal Use"
+STAGETOP_WAVE = "Wave 1.5"
+ROCKET_GROUPS = (
+    "The_Rocket--Circles--Side_Spool_Mount",
+    "The_Rocket--Dots--Side_Spool_Mount",
+    "The_Rocket--Flowers--Side_Spool_Mount",
+    "The_Rocket--Hearts--Side_Spool_Mount",
+    "The_Rocket--Solid--Side_Spool_Mount",
+    "The_Rocket--Squares--Side_Spool_Mount",
+    "The_Rocket--Stars--Side_Spool_Mount",
+    "The_Rocket--Triangles--Side_Spool_Mount",
+)
+XBOX_GROUP = "Wallmount for Lenovo Tab M10 Plus Gen3 - 5461913"
+
+
+def _models(prefix: str, count: int, suffix: str = ".stl") -> Dict[str, int]:
+    """``count`` models under ``prefix``, named so the fixture never depends on order."""
+    return {f"{prefix}/part{index:02d}{suffix}": 10 for index in range(count)}
+
+
+def _root_models(count: int) -> Dict[str, int]:
+    """``count`` models at depth 0: the folder's own files, nothing below them."""
+    return {f"part{index:02d}.stl": 10 for index in range(count)}
+
+
+def stagetop_files() -> Dict[str, int]:
+    """``import/Stagetop`` by this module's own table: 45 in wave one, 15 in Wave 1.5.
+
+    The wave-one ``.stl`` sit one level down inside the group's own payload
+    directories (Core / Legs / Accessories / Rails) and the four ``.step`` files
+    sit beside ``PlayTile - Blank``'s four ``.stl``, so the shape is a real
+    nested tree rather than a flat list. ``PlayTiles/Accessory`` is a
+    ``title-name`` row on disk and is a group here too. The ``.step`` files are
+    what makes 60 and not 56: ``.step`` is a ``MODEL_SUFFIXES`` member, and the
+    plan's 56 was a ``.stl``-only count.
+    """
+    files: Dict[str, int] = {}
+    files.update(_models(f"{STAGETOP_WAVE_ONE}/Accessories", 5))
+    files.update(_models(f"{STAGETOP_WAVE_ONE}/Core", 3))
+    files.update(_models(f"{STAGETOP_WAVE_ONE}/Legs", 5))
+    for play_tile, count in (("PlayTile - 1x1", 4), ("PlayTile - 2x2", 4), ("PlayTile - 4x4", 3)):
+        files.update(_models(f"{STAGETOP_WAVE_ONE}/PlayTiles/{play_tile}", count))
+    blank = f"{STAGETOP_WAVE_ONE}/PlayTiles/PlayTile - Blank"
+    files.update(_models(blank, 4))
+    files.update(_models(blank, 4, suffix=".step"))
+    files.update(_models(f"{STAGETOP_WAVE_ONE}/PlayTiles/Accessory", 4))
+    files.update(_models(f"{STAGETOP_WAVE_ONE}/Rails/Rail - Elite", 5))
+    files.update(_models(f"{STAGETOP_WAVE_ONE}/Rails/Rail - Standard", 4))
+    files.update(_models(STAGETOP_WAVE, 15))
+    return files
+
+
+def rocket_files() -> Dict[str, int]:
+    """``import/Rocket Filement support``: 8 groups of 12, six real plus six AppleDouble."""
+    files: Dict[str, int] = {}
+    for group in ROCKET_GROUPS:
+        files.update(_models(f"{group}/files", 6))
+        files.update({f"{group}/__MACOSX/files/._part{index:02d}.stl": 10 for index in range(6)})
+    return files
+
+
+def xbox_files() -> Dict[str, int]:
+    """``import/xbox360_shell``: 27 of its own models plus one foreign group of 4."""
+    files = _root_models(27)
+    files.update(_models(f"{XBOX_GROUP}/files", 4))
+    return files
+
+
+def test_a_compound_folder_is_low_name_derived_and_names_every_group() -> None:
+    """60 parts in two editions is ONE low row that names both groups.
+
+    Mutation: drop ``dataclasses.replace(facts, groups=groups)`` and the row loses
+    its breakdown; count ``.stl`` only and 60 becomes 56 with groups 41/15, which
+    is the plan's stale number rather than this module's own suffix table.
+    """
+    facts = bundle_detect.compound_bundle_facts(snapshot(STAGETOP, stagetop_files()))
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_COMPOUND
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+    assert facts.metadata_shape == bundle_detect.SHAPE_COMPOUND
+    assert facts.counts.model == 60
+    assert facts.groups == (
+        bundle_detect.BundleGroup(STAGETOP_WAVE_ONE, 45, False),
+        bundle_detect.BundleGroup(STAGETOP_WAVE, 15, False),
+    )
+    assert bundle_detect._compound_family_token(facts.groups) == "wave"
+    assert facts.title == bundle_detect.display_name(STAGETOP) == "Stagetop"
+    # LOW and name-derived: nothing here states provenance.
+    assert facts.creator is None
+    assert facts.licence is None
+    assert facts.licence_url is None
+    assert facts.source_url is None
+    assert facts.thing_id is None
+    assert facts.description is None
+
+
+def test_detect_bundle_still_refuses_the_snapshot_compound_facts_offers() -> None:
+    """R7 is not a ``detect_bundle`` branch: the folder walk is deepest-first.
+
+    Mutation: add a compound branch to ``detect_bundle_decision`` and this very
+    snapshot starts answering from a walk pass that would hand the parent's row
+    to its first child - the reason R5 is a post-pass too.
+    """
+    files = stagetop_files()
+
+    assert bundle_detect.compound_bundle_facts(snapshot(STAGETOP, files)) is not None
+    assert bundle_detect.detect_bundle(snapshot(STAGETOP, files), {}) is None
+
+
+def test_repository_metadata_refuses_a_compound() -> None:
+    """A checkout holding several products is descended, never merged into one row.
+
+    Mutation: drop the marker leg and a git dump with a shared token becomes a
+    compound row - endorphin's failure mode. Both reachable marker shapes are
+    covered: a hidden FILE the walk yields (``Gemfile``) and a Jekyll entry
+    (``_layouts/``), since hidden DIRECTORIES are pruned before this module sees
+    them. The NEGATIVE witness is a marker one level INSIDE a group: the marker
+    leg is the folder's own first segments only, so a payload ``Gemfile`` is not
+    evidence about the folder being judged.
+    """
+    for marker in ("Gemfile", "_layouts/page.html"):
+        files = dict(stagetop_files())
+        files[marker] = 10
+        assert bundle_detect.compound_bundle_facts(snapshot(STAGETOP, files)) is None, marker
+
+    deep_marker = dict(stagetop_files())
+    deep_marker[f"{STAGETOP_WAVE_ONE}/Gemfile"] = 10
+    assert bundle_detect.compound_bundle_facts(snapshot(STAGETOP, deep_marker)) is not None
+
+
+def test_two_groups_with_their_own_vendor_ids_are_not_compound() -> None:
+    """Each group carrying its own thing id is its own product, not a part.
+
+    Mutation: drop the own-id leg and two shipped products merge on nothing but a
+    shared word. The family token is asserted to EXIST here, so the refusal
+    cannot be the Leg A token leg wearing the own-id leg's name.
+    """
+    files = dict(_models("Octopus Enclosure - 5414731/files", 4))
+    files.update(_models("Octopus Mount - 4591932/files", 2))
+    judged = snapshot("Unsorted", files)
+
+    assert bundle_detect._compound_family_token(bundle_detect.compound_groups(judged)) == "octopus"
+    assert bundle_detect.compound_bundle_facts(judged) is None
+
+
+def test_a_foreign_group_is_named_and_never_split() -> None:
+    """27 own models plus somebody else's 4 is ONE row that names the foreign group.
+
+    Mutation: split on the foreign group and its 4 parts become a second row;
+    drop the group breakdown and the operator cannot see what to split at
+    confirmation (C2).
+    """
+    facts = bundle_detect.compound_bundle_facts(snapshot("xbox360_shell", xbox_files()))
+
+    assert facts is not None
+    assert facts.detector == bundle_detect.DETECTOR_COMPOUND
+    assert facts.confidence == bundle_detect.CONFIDENCE_LOW
+    assert facts.counts.model == 31
+    assert facts.groups == (bundle_detect.BundleGroup(XBOX_GROUP, 4, True),)
+
+
+def test_a_foreign_group_is_known_by_its_own_root_document() -> None:
+    """``<group>/README.txt`` is somebody's thing; ``<group>/docs/README.txt`` is payload.
+
+    Mutation: match the document at any depth and every group that vendors a docs
+    folder reads as foreign, which turns ordinary piles into compounds. All three
+    stems the predicate accepts are covered - ``readme``/``license``/``licence`` -
+    so a narrowed stem set reds here rather than silently losing a foreign flag.
+    """
+    group = "Gadget Bracket"
+    for document in ("README.txt", "LICENSE.txt", "LICENCE"):
+        shallow = {f"{group}/part00.stl": 10, f"{group}/{document}": 10}
+        assert bundle_detect.compound_groups(snapshot("shallow", shallow))[0].foreign is True, document
+
+    deep = {f"{group}/part00.stl": 10, f"{group}/docs/README.txt": 10}
+    assert bundle_detect.compound_groups(snapshot("deep", deep))[0].foreign is False
+
+    own_heavy = _root_models(3)
+    own_heavy.update(deep)
+    assert bundle_detect.compound_bundle_facts(snapshot("deep", own_heavy)) is None
+
+
+def test_leg_b_does_not_merge_two_readme_bearing_unrelated_groups() -> None:
+    """Two README-bearing sub-projects under a root-heavy folder stay refused.
+
+    Mutation: drop Leg B's ``any(COMPOUND_FOREIGN_ID ...)`` requirement and two
+    unrelated projects merge into one row on nothing but "the folder's own models
+    are the majority".
+    """
+    files = _root_models(27)
+    files.update({"Widget Case/part00.stl": 10, "Widget Case/README.txt": 10})
+    files.update({"Gadget Stand/part00.stl": 10, "Gadget Stand/README.txt": 10})
+    judged = snapshot("pile", files)
+
+    assert [group.foreign for group in bundle_detect.compound_groups(judged)] == [True, True]
+    assert bundle_detect.compound_bundle_facts(judged) is None
+
+
+def test_leg_b_needs_every_group_foreign_and_dominant_own_models() -> None:
+    """Leg B's three bounds, each with the shape that breaks it.
+
+    Mutation: drop ``all(foreign)`` and the folder's own sub-project is swallowed;
+    drop the majority floor and 4 own models claim a 10-model pile; drop the
+    vendor-id requirement (the previous test's shape) and unrelated groups merge.
+    The passing shape shares NO token between its groups, which proves Leg B asks
+    for no family evidence: the vendor id and the majority are its evidence.
+    """
+    # (a) one foreign group beside one group of the folder's own: refused.
+    one_own = _root_models(27)
+    one_own.update(_models("Widget Mount - 5461913/files", 2))
+    one_own.update(_models("Gadget Bracket/files", 2))
+
+    # (b) every group foreign with a vendor id, own models the minority: the
+    # anti-swallow floor refuses.
+    minority = _root_models(4)
+    minority.update(_models("Widget Mount - 5461913/files", 5))
+    minority.update(_models("Gadget Bracket/files", 5))
+    minority.update({"Gadget Bracket/README.txt": 10})
+
+    # (c) the passing shape.
+    passing = _root_models(27)
+    passing.update(_models("Widget Mount - 5461913/files", 2))
+    passing.update(_models("Gadget Bracket/files", 2))
+    passing.update({"Gadget Bracket/README.txt": 10})
+
+    assert bundle_detect.compound_bundle_facts(snapshot("one-own", one_own)) is None
+    assert bundle_detect.compound_bundle_facts(snapshot("minority", minority)) is None
+
+    facts = bundle_detect.compound_bundle_facts(snapshot("passing", passing))
+    assert facts is not None
+    assert facts.groups == (
+        bundle_detect.BundleGroup("Gadget Bracket", 2, True),
+        bundle_detect.BundleGroup("Widget Mount - 5461913", 2, True),
+    )
+    assert bundle_detect._compound_family_token(facts.groups) is None
+
+
+def test_two_groups_with_their_own_vendor_ids_refuse_the_leg_b_shape() -> None:
+    """The own-id refusal and the group floor are ONE constant, and this is its witness.
+
+    The shape is Leg B on every other count - models of its own, a strict majority,
+    every group foreign, vendor ids present - and only the own-id refusal keeps it
+    from being one row. Mutation: raise ``COMPOUND_MIN_GROUPS`` and this folder
+    becomes compound, because two own ids no longer reach the threshold that is
+    also the group floor. That is the drift the single constant is meant to be
+    honest about.
+    """
+    files = _root_models(27)
+    files.update(_models("Gadget Mount - 1234567/files", 2))
+    files.update(_models("Widget Bracket - 7654321/files", 2))
+    judged = snapshot("pile", files)
+
+    groups = bundle_detect.compound_groups(judged)
+    assert all(group.foreign for group in groups), "every group looks foreign"
+    assert all(bundle_detect.COMPOUND_OWN_ID.search(group.name) for group in groups), "and every group is a product"
+    assert bundle_detect.compound_bundle_facts(judged) is None
+
+
+def test_a_family_token_must_be_a_word() -> None:
+    """A shared token only binds two groups when it is a product word.
+
+    Every refused pair below shares exactly ONE token, so the refusal cannot be
+    "no token at all": ``the`` is refused TWICE over (it is glue and it is not
+    strictly longer than the length floor), ``with`` is glue and the only glue
+    word the length floor does not also refuse, ``files`` is a part name, ``abc``
+    is not strictly longer than the floor, and ``2024`` is all digits. Emptying
+    ``COMPOUND_GLUE_TOKENS`` is what makes ``with widget``/``with gadget`` a
+    compound, which is why that pair is the glue table's behavioural witness.
+    The final pair shares ``wander`` and must FIRE, so the table cannot pass by
+    refusing every shape thrown at it.
+    """
+    pairs = {
+        "the": ("the widget", "the gadget", False),
+        "with": ("with widget", "with gadget", False),
+        "files": ("files widget", "files gadget", False),
+        "abc": ("abc widget", "abc gadget", False),
+        "2024": ("2024 widget", "2024 gadget", False),
+        "wander": ("wander widget", "wander gadget", True),
+    }
+    for token, (first, second, fires) in pairs.items():
+        files = {f"{first}/part00.stl": 10, f"{second}/part00.stl": 10}
+        judged = snapshot("family", files)
+        groups = bundle_detect.compound_groups(judged)
+        assert bundle_detect._compound_tokens(first) & bundle_detect._compound_tokens(second) == {token}, token
+        facts = bundle_detect.compound_bundle_facts(judged)
+        assert (facts is not None) is fires, token
+        if fires:
+            assert facts is not None
+            assert bundle_detect._compound_family_token(groups) == token
+
+
+def test_compound_groups_are_a_function_of_the_tree_not_of_readdir_order() -> None:
+    """Casefold order, so two names that disagree with raw order still sort the same.
+
+    Mutation: sort on the raw name and ``Zeta Parts`` lands before ``alpha parts``;
+    the row's breakdown would then depend on which comparison the machine chose.
+    """
+    files = {"Zeta Parts/part00.stl": 10, "alpha parts/part00.stl": 10}
+
+    names = [group.name for group in bundle_detect.compound_groups(snapshot("parts", files))]
+
+    assert names == ["alpha parts", "Zeta Parts"]
+
+
+def test_apple_double_cruft_is_not_a_group() -> None:
+    """A top-level ``__MACOSX`` never names a group, but it is still a MODEL.
+
+    Mutation: group on ``parts[0]`` with no artifact check and the junk directory
+    becomes a group of its own (and changes a breakdown an operator reads). The
+    model count is pinned as UNCHANGED on purpose: the ``._*`` copies are real
+    files on the measured disk, which is why the Rocket reads 12 per group.
+    """
+    files = {"Widget Wrapper/part00.stl": 10, "__MACOSX/Widget Wrapper/._part00.stl": 10}
+    judged = snapshot("cruft", files)
+
+    assert [group.name for group in bundle_detect.compound_groups(judged)] == ["Widget Wrapper"]
+    assert bundle_detect._counts(judged).model == 2, "the cruft is still counted as a model"
+
+
+def test_a_single_model_bearing_group_is_not_compound() -> None:
+    """One group is a wrapper, not a product in several parts.
+
+    Mutation: lower ``COMPOUND_MIN_GROUPS`` to 1 and a plain wrapper with a
+    model-bearing child becomes a compound row. The last two shapes pin the two
+    bounds Leg B still needs: the vendor id, and a STRICT majority.
+    """
+    assert bundle_detect.compound_bundle_facts(snapshot("wrapper", dict(_models("Widget", 3)))) is None
+
+    readme_only = _root_models(3)
+    readme_only.update({"Gadget/part00.stl": 10, "Gadget/README.txt": 10})
+    assert bundle_detect.compound_bundle_facts(snapshot("readme-only", readme_only)) is None
+
+    equal = _root_models(3)
+    equal.update(_models("Widget Mount - 5461913/files", 3))
+    assert bundle_detect.compound_bundle_facts(snapshot("equal", equal)) is None
+
+
+def test_root_models_are_strictly_at_depth_zero_and_the_wave_15_leg_is_not_one_of_them() -> None:
+    """``root_model_count`` is depth 0 only; ``_own_depth_model_count`` cannot serve R7.
+
+    Mutation: build R7 on ``_own_depth_model_count`` and every wrapper with one
+    model-bearing child fires, because that function answers 15 for
+    ``import/Stagetop`` - the ``Wave 1.5`` models, which are a CHILD's pile, and
+    a wrapper would read them as a product of its own.
+    """
+    stagetop = snapshot(STAGETOP, stagetop_files())
+
+    assert bundle_detect.root_model_count(stagetop) == 0
+    assert bundle_detect._own_depth_model_count(stagetop) == 15, "the leg R7 must not use"
+
+    xbox = snapshot("xbox360_shell", xbox_files())
+    assert bundle_detect.root_model_count(xbox) == 27, "the foreign group's 4 are not the folder's own"
+    assert bundle_detect._own_depth_model_count(xbox) == 27
+
+
+def test_compound_facts_is_none_when_the_switch_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One switch turns R7 off for every caller, and the stamp is not order-dependent.
+
+    Mutation: read the flag anywhere but inside ``compound_bundle_facts`` (or
+    nowhere) and the rule cannot be turned off at all. The 8 x 12 Rocket pile is
+    the ticket's other witness: 96 parts in 8 groups while the switch is on. The
+    ``monkeypatch.context()`` restores the flag, so a later stamp comparison still
+    sees the shipped tables.
+    """
+    judged = snapshot("Rocket Filement support", rocket_files())
+
+    with monkeypatch.context() as patched:
+        patched.setattr(bundle_detect, "COMPOUND_BUNDLES_ENABLED", False)
+        assert bundle_detect.compound_bundle_facts(judged) is None
+
+    facts = bundle_detect.compound_bundle_facts(judged)
+    assert facts is not None
+    assert facts.counts.model == 96
+    assert tuple(group.name for group in facts.groups) == ROCKET_GROUPS
+    assert all(group.model_count == 12 for group in facts.groups)
+    assert bundle_detect._compound_family_token(facts.groups) == "mount"
+    assert bundle_detect.rule_set_stamp() == RULE_SET_STAMP, "the context restores the flag"

@@ -4740,3 +4740,505 @@ def test_the_enrich_budget_fits_inside_the_proxy_timeout() -> None:
     )
 
     assert budget < proxy_read_timeout_seconds()
+
+
+# --- R7: one product in many parts (Mf-8xrc) --------------------------------
+
+# The REAL names from the owner's library (Mf-5dnx). A friendlier invention would
+# pass the same predicates, so none of these may be renamed: the evidence R7 acts
+# on is the names themselves.
+STAGETOP = "Stagetop"
+STAGETOP_WAVE_ONE = "StageTop Wave One - Personal Use"
+STAGETOP_WAVE = "Wave 1.5"
+ROCKET = "Rocket Filement support"
+ROCKET_GROUPS = (
+    "The_Rocket--Circles--Side_Spool_Mount",
+    "The_Rocket--Dots--Side_Spool_Mount",
+    "The_Rocket--Flowers--Side_Spool_Mount",
+    "The_Rocket--Hearts--Side_Spool_Mount",
+    "The_Rocket--Solid--Side_Spool_Mount",
+    "The_Rocket--Squares--Side_Spool_Mount",
+    "The_Rocket--Stars--Side_Spool_Mount",
+    "The_Rocket--Triangles--Side_Spool_Mount",
+)
+XBOX = "xbox360_shell"
+XBOX_GROUP = "Wallmount for Lenovo Tab M10 Plus Gen3 - 5461913"
+
+# The measured Stagetop tree: 41 `.stl` and 4 `.step` in the first edition
+# across ten part folders, 15 models in the second. The 4 `.step` files sit
+# beside `PlayTiles/PlayTile - Blank`'s 4 `.stl`, and `.step` is a
+# MODEL_SUFFIXES member, which is why the row reads 60 and not 56.
+# `PlayTiles/Accessory` is a `title-name` row on disk and is a group here too.
+STAGETOP_LAYOUT = {
+    "Accessories": (5, 0),
+    "Core": (3, 0),
+    "Legs": (5, 0),
+    "PlayTiles/PlayTile - 1x1": (4, 0),
+    "PlayTiles/PlayTile - 2x2": (4, 0),
+    "PlayTiles/PlayTile - 4x4": (3, 0),
+    "PlayTiles/PlayTile - Blank": (4, 4),
+    "PlayTiles/Accessory": (4, 0),
+    "Rails/Rail - Elite": (5, 0),
+    "Rails/Rail - Standard": (4, 0),
+}
+
+# Each Rocket variant holds 6 real `.stl` under `<group>/<group>/` plus the 6
+# macOS AppleDouble `._*.stl` copies under `<group>/__MACOSX/<group>/`. Both
+# classify as MODEL, which is why the disk the owner measured says 12 per group
+# and 96 in total.
+ROCKET_MODELS_PER_GROUP = 6
+
+XBOX_OWN_MODELS = 27
+XBOX_GROUP_MODELS = 4
+XBOX_THING = 5461913
+
+ENDORPHIN = "endorphin"
+# The two groups carrying their own Thingiverse id: each is a whole product.
+ENDORPHIN_OWN_ID_GROUPS = (
+    "3D Printer Electronics Enclosure - 5414731",
+    "Ender 5 Dual Y Stepper NEMA 17 Mount - 4591932",
+)
+# The `STLs` subtree: three title-shaped, model-only payload directories sharing
+# the family token `stage`. This is exactly the case the ancestor repo-marker
+# rule exists for - without it R7 would swallow these three rows.
+ENDORPHIN_STAGE_GROUPS = ("stage-1", "stage-2", "stage-3")
+ENDORPHIN_MODEL_FILES = (
+    "btt-octopus-raspbery-pi-box-model_files",
+    "octopus-pi-case-remix-model_files",
+    "prusa-bear-btt-octopus-case-model_files",
+)
+ENDORPHIN_REPO_FILES = ("_layouts/x.html", "_sass/x.scss", "_includes/x.html", "_config.yml", "Gemfile")
+
+
+def write_group(folder: Path, models: int, *, steps: int = 0) -> None:
+    """One model-bearing group: its models, an image and a text at its OWN level.
+
+    The image and the text are what make the folder a ``generic-bundle``/LOW row
+    on its own with R7 switched off. Without them a directory holding only models
+    is refused by R3, and absorption would be indistinguishable from absence.
+    """
+    for index in range(models):
+        write_file(folder / f"part-{index}.stl", b"s" * 40)
+    for index in range(steps):
+        write_file(folder / f"part-{index}.step", b"s" * 40)
+    write_file(folder / "cover.jpg", b"j" * 40)
+    write_text(folder / "notes.txt", "print at 0.2mm\n")
+
+
+def write_thingiverse_docs(folder: Path, thing: int) -> None:
+    """The real README/LICENSE marker pair, so the folder is HIGH on its own."""
+    title = bundle_detect.display_name(folder.name)
+    write_text(folder / "README.txt", f"{title}\nCreated by Thingiverse user maker_{thing}\nLicensed under CC BY-NC\n")
+    write_text(
+        folder / "LICENSE.txt",
+        f"{title} by maker_{thing} on Thingiverse: https://www.thingiverse.com/thing:{thing}\n",
+    )
+
+
+def write_stagetop(storage: Path) -> tuple:
+    """The measured Stagetop tree; returns the eleven keys R7 absorbs, one row each.
+
+    Those keys are the rows the same fixture offers with ``COMPOUND_BUNDLES_ENABLED``
+    off, which is what makes them evidence of absorption rather than of absence.
+    """
+    root = storage / "import" / STAGETOP
+    keys: List[str] = []
+    for rel_dir, (models, steps) in STAGETOP_LAYOUT.items():
+        write_group(root / STAGETOP_WAVE_ONE / rel_dir, models, steps=steps)
+        keys.append(f"import/{STAGETOP}/{STAGETOP_WAVE_ONE}/{rel_dir}")
+    write_group(root / STAGETOP_WAVE, 15)
+    keys.append(f"import/{STAGETOP}/{STAGETOP_WAVE}")
+    return tuple(keys)
+
+
+def write_rocket(storage: Path) -> tuple:
+    """The measured Rocket tree: 8 variants of exactly 12 models each."""
+    root = storage / "import" / ROCKET
+    for group in ROCKET_GROUPS:
+        for index in range(ROCKET_MODELS_PER_GROUP):
+            write_file(root / group / group / f"part-{index}.stl", b"s" * 40)
+            write_file(root / group / "__MACOSX" / group / f"._part-{index}.stl", b"s" * 40)
+        write_file(root / group / "cover.jpg", b"j" * 40)
+        write_text(root / group / "notes.txt", "print at 0.2mm\n")
+    return tuple(f"import/{ROCKET}/{group}" for group in ROCKET_GROUPS)
+
+
+def write_xbox360(storage: Path) -> Path:
+    """27 models of the product's own, plus the foreign group it ships beside."""
+    root = storage / "import" / XBOX
+    for index in range(XBOX_OWN_MODELS):
+        write_file(root / f"shell-{index}.stl", b"s" * 40)
+    group = root / XBOX_GROUP
+    for index in range(XBOX_GROUP_MODELS):
+        write_file(group / f"bracket-{index}.stl", b"s" * 40)
+    write_thingiverse_docs(group, XBOX_THING)
+    return root
+
+
+def write_endorphin(storage: Path) -> Dict[str, str]:
+    """The git checkout holding five DIFFERENT products - the AC-3 regression.
+
+    Returns ``key -> detector`` for the rows it offers; R7 must not add, remove or
+    rewrite a single one of them.
+    """
+    root = storage / "import" / ENDORPHIN
+    for rel_path in ENDORPHIN_REPO_FILES:
+        write_text(root / rel_path, "bundle exec jekyll build\n")
+    expected: Dict[str, str] = {}
+    for name in ENDORPHIN_OWN_ID_GROUPS:
+        write_thingiverse_docs(root / name, int(name.rsplit("- ", 1)[1]))
+        write_file(root / name / "files" / "part.stl", b"s" * 40)
+        expected[f"import/{ENDORPHIN}/{name}"] = "thingiverse-readme"
+    for name in ENDORPHIN_STAGE_GROUPS:
+        write_file(root / "STLs" / name / "part.stl", b"s" * 40)
+        expected[f"import/{ENDORPHIN}/STLs/{name}"] = "title-name"
+    for name in ENDORPHIN_MODEL_FILES:
+        generic_bundle(root, name)
+        expected[f"import/{ENDORPHIN}/{name}"] = "generic-bundle"
+    return expected
+
+
+def refusal_ledger(report: Mapping) -> Dict[str, str]:
+    """Every refused path and the rule that refused it, keyed by storage-relative path."""
+    return {item["rel_path"]: item["rule"] for item in report["refused"]}
+
+
+def service_row(key: str) -> dict:
+    """One row read from ``bundle_service.build_report`` - the dict the route serves.
+
+    ``groups`` is not declared on ``BundleDetectItemOut`` yet (that model belongs
+    to the schema side of Mf-8xrc), and a response model silently drops a key it
+    does not declare, so the breakdown is read from the service while everything
+    else is asserted on the wire row. Both come from the same function, so the two
+    readings cannot disagree about a row.
+    """
+    report = bundle_service.build_report(limit=1000)
+    matches = [item for item in report["bundles"] if item["key"] == key]
+    assert len(matches) == 1, f"expected exactly one row for {key}: {report['bundles']}"
+    return matches[0]
+
+
+def test_service_stagetop_is_one_row_with_two_groups(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC: Stagetop is ONE row carrying its two editions and 60 parts.
+
+    Mutation: drop the post-pass and the eleven child rows come back (the
+    ``report["bundles"]`` shape reds); take ``folded`` instead of the claimed
+    ``work`` view and ``model_count`` reads 0 for the parent; skip the ledger
+    write and the ``member-of-bundle`` assertions red.
+    """
+    child_keys = write_stagetop(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    row = row_for(report, f"import/{STAGETOP}")
+    assert row["detector"] == "compound-bundle"
+    assert row["confidence"] == "low"
+    assert row["metadata_shape"] == "compound"
+    assert row["model_count"] == 60
+    assert service_row(f"import/{STAGETOP}")["groups"] == [
+        {"name": STAGETOP_WAVE_ONE, "model_count": 45, "foreign": False},
+        {"name": STAGETOP_WAVE, "model_count": 15, "foreign": False},
+    ]
+    assert [item for item in report["bundles"] if item["key"].startswith(f"import/{STAGETOP}/")] == []
+
+    ledger = refusal_ledger(report)
+    for key in child_keys:
+        assert ledger.get(key) == "member-of-bundle", f"{key} was a row and must be named as a member"
+
+
+def test_service_the_rocket_is_one_row_with_eight_groups(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC: the Rocket is ONE row with eight variants of exactly 12 models each.
+
+    The AppleDouble copies are counted on purpose: they are real files on the
+    measured disk and both they and the real `.stl` classify as MODEL, so a group
+    reads 12 and the row reads 96. Mutation: count only the real `.stl` and the
+    eight 12s become eight 6s; order the groups by anything but their name and the
+    name list reds.
+    """
+    group_keys = write_rocket(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    row = row_for(report, f"import/{ROCKET}")
+    assert row["detector"] == "compound-bundle"
+    assert row["confidence"] == "low"
+    assert row["model_count"] == 96
+    groups = service_row(f"import/{ROCKET}")["groups"]
+    assert [group["name"] for group in groups] == list(ROCKET_GROUPS)
+    assert [group["model_count"] for group in groups] == [12] * len(ROCKET_GROUPS)
+    assert all(group["foreign"] is False for group in groups)
+
+    ledger = refusal_ledger(report)
+    for key in group_keys:
+        assert ledger.get(key) == "member-of-bundle", key
+    assert [item for item in report["bundles"] if item["key"] != f"import/{ROCKET}"] == []
+
+
+def test_service_a_git_dump_keeps_its_separate_product_rows(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-3: a checkout holding several different products keeps every row it has.
+
+    Two legs refuse ``import/endorphin`` twice over (its own repo markers, then two
+    groups carrying their own thing id), and the ancestor rule refuses
+    ``import/endorphin/STLs`` - the measured witness: its three ``stage-N``
+    directories share the token ``stage`` and would otherwise be compounded,
+    swallowing three title-name rows. Mutation: drop ``has_repo_markers`` and the
+    checkout is STILL refused twice over by ``compound_bundle_facts`` on the two
+    own-id groups (``5414731``, ``4591932``); what actually reds under that
+    mutation is ``_inside_repository_dump``, because ``repo_dumps`` goes empty and
+    ``import/endorphin/STLs`` is compounded and swallows the three title-name
+    rows. Keep the marker test to the key only (no ancestor walk) and the same
+    three rows are swallowed, so the ancestor leg is the one this test proves.
+    """
+    expected = write_endorphin(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    rows = {
+        item["key"]: item["detector"]
+        for item in report["bundles"]
+        if item["key"].startswith(f"import/{ENDORPHIN}")
+    }
+    assert rows == expected
+    assert "import/endorphin/STLs" not in rows
+    assert "compound-bundle" not in {item["detector"] for item in report["bundles"]}
+
+
+def test_service_xbox360_shell_has_a_row_covering_its_own_models_and_naming_the_foreign_group(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC: the parent's 27 invisible models come back, and the foreign group is NAMED.
+
+    Owner decision 2: ONE row with the foreign group flagged, never a split. The
+    absorbed ``Wallmount ...`` row is HIGH and the compound row is LOW - that
+    low-suppresses-high absorption is deliberate, and the ledger plus the group
+    name are what keep it recoverable at create time (C2). Mutation: drop Leg B
+    and the parent keeps no row at all, so ``row_for`` finds nothing and its 27
+    models stay invisible.
+    """
+    write_xbox360(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    row = row_for(report, f"import/{XBOX}")
+    assert row["detector"] == "compound-bundle"
+    assert row["confidence"] == "low"
+    assert row["model_count"] == XBOX_OWN_MODELS + XBOX_GROUP_MODELS
+    assert service_row(f"import/{XBOX}")["groups"] == [
+        {"name": XBOX_GROUP, "model_count": XBOX_GROUP_MODELS, "foreign": True}
+    ]
+    assert [item for item in report["bundles"] if item["key"].startswith(f"import/{XBOX}/")] == []
+
+    ledger = refusal_ledger(report)
+    assert ledger.get(f"import/{XBOX}/{XBOX_GROUP}") == "member-of-bundle"
+
+    candidates, _truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    compound = [candidate for candidate in candidates if candidate.key == f"import/{XBOX}"]
+    assert len(compound) == 1
+    own = bundle_service._own_paths(compound[0].key, compound[0])
+    for index in range(XBOX_OWN_MODELS):
+        assert f"import/{XBOX}/shell-{index}.stl" in own
+
+
+def test_service_a_compound_row_creates_one_project_with_every_part(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A compound row is creatable on the same terms as any other folder row.
+
+    The folder resolves, so the row is ``ready`` like every other row, and one
+    create makes ONE project attaching all 31 models: the 27 of the product's own
+    and the foreign group's 4, because ``_own_paths`` is the whole subtree rather
+    than a claimed-children view. The ``contains_bundles`` belt cannot fire here -
+    ``own_assets == assets`` - and splitting the foreign group is C2's job
+    (``Mf-ao6r``), not this slice's. Mutation: give the compound candidate a
+    closed snapshot instead of the whole subtree and the 4 foreign models drop out
+    of the create, or the belt reds and nothing is created.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+
+    created = create(client, headers, [{"key": f"import/{XBOX}"}])
+
+    assert created["created"] == 1
+    assert created["failed"] == 0
+    assert member_count(created["results"][0]["project_id"]) == XBOX_OWN_MODELS + XBOX_GROUP_MODELS
+
+
+def test_service_a_folder_with_one_model_bearing_group_is_not_compound(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A wrapper holding ONE model-bearing group stays exactly as it is today.
+
+    One group is a plain wrapper, not "several parts", so R7 must not fire. The
+    wrapper is named in lowercase on purpose: a title-shaped wrapper with one
+    model-bearing child is already offered by R5, which is what the
+    ``root_model_count`` leg inside R7 exists to avoid copying. Mutation: drop
+    the two-group floor and this wrapper gains a compound row beside its child.
+    """
+    write_group(isolated_storage / "import" / "wrapper" / "one product", 2)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    assert row_for(report, "import/wrapper/one product")["detector"] == "generic-bundle"
+    assert [item for item in report["bundles"] if item["key"] == "import/wrapper"] == []
+
+
+def test_service_a_bundle_that_is_already_offered_is_never_compounded(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The overlap guard: a directory any rule already offered is never compounded.
+
+    The family here answers every predicate R7 has - two groups sharing the token
+    ``mount``, no models at the parent's own depth - but the parent is a HIGH
+    ``thingiverse-readme`` row already, so the post-pass must skip it and leave it
+    byte-for-byte as it was. Mutation: drop the ``key in offered`` guard and the
+    high row becomes a LOW compound row, i.e. a rewrite of a verdict no rule
+    disputed.
+    """
+    family = isolated_storage / "import" / "Spool Holder Family"
+    write_thingiverse_docs(family, 777777)
+    for group in ROCKET_GROUPS[:2]:
+        write_file(family / group / "part.stl", b"s" * 40)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    assert len(report["bundles"]) == 1
+    row = row_for(report, "import/Spool Holder Family")
+    assert row["detector"] == "thingiverse-readme"
+    assert row["confidence"] == "high"
+    assert row["model_count"] == 2
+    assert service_row("import/Spool Holder Family")["groups"] == []
+    assert "compound-bundle" not in {item["detector"] for item in report["bundles"]}
+
+
+def test_service_an_offered_low_folder_is_never_recompounded(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The overlap guard on the row it is the ONLY protection for: an offered LOW one.
+
+    ``import/Rig`` is offered at LOW by R3 (five own models, an image and a text)
+    and is ALSO Leg B's shape: every group below it is foreign, the two foreign
+    groups hold four models against the folder's five, and one carries a vendor
+    id. The ``thingiverse-readme`` parent in the test above is refused by
+    ``_compound_absorbs`` for a different reason, so this fixture is the witness
+    for the offered-key guard itself. Mutation: delete ``key in offered`` from
+    ``_compound_pass`` and the LOW ``generic-bundle`` row is rewritten into a LOW
+    ``compound-bundle`` row, i.e. a verdict no rule disputed is replaced.
+    """
+    rig = isolated_storage / "import" / "Rig"
+    for index in range(5):
+        write_file(rig / f"shell-{index}.stl", b"s" * 40)
+    write_file(rig / "cover.jpg", b"j" * 40)
+    write_text(rig / "notes.txt", "print at 0.2mm\n")
+    for index in range(2):
+        write_file(rig / "Gizmo Mount Kit - 5461913" / "files" / f"part-{index}.stl", b"s" * 40)
+        write_file(rig / "Other Vendor" / "files" / f"part-{index}.stl", b"s" * 40)
+    write_text(rig / "Other Vendor" / "README.txt", "print at 0.2mm\n")
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    assert {item["key"] for item in report["bundles"]} == {"import/Rig"}
+    row = row_for(report, "import/Rig")
+    assert row["detector"] == "generic-bundle"
+    assert row["metadata_shape"] == "generic"
+    assert "compound-bundle" not in {item["detector"] for item in report["bundles"]}
+    # Both group directories already sit below an OFFERED row, so the existing
+    # reconciliation names them ``member-of-bundle``; the guard must not change
+    # that, and the post-pass must add no row of its own.
+    ledger = refusal_ledger(report)
+    for key in ("import/Rig/Gizmo Mount Kit - 5461913", "import/Rig/Other Vendor"):
+        assert ledger.get(key) == "member-of-bundle", key
+
+
+def test_service_a_leg_a_family_never_absorbs_a_high_row(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """Two whole HIGH exports sharing a word are a pile, not one product in parts.
+
+    ``vendor/`` holds two real Thingiverse exports of one model each, so both are
+    ``thingiverse-readme``/``high``, and nothing is offered at ``vendor``'s own
+    depth. Leg A fires on the shared token ``bundle``. Mutation: delete the
+    STRONG-row half of ``_compound_absorbs`` and the two undisputed HIGH verdicts
+    collapse into one LOW row: the rule would rewrite verdicts no rule disputed.
+
+    The second case is the witness for WHICH count the bound asks. ``vendor2``
+    holds ``Kits Alpha`` (models at depth 1) and ``Kits Inner`` (a real
+    Thingiverse marker pair two levels down, so a ``thingiverse-readme``/``high``
+    row). The two names share exactly one token, ``kits``, so Leg A fires on
+    ``vendor2`` and the absorbed set holds that HIGH row. ``root_model_count``
+    answers 0 and refuses it; ``_own_depth_model_count`` would answer 4 from its
+    single-unnamed-subdirectory leg - it sees only ``Kits Alpha``'s depth-1
+    models - and would let the row be captured. This is the shape ADR
+    superseding-condition 1 forbids: a Leg A family must never absorb a HIGH row.
+    ``Kits Alpha`` is itself offered as a LOW ``title-name`` row, so the bound has
+    to refuse a mixed set rather than a set of HIGH rows alone.
+    """
+    vendor = isolated_storage / "vendor"
+    thingiverse_bundle(vendor, "Alpha Bundle", 111111)
+    thingiverse_bundle(vendor, "Beta Bundle", 222222)
+    kits = isolated_storage / "vendor2"
+    for index in range(4):
+        write_file(kits / "Kits Alpha" / f"part-{index}.stl", STL_BYTES)
+    write_thingiverse_docs(kits / "Kits Inner" / "inner", 333333)
+    for index in range(4):
+        write_file(kits / "Kits Inner" / "inner" / f"part-{index}.stl", STL_BYTES)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    high_keys = {"vendor/Alpha Bundle", "vendor/Beta Bundle", "vendor2/Kits Inner/inner"}
+    assert {item["key"] for item in report["bundles"]} == high_keys | {"vendor2/Kits Alpha"}
+    for key in high_keys:
+        row = row_for(report, key)
+        assert row["detector"] == "thingiverse-readme", key
+        assert row["confidence"] == "high", key
+    assert "compound-bundle" not in {item["detector"] for item in report["bundles"]}
+    for parent in ("vendor", "vendor2"):
+        assert [item for item in report["bundles"] if item["key"] == parent] == [], parent
+
+
+def test_service_the_switch_off_restores_every_absorbed_row(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turning R7 off gives every absorbed row back, and only R7 moves them.
+
+    ``COMPOUND_BUNDLES_ENABLED`` is read inside ``compound_bundle_facts`` and
+    nowhere else, so one switch is the whole difference between one row and eleven.
+    Mutation: read the switch in the service instead of the rule, or cache facts,
+    and the two reports stop moving together.
+    """
+    child_keys = write_stagetop(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(bundle_detect, "COMPOUND_BUNDLES_ENABLED", False)
+        without = detect(client, headers, limit=1000)
+
+    with_rule_on = detect(client, headers, limit=1000)
+
+    assert {item["key"] for item in without["bundles"]} == set(child_keys)
+    assert f"import/{STAGETOP}" not in {item["key"] for item in without["bundles"]}
+    assert [item["key"] for item in with_rule_on["bundles"]] == [f"import/{STAGETOP}"]

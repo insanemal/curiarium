@@ -385,6 +385,14 @@
         ],
         "title": "Existing Project Name"
       },
+      "groups": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleGroupOut"
+        },
+        "title": "Groups",
+        "type": "array"
+      },
       "image_count": {
         "default": 0,
         "title": "Image Count",
@@ -753,6 +761,30 @@
       }
     },
     "title": "BundleEnrichmentOut",
+    "type": "object"
+  },
+  "BundleGroupOut": {
+    "description": "One model-bearing group inside a compound folder, and whether it is somebody else's thing.",
+    "properties": {
+      "foreign": {
+        "title": "Foreign",
+        "type": "boolean"
+      },
+      "model_count": {
+        "title": "Model Count",
+        "type": "integer"
+      },
+      "name": {
+        "title": "Name",
+        "type": "string"
+      }
+    },
+    "required": [
+      "name",
+      "model_count",
+      "foreign"
+    ],
+    "title": "BundleGroupOut",
     "type": "object"
   },
   "BundleRefusalOut": {

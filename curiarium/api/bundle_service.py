@@ -275,7 +275,11 @@ class BundleCandidate:
     offered at LOW even when no rule offers the directory on its own and it is
     creatable like any other LOW candidate. ``title_name`` means the row exists
     only because the folder's NAME reads like a title, so its facts come from
-    ``bundle_detect.title_name_facts`` and its confidence is LOW.
+    ``bundle_detect.title_name_facts`` and its confidence is LOW. ``compound``
+    means the row exists only because the folder holds ONE product in several
+    model-bearing parts, so its facts come from
+    ``bundle_detect.compound_bundle_facts``, its confidence is LOW, and it
+    carries a group breakdown.
     """
 
     key: str
@@ -287,6 +291,7 @@ class BundleCandidate:
     pair_only: bool = False
     archive_owned: bool = False
     title_name: bool = False
+    compound: bool = False
 
     @property
     def offers_archive_only(self) -> bool:
@@ -551,6 +556,171 @@ def _walk_tree(root: Path) -> Tuple[Dict[str, List[Tuple[str, int]]], Dict[str, 
             truncated = True
             break
     return files_by_dir, dirs_by_parent, truncated
+
+
+def _inside_repository_dump(key: str, repo_dumps: AbstractSet[str]) -> bool:
+    """Whether ``key`` IS a repository dump, or sits inside one.
+
+    A payload directory inside a checkout is part of that checkout's own tree:
+    ``import/endorphin/STLs`` shares one family token over its three
+    ``stage-N`` directories and would otherwise be compounded, swallowing three
+    title-name rows of a checkout that holds five DIFFERENT products. Nothing
+    strictly below a marker-bearing root may be compounded. Walks the ancestors
+    with ``_parent``, so the cost is the key's own depth.
+    """
+    if key in repo_dumps:
+        return True
+    parent = _parent(key)
+    while parent:
+        if parent in repo_dumps:
+            return True
+        parent = _parent(parent)
+    return False
+
+
+def _compound_absorbs(absorbed: Sequence[BundleCandidate], snapshot: bundle_detect.BundleSnapshot) -> bool:
+    """Whether a compound row may absorb the rows below it.
+
+    A Leg A family - models only in subdirectories - generalises LOW guesses: the
+    ten Stagetop children and the eight Rocket variants are exactly the rows R7
+    exists to replace. It must never replace a STRONGER rule's verdict instead.
+    ``vendor/`` holding two Thingiverse exports that happen to share the word
+    "bundle" is a pile of two whole products rather than one product in two
+    parts, and the container rule already reads it that way; absorbing its rows
+    would rewrite two verdicts no rule disputed and lower a HIGH row to LOW.
+
+    A folder that holds models of its OWN is the other shape (Leg B,
+    ``import/xbox360_shell``): its 27 models are invisible today because the
+    parent is refused as a container, so absorbing the foreign HIGH row beside
+    them is owner decision 2 - "one row, with the foreign group flagged". The
+    group name and the ledger entry keep that evidence recoverable.
+
+    The question "does this folder hold its own models" is asked through
+    ``bundle_detect.root_model_count`` and not re-implemented here: the strict
+    depth-0 reading is the same one that separates R7's two legs, and a second
+    copy of it would be free to drift.
+    """
+    if not any(candidate.confidence in bundle_detect.STRONG_CONFIDENCES for candidate in absorbed):
+        return True
+    return bundle_detect.root_model_count(snapshot) >= 1
+
+
+def _compound_pass(
+    folded: Mapping[str, Sequence[bundle_detect.BundleEntry]],
+    files_by_dir: Mapping[str, Sequence[Tuple[str, int]]],
+    found: Sequence[BundleCandidate],
+    refusals: Dict[str, str],
+) -> List[BundleCandidate]:
+    """R7: turn a folder holding ONE product in several parts into one row.
+
+    **Why a post-pass and not a ``detect_bundle`` branch.** The folder walk is
+    deepest-first, so a branch inside the detector would hand ``Stagetop``'s row
+    to its first child and lose the row that child owns. Running at the end means
+    a compound row can only ever ABSORB rows that are already final, and it names
+    each of them in the ledger.
+
+    **Why ``folded`` and not ``work``.** ``work[rel_dir]`` has already had its
+    claimed children stripped by ``_forget_claimed_subtree``, so it reads 0
+    models for ``import/Stagetop``; ``folded`` is the unclaimed full-subtree
+    listing, which is exactly what the row's counts have to describe (``Stagetop``
+    reads 60, the Rocket 96, ``import/xbox360_shell`` 31 = 27 own + 4 foreign).
+
+    **The overlap guard.** A key that is already a row, or that sits strictly
+    inside one, is never compounded. R7 can therefore never lower, split or
+    rewrite the verdict for a directory any rule already offered - which is what
+    keeps ADR 0010 Decision 15's container rule intact for ``endorphin`` and every
+    other tree. A compound row is likewise never judged by
+    ``iter_bundle_candidates``' container strip at all: it is created after the
+    strip has run.
+
+    **Absorption is bounded by evidence.** A compound may only absorb rows no
+    stronger than what its own shape generalises: a Leg A family (models only in
+    subdirectories) replaces LOW guesses, while absorbing a STRONG row needs the
+    Leg B shape, where the folder's own models are the ones the container rule
+    made invisible. See ``_compound_absorbs`` for the measured pile that bound
+    exists for.
+
+    **The absorption is deliberately low-suppresses-high.**
+    ``import/xbox360_shell``'s foreign ``Wallmount ...`` row is HIGH and is
+    absorbed by a LOW compound row. That is owner decision 2 - "one row, with the
+    foreign group flagged": the group NAME is preserved in the row's breakdown,
+    the absorbed key is named ``member-of-bundle`` in the ledger, and detection is
+    recomputed from disk at create time, so C2 recovers the high evidence.
+
+    The cost is honest rather than optimistic. ``repo_dumps`` builds ONE snapshot
+    for EVERY folded directory on every scan, before the loop can skip anything,
+    so the pass pays that full-tree read whether or not
+    ``COMPOUND_BUNDLES_ENABLED`` is on - the switch lives inside the rule, by
+    design, because a caller must not have to know it. Inside the loop the shape
+    is O(dirs x subtree entries) at worst, like ``_relates_to_any``, and every
+    key that is already a row or sits inside one is skipped before its own
+    snapshot is built. Shallowest-first, so a parent claims before its child.
+    """
+    offered = {candidate.key for candidate in found}
+    # A directory is a repository dump when its OWN immediate children carry a
+    # marker. A payload directory INSIDE a checkout is refused too - see
+    # `_inside_repository_dump` for the measured witness.
+    repo_dumps = {
+        key for key in folded if key and bundle_detect.has_repo_markers(_folder_snapshot(key, folded[key]))
+    }
+    archives = _zip_files(files_by_dir)
+    accepted: set = set()
+    compounds: List[BundleCandidate] = []
+    for key in sorted(folded, key=lambda item: (_depth(item), item.casefold(), item)):
+        if not key or key in offered:
+            continue
+        if _strictly_inside_any(key, offered) or _strictly_inside_any(key, accepted):
+            continue
+        if not folded.get(key):
+            continue
+        if _inside_repository_dump(key, repo_dumps):
+            continue
+        # The UNCLAIMED full-subtree listing, never `work[key]`: see the docstring.
+        snapshot = _folder_snapshot(key, folded[key])
+        facts = bundle_detect.compound_bundle_facts(snapshot)
+        if facts is None:
+            continue
+        # A pair-only row is a blocked archive-only fact the operator can see on
+        # disk, so it is never absorbed - only real rows are.
+        absorbed = [
+            candidate
+            for candidate in found
+            if (candidate.key == key or candidate.key.startswith(key + "/")) and not candidate.pair_only
+        ]
+        if not _compound_absorbs(absorbed, snapshot):
+            continue
+        absorbed_keys = {candidate.key for candidate in absorbed}
+        for absorbed_key in absorbed_keys:
+            # These were rows, so they had no ledger entry of their own yet: the
+            # override is what puts one there.
+            _refuse(refusals, absorbed_key, REFUSAL_MEMBER_OF_BUNDLE, override=True)
+        found = [candidate for candidate in found if candidate.key not in absorbed_keys]
+        for zip_rel in archives:
+            if not zip_rel.startswith(key + "/"):
+                continue
+            # An existing R3/R4/R5 reason is never rewritten. `scan_bundles`'
+            # reconciliation later relabels these archives `nested-member` because
+            # the compound key is a bundle directory - the correct Mf-74x5 answer
+            # for a zip inside a detected bundle - and it only ever edits the
+            # ledger, never the rows. This guard is outcome-dead: every zip below
+            # an accepted compound key is already in `nested`, and
+            # `_reconcile_refusals` assigns `nested-member` regardless of what is
+            # written here. It is kept as documentation of the intended ledger
+            # order, not as a protection - do not "harden" it later.
+            if refusals.get(zip_rel) is None or refusals.get(zip_rel) == REFUSAL_TWIN_CONSUMED:
+                _refuse(refusals, zip_rel, REFUSAL_MEMBER_OF_BUNDLE, override=True)
+        compounds.append(
+            BundleCandidate(
+                key=key,
+                snapshot=snapshot,
+                archive_path=None,
+                is_archive=False,
+                confidence=facts.confidence,
+                compound=True,
+            )
+        )
+        accepted.add(key)
+    return list(found) + compounds
 
 
 def _build_candidates(
@@ -911,6 +1081,12 @@ def _build_candidates(
             )
         )
 
+    # R7 runs last, and as a post-pass over the rows every other pass offered.
+    # Placed before the `with_twins` loop so the new row gets the same archive
+    # attachment and the same sort as every other row, and so every pass that
+    # decides every OTHER row is untouched.
+    found = _compound_pass(folded, files_by_dir, found, refusals)
+
     # A folder candidate's archive is provenance: reported, never a member. A row
     # that is already archive-only is reported as it was built.
     with_twins: List[BundleCandidate] = []
@@ -935,6 +1111,7 @@ def _build_candidates(
                 pair_only=candidate.pair_only,
                 archive_owned=candidate.archive_owned,
                 title_name=candidate.title_name,
+                compound=candidate.compound,
             )
         )
     with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
@@ -1590,6 +1767,12 @@ def _qualify(scope: str, rel_path: str) -> str:
 
 
 def _candidate_facts(root: Path, candidate: BundleCandidate) -> Optional[bundle_detect.BundleFacts]:
+    if candidate.compound:
+        # R7 is a post-pass: `_detect_folder` re-runs `detect_bundle`, which never
+        # knows the compound rule, so asking it here would answer None and drop the
+        # row. The facts are recomputed from the same snapshot the candidate was
+        # built from, so the row can never disagree with the candidate.
+        return bundle_detect.compound_bundle_facts(candidate.snapshot)
     if candidate.title_name:
         return bundle_detect.title_name_facts(candidate.snapshot)
     if candidate.pair_only or candidate.archive_owned:
@@ -1754,6 +1937,13 @@ def _report_row(
         "image_count": facts.counts.image,
         "text_count": facts.counts.text,
         "other_count": facts.counts.other,
+        # R7's breakdown: one entry per model-bearing group, so a row that covers
+        # 60 parts in two editions says so instead of showing an anonymous total.
+        # Empty for every row that is not compound.
+        "groups": [
+            {"name": group.name, "model_count": group.model_count, "foreign": group.foreign}
+            for group in facts.groups
+        ],
         "cover": _cover(own_assets, facts),
         "assets_total": len(assets),
         "status": status,

@@ -24,6 +24,15 @@ export type BundleArchive = {
   twin_verified: boolean;
 };
 
+/** One model-bearing group inside a compound folder (`compound-bundle` / low:
+ *  one product in several parts), and whether it is somebody else's thing. Only
+ *  a compound row fills this; every other row serves an empty list. */
+export type BundleGroup = {
+  name: string;
+  model_count: number;
+  foreign: boolean;
+};
+
 /** The rule set one report was decided against: the revision a report was taken
  *  at, and the stamp that proves what its tables were. The stamp is a sha256 of
  *  every row-deciding table, so two reports are comparable by value or provably
@@ -86,6 +95,11 @@ export type BundleDetectItem = {
   image_count: number;
   text_count: number;
   other_count: number;
+  // OPTIONAL on purpose, like the neighbouring fields: a payload from before the
+  // breakdown was served omits it, and every existing fixture must keep
+  // compiling. `undefined` means "the server did not say". Only a compound row
+  // fills it; no component reads it yet (C3/Mf-aaqi owns presentation).
+  groups?: BundleGroup[];
   cover: BundleCover;
   assets_total: number;
   status: string;
