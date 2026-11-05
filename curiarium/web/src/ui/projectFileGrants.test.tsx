@@ -100,6 +100,9 @@ function installFetchStub(): void {
       if (method === "GET" && (path.endsWith("/tags") || path.endsWith("/creators"))) {
         return jsonResponse([], 200);
       }
+      // The project grid now reads the tree for sectioning (Mf-aaqi); a bare
+      // `{}` here would throw inside the folder derivation.
+      if (method === "GET" && path.endsWith("/folders")) return jsonResponse([], 200);
       return jsonResponse({});
     }),
   );

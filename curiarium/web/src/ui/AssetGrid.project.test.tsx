@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRef } from "react";
 
-import type { Asset } from "../lib/api";
+import type { Asset, Folder } from "../lib/api";
 
 vi.mock("../lib/api", () => ({
   UnauthorizedError: class UnauthorizedError extends Error {},
@@ -196,6 +196,90 @@ function rectOf(top: number, height: number): DOMRect {
   } as DOMRect;
 }
 
+/** The measured Stagetop shape: a project folder, one wave, and Wave 1.5. */
+const stagetopFolders: Folder[] = [
+  { id: "f-top", name: "Stagetop", tags: [] },
+  { id: "f-wave1", name: "StageTop Wave One - Personal Use", tags: [], parent_id: "f-top" },
+  { id: "f-core", name: "Core", tags: [], parent_id: "f-wave1" },
+  { id: "f-acc", name: "Accessories", tags: [], parent_id: "f-wave1" },
+  { id: "f-legs", name: "Legs", tags: [], parent_id: "f-wave1" },
+  { id: "f-play", name: "PlayTiles", tags: [], parent_id: "f-wave1" },
+  { id: "f-wave15", name: "Wave 1.5", tags: [], parent_id: "f-top" },
+];
+
+/** One project member filed in `folderId`, with a stable, searchable id. */
+function memberIn(folderId: string, index: number): Asset {
+  const id = `${folderId}-${index}`;
+  return {
+    id,
+    name: `${folderId} part ${index}`,
+    filename: `${id}.stl`,
+    mime: "model/stl",
+    size: 1000,
+    tags: [],
+    url: `/api/assets/${id}/file`,
+    thumb_url: `/api/assets/${id}/thumb`,
+    supporting_file_count: 0,
+    folder_id: folderId,
+  };
+}
+
+/** 60 parts: Core 12, Accessories 9, Legs 6, PlayTiles 18, Wave 1.5 15. */
+function stagetopMembers(): Asset[] {
+  return [
+    ...Array.from({ length: 12 }, (_, index) => memberIn("f-core", index + 1)),
+    ...Array.from({ length: 9 }, (_, index) => memberIn("f-acc", index + 1)),
+    ...Array.from({ length: 6 }, (_, index) => memberIn("f-legs", index + 1)),
+    ...Array.from({ length: 18 }, (_, index) => memberIn("f-play", index + 1)),
+    ...Array.from({ length: 15 }, (_, index) => memberIn("f-wave15", index + 1)),
+  ];
+}
+
+/** Mounts the grid over the Stagetop shape: folders and 60 members loaded. */
+function renderStagetopProject(props: ProjectGridProps = {}) {
+  listFoldersMock.mockResolvedValue(stagetopFolders);
+  listProjectAssetsMock.mockResolvedValue({ items: stagetopMembers(), hasMore: false });
+  return renderProjectGrid(props);
+}
+
+/** The toolbar's sort select (the only combobox offering a `size` option). */
+function sortSelect(): HTMLSelectElement {
+  const select = screen
+    .getAllByRole("combobox")
+    .find(element =>
+      Array.from((element as HTMLSelectElement).options).some(option => option.value === "size"),
+    );
+  if (!select) throw new Error("sort select not found");
+  return select as HTMLSelectElement;
+}
+
+/** The project section with this exact aria-label, or null. */
+function projectSection(label: string): HTMLElement | null {
+  return (
+    Array.from(document.querySelectorAll<HTMLElement>("[data-project-section]")).find(
+      section => section.getAttribute("aria-label") === label,
+    ) ?? null
+  );
+}
+
+/** The asset ids of the cards rendered inside one section, in DOM order. */
+function sectionIds(section: HTMLElement): string[] {
+  return Array.from(section.querySelectorAll<HTMLElement>("[data-asset-id]")).map(
+    element => element.dataset.assetId as string,
+  );
+}
+
+/** The Stagetop shape with the Core members loaded in a deliberately reversed order. */
+function stagetopMembersReversedCore(): Asset[] {
+  return [
+    ...Array.from({ length: 12 }, (_, index) => memberIn("f-core", 12 - index)),
+    ...Array.from({ length: 9 }, (_, index) => memberIn("f-acc", index + 1)),
+    ...Array.from({ length: 6 }, (_, index) => memberIn("f-legs", index + 1)),
+    ...Array.from({ length: 18 }, (_, index) => memberIn("f-play", index + 1)),
+    ...Array.from({ length: 15 }, (_, index) => memberIn("f-wave15", index + 1)),
+  ];
+}
+
 beforeEach(() => {
   listAssetsMock.mockReset();
   listCreatorsMock.mockReset();
@@ -216,7 +300,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("AssetGrid in project mode", () => {
-  it("lists project assets through listProjectAssets and never touches folders", async () => {
+  it("lists project assets through listProjectAssets and reads the folder tree for sectioning", async () => {
     projectGrid();
 
     await screen.findByText("Calibration cube");
@@ -228,7 +312,10 @@ describe("AssetGrid in project mode", () => {
       tags: [],
     });
     expect(listAssetsMock).not.toHaveBeenCalled();
-    expect(listFoldersMock).not.toHaveBeenCalled();
+    // Mf-aaqi reverses the old "never touches folders" invariant on purpose:
+    // project mode reads the tree to section the members, and the tree never
+    // scopes the listing (membership does).
+    expect(listFoldersMock).toHaveBeenCalled();
     // Tag chips follow the open project now (Mf-o4vi), so they carry its id.
     expect(listTagsMock).toHaveBeenCalledWith({
       q: "",
@@ -241,6 +328,203 @@ describe("AssetGrid in project mode", () => {
       // project grid is never in missing mode, so it is false here.
       missing: false,
     });
+  });
+
+  it("sections a project's parts by folder and filters by wave", async () => {
+    renderStagetopProject();
+
+    await waitFor(() =>
+      expect(document.querySelectorAll("[data-project-section]")).toHaveLength(5),
+    );
+    // All 60 parts arrive in ONE page: the sections count the loaded rows, so
+    // a screenful-sized first page would under-report every section count.
+    expect(listProjectAssetsMock.mock.calls[0][0]).toMatchObject({ limit: 1000 });
+    // And all 60 render, because every section fits under the 24-card cap.
+    expect(document.querySelectorAll("[data-asset-id]")).toHaveLength(60);
+
+    const sections = Array.from(document.querySelectorAll<HTMLElement>("[data-project-section]"));
+    const summary = sections.map(section => ({
+      label: section.getAttribute("aria-label"),
+      count: section.querySelector("[data-section-count]")?.textContent,
+    }));
+    expect(summary).toEqual([
+      { label: "StageTop Wave One - Personal Use . Accessories", count: "9" },
+      { label: "StageTop Wave One - Personal Use . Core", count: "12" },
+      { label: "StageTop Wave One - Personal Use . Legs", count: "6" },
+      { label: "StageTop Wave One - Personal Use . PlayTiles", count: "18" },
+      { label: "Wave 1.5", count: "15" },
+    ]);
+
+    const listingCalls = listProjectAssetsMock.mock.calls.length;
+    fireEvent.click(screen.getByRole("radio", { name: "Wave 1.5 15" }));
+
+    expect(document.querySelectorAll("[data-asset-id]")).toHaveLength(15);
+    // Filtering is a predicate over the loaded members: no refetch, no request.
+    expect(listProjectAssetsMock).toHaveBeenCalledTimes(listingCalls);
+    expect(screen.getByText("Showing 15 of 60 parts in Wave 1.5")).toBeTruthy();
+  });
+
+  it("announces a partially loaded project as loaded and pages by the 1000-part page size", async () => {
+    const loaded = stagetopMembers();
+    const extra = memberIn("f-core", 13);
+    listFoldersMock.mockResolvedValue(stagetopFolders);
+    listProjectAssetsMock.mockResolvedValueOnce({ items: loaded, hasMore: true });
+    listProjectAssetsMock.mockResolvedValueOnce({ items: [extra], hasMore: false });
+
+    renderProjectGrid();
+
+    await waitFor(() =>
+      expect(document.querySelectorAll("[data-project-section]")).toHaveLength(5),
+    );
+
+    // The counts are the loaded page, and the live line says so rather than
+    // presenting the loaded total as the whole project.
+    const live = document.querySelector<HTMLElement>("[data-project-visible-count]");
+    expect(live?.textContent).toBe("Showing 60 of 60 loaded parts - more to load");
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+    await waitFor(() => expect(listProjectAssetsMock).toHaveBeenCalledTimes(2));
+    // Pins the loadMore page size: it must ask for the same 1000-part page as
+    // the first load, not a screenful.
+    expect(listProjectAssetsMock.mock.calls[1][0]).toMatchObject({
+      projectId: "p1",
+      limit: 1000,
+      offset: 60,
+    });
+
+    // The appended part renders inside its own section, and the fully loaded
+    // project drops the "loaded ... more to load" qualifier.
+    await waitFor(() => {
+      const core = projectSection("StageTop Wave One - Personal Use . Core");
+      expect(core).toBeTruthy();
+      expect(core?.querySelector('[data-asset-id="f-core-13"]')).toBeTruthy();
+    });
+    await waitFor(() =>
+      expect(
+        document.querySelector<HTMLElement>("[data-project-visible-count]")?.textContent,
+      ).toBe("Showing 61 of 61 parts"),
+    );
+  });
+
+  it("keeps the toolbar's sort order inside a section", async () => {
+    const loaded = stagetopMembersReversedCore();
+    listFoldersMock.mockResolvedValue(stagetopFolders);
+    listProjectAssetsMock.mockResolvedValue({ items: loaded, hasMore: false });
+
+    renderProjectGrid();
+
+    const coreLabel = "StageTop Wave One - Personal Use . Core";
+    await waitFor(() => expect(projectSection(coreLabel)).toBeTruthy());
+
+    const loadedCoreIds = loaded
+      .filter(item => item.folder_id === "f-core")
+      .map(item => item.id);
+    const initial = projectSection(coreLabel);
+    if (!initial) throw new Error("Core section not rendered");
+    // The DOM follows the loaded (server) order, not the alphabetical filename
+    // order the bucket itself carries.
+    expect(sectionIds(initial)).toEqual(loadedCoreIds);
+    expect(sectionIds(initial)).not.toEqual(
+      [...loadedCoreIds].sort((a, b) => a.localeCompare(b)),
+    );
+
+    const reversed = [...loaded].reverse();
+    listProjectAssetsMock.mockResolvedValueOnce({ items: reversed, hasMore: false });
+    fireEvent.change(sortSelect(), { target: { value: "size" } });
+
+    await waitFor(() =>
+      expect(listProjectAssetsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sort: "size" }),
+      ),
+    );
+    await waitFor(() => {
+      const updated = projectSection(coreLabel);
+      if (!updated) throw new Error("Core section disappeared");
+      expect(sectionIds(updated)).toEqual(
+        reversed.filter(item => item.folder_id === "f-core").map(item => item.id),
+      );
+    });
+  });
+
+  it("keeps the File type sort in a project on the grouped type branch", async () => {
+    renderStagetopProject();
+
+    await waitFor(() =>
+      expect(document.querySelectorAll("[data-project-section]")).toHaveLength(5),
+    );
+
+    fireEvent.change(sortSelect(), { target: { value: "type" } });
+
+    await waitFor(() => expect(document.querySelector("[data-project-section]")).toBeNull());
+    // The sectioned view (and its live count line) is gone: the type guard held.
+    expect(document.querySelector("[data-project-visible-count]")).toBeNull();
+    expect(document.querySelector("[data-project-sections]")).toBeNull();
+    // The grouped File type branch renders instead, under its own STL heading.
+    expect(await screen.findByText("STL")).toBeTruthy();
+  });
+
+  it("card checkboxes still drive the bulk bar in the sectioned view", async () => {
+    renderStagetopProject({ canContribute: true, canDelete: false });
+
+    await waitFor(() =>
+      expect(document.querySelectorAll("[data-project-section]")).toHaveLength(5),
+    );
+
+    fireEvent.click(checkboxFor("f-core-1"));
+
+    const bar = within(screen.getByTestId("bulk-action-bar"));
+    expect(bar.getByRole("button", { name: "Remove from project" })).toBeTruthy();
+    expect(bar.getByText("1 selected")).toBeTruthy();
+    expect(bar.queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
+  it("still renders every member of a folder-less project (unchanged flat grid)", async () => {
+    // The deliberately-unresolved degenerate case: a folder-less project keeps
+    // today's grid with no header and no filter row. The literal single-header
+    // alternative is a later decision, not a guess here.
+    listFoldersMock.mockResolvedValue([]);
+    listProjectAssetsMock.mockResolvedValue({
+      items: Array.from({ length: 3 }, (_, index) => makeSyntheticAsset(index + 1)),
+      hasMore: false,
+    });
+
+    renderProjectGrid();
+
+    expect(await screen.findByText("Asset 3")).toBeTruthy();
+    expect(screen.getByText("Asset 1")).toBeTruthy();
+    expect(document.querySelectorAll("[data-asset-id]")).toHaveLength(3);
+    expect(document.querySelector("[data-project-section]")).toBeNull();
+    expect(screen.queryByRole("radiogroup", { name: "Filter by folder" })).toBeNull();
+  });
+
+  it("falls back to the flat grid when the project's folder tree cannot be read", async () => {
+    // `handleApiError` reports the failure through console.error; keep the
+    // output clean while still letting the toast assertion see the report.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // A failed tree read must degrade presentation only: the members are
+      // still listed (membership, not the tree, scopes the listing), but the
+      // model sees no folder paths, so nothing may section.
+      listFoldersMock.mockRejectedValueOnce(new Error("folders down"));
+      listProjectAssetsMock.mockResolvedValue({ items: stagetopMembers(), hasMore: false });
+
+      renderProjectGrid();
+
+      await screen.findByText("f-core part 1");
+      await waitFor(() =>
+        expect(
+          getToasts().some(toast => toast.message === "Failed to load folders. Please refresh."),
+        ).toBe(true),
+      );
+
+      expect(document.querySelector("[data-project-section]")).toBeNull();
+      expect(screen.queryByRole("radiogroup", { name: "Filter by folder" })).toBeNull();
+      // The unchanged flat branch still renders the loaded members.
+      expect(document.querySelector("[data-virtual-grid]")).not.toBeNull();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it("hides every folder affordance", async () => {

@@ -1,10 +1,18 @@
-import { type RefObject } from "react";
+import { useMemo, type RefObject } from "react";
 
 import { type Asset, type Folder } from "../../lib/api";
 import { GRID_GAP_PX } from "../../lib/virtualGrid";
 import { type FilesScopeKind } from "../filesScope";
 import type { VirtualRowsResult } from "../useVirtualRows";
-import { GROUP_CARD_CAP, type GroupBucket, type MissingScanOutcome, type SortKey } from "./assetGridMeta";
+import {
+  GROUP_CARD_CAP,
+  SERVER_SORT_KEYS,
+  type GroupBucket,
+  type MissingScanOutcome,
+  type SortKey,
+} from "./assetGridMeta";
+import ProjectFolderSections from "./ProjectFolderSections";
+import { projectSectionModel } from "./projectSections";
 
 type AssetGridBodyProps = {
   /** Virtualization result from the root; its refs are attached verbatim. */
@@ -42,9 +50,11 @@ type AssetGridBodyProps = {
 };
 
 /**
- * The result area: grouped sections for the grouped sorts, the virtualized flat
- * grid otherwise, plus the empty hints and the "Load more" control. Owns no
- * effects and no state; every value comes from the root.
+ * The result area: the project's folder-sectioned view, grouped sections for
+ * the grouped sorts, or the virtualized flat grid otherwise, plus the empty
+ * hints and the "Load more" control. Owns no effects and no state; every value
+ * comes from the root (the project filter's own state lives in its child, and
+ * the section model is a `useMemo` derivation, not state).
  */
 export default function AssetGridBody({
   virtual,
@@ -90,6 +100,20 @@ export default function AssetGridBody({
   const unfiledScope = filesActive && scopeKind === "unfiled";
   const allFilesScope = filesActive && scopeKind === "all";
   const settled = !loading && !items.length && !error;
+
+  // A project's parts section by folder, two levels deep, from the folder tree
+  // the listing hook fetched for this mode. The second argument is the loaded
+  // order, so each section keeps the server sort the toolbar asked for. One
+  // group means there is nothing to filter between (a folder-less project
+  // included), so the flat grid keeps it.
+  const sections = useMemo(() => projectSectionModel(folderGroups, items), [folderGroups, items]);
+  // The sectioned view is the project's structure layered on a server-ordered
+  // listing, so it applies exactly to the server-backed sorts. The grouped
+  // sorts (`folder`, `type`) keep their own branches below: `File type` is
+  // offered in project mode's toolbar and renders today's grouped branch, not
+  // the folder sections.
+  const sectionedProject =
+    isProject && sections.groups.length >= 2 && SERVER_SORT_KEYS.includes(sortKey);
 
   return (
     <>
@@ -216,7 +240,13 @@ export default function AssetGridBody({
         </div>
       )}
 
-      {["folder", "type"].includes(sortKey) ? (
+      {sectionedProject ? (
+        <ProjectFolderSections
+          groups={sections.groups}
+          renderCard={renderCard}
+          hasMore={hasMore}
+        />
+      ) : ["folder", "type"].includes(sortKey) ? (
         <div className="space-y-4">
           {(sortKey === "folder" ? folderGroups : typeGroups).map(group => {
             const collapsed = collapsedGroups.has(group.id);
