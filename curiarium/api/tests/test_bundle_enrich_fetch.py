@@ -6,10 +6,13 @@ the seam every test replaces - the name the module actually calls, not
 installs socket tripwires, so "the stub answered" cannot be a coincidence.
 
 Every refusal is pinned by the two things an operator reads: the status and the
-detail. These refusals name ``THINGIVERSE_COOKIE``, the deployment-wide default,
-and never name a UI control: the enrichment call sends no cookie of its own, so a
-pointer at Settings would name a field this path never reads. The import path,
-which does send one, names both surfaces - see ``test_import_cookie_messages.py``.
+detail. The three cookie refusals name ``THINGIVERSE_COOKIE`` and nothing in the
+UI. The wording is unconditional: it names the environment variable even when a
+cookie was sent. The shipped caller sends no cookie today, so that variable is
+the only surface this path reaches - the route accepts a per-request cookie and
+prefers it, so a pointer at Settings is deferred, not forbidden (``Mm-folh``).
+The import path, which does send one, names both surfaces - see
+``test_import_cookie_messages.py``.
 
 The only files read are the Thingiverse page fixtures inside this module's tree,
 so the in-container build context carries them (AGENTS.md guardrail 3).
@@ -136,11 +139,15 @@ def test_a_page_decodes_with_the_charset_it_announces(monkeypatch: pytest.Monkey
 
 
 def test_a_rate_limit_names_the_environment_variable_and_never_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """429 is the measured failure of unauthenticated traffic, so the remedy is the cookie.
+    """429 is the measured failure of unauthenticated traffic, so the remedy is
+    the cookie.
 
-    Mutation: widen this to name a UI control and this fails - the enrichment call
-    sends no cookie, so a pointer at Settings would send the operator to a field
-    this path never reads.
+    Mutation: put Settings in this detail and this fails on the
+    ``"Settings" not in caught.value.detail`` guard. The detail is
+    unconditional: it names the environment variable even when a cookie was
+    sent. The shipped caller sends no cookie today, so that variable is the
+    only surface this path reaches - the route accepts a per-request cookie and
+    prefers it, so the pointer waits on that caller gap (``Mm-folh``).
     """
     stub(monkeypatch, error=http_error(429))
 
