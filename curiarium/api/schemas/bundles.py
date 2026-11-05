@@ -28,7 +28,9 @@ __all__ = [
   "BundleEnrichRequest",
   "BundleEnrichResponse",
   "BundleEnrichmentOut",
+  "BundleRefusalOut",
   "BundleReportOut",
+  "BundleRuleSetOut",
 ]
 
 
@@ -125,6 +127,23 @@ class BundleDetectCountsOut(BaseModel):
   already_created: int = 0
 
 
+class BundleRuleSetOut(BaseModel):
+  """The rule set one report was decided against: its revision, and what its tables were."""
+
+  version: str
+  stamp: str
+
+
+class BundleRefusalOut(BaseModel):
+  """One path the walk saw and did not offer, with the rule that refused it."""
+
+  rel_path: str
+  rule: str
+  # archive | directory - what the path IS on disk, so a consumer can tell a
+  # missing row from a missing folder without a second walk.
+  kind: str
+
+
 class BundleReportOut(BaseModel):
   """A dry-run view of the storage root. Reading it writes nothing."""
 
@@ -138,6 +157,13 @@ class BundleReportOut(BaseModel):
   duplicates_text: str = ""
   # Dismissal keys that match no live bundle: a renamed directory un-dismisses.
   stale_dismissals: List[str] = []
+  # The rule set this whole report was decided against. REQUIRED, not defaulted:
+  # every producer always emits it, so a default would only mask a producer that
+  # forgot. Declared HERE or the response model silently drops it.
+  rule_set: BundleRuleSetOut
+  # Every path the walk refused to offer, one reason each. An empty list is a
+  # legitimate answer ("nothing was refused"), never an omission.
+  refused: List[BundleRefusalOut] = []
 
 
 class BundleCreateItemIn(BaseModel):
