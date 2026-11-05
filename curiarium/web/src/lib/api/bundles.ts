@@ -270,15 +270,19 @@ export async function enrichBundles(
   keys: string[],
   options: { refresh?: boolean; thingiverseCookie?: string } = {},
 ): Promise<BundleEnrichResponse> {
+  // Trim here, once, at the single body builder: `ImportCookiesCard` commits the
+  // paste untrimmed, and a copied Cookie header usually ends in a newline. An
+  // untrimmed-but-empty value is truthy, and the server prefers a sent cookie
+  // over `THINGIVERSE_COOKIE`, so shipping `"   "` would mask a server-side
+  // cookie with one that can never authenticate.
+  const thingiverseCookie = (options.thingiverseCookie ?? "").trim();
   const res = await fetch(`${apiBase()}/bundles/enrich`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       keys,
       refresh: options.refresh ?? false,
-      ...(options.thingiverseCookie
-        ? { thingiverse_cookie: options.thingiverseCookie }
-        : {}),
+      ...(thingiverseCookie ? { thingiverse_cookie: thingiverseCookie } : {}),
     }),
   });
   if (res.status === 401) throw new UnauthorizedError();

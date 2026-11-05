@@ -29,6 +29,7 @@ import {
 import { UnauthorizedError } from "../../lib/api/http";
 import type { ArchiveExtractResult } from "../../lib/api/imports";
 import { settleAfterExtract, type SettleOutcome } from "../../lib/scanSettle";
+import { resetSettingsCache, saveSettings, type AppSettings } from "../../lib/settings";
 import { useBundleDetect } from "./useBundleDetect";
 
 const getBundleReportMock = vi.mocked(getBundleReport);
@@ -160,6 +161,15 @@ afterEach(() => {
   // Restores the Storage.prototype.setItem spy even when an assertion threw,
   // so a red run cannot leak a spy into the tests after it.
   vi.restoreAllMocks();
+  // A seeded cookie must not leak into the tests after it: clear both stores
+  // and the settings cache, guarded so a storage-less environment cannot throw.
+  try {
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+  } catch {
+    // An environment without storage has nothing to clear.
+  }
+  resetSettingsCache();
 });
 
 describe("useBundleDetect", () => {
@@ -284,9 +294,12 @@ describe("useBundleDetect", () => {
       pending = result.current.enrich(["Moai statue"]);
     });
 
-    // The keys reach the client with no forced refresh: a first pass reads the
-    // page only to fill the empties.
-    expect(enrichBundlesMock).toHaveBeenCalledWith(["Moai statue"], { refresh: undefined });
+    // The keys reach the client with no forced refresh and no saved cookie: a
+    // first pass reads the page only to fill the empties.
+    expect(enrichBundlesMock).toHaveBeenCalledWith(["Moai statue"], {
+      refresh: undefined,
+      thingiverseCookie: undefined,
+    });
     // Nothing is fetched while the page is still in flight.
     expect(getBundleReportMock).toHaveBeenCalledTimes(1);
     expect(result.current.busy).toBe(true);
@@ -412,7 +425,40 @@ describe("useBundleDetect", () => {
       await result.current.enrich(["Moai statue"], { refresh: true });
     });
 
-    expect(enrichBundlesMock).toHaveBeenCalledWith(["Moai statue"], { refresh: true });
+    expect(enrichBundlesMock).toHaveBeenCalledWith(["Moai statue"], {
+      refresh: true,
+      thingiverseCookie: undefined,
+    });
+  });
+
+  it("sends the cookie the Settings card saved", async () => {
+    // Seeded through the real `saveSettings` on its DEFAULT session-storage
+    // route (`rememberCookies: false`): that session copy is the operator path
+    // this ticket is about, and a hand-written localStorage seed would leave it
+    // untested. `DEFAULT_SETTINGS` is not exported, so the literal is explicit.
+    saveSettings({
+      slicer: { enabled: false, selected: "orca" },
+      engraving: { enabled: false, selected: "lightburn" },
+      theme: { selected: "purple" },
+      makerworld: { cookie: "" },
+      thingiverse: { cookie: "session=fake-cookie" },
+      imports: { rememberCookies: false },
+      network: { publicUrl: "" },
+      previews: { mode: "automatic" },
+    } satisfies AppSettings);
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    await act(async () => {
+      await result.current.enrich(["Moai statue"]);
+    });
+
+    // The exact stored string, not a re-trimmed copy: trimming is the body builder's job.
+    expect(enrichBundlesMock).toHaveBeenCalledWith(["Moai statue"], {
+      refresh: undefined,
+      thingiverseCookie: "session=fake-cookie",
+    });
   });
 
   it("reports an unauthorized enrichment to the caller", async () => {

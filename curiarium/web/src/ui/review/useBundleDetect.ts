@@ -15,6 +15,7 @@ import {
 import { UnauthorizedError } from "../../lib/api/http";
 import type { ArchiveExtractResult } from "../../lib/api/imports";
 import { settleAfterExtract, type SettleOutcome } from "../../lib/scanSettle";
+import { loadSettings } from "../../lib/settings";
 
 type Props = {
   /** Whether the review queue is open (and the role may write). */
@@ -78,6 +79,19 @@ function enrichmentMessage(results: BundleEnrichItemResult[]): {
     return { error: null, notice: "That bundle is no longer in the report" };
   }
   return { error: null, notice: null };
+}
+
+/** The cookie the Settings card saved, read at the moment of the call.
+ *
+ * Call time, not render time: `App` holds settings as React state while
+ * `saveSettings` and the storage cache are the origin, so a value captured at
+ * mount would miss a paste made since - `lib/api/baseUrl.ts`'s
+ * `apiBaseFromSettings` reads `loadSettings()` the same way for the same reason.
+ * Reading it here also avoids threading a prop through `App.tsx`, which this
+ * ticket deliberately does not touch.
+ */
+function savedThingiverseCookie(): string | undefined {
+  return loadSettings().thingiverse.cookie || undefined;
 }
 
 /**
@@ -225,7 +239,10 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
       if (!enabled) return;
       setBusy(true);
       try {
-        const response = await enrichBundles(keys, { refresh: options.refresh });
+        const response = await enrichBundles(keys, {
+          refresh: options.refresh,
+          thingiverseCookie: savedThingiverseCookie(),
+        });
         await refresh();
         const message = enrichmentMessage(response.results);
         setError(message.error);
