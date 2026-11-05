@@ -109,7 +109,8 @@ def enrich_bundles(
     disk walk and must stay offline and deterministic. It fills only empty fields
     and never invents a licence. A per-item `refused` is the bulk partial-success
     contract, so one rate-limited thing does not discard the pages that answered.
-    A 429 detail names `THINGIVERSE_COOKIE` as the environment variable it is.
+    A 429 detail reuses `THINGIVERSE_COOKIE_REMEDY`, so it names the Settings
+    paste and the environment variable alike.
     """
     cookie = import_resolvers.resolve_thingiverse_cookie(body)
     return bundle_service.enrich_bundles(

@@ -1805,7 +1805,7 @@
   },
   "/bundles/enrich": {
     "post": {
-      "description": "Read the vendor pages these bundles name and cache what the pages say.\n\nOn demand by a human, never part of `GET /bundles/detect`: that report is a\ndisk walk and must stay offline and deterministic. It fills only empty fields\nand never invents a licence. A per-item `refused` is the bulk partial-success\ncontract, so one rate-limited thing does not discard the pages that answered.\nA 429 detail names `THINGIVERSE_COOKIE` as the environment variable it is.",
+      "description": "Read the vendor pages these bundles name and cache what the pages say.\n\nOn demand by a human, never part of `GET /bundles/detect`: that report is a\ndisk walk and must stay offline and deterministic. It fills only empty fields\nand never invents a licence. A per-item `refused` is the bulk partial-success\ncontract, so one rate-limited thing does not discard the pages that answered.\nA 429 detail reuses `THINGIVERSE_COOKIE_REMEDY`, so it names the Settings\npaste and the environment variable alike.",
       "operationId": "enrich_bundles_bundles_enrich_post",
       "requestBody": {
         "content": {

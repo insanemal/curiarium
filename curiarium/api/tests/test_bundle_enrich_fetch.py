@@ -6,12 +6,12 @@ the seam every test replaces - the name the module actually calls, not
 installs socket tripwires, so "the stub answered" cannot be a coincidence.
 
 Every refusal is pinned by the two things an operator reads: the status and the
-detail. The three cookie refusals name ``THINGIVERSE_COOKIE`` and nothing in the
-UI. The wording is unconditional: it names the environment variable even when a
-cookie was sent. The shipped caller sends no cookie today, so that variable is
-the only surface this path reaches - the route accepts a per-request cookie and
-prefers it, so a pointer at Settings is deferred, not forbidden (``Mm-folh``).
-The import path, which does send one, names both surfaces - see
+detail. The three cookie refusals reuse ``import_resolvers.THINGIVERSE_COOKIE_REMEDY``,
+so they name the Settings paste AND the environment variable - the gap that once
+left this path pointing only at ``THINGIVERSE_COOKIE`` is closed (``Mm-folh``).
+Each refusal asserts the constant itself rather than its wording, which is what
+keeps this path from drifting away from the import path: the text can be
+reworded and both move together. The import path's own pins live in
 ``test_import_cookie_messages.py``.
 
 The only files read are the Thingiverse page fixtures inside this module's tree,
@@ -19,6 +19,7 @@ so the in-container build context carries them (AGENTS.md guardrail 3).
 """
 
 import json
+import logging
 import socket
 from email.message import Message
 from pathlib import Path
@@ -138,16 +139,14 @@ def test_a_page_decodes_with_the_charset_it_announces(monkeypatch: pytest.Monkey
 # --- the refusals ----------------------------------------------------------
 
 
-def test_a_rate_limit_names_the_environment_variable_and_never_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_rate_limit_names_the_shared_cookie_remedy(monkeypatch: pytest.MonkeyPatch) -> None:
     """429 is the measured failure of unauthenticated traffic, so the remedy is
     the cookie.
 
-    Mutation: put Settings in this detail and this fails on the
-    ``"Settings" not in caught.value.detail`` guard. The detail is
-    unconditional: it names the environment variable even when a cookie was
-    sent. The shipped caller sends no cookie today, so that variable is the
-    only surface this path reaches - the route accepts a per-request cookie and
-    prefers it, so the pointer waits on that caller gap (``Mm-folh``).
+    Mutation: hand-write the remedy here again and this fails on the constant
+    guard - which is the point. Pinning ``THINGIVERSE_COOKIE_REMEDY`` rather
+    than its literal text is what stops this path drifting from the import
+    path: a reworded constant moves both, a reworded literal moves one.
     """
     stub(monkeypatch, error=http_error(429))
 
@@ -157,14 +156,22 @@ def test_a_rate_limit_names_the_environment_variable_and_never_settings(monkeypa
     assert caught.value.status_code == 429
     assert "429" in caught.value.detail
     assert THING_ID in caught.value.detail
+    assert import_resolvers.THINGIVERSE_COOKIE_REMEDY in caught.value.detail
     assert "THINGIVERSE_COOKIE" in caught.value.detail
+    assert "Settings > Import sources" in caught.value.detail
     assert "restart" in caught.value.detail
-    assert "Settings" not in caught.value.detail
 
 
 @pytest.mark.parametrize("code", [401, 403])
-def test_a_refused_page_is_a_403_that_names_the_cookie(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
-    """A Cloudflare challenge answers 403 (and sometimes 401): both mean "no page for you"."""
+def test_a_refused_page_is_a_403_that_names_the_shared_cookie_remedy(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """A Cloudflare challenge answers 403 (and sometimes 401): both mean "no page for you".
+
+    The detail names both cookie surfaces through the shared constant, so an
+    operator whose cookie lives in Settings is not sent to a server they cannot
+    reach.
+    """
     stub(monkeypatch, error=http_error(code))
 
     with pytest.raises(HTTPException) as caught:
@@ -173,8 +180,8 @@ def test_a_refused_page_is_a_403_that_names_the_cookie(monkeypatch: pytest.Monke
     assert caught.value.status_code == 403
     assert f"HTTP {code}" in caught.value.detail
     assert "challenge" in caught.value.detail
-    assert "THINGIVERSE_COOKIE" in caught.value.detail
-    assert "Settings" not in caught.value.detail
+    assert import_resolvers.THINGIVERSE_COOKIE_REMEDY in caught.value.detail
+    assert "Settings > Import sources" in caught.value.detail
 
 
 def test_a_missing_thing_is_a_404_that_names_the_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -277,9 +284,58 @@ def test_the_no_metadata_detail_names_the_id_the_remedy_and_the_outcome() -> Non
     assert "no creator or licence" in detail
     assert "may not exist" in detail
     assert "challenge" in detail
-    assert "THINGIVERSE_COOKIE" in detail
+    assert import_resolvers.THINGIVERSE_COOKIE_REMEDY in detail
+    assert "Settings > Import sources" in detail
     assert "Nothing was changed" in detail
-    assert "Settings" not in detail
+
+
+# --- the leak pins ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("code", [429, 401, 403])
+def test_no_refusal_carries_the_cookie_it_was_given(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """The cookie must reach the wire and nowhere a human reads.
+
+    The two fetch refusals are the ones that could genuinely leak, because the
+    cookie is in scope there; this drives the real seam with a fake value and
+    proves the header really went out before pinning the detail clean - an
+    assertion that would otherwise pass vacuously. The no-metadata detail takes
+    no cookie, so its check is structural: nothing can put one there.
+    """
+    fetch = stub(monkeypatch, error=http_error(code))
+
+    with pytest.raises(HTTPException) as caught:
+        import_resolvers.fetch_thingiverse_thing_page(THING_ID, "session=fake-cookie")
+
+    assert dict(fetch.request.header_items())["Cookie"] == "session=fake-cookie"
+    assert "session=fake-cookie" not in caught.value.detail
+    assert "session=fake-cookie" not in import_resolvers.thingiverse_no_metadata_detail(THING_ID)
+
+
+def test_the_cookie_never_reaches_a_log_record(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A tripwire, not a description of today's behaviour.
+
+    Nothing in ``import_resolvers`` or ``bundle_service`` logs right now, so
+    this cannot pass by catching an existing line; it fails the day someone adds
+    a debug line carrying the request headers. The wire assertion first keeps it
+    from being vacuous.
+    """
+    caplog.set_level(logging.DEBUG)
+    # Positive control: without it this could pass against a log that never
+    # captured anything, which is the shape of a vacuous leak pin. It borrows the
+    # module's own logger name, so propagation from a future leak is exercised
+    # rather than the root handler alone.
+    logging.getLogger("import_resolvers").debug("capture-is-live")
+    fetch = stub(monkeypatch, error=http_error(429))
+
+    with pytest.raises(HTTPException):
+        import_resolvers.fetch_thingiverse_thing_page(THING_ID, "session=fake-cookie")
+
+    assert "capture-is-live" in caplog.text
+    assert dict(fetch.request.header_items())["Cookie"] == "session=fake-cookie"
+    assert "session=fake-cookie" not in caplog.text
 
 
 # --- the cookie resolver ---------------------------------------------------

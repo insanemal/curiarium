@@ -820,8 +820,9 @@ def fetch_thingiverse_thing_page(thing_id: str, thingiverse_cookie: Optional[str
     It never retries: a rate limit is a refusal a human acts on, not a loop, and
     this function is reached only from ``bundle_service.enrich_bundles``, never
     from the report. Every status this call can meet becomes ONE
-    ``HTTPException`` written for an operator, and names the cookie as the
-    environment variable it really is. A status with no mapping of its own is
+    ``HTTPException`` written for an operator, and its cookie refusals reuse
+    ``THINGIVERSE_COOKIE_REMEDY``, so they name the Settings paste and the
+    environment variable alike. A status with no mapping of its own is
     reported as a 502 rather than escaping as a raw ``HTTPError``, because the
     batch must keep its other answers and its single cache write.
     """
@@ -834,9 +835,8 @@ def fetch_thingiverse_thing_page(thing_id: str, thingiverse_cookie: Optional[str
             raise HTTPException(
                 status_code=429,
                 detail=(
-                    f"Thingiverse is rate limiting this server (HTTP 429) for thing {thing_id}. Thingiverse "
-                    "throttles unauthenticated traffic: set the THINGIVERSE_COOKIE environment variable to a "
-                    "Cookie header copied from a signed-in browser session, restart the API, and try again."
+                    f"Thingiverse is rate limiting this server (HTTP 429) for thing {thing_id}. "
+                    f"{THINGIVERSE_COOKIE_REMEDY}"
                 ),
             ) from err
         if err.code in {401, 403}:
@@ -844,8 +844,7 @@ def fetch_thingiverse_thing_page(thing_id: str, thingiverse_cookie: Optional[str
                 status_code=403,
                 detail=(
                     f"Thingiverse refused the page (HTTP {err.code}) for thing {thing_id}; a Cloudflare challenge "
-                    "looks like this. Set the THINGIVERSE_COOKIE environment variable to a Cookie header copied "
-                    "from a signed-in browser session, restart the API, and try again. Nothing was changed."
+                    f"looks like this. {THINGIVERSE_COOKIE_REMEDY}"
                 ),
             ) from err
         if err.code == 404:
@@ -903,13 +902,15 @@ def thingiverse_no_metadata_detail(thing_id: str) -> str:
 
     Thingiverse answers a nonexistent id with a generic 200 page (measured), so
     absent metadata is the only signal there is: the id may name a deleted or
-    private thing, or the site may have served a challenge page instead.
+    private thing, or the site may have served a challenge page instead. The
+    remedy is ``THINGIVERSE_COOKIE_REMEDY``, the same one the import path and
+    the fetch refusals use, so it names the Settings paste as well as the
+    environment variable.
     """
     return (
         f"Thingiverse answered thing {thing_id} with a page that carried no creator or licence. The thing may "
-        "not exist any more (deleted or private), or Thingiverse may have answered a challenge page instead: "
-        "set the THINGIVERSE_COOKIE environment variable to a Cookie header copied from a signed-in browser "
-        "session and restart the API. Nothing was changed."
+        "not exist any more (deleted or private), or Thingiverse may have answered a challenge page instead. "
+        f"{THINGIVERSE_COOKIE_REMEDY}"
     )
 
 
