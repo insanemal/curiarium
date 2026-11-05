@@ -821,14 +821,14 @@ def test_the_compound_row_serves_its_groups(
     assert row["metadata_shape"] == "compound"
     assert row["model_count"] == 60
     assert row["groups"] == [
-        {"name": STAGETOP_EDITION, "model_count": 45, "foreign": False},
-        {"name": "Wave 1.5", "model_count": 15, "foreign": False},
+        {"name": STAGETOP_EDITION, "model_count": 45, "foreign": False, "separable": False},
+        {"name": "Wave 1.5", "model_count": 15, "foreign": False, "separable": True},
     ]
     assert row_for(report, MOAI)["groups"] == [], "an ordinary row answers with an empty list, not a missing key"
 
 
 def test_the_committed_openapi_fixture_declares_the_group_component() -> None:
-    """The group is a pinned component with three required fields, and the row carries it.
+    """The group is a pinned component with four required fields, and the row carries it.
 
     The rewrite run SKIPS, so a skipped regeneration would otherwise leave
     stale-but-valid JSON: this assertion is what catches it.
@@ -837,10 +837,15 @@ def test_the_committed_openapi_fixture_declares_the_group_component() -> None:
 
     assert "BundleGroupOut" in fixture
     group = fixture["BundleGroupOut"]
-    assert sorted(group["required"]) == ["foreign", "model_count", "name"]
+    assert sorted(group["required"]) == ["foreign", "model_count", "name", "separable"]
     assert {name: prop["type"] for name, prop in group["properties"].items()} == {
         "name": "string",
         "model_count": "integer",
         "foreign": "boolean",
+        "separable": "boolean",
     }
     assert "groups" in fixture["BundleDetectItemOut"]["properties"]
+    create_item = fixture["BundleCreateItemIn"]
+    assert "exclude_groups" not in create_item.get("required", []), "the field is additive, never required"
+    assert create_item["properties"]["exclude_groups"]["type"] == "array"
+    assert create_item["properties"]["exclude_groups"]["items"]["type"] == "string"

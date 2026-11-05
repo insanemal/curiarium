@@ -325,6 +325,10 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const [filter, setFilter] = React.useState<BundleFilter>("all");
   const [selectedKeys, setSelectedKeys] = React.useState<string[]>([]);
   const [names, setNames] = React.useState<Record<string, string>>({});
+  // Groups the operator took out of a compound row's project, per row key. A row
+  // with nothing excluded has no entry at all: an empty list here would put
+  // `exclude_groups: []` on the wire, which is not the same body as omitting it.
+  const [excludedGroups, setExcludedGroups] = React.useState<Record<string, string[]>>({});
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
   // One dialog serves all three doors (card, blocked row, bulk bar). `returnKey`
   // is the row to put focus back on when it closes, so a keyboard user who
@@ -373,6 +377,8 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const lowCreatable = visible.filter(row => row.confidence === "low" && isCreatable(row));
   const stale = report?.stale_dismissals ?? [];
   const activeRow = filtered.find(row => row.key === activeKey) ?? null;
+  const activeGroups = activeRow?.groups ?? [];
+  const activeExcluded = activeRow === null ? [] : excludedGroups[activeRow.key] ?? [];
   const activeArchive = activeRow === null ? null : archiveLine(activeRow);
   const activeCreatedLine = activeRow === null ? null : createdProjectLine(activeRow);
   const activeEnrichmentLine = activeRow === null ? null : enrichmentLine(activeRow);
@@ -422,10 +428,33 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
     );
   };
 
-  const createItems = (items: BundleDetectItem[]): BundleCreateItem[] =>
+  // `include` is the checkbox's own state, so the update is a function of what
+  // the operator just asked for rather than of the list they saw a render ago.
+  const toggleGroupExclusion = (key: string, name: string, include: boolean) => {
+    setExcludedGroups(prev => {
+      const others = (prev[key] ?? []).filter(item => item !== name);
+      const next = include ? others : [...others, name];
+      const draft = { ...prev };
+      // Dropping the key, not storing `[]`: the create body must stay
+      // byte-identical to the one that never mentions the field.
+      if (next.length === 0) delete draft[key];
+      else draft[key] = next;
+      return draft;
+    });
+  };
+
+  const createItems = (
+    items: BundleDetectItem[],
+    options: { excludeGroups?: boolean } = {},
+  ): BundleCreateItem[] =>
     items.map(row => {
       const name = typedName(names, row);
-      return name ? { key: row.key, name } : { key: row.key };
+      const item: BundleCreateItem = name ? { key: row.key, name } : { key: row.key };
+      const excluded = excludedGroups[row.key] ?? [];
+      // The bulk doors mean "include every group", so they pass no option and
+      // send no field; only the detail pane can carry an exclusion.
+      if (options.excludeGroups && excluded.length > 0) item.exclude_groups = excluded;
+      return item;
     });
 
   const createSelected = () => {
@@ -511,7 +540,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const createActive = () => {
     if (!activeRow) return;
     void primeModelCovers([activeRow], { mediaUrl: fileUrl });
-    void state.create(createItems([activeRow]));
+    void state.create(createItems([activeRow], { excludeGroups: true }));
   };
 
   const dismissActive = () => {
@@ -914,6 +943,48 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                   )}
                   {activeCreatedLine && <span>{activeCreatedLine}</span>}
                 </div>
+                {/* The compound row's breakdown. Only a row with groups renders
+                    it, so every other pane is exactly as it was; the checkboxes
+                    are the operator's only say in what the project contains, and
+                    they exist solely for a group the server will let us exclude. */}
+                {activeGroups.length > 0 && (
+                  <div
+                    className="review-detail-facts"
+                    role="group"
+                    aria-label="Groups in this bundle"
+                  >
+                    {activeGroups.map(group => (
+                      <div key={group.name} className="flex flex-wrap items-center gap-2">
+                        <span>{`${group.name} - ${countLabel(group.model_count, "part", "parts")}`}</span>
+                        {group.foreign && <span className="review-detail-reason">unrelated</span>}
+                        {/* Both gates, because the server refuses either refusal:
+                            `not_a_foreign_group` for the row's own part and
+                            `not_separable_group` for one that was never a row of
+                            its own. A checkbox the server would reject is a trap. */}
+                        {group.foreign && group.separable && canContribute && (
+                          <label className="review-toggle">
+                            <input
+                              type="checkbox"
+                              aria-label={`Include ${group.name}`}
+                              // Checked means "in the project": absence from the
+                              // excluded list is the default, so a fresh row sends
+                              // no `exclude_groups` at all.
+                              checked={!activeExcluded.includes(group.name)}
+                              onChange={event =>
+                                toggleGroupExclusion(
+                                  activeRow.key,
+                                  group.name,
+                                  event.target.checked,
+                                )
+                              }
+                            />
+                            <span>Include</span>
+                          </label>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {canContribute && (
                   <>
                     {/* An already-created row has nothing to create, so the name

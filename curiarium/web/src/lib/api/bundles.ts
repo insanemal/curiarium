@@ -31,6 +31,12 @@ export type BundleGroup = {
   name: string;
   model_count: number;
   foreign: boolean;
+  /** Was this directory a row of its own before the compound rule absorbed it?
+   *  A SERVICE fact, not a detection fact: the detector's own group is the three
+   *  fields above, and this one exists because only the server can answer it - it
+   *  is also what says whether the server will accept an exclusion for this
+   *  group, so a checkbox must never exist where it is false. */
+  separable: boolean;
 };
 
 /** The rule set one report was decided against: the revision a report was taken
@@ -98,7 +104,8 @@ export type BundleDetectItem = {
   // OPTIONAL on purpose, like the neighbouring fields: a payload from before the
   // breakdown was served omits it, and every existing fixture must keep
   // compiling. `undefined` means "the server did not say". Only a compound row
-  // fills it; no component reads it yet (C3/Mf-aaqi owns presentation).
+  // fills it; the review detail pane renders the breakdown from it, while the
+  // grouped *project* presentation and the variant filter are still C3/Mf-aaqi.
   groups?: BundleGroup[];
   cover: BundleCover;
   assets_total: number;
@@ -180,6 +187,10 @@ export type BundleCreateItem = {
   /** Absent means "use the server's name suggestion". */
   name?: string | null;
   name_only?: boolean;
+  /** Group names to leave out of the project; the server keeps every group when
+   *  the field is absent. OMITTED entirely when nothing is excluded, so every
+   *  existing row's request body stays byte-identical. */
+  exclude_groups?: string[];
 };
 
 export type BundleCreateItemResult = {
