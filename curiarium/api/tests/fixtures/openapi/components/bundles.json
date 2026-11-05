@@ -80,6 +80,14 @@
     "additionalProperties": false,
     "description": "One confirmed bundle; a key the fresh report does not know is `failed`.",
     "properties": {
+      "exclude_groups": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Exclude Groups",
+        "type": "array"
+      },
       "key": {
         "title": "Key",
         "type": "string"
@@ -777,12 +785,17 @@
       "name": {
         "title": "Name",
         "type": "string"
+      },
+      "separable": {
+        "title": "Separable",
+        "type": "boolean"
       }
     },
     "required": [
       "name",
       "model_count",
-      "foreign"
+      "foreign",
+      "separable"
     ],
     "title": "BundleGroupOut",
     "type": "object"

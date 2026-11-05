@@ -4906,11 +4906,11 @@ def refusal_ledger(report: Mapping) -> Dict[str, str]:
 def service_row(key: str) -> dict:
     """One row read from ``bundle_service.build_report`` - the dict the route serves.
 
-    ``groups`` is not declared on ``BundleDetectItemOut`` yet (that model belongs
-    to the schema side of Mf-8xrc), and a response model silently drops a key it
-    does not declare, so the breakdown is read from the service while everything
-    else is asserted on the wire row. Both come from the same function, so the two
-    readings cannot disagree about a row.
+    The per-row ``rule_set`` stamp is not declared on ``BundleDetectItemOut`` - it
+    is a service-level fact, one rule set per report - so a response model would
+    silently drop it. Reading the service's own dict is the only way to assert it;
+    everything else is read from here too, so the two readings cannot disagree
+    about a row.
     """
     report = bundle_service.build_report(limit=1000)
     matches = [item for item in report["bundles"] if item["key"] == key]
@@ -4940,8 +4940,8 @@ def test_service_stagetop_is_one_row_with_two_groups(
     assert row["metadata_shape"] == "compound"
     assert row["model_count"] == 60
     assert service_row(f"import/{STAGETOP}")["groups"] == [
-        {"name": STAGETOP_WAVE_ONE, "model_count": 45, "foreign": False},
-        {"name": STAGETOP_WAVE, "model_count": 15, "foreign": False},
+        {"name": STAGETOP_WAVE_ONE, "model_count": 45, "foreign": False, "separable": False},
+        {"name": STAGETOP_WAVE, "model_count": 15, "foreign": False, "separable": True},
     ]
     assert [item for item in report["bundles"] if item["key"].startswith(f"import/{STAGETOP}/")] == []
 
@@ -5038,7 +5038,7 @@ def test_service_xbox360_shell_has_a_row_covering_its_own_models_and_naming_the_
     assert row["confidence"] == "low"
     assert row["model_count"] == XBOX_OWN_MODELS + XBOX_GROUP_MODELS
     assert service_row(f"import/{XBOX}")["groups"] == [
-        {"name": XBOX_GROUP, "model_count": XBOX_GROUP_MODELS, "foreign": True}
+        {"name": XBOX_GROUP, "model_count": XBOX_GROUP_MODELS, "foreign": True, "separable": True}
     ]
     assert [item for item in report["bundles"] if item["key"].startswith(f"import/{XBOX}/")] == []
 
@@ -5242,3 +5242,1086 @@ def test_service_the_switch_off_restores_every_absorbed_row(
     assert {item["key"] for item in without["bundles"]} == set(child_keys)
     assert f"import/{STAGETOP}" not in {item["key"] for item in without["bundles"]}
     assert [item["key"] for item in with_rule_on["bundles"]] == [f"import/{STAGETOP}"]
+
+
+
+# --- C2: excluding a flagged foreign group (Mf-ao6r) -------------------------
+
+
+def project_marker(project_id: str) -> dict:
+    """The ``_bundle`` marker one created project carries, as ``_create_one`` wrote it."""
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+    assert project is not None, f"no project row for {project_id}"
+    return json.loads(project.metadata_json or "{}")["_bundle"]
+
+
+def project_storage_paths(project_id: str) -> set:
+    """The storage path of every asset attached to one project, as a set."""
+    with Session(engine) as session:
+        asset_ids = {
+            membership.asset_id
+            for membership in session.exec(select(ProjectAsset).where(ProjectAsset.project_id == project_id))
+        }
+        assets = session.exec(select(Asset).where(Asset.id.in_(asset_ids))).all()
+    return {asset.storage_path for asset in assets}
+
+
+def registered_model_paths(rel_dir: str) -> set:
+    """Every registered MODEL file under ``rel_dir``, as storage-relative paths."""
+    with Session(engine) as session:
+        return {
+            asset.path
+            for asset in bundle_service.registered_assets(session, rel_dir)
+            if bundle_service._suffix(asset.path) in bundle_detect.MODEL_SUFFIXES
+        }
+
+
+def mount_key() -> str:
+    """The xbox fixture's foreign group as a bundle key."""
+    return f"import/{XBOX}/{XBOX_GROUP}"
+
+
+def create_for_exclusion(client: TestClient, headers: dict, exclude: Optional[List[str]] = None) -> dict:
+    """Create the xbox compound row, optionally excluding its foreign group."""
+    item: dict = {"key": f"import/{XBOX}"}
+    if exclude is not None:
+        item["exclude_groups"] = exclude
+    return create(client, headers, [item])
+
+
+# A vendor id in the name -> foreign; its models sit in two unnamed subdirectories,
+# so nothing at its own depth -> R5 (the own-depth guard) still refuses it a row.
+A_LONE_GROUP = "grip-5461913"
+A_COMPOUND = "toolkit"
+
+
+def write_foreign_group_never_a_row(storage: Path) -> str:
+    """A Leg B compound whose ONE foreign group was never a row of its own.
+
+    R9's case, verbatim: a group is ``foreign`` off its own README/name, and it
+    MAY NEVER HAVE BEEN A ROW AT ALL. This group's name carries a vendor id, so
+    ``compound_groups`` calls it foreign; it holds four models in two unnamed
+    subdirectories and NOTHING else, so R1 refuses it (no README/LICENSE), R3
+    refuses it (no image, no text) and R5 refuses it (no own-depth model).
+    It is therefore never a candidate, never absorbed, and reads
+    ``separable: false`` - exactly the group an operator must not be allowed to
+    exclude, because its parts would land in no project and in no row. The parent
+    has no image and no text either, so R3/R5 refuse it and only Leg B fires (own
+    models 9 > the group's 4, every group foreign, a vendor id present).
+    """
+    root = storage / "import" / A_COMPOUND
+    for index in range(9):
+        write_file(root / f"shell-{index}.stl", b"s" * 40)
+    for index in range(2):
+        write_file(root / A_LONE_GROUP / "plates" / f"bracket-{index}.stl", b"s" * 40)
+    for index in range(2, 4):
+        write_file(root / A_LONE_GROUP / "rails" / f"bracket-{index}.stl", b"s" * 40)
+    return f"import/{A_COMPOUND}"
+
+
+def test_service_creating_from_a_compound_row_makes_one_project_with_every_part(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """One create of the Stagetop row makes ONE project holding all 60 parts in two groups.
+
+    Mutation: attach only one group's snapshot (or filter the attach set with no
+    exclusion asked) and the set equality against every registered model reds.
+    """
+    write_stagetop(isolated_storage)
+    insert_folder_row(STAGETOP, f"import/{STAGETOP}")
+    scan()
+    headers = auth_header(client)
+
+    created = create(client, headers, [{"key": f"import/{STAGETOP}"}])
+
+    assert created["created"] == 1
+    assert created["failed"] == 0
+    result = created["results"][0]
+    assert result["assets_added"] == 60
+    assert project_storage_paths(result["project_id"]) == registered_model_paths(f"import/{STAGETOP}")
+
+    row = service_row(f"import/{STAGETOP}")
+    assert row["model_count"] == 60
+    with Session(engine) as session:
+        project = session.get(Project, result["project_id"])
+    marker = project_marker(result["project_id"])
+    assert marker["detector"] == "compound-bundle"
+    assert marker["shape"] == "compound"
+    assert marker["groups"] == [
+        {"name": STAGETOP_WAVE_ONE, "model_count": 45, "foreign": False, "included": True, "attached": 45},
+        {"name": STAGETOP_WAVE, "model_count": 15, "foreign": False, "included": True, "attached": 15},
+    ]
+    assert sum(group["attached"] for group in marker["groups"]) == result["assets_added"]
+    assert marker["cover"]["reason"] == "largest-image"
+    assert project.cover_asset_id == row["cover"]["asset_id"] == marker["cover"]["asset_id"]
+    assert marker["cover"]["group"] == STAGETOP_WAVE_ONE
+
+
+def test_the_row_counts_what_the_walk_saw_and_the_project_holds_what_the_scan_registered(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A walk-vs-registration pin that holds with NO exclusion code at all.
+
+    The Rocket's 96 walk-counted models are 48 real `.stl` plus 48 AppleDouble
+    `._*` copies; library_scan registers only the real ones, so the row counts 12
+    per group and the project holds 6. No code excludes dotfiles - this test is
+    the named reason a future `library_scan` change reds instead of silently
+    shifting 48 -> 96. Mutation: register the AppleDouble copies and the set
+    equality and the after-create `assets_added` both move.
+    """
+    write_rocket(isolated_storage)
+    insert_folder_row(ROCKET, f"import/{ROCKET}")
+    scan()
+    headers = auth_header(client)
+
+    created = create(client, headers, [{"key": f"import/{ROCKET}"}])
+
+    assert created["created"] == 1
+    result = created["results"][0]
+    assert result["assets_added"] == 48
+    marker = project_marker(result["project_id"])
+    assert [(group["model_count"], group["attached"]) for group in marker["groups"]] == [(12, 6)] * len(ROCKET_GROUPS)
+
+    real = {
+        f"import/{ROCKET}/{group}/{group}/part-{index}.stl"
+        for group in ROCKET_GROUPS
+        for index in range(ROCKET_MODELS_PER_GROUP)
+    }
+    counted = real | {
+        f"import/{ROCKET}/{group}/__MACOSX/{group}/._part-{index}.stl"
+        for group in ROCKET_GROUPS
+        for index in range(ROCKET_MODELS_PER_GROUP)
+    }
+    assert project_storage_paths(result["project_id"]) == real
+    for path in counted - real:
+        assert path.rsplit("/", 1)[-1].startswith("._"), path
+        assert path not in project_storage_paths(result["project_id"]), path
+
+
+def test_service_xbox360_shell_creates_one_project_with_all_31_parts(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """Unexcluded, the compound row attaches the 27 own parts AND the foreign group's 4.
+
+    The cover documents the un-excluded pick: with no image anywhere, the four
+    foreign `.stl` are equal-sized and path order breaks the tie, and ``W`` sorts
+    before ``s``, so the mount's `bracket-0.stl` wins. That 40-byte tie and the
+    ``Wallmount.../bracket-0.stl`` pick are pinned on purpose (AC-3a); every model
+    is equal-sized and ``registered_assets`` already orders by ``storage_path``, so
+    any other ordering the code could apply reproduces the same pick. Mutation:
+    drop the foreign group from the attach set and the 31 relation reds.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+
+    created = create_for_exclusion(client, headers)
+
+    assert created["created"] == 1
+    result = created["results"][0]
+    assert result["assets_added"] == XBOX_OWN_MODELS + XBOX_GROUP_MODELS
+    expected = {f"import/{XBOX}/shell-{index}.stl" for index in range(XBOX_OWN_MODELS)} | {
+        f"{mount_key()}/bracket-{index}.stl" for index in range(XBOX_GROUP_MODELS)
+    }
+    assert project_storage_paths(result["project_id"]) == expected
+
+    marker = project_marker(result["project_id"])
+    assert marker["groups"] == [
+        {
+            "name": XBOX_GROUP,
+            "model_count": XBOX_GROUP_MODELS,
+            "foreign": True,
+            "included": True,
+            "attached": XBOX_GROUP_MODELS,
+        }
+    ]
+    row = row_for(detect(client, headers, limit=1000), f"import/{XBOX}")
+    assert marker["cover"]["reason"] == "model-preview"
+    assert marker["cover"]["rel_path"] == f"{mount_key()}/bracket-0.stl"
+    assert row["cover"]["asset_id"] == marker["cover"]["asset_id"]
+    assert marker["cover"]["group"] == XBOX_GROUP
+
+
+def test_excluding_the_foreign_group_creates_one_project_of_its_own_27(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """An exclusion is an ATTACH decision, never a detection one.
+
+    One create of the compound row with the mount excluded attaches the 27 own
+    parts and nothing from the mount; the next report's compound row is unchanged
+    as far as detection is concerned - same counts, same groups, same cover asset,
+    same status. Mutation: filter `assets`/`own_assets` in `_create_one` and
+    the belt fires on every excluded create; drop the cover re-pick and the cover
+    stays on the excluded group's `bracket-0.stl`.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+    before = row_for(detect(client, headers, limit=1000), f"import/{XBOX}")
+
+    created = create_for_exclusion(client, headers, [XBOX_GROUP])
+
+    assert created["created"] == 1
+    assert created["failed"] == 0
+    result = created["results"][0]
+    assert result["assets_added"] == XBOX_OWN_MODELS
+    expected = {f"import/{XBOX}/shell-{index}.stl" for index in range(XBOX_OWN_MODELS)}
+    assert project_storage_paths(result["project_id"]) == expected
+    for index in range(XBOX_GROUP_MODELS):
+        assert f"{mount_key()}/bracket-{index}.stl" not in project_storage_paths(result["project_id"])
+
+    marker = project_marker(result["project_id"])
+    assert marker["groups"] == [
+        {
+            "name": XBOX_GROUP,
+            "model_count": XBOX_GROUP_MODELS,
+            "foreign": True,
+            "included": False,
+            "attached": 0,
+        }
+    ]
+    with Session(engine) as session:
+        project = session.get(Project, result["project_id"])
+    assert marker["cover"]["reason"] == "model-preview"
+    assert marker["cover"]["rel_path"] == f"import/{XBOX}/shell-0.stl"
+    assert not marker["cover"]["rel_path"].startswith(f"import/{XBOX}/{XBOX_GROUP}/")
+    assert marker["cover"]["group"] is None
+    assert marker["cover"]["asset_id"] == project.cover_asset_id
+
+    after = row_for(detect(client, headers, limit=1000), f"import/{XBOX}")
+    for field in ("model_count", "assets_total", "groups", "status"):
+        assert after[field] == before[field], field
+    assert after["cover"]["asset_id"] == before["cover"]["asset_id"]
+
+
+def test_the_excluded_group_is_offered_as_its_own_row(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """An excluded group comes back as a real, creatable row - at both scopes.
+
+    The re-offer is a REPORT-level act: the same walk still names the mount
+    ``member-of-bundle``, so the report and the ledger each say what they know.
+    Mutation: drop the second loop in `_report_from_scan` and the mount row is
+    missing; drop the `reoffered_relative` filter and the key is both a row and a
+    refusal; drop `_qualify` from the marker lookup and the scoped read offers
+    nothing; delete the re-offer loop's `row["rule_set"]` stamp and the stamp
+    assertion reds.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(XBOX_GROUP, mount_key())
+    scan()
+    headers = auth_header(client)
+    assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
+
+    report = detect(client, headers, limit=1000)
+
+    row = row_for(report, mount_key())
+    assert row["detector"] == "thingiverse-readme"
+    assert row["confidence"] == "high"
+    assert row["status"] == "ready"
+    assert row["blocked_reason"] is None
+    assert row["groups"] == []
+    assert row["model_count"] == XBOX_GROUP_MODELS
+    compound = service_row(f"import/{XBOX}")
+    assert compound["groups"] == [
+        {
+            "name": XBOX_GROUP,
+            "model_count": XBOX_GROUP_MODELS,
+            "foreign": True,
+            "separable": True,
+        }
+    ]
+    assert mount_key() not in refusal_ledger(report)
+    # The wire model does not declare the per-row stamp - it is a service-level
+    # fact, one rule set per report - so this is read from the service's dict.
+    assert service_row(mount_key())["rule_set"] == report["rule_set"]["stamp"]
+
+    walked = bundle_service.scan_bundles(isolated_storage)
+    assert {item.rel_path: item.rule for item in walked.refusals}[mount_key()] == "member-of-bundle"
+    assert mount_key() not in {candidate.key for candidate in walked.candidates}
+
+    assert report["counts"]["total"] == 2
+    scoped = detect(client, headers, path="import", limit=1000)
+    assert scoped["counts"]["total"] == 2
+    scoped_mount = row_for(scoped, mount_key())
+    assert scoped_mount["key"] == row["key"], "a scoped read names the same bundle absolutely"
+    refused = {item["rel_path"] for item in scoped["refused"]}
+    assert f"{XBOX}/{XBOX_GROUP}" not in refused
+    assert mount_key() not in refused
+
+
+def test_no_directory_is_both_a_row_and_a_refusal(client: TestClient, isolated_storage: Path) -> None:
+    """The offered set and the ledger never name the same directory, before or after.
+
+    Mutation: re-offer a group without removing its ledger entry (or filter the
+    qualified key instead of the walk-relative one) and both the unscoped and the
+    scoped read see a non-empty intersection. The scoped read is the witness: under
+    `path="import"` the row key is qualified while the ledger path the filter must
+    match is walk-relative, so the unscoped read alone cannot tell them apart.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(XBOX_GROUP, mount_key())
+    scan()
+    headers = auth_header(client)
+
+    def assert_disjoint() -> None:
+        report = detect(client, headers, limit=1000)
+        rows = {row["key"] for row in report["bundles"]}
+        assert rows & set(refusal_ledger(report)) == set()
+        scoped = detect(client, headers, path="import", limit=1000)
+        scoped_rows = {row["key"] for row in scoped["bundles"]}
+        assert scoped_rows & set(refusal_ledger(scoped)) == set()
+
+    assert_disjoint()
+    assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
+    assert_disjoint()
+
+
+def test_a_dismissed_re_offered_group_is_not_stale_and_a_vanished_key_is(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A dismissal of a re-offered group still names a live row; a ghost key does not.
+
+    Mutation: build `live_keys` from `scan.candidates` alone and the dismissed
+    mount key reads stale the moment it is hidden, which is exactly the class of
+    false stale a re-offer must not introduce.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(XBOX_GROUP, mount_key())
+    scan()
+    headers = auth_header(client)
+    assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
+
+    dismiss(client, headers, [mount_key()])
+    report = detect(client, headers, limit=1000)
+
+    assert mount_key() not in report["stale_dismissals"], "a live row is never stale"
+    assert mount_key() not in {row["key"] for row in report["bundles"]}
+    assert report["counts"]["dismissed"] == 1
+
+    dismiss(client, headers, ["ghost/dismissed"])
+    report = detect(client, headers, limit=1000)
+    assert "ghost/dismissed" in report["stale_dismissals"]
+    assert mount_key() not in report["stale_dismissals"]
+
+
+def model_asset_ids(rel_dir: str) -> List[str]:
+    """The ids of every registered MODEL asset under ``rel_dir``, in path order."""
+    with Session(engine) as session:
+        assets = session.exec(select(Asset).where(Asset.storage_path.is_not(None)).order_by(Asset.storage_path))
+        return [
+            asset.id
+            for asset in assets
+            if asset.storage_path.startswith(rel_dir + "/")
+            and bundle_service._suffix(asset.storage_path) in bundle_detect.MODEL_SUFFIXES
+        ]
+
+
+def test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The re-offer needs the marker, and only the marker: absorbed alone creates nothing.
+
+    Three parts, one contract. (a) Before anything recorded an exclusion the
+    absorbed key is not a row and answers ``unknown bundle``. (b) With the
+    exclusion recorded, the group creates a project on facts RECOMPUTED from its
+    own documents - never the compound's ``low`` - and its marker carries only the
+    six keys every row has. (c) A second, exclusion-free tree leaves its own
+    foreign group exactly where it was. Mutation: remove the `by_key.update(...)`
+    line in `create_bundles` and part (b) answers `unknown bundle`; copy the
+    compound row's detector/confidence into the split marker and part (b) reds.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(XBOX_GROUP, mount_key())
+    scan()
+    headers = auth_header(client)
+
+    before_any = create(client, headers, [{"key": mount_key()}])
+    assert before_any["failed"] == 1
+    assert before_any["results"][0]["reason"] == "unknown bundle"
+    assert table_counts()["projects"] == 0
+
+    assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
+    split = create(client, headers, [{"key": mount_key()}])
+
+    assert split["created"] == 1
+    project_id = split["results"][0]["project_id"]
+    assert project_storage_paths(project_id) == {
+        f"{mount_key()}/bracket-{index}.stl" for index in range(XBOX_GROUP_MODELS)
+    }
+    marker = project_marker(project_id)
+    assert (marker["detector"], marker["confidence"]) == ("thingiverse-readme", "high")
+    assert marker["key"] == mount_key()
+    assert set(marker) - {"enrichment"} == {"key", "detector", "confidence", "rel_dir", "archive", "twin_verified"}
+
+    copy_key = f"import/{XBOX}-copy"
+    shutil.copytree(isolated_storage / "import" / XBOX, isolated_storage / "import" / f"{XBOX}-copy")
+    insert_folder_row(f"{XBOX}-copy", copy_key)
+    scan()
+    projects_before = table_counts()["projects"]
+    assert create(client, headers, [{"key": copy_key, "name": "copy of the shell"}])["created"] == 1
+    unstripped = create(client, headers, [{"key": f"{copy_key}/{XBOX_GROUP}"}])
+    assert unstripped["failed"] == 1
+    assert unstripped["results"][0]["reason"] == "unknown bundle"
+    assert table_counts()["projects"] == projects_before + 1
+
+
+def test_a_re_offered_group_without_a_folder_row_is_blocked_and_creates_nothing(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-3e: a re-offered row resolves on the same terms as any other row.
+
+    The row is offered because the marker says so, but a directory with no
+    ``Folder.storage_path`` row is still ``blocked``/``unresolved_directory`` and
+    creates nothing. The row is removed AFTER the scan on purpose: the assets stay
+    registered, so only the resolution is missing. Mutation: let the re-offer skip
+    the folder check (or create from an unresolved row) and a project appears
+    with no folder behind it.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+    assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
+    with Session(engine) as session:
+        folder = session.exec(select(Folder).where(Folder.storage_path == mount_key())).first()
+        assert folder is not None
+        session.delete(folder)
+        session.commit()
+
+    row = row_for(detect(client, headers, limit=1000), mount_key())
+    assert row["status"] == "blocked"
+    assert row["blocked_reason"] == "unresolved_directory"
+
+    blocked = create(client, headers, [{"key": mount_key()}])
+    assert blocked["blocked"] == 1
+    assert blocked["results"][0]["reason"] == "unresolved_directory"
+    assert table_counts()["projects"] == 1
+
+
+def test_a_second_create_of_a_compound_row_is_already_created(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A compound create is idempotent, and a later exclusion never rewrites the marker.
+
+    The second create is a marker hit; the third sends a DIFFERENT exclusion and
+    still answers ``already_created`` with the project byte-identical, because
+    the marker is proof and the row is never touched again. Mutation: skip the
+    existing-project check for a compound row and the project gets a second
+    attach pass or a rewritten marker.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+
+    first = create(client, headers, [{"key": f"import/{XBOX}", "name": "shell only"}])
+    assert first["created"] == 1
+    project_id = first["results"][0]["project_id"]
+    with Session(engine) as session:
+        metadata_before = session.get(Project, project_id).metadata_json
+
+    second = create(client, headers, [{"key": f"import/{XBOX}"}])
+
+    assert second["skipped"] == 1
+    assert second["results"][0]["reason"] == "already_created"
+    row = row_for(detect(client, headers, limit=1000), f"import/{XBOX}")
+    assert row["existing_project_match"] == "marker"
+
+    third = create_for_exclusion(client, headers, [XBOX_GROUP])
+
+    assert third["skipped"] == 1
+    assert third["results"][0]["reason"] == "already_created"
+    with Session(engine) as session:
+        assert session.get(Project, project_id).metadata_json == metadata_before
+    assert table_counts()["projects"] == 1
+    assert member_count(project_id) == XBOX_OWN_MODELS + XBOX_GROUP_MODELS
+
+
+def test_a_second_create_of_the_split_group_is_already_created(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The split row is a row like any other: a marker hit, and two created rows report.
+
+    Mutation: leave the split candidate out of `by_key` (or key the marker with the
+    compound's key) and the second create makes a second project.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(XBOX_GROUP, mount_key())
+    scan()
+    headers = auth_header(client)
+    assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
+    split = create(client, headers, [{"key": mount_key()}])
+    assert split["created"] == 1
+
+    second = create(client, headers, [{"key": mount_key()}])
+
+    assert second["skipped"] == 1
+    assert second["results"][0]["reason"] == "already_created"
+    assert row_for(detect(client, headers, limit=1000), mount_key())["existing_project_match"] == "marker"
+
+    report = detect(client, headers, limit=1000)
+    assert len(report["bundles"]) == 2
+    assert all(row["existing_project_id"] for row in report["bundles"])
+    assert report["counts"]["already_created"] == 2
+
+
+def test_a_hand_made_project_over_the_mount_files_reports_already_created_by_assets(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """Asset containment is an identity even with no marker, no source and another name.
+
+    Mutation: drop the assets leg of `find_existing_project` for the re-offered
+    row (or hand the row only the compound's containment) and this project is
+    reported as creatable, so a create would make a duplicate.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+    assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
+
+    with Session(engine) as session:
+        hand_made = project_service.create_project(session, "Someone Else's Mount", None, None, origin="imported")
+    project_service.add_assets(hand_made.id, model_asset_ids(mount_key()))
+
+    row = row_for(detect(client, headers, limit=1000), mount_key())
+
+    assert row["existing_project_id"] == hand_made.id
+    assert row["existing_project_match"] == "assets"
+    assert table_counts()["projects"] == 2
+
+
+def test_the_compound_marker_names_the_groups_and_their_counts(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The marker's group list is the row's, in order, plus what was attached.
+
+    ``model_count`` is what the WALK counted and ``attached`` is what the scan
+    registered, which is why the Rocket reads 12/6 and the account still adds up:
+    for the xbox tree 31 attached minus the foreign 4 is the product's own 27.
+    Mutation: count `attached` from the snapshot instead of the registered models
+    and the Rocket's marker reads 12/12.
+    """
+    write_stagetop(isolated_storage)
+    write_rocket(isolated_storage)
+    write_xbox360(isolated_storage)
+    keys = {"stagetop": f"import/{STAGETOP}", "rocket": f"import/{ROCKET}", "xbox": f"import/{XBOX}"}
+    for key in keys.values():
+        insert_folder_row(key.rsplit("/", 1)[-1], key)
+    scan()
+    headers = auth_header(client)
+
+    created = create(client, headers, [{"key": key, "name": f"{name} parts"} for name, key in keys.items()])
+
+    assert created["created"] == 3
+    for name, result in zip(keys, created["results"], strict=True):
+        marker = project_marker(result["project_id"])
+        row = service_row(keys[name])
+        assert [
+            {"name": group["name"], "model_count": group["model_count"], "foreign": group["foreign"]}
+            for group in marker["groups"]
+        ] == [
+            {"name": group["name"], "model_count": group["model_count"], "foreign": group["foreign"]}
+            for group in row["groups"]
+        ], name
+        assert all(group["included"] is True for group in marker["groups"]), name
+
+    rocket_marker = project_marker(created["results"][1]["project_id"])
+    assert [(group["model_count"], group["attached"]) for group in rocket_marker["groups"]] == [(12, 6)] * len(
+        ROCKET_GROUPS
+    )
+
+    xbox_marker = project_marker(created["results"][2]["project_id"])
+    assert created["results"][2]["assets_added"] - sum(
+        group["attached"] for group in xbox_marker["groups"] if group["included"]
+    ) == XBOX_OWN_MODELS
+
+
+def test_a_non_compound_marker_is_unchanged_in_both_directions(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """R7's marker additions are additive-only: six keys ordinary, nine compound.
+
+    Mutation: write `shape`/`groups`/`cover` unconditionally and the six-key
+    assertions red.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(XBOX_GROUP, mount_key())
+    thingiverse_bundle(isolated_storage, "Ordinary Thing", 424242)
+    insert_folder_row("Ordinary Thing", "Ordinary Thing")
+    scan()
+    headers = auth_header(client)
+
+    created = create(
+        client,
+        headers,
+        [
+            {"key": "Ordinary Thing", "name": "ordinary thing"},
+            {"key": f"import/{XBOX}", "name": "compound thing", "exclude_groups": [XBOX_GROUP]},
+        ],
+    )
+    assert created["created"] == 2
+    split = create(client, headers, [{"key": mount_key()}])
+    assert split["created"] == 1
+
+    ordinary = project_marker(created["results"][0]["project_id"])
+    compound = project_marker(created["results"][1]["project_id"])
+    split_marker = project_marker(split["results"][0]["project_id"])
+    six = {"key", "detector", "confidence", "rel_dir", "archive", "twin_verified"}
+    assert set(ordinary) - {"enrichment"} == six
+    assert set(split_marker) - {"enrichment"} == six
+    assert set(compound) - {"enrichment"} == six | {"shape", "groups", "cover"}
+
+
+def test_an_exclusion_of_a_group_that_was_never_a_row_is_refused(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """R9: a FOREIGN group with no absorbed row behind it has nowhere to go.
+
+    The toolkit's group is foreign off its own name and holds four parts, but it
+    was never a row of its own - R1, R3 and R5 each refuse it - so creating the
+    compound without it would leave its parts in no project and in no row, the
+    ticket's vanish. Mutation: treat every group as separable and the refusal
+    becomes a project holding 9 of its 13 parts.
+    """
+    key = write_foreign_group_never_a_row(isolated_storage)
+    insert_folder_row(A_COMPOUND, key)
+    scan()
+    headers = auth_header(client)
+
+    row = service_row(key)
+    assert row["groups"] == [{"name": A_LONE_GROUP, "model_count": 4, "foreign": True, "separable": False}]
+
+    refused = create(client, headers, [{"key": key, "exclude_groups": [A_LONE_GROUP]}])
+
+    assert refused["failed"] == 1
+    assert refused["results"][0]["reason"] == "not_separable_group"
+    assert table_counts()["projects"] == 0
+
+    created = create(client, headers, [{"key": key}])
+    assert created["created"] == 1
+    held = project_storage_paths(created["results"][0]["project_id"])
+    assert held == registered_model_paths(key)
+    assert f"import/{A_COMPOUND}/{A_LONE_GROUP}/plates/bracket-0.stl" in held
+
+
+def test_the_three_exclusion_refusals(client: TestClient, isolated_storage: Path) -> None:
+    """Every unusable exclusion is a `failed` with its own reason, and creates nothing.
+
+    ``unknown_group`` covers a name no group carries and a differently-cased
+    spelling of one that is there; ``not_a_foreign_group`` covers a group of the
+    product's own, witnessed by both Stagetop groups (the absorbed edition and
+    the never-absorbed one); ``not_separable_group`` covers a FOREIGN group that
+    was never a row, witnessed by the toolkit's lone group. The rest are the edges
+    of the rule: an empty list is a no-op even on a non-compound row, a duplicated
+    name still attaches once, a FILE that happens to be named exactly
+    ``<key>/<name>`` is not the group, and an already-created row answers the
+    validation reason rather than ``already_created``. Mutation: drop the trailing
+    slash from the prefix and the file-named-group case attaches only one model;
+    move validation after ``find_existing_project`` and the bogus-name case
+    answers ``already_created``.
+    """
+    write_xbox360(isolated_storage)
+    write_stagetop(isolated_storage)
+    write_foreign_group_never_a_row(isolated_storage)
+    moai_bundle(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(STAGETOP, f"import/{STAGETOP}")
+    insert_folder_row(A_COMPOUND, f"import/{A_COMPOUND}")
+    insert_folder_row(MOAI, MOAI)
+    write_file(isolated_storage / "Inbox" / "part-0.stl", STL_BYTES)
+    write_file(isolated_storage / "Inbox" / "foreign.stl", STL_BYTES)
+    scan()
+    headers = auth_header(client)
+
+    def reason(items: List[dict]) -> Optional[str]:
+        return create(client, headers, items)["results"][0]["reason"]
+
+    assert reason([{"key": f"import/{XBOX}", "exclude_groups": ["No Such Group"]}]) == "unknown_group"
+    assert reason([{"key": f"import/{XBOX}", "exclude_groups": [XBOX_GROUP.casefold()]}]) == "unknown_group"
+    assert reason([{"key": f"import/{STAGETOP}", "exclude_groups": [STAGETOP_WAVE]}]) == "not_a_foreign_group"
+    assert reason([{"key": f"import/{STAGETOP}", "exclude_groups": [STAGETOP_WAVE_ONE]}]) == "not_a_foreign_group"
+    assert reason([{"key": f"import/{A_COMPOUND}", "exclude_groups": [A_LONE_GROUP]}]) == "not_separable_group"
+    assert table_counts()["projects"] == 0, "a refused exclusion creates nothing"
+
+    plain = create(client, headers, [{"key": MOAI, "exclude_groups": []}])
+    assert plain["created"] == 1, "an empty list is a no-op on a non-compound row too"
+
+    duplicated = create(client, headers, [{"key": f"import/{XBOX}", "exclude_groups": [XBOX_GROUP, XBOX_GROUP]}])
+    assert duplicated["created"] == 1
+    assert duplicated["results"][0]["assets_added"] == XBOX_OWN_MODELS
+    assert project_storage_paths(duplicated["results"][0]["project_id"]) == {
+        f"import/{XBOX}/shell-{index}.stl" for index in range(XBOX_OWN_MODELS)
+    }
+
+    bogus = create(client, headers, [{"key": f"import/{XBOX}", "exclude_groups": ["No Such Group"]}])
+    assert bogus["failed"] == 1
+    assert bogus["results"][0]["reason"] == "unknown_group", "validation runs before the marker check"
+
+    snapshot = bundle_detect.BundleSnapshot(
+        bundle_name="Inbox",
+        rel_dir="Inbox",
+        entries=(
+            bundle_detect.BundleEntry(rel_path="part-0.stl", size=len(STL_BYTES)),
+            bundle_detect.BundleEntry(rel_path="foreign.stl", size=len(STL_BYTES)),
+        ),
+    )
+    candidate = bundle_service.BundleCandidate(
+        key="Inbox", snapshot=snapshot, archive_path=None, is_archive=False, confidence="low"
+    )
+    hand_row = {
+        "key": "Inbox",
+        "rel_path": "Inbox",
+        "name_suggestion": "Inbox",
+        "creator": None,
+        "licence": None,
+        "licence_url": None,
+        "source_url": None,
+        "description_excerpt": None,
+        "detector": "generic-bundle",
+        "confidence": "low",
+        "cover": {"asset_id": None, "rel_path": None, "reason": "none", "url": None, "thumb_url": None},
+        "status": "ready",
+        "blocked_reason": None,
+        "archive": None,
+        "groups": [{"name": "foreign.stl", "model_count": 1, "foreign": True, "separable": True}],
+    }
+
+    named_like_a_file = bundle_service._create_one(
+        bundle_service.BundleCreateItem(key="Inbox", name_only=True, exclude_groups=("foreign.stl",)),
+        hand_row,
+        candidate,
+        audit_ctx(),
+    )
+
+    assert named_like_a_file["status"] == "created"
+    assert named_like_a_file["assets_added"] == 2, "the file `Inbox/foreign.stl` is not the group"
+    assert project_storage_paths(named_like_a_file["project_id"]) == {"Inbox/part-0.stl", "Inbox/foreign.stl"}
+
+
+def test_a_split_sent_with_its_parent_in_one_request_fails_on_the_second_item(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """One request cannot both record an exclusion and create from it.
+
+    The report is recomputed once, before any item runs, so the mount is not a row
+    yet when the second item is looked up: ``unknown bundle``. The NEXT read offers
+    it, because by then the marker exists. Mutation: resolve items against a
+    re-scanned report per item and the second item creates a project instead.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(XBOX_GROUP, mount_key())
+    scan()
+    headers = auth_header(client)
+
+    created = create(
+        client,
+        headers,
+        [
+            {"key": f"import/{XBOX}", "exclude_groups": [XBOX_GROUP]},
+            {"key": mount_key()},
+        ],
+    )
+
+    assert created["created"] == 1
+    assert created["failed"] == 1
+    assert created["results"][0]["status"] == "created"
+    assert created["results"][1]["reason"] == "unknown bundle"
+
+    assert row_for(detect(client, headers, limit=1000), mount_key())["status"] == "ready"
+
+
+def test_the_create_audit_records_the_excluded_groups(client: TestClient, isolated_storage: Path) -> None:
+    """Every create names its exclusions, `[]` included, so a reader can tell none from absent.
+
+    Mutation: write the field only when something was excluded and the three `[]`
+    assertions red; read the excluded names from `item.exclude_groups` instead of
+    the matched group order and the duplicated-name create records the name twice.
+    """
+    write_xbox360(isolated_storage)
+    shutil.copytree(isolated_storage / "import" / XBOX, isolated_storage / "import" / f"{XBOX}-copy")
+    shutil.copytree(isolated_storage / "import" / XBOX, isolated_storage / "import" / f"{XBOX}-copy-2")
+    thingiverse_bundle(isolated_storage, "Ordinary Thing", 515151)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(f"{XBOX}-copy", f"import/{XBOX}-copy")
+    insert_folder_row(f"{XBOX}-copy-2", f"import/{XBOX}-copy-2")
+    insert_folder_row("Ordinary Thing", "Ordinary Thing")
+    scan()
+    headers = auth_header(client)
+
+    created = create(
+        client,
+        headers,
+        [
+            {"key": f"import/{XBOX}", "name": "excluded shell", "exclude_groups": [XBOX_GROUP]},
+            {"key": f"import/{XBOX}-copy", "name": "whole copy"},
+            {
+                "key": f"import/{XBOX}-copy-2",
+                "name": "twice-excluded copy",
+                "exclude_groups": [XBOX_GROUP, XBOX_GROUP],
+            },
+            {"key": "Ordinary Thing", "name": "ordinary thing"},
+        ],
+    )
+    assert created["created"] == 4
+    split = create(client, headers, [{"key": mount_key()}])
+    assert split["created"] == 1
+
+    with Session(engine) as session:
+        events = session.exec(select(AuditEvent).where(AuditEvent.action == audit.BUNDLE_CREATE)).all()
+    details = {event.target: json.loads(event.detail_json or "{}") for event in events}
+
+    assert details[f"import/{XBOX}"]["excluded_groups"] == [XBOX_GROUP]
+    assert details[f"import/{XBOX}-copy"]["excluded_groups"] == []
+    assert details[f"import/{XBOX}-copy-2"]["excluded_groups"] == [XBOX_GROUP]
+    assert details[mount_key()]["excluded_groups"] == []
+    assert details["Ordinary Thing"]["excluded_groups"] == []
+
+
+def test_a_registered_asset_that_vanished_from_the_disk_still_answers_the_belt(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The belt is live on a `low` compound row and its assets stay UNFILTERED.
+
+    ``assets``/``own_assets`` are handed to the belt unfiltered on purpose: the
+    only difference between them here is a file deleted after it was registered,
+    which is another bundle's asset as far as the belt can tell - so the create is
+    refused and nothing is written. This create sends no ``exclude_groups``, so it
+    cannot witness the exclusion filter; that mutation is witnessed by
+    ``test_excluding_the_foreign_group_creates_one_project_of_its_own_27`` (12
+    tests red under it, including that one). Mutation: exempt the compound row
+    from the belt and this witness creates a project.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    (isolated_storage / "import" / XBOX / "shell-0.stl").unlink()
+    headers = auth_header(client)
+
+    created = create(client, headers, [{"key": f"import/{XBOX}"}])
+
+    assert created["failed"] == 1
+    assert created["results"][0]["reason"] == "contains_bundles"
+    assert table_counts()["projects"] == 0
+
+
+def test_the_cover_never_picks_an_unregistered_image_under_an_excluded_group(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """An excluded group's image cannot become the project's face.
+
+    The row's cover names an unregistered image under the group; once that group is
+    excluded the facts' ``cover_entry`` is dropped and the same ``_cover`` rule is
+    re-asked over the included parts, so the project's own model wins. Mutation:
+    keep ``facts.cover_entry`` and the project's cover is a rel_path under
+    ``Inbox/foreign/`` with no asset behind it.
+    """
+    write_file(isolated_storage / "Inbox" / "part-0.stl", STL_BYTES)
+    scan()
+    snapshot = bundle_detect.BundleSnapshot(
+        bundle_name="Inbox",
+        rel_dir="Inbox",
+        entries=(
+            bundle_detect.BundleEntry(rel_path="part-0.stl", size=len(STL_BYTES)),
+            bundle_detect.BundleEntry(rel_path="notes.txt", size=13),
+            bundle_detect.BundleEntry(rel_path="foreign/cover.jpg", size=900),
+        ),
+    )
+    candidate = bundle_service.BundleCandidate(
+        key="Inbox", snapshot=snapshot, archive_path=None, is_archive=False, confidence="low"
+    )
+    row = {
+        "key": "Inbox",
+        "rel_path": "Inbox",
+        "name_suggestion": "Inbox",
+        "creator": None,
+        "licence": None,
+        "licence_url": None,
+        "source_url": None,
+        "description_excerpt": None,
+        "detector": "generic-bundle",
+        "confidence": "low",
+        "cover": {
+            "asset_id": None,
+            "rel_path": "Inbox/foreign/cover.jpg",
+            "reason": "largest-image-unregistered",
+            "url": None,
+            "thumb_url": None,
+        },
+        "status": "ready",
+        "blocked_reason": None,
+        "archive": None,
+        "groups": [{"name": "foreign", "model_count": 1, "foreign": True, "separable": True}],
+    }
+
+    result = bundle_service._create_one(
+        bundle_service.BundleCreateItem(key="Inbox", name_only=True, exclude_groups=("foreign",)),
+        row,
+        candidate,
+        audit_ctx(),
+    )
+
+    assert result["status"] == "created"
+    with Session(engine) as session:
+        project = session.get(Project, result["project_id"])
+        cover = session.get(Asset, project.cover_asset_id)
+    assert cover.storage_path == "Inbox/part-0.stl"
+    assert not cover.storage_path.startswith("Inbox/foreign/")
+    assert "foreign/" not in cover.storage_path, "no cover rel_path may sit under the excluded group"
+
+
+def test_the_marker_names_the_group_of_an_unregistered_cover(isolated_storage: Path) -> None:
+    """An unregistered cover is attributed to its group in ONE key space.
+
+    ``_cover``'s registered legs name a storage-relative ``asset.path``; its
+    ``largest-image-unregistered`` leg names a BUNDLE-relative snapshot entry.
+    ``_create_one`` settles the one storage-relative form before the marker is
+    built, so the same field is never recorded in two spaces. Mutation: compare
+    the bundle-relative entry against the storage-relative prefix (the
+    pre-normalisation code) and ``cover["group"]`` reads None.
+    """
+    write_file(isolated_storage / "Inbox" / "part-0.stl", STL_BYTES)
+    scan()
+    # The second vendor-id group and the extra root models are what make this a
+    # GENUINE compound snapshot: one README-bearing group named `gear` cannot meet
+    # R7's Leg A two-group floor or Leg B's vendor-id requirement on its own, and
+    # then `_candidate_facts` would return None instead of the unregistered leg.
+    snapshot = bundle_detect.BundleSnapshot(
+        bundle_name="Inbox",
+        rel_dir="Inbox",
+        entries=(
+            bundle_detect.BundleEntry(rel_path="part-0.stl", size=len(STL_BYTES)),
+            bundle_detect.BundleEntry(rel_path="part-1.stl", size=len(STL_BYTES)),
+            bundle_detect.BundleEntry(rel_path="part-2.stl", size=len(STL_BYTES)),
+            bundle_detect.BundleEntry(rel_path="notes.txt", size=13),
+            bundle_detect.BundleEntry(rel_path="gear/cover.jpg", size=900),
+            bundle_detect.BundleEntry(rel_path="gear/bracket.stl", size=40),
+            bundle_detect.BundleEntry(rel_path="gear/README.txt", size=10),
+            bundle_detect.BundleEntry(rel_path="grip-5461913/grip.stl", size=40),
+        ),
+    )
+    candidate = bundle_service.BundleCandidate(
+        key="Inbox",
+        snapshot=snapshot,
+        archive_path=None,
+        is_archive=False,
+        confidence="low",
+        compound=True,
+    )
+    facts = bundle_service._candidate_facts(isolated_storage, candidate)
+    assert facts is not None and facts.cover_entry == "gear/cover.jpg"
+
+    row = {
+        "key": "Inbox",
+        "rel_path": "Inbox",
+        "name_suggestion": "Inbox",
+        "creator": None,
+        "licence": None,
+        "licence_url": None,
+        "source_url": None,
+        "description_excerpt": None,
+        "detector": "compound-bundle",
+        "confidence": "low",
+        "cover": {
+            "asset_id": None,
+            "rel_path": "gear/cover.jpg",
+            "reason": "largest-image-unregistered",
+            "url": None,
+            "thumb_url": None,
+        },
+        "status": "ready",
+        "blocked_reason": None,
+        "archive": None,
+        "groups": [{"name": "gear", "model_count": 1, "foreign": True, "separable": True}],
+    }
+
+    result = bundle_service._create_one(
+        bundle_service.BundleCreateItem(key="Inbox", name_only=True),
+        row,
+        candidate,
+        audit_ctx(),
+    )
+
+    assert result["status"] == "created"
+    marker = project_marker(result["project_id"])
+    assert marker["cover"]["reason"] == "largest-image-unregistered"
+    assert marker["cover"]["rel_path"] == "Inbox/gear/cover.jpg"
+    assert marker["cover"]["group"] == "gear"
+    with Session(engine) as session:
+        assert session.get(Project, result["project_id"]).cover_asset_id is None
+
+
+def test_a_pre_c2_marker_re_offers_nothing(client: TestClient, isolated_storage: Path) -> None:
+    """A marker written before C2 carries no ``groups``, so it re-offers no part.
+
+    The six-key marker is exactly what C1's create wrote. Absence of ``groups``
+    means nothing was ever excluded, so the absorbed mount stays a
+    ``member-of-bundle`` and is not creatable. Mutation: treat an absent `groups`
+    as "everything was excluded" (or default `included` to False) and the mount is
+    re-offered from a marker that predates C2.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(XBOX_GROUP, mount_key())
+    scan()
+    headers = auth_header(client)
+    with Session(engine) as session:
+        project_service.create_project(
+            session,
+            "pre-c2 shell",
+            None,
+            None,
+            origin="imported",
+            metadata={
+                "_bundle": {
+                    "key": f"import/{XBOX}",
+                    "detector": "compound-bundle",
+                    "confidence": "low",
+                    "rel_dir": f"import/{XBOX}",
+                    "archive": None,
+                    "twin_verified": None,
+                }
+            },
+        )
+
+    report = detect(client, headers, limit=1000)
+
+    assert [row["key"] for row in report["bundles"]] == [f"import/{XBOX}"]
+    assert mount_key() not in {row["key"] for row in report["bundles"]}
+    assert refusal_ledger(report)[mount_key()] == "member-of-bundle"
+    assert report["counts"]["total"] == 1
+
+    blocked = create(client, headers, [{"key": mount_key()}])
+    assert blocked["failed"] == 1
+    assert blocked["results"][0]["reason"] == "unknown bundle"
+
+
+def test_a_refused_container_is_not_creatable_by_key(client: TestClient, isolated_storage: Path) -> None:
+    """A refused checkout is not a row, so its key is `unknown bundle` and creates nothing.
+
+    The git dump keeps its five separate product rows (the R7 AC-3 test above) and
+    is itself creatable by nobody. Mutation: offer the refused container as a row
+    and one create turns five products into one project.
+    """
+    write_endorphin(isolated_storage)
+    scan()
+    headers = auth_header(client)
+    report = detect(client, headers, limit=1000)
+    assert f"import/{ENDORPHIN}" not in {row["key"] for row in report["bundles"]}
+
+    created = create(client, headers, [{"key": f"import/{ENDORPHIN}"}])
+
+    assert created["failed"] == 1
+    assert created["results"][0]["reason"] == "unknown bundle"
+    assert table_counts()["projects"] == 0

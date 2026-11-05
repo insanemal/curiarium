@@ -286,6 +286,49 @@ const mediumDragon = makeBundle({
   assets_total: 0,
 });
 
+/** A compound row: one product in several parts, one of them somebody else's
+ *  thing. `separable` is the service's answer to "was this a directory of its
+ *  own before the compound rule absorbed it?", and only a separable group may be
+ *  excluded - the server refuses the rest. */
+const compound = makeBundle({
+  key: "StageTop",
+  rel_path: "StageTop",
+  title: "StageTop Wave One",
+  name_suggestion: "StageTop Wave One",
+  confidence: "low",
+  groups: [
+    {
+      name: "StageTop Wave One - Personal Use",
+      model_count: 45,
+      foreign: false,
+      separable: true,
+    },
+    { name: "Gearbox", model_count: 3, foreign: true, separable: true },
+  ],
+});
+
+/** The same shape with no foreign part, so nothing here may be excluded. */
+const compoundOwn = makeBundle({
+  key: "Vase",
+  rel_path: "Vase",
+  title: "Vase",
+  name_suggestion: "Vase",
+  groups: [
+    { name: "Body", model_count: 2, foreign: false, separable: true },
+    { name: "Lid", model_count: 1, foreign: false, separable: true },
+  ],
+});
+
+/** A foreign group the server would NOT accept an exclusion for: it was never a
+ *  row of its own, so the checkbox must not exist at all. */
+const compoundNotSeparable = makeBundle({
+  key: "Borrowed",
+  rel_path: "Borrowed",
+  title: "Borrowed",
+  name_suggestion: "Borrowed",
+  groups: [{ name: "Gearbox", model_count: 3, foreign: true, separable: false }],
+});
+
 function makeReport(
   bundles: BundleDetectItem[],
   overrides: Partial<BundleReport> = {},
@@ -403,6 +446,11 @@ function headerCount(): string {
 
 function detail(): HTMLElement {
   return screen.getByRole("complementary", { name: "Bundle details" });
+}
+
+/** The detail pane's compound-row breakdown; only a row carrying groups renders it. */
+function groupsBlock(): HTMLElement {
+  return screen.getByRole("group", { name: "Groups in this bundle" });
 }
 
 function rowKeys(): string[] {
@@ -1840,6 +1888,107 @@ describe("BundleReviewView detail panel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Blocked" }));
 
     expect(within(detail()).getByText("Select a bundle to see its details.")).toBeTruthy();
+  });
+});
+
+describe("BundleReviewView compound groups", () => {
+  it("renders every group's name and part count, and no checkbox when none is foreign", () => {
+    renderView(makeState({ report: makeReport([compoundOwn]) }));
+
+    const block = groupsBlock();
+    expect(within(block).getByText("Body - 2 parts")).toBeTruthy();
+    // Singular on purpose: 1 must read "1 part", not "1 parts".
+    expect(within(block).getByText("Lid - 1 part")).toBeTruthy();
+    // Nothing is somebody else's thing, so the operator has nothing to decide:
+    // a checkbox here would offer an exclusion the server has no reason to take.
+    expect(within(block).queryByRole("checkbox")).toBeNull();
+  });
+
+  it("names a foreign group as unrelated and offers one checked exclusion", () => {
+    renderView(makeState({ report: makeReport([compound]) }));
+
+    const block = groupsBlock();
+    expect(within(block).getByText("Gearbox - 3 parts")).toBeTruthy();
+    expect(within(block).getByText("unrelated")).toBeTruthy();
+
+    // Exactly one, and only the foreign group gets it: the row's own part is not
+    // the operator's to remove.
+    const boxes = within(block).getAllByRole("checkbox");
+    expect(boxes).toHaveLength(1);
+    expect(within(block).getByRole("checkbox", { name: "Include Gearbox" })).toBeTruthy();
+    // Checked by default: excluding is opt-in, so an untouched row includes
+    // every group.
+    expect((boxes[0] as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("offers no checkbox for a foreign group the server would refuse to exclude", () => {
+    renderView(makeState({ report: makeReport([compoundNotSeparable]) }));
+
+    const block = groupsBlock();
+    expect(within(block).getByText("Gearbox - 3 parts")).toBeTruthy();
+    expect(within(block).getByText("unrelated")).toBeTruthy();
+    // Not separable means it was never a row of its own, so an exclusion would
+    // come back `not_separable_group`; the control must not exist to ask for it.
+    expect(within(block).queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: "Include Gearbox" })).toBeNull();
+  });
+
+  it("creates the project without an unchecked foreign group", () => {
+    const state = makeState({ report: makeReport([compound]) });
+    renderView(state);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Gearbox" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    // The name is part of the body as it always was; the exclusion is the only
+    // new key, and it carries the group's own name verbatim.
+    expect(state.create).toHaveBeenCalledWith([
+      { key: "StageTop", name: "StageTop Wave One", exclude_groups: ["Gearbox"] },
+    ]);
+  });
+
+  it("omits exclude_groups entirely when nothing was unchecked", () => {
+    const state = makeState({ report: makeReport([compound]) });
+    renderView(state);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    const item = vi.mocked(state.create).mock.calls[0][0][0];
+    // Absent, not present-and-empty: the server reads the missing field as
+    // "include every group", and the old body stays byte-identical.
+    expect(item).not.toHaveProperty("exclude_groups");
+    expect(item).toEqual({ key: "StageTop", name: "StageTop Wave One" });
+  });
+
+  it("renders no group block for an empty list and sends the old body", () => {
+    const state = makeState({ report: makeReport([makeBundle({ groups: [] })]) });
+    renderView(state);
+
+    expect(screen.queryByRole("group", { name: "Groups in this bundle" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    expect(state.create).toHaveBeenCalledWith([{ key: "Moai", name: "Moai statue" }]);
+  });
+
+  it("keeps bulk doors on include-every-group even after an exclusion was toggled", () => {
+    const state = makeState({ report: makeReport([compound]) });
+    renderView(state);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Gearbox" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Create selected/ }));
+
+    const bulkItems = vi.mocked(state.create).mock.calls[0][0];
+    // Bulk create means "include every group": the exclusion lives in the detail
+    // pane, and carrying it here would silently drop a part the operator never
+    // excluded from this door.
+    for (const item of bulkItems) expect(item).not.toHaveProperty("exclude_groups");
+
+    vi.mocked(state.create).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /^Create low as name-only/ }));
+
+    expect(state.create).toHaveBeenCalledWith([{ key: "StageTop", name_only: true }]);
   });
 });
 

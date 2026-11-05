@@ -74,6 +74,10 @@ every other pass; it mints no refusal vocabulary, no row any other rule offered
 is rewritten, and the low/name-derived rule absorbs only what its own shape
 generalises - the full reasoning and the measurement are Decision 23).
 
+**Extended:** 2026-11-05 - ticket `Mf-ao6r` (the create path of a compound row -
+an excluded group is an ATTACH decision, the group is re-offered from the created
+project's own marker, and the detection rule and its stamp are untouched).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -271,6 +275,20 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
      migration is involved. The underscore prefix is the existing convention for
      reserved keys, so the merge in `project_service.merge_project_marker` only
      ever writes `_`-prefixed keys and an operator's own metadata is untouched.
+
+   **Extended by Mf-ao6r.** The marker-derived re-offer is not a second piece of
+   stored state and not an exception to "nothing is stored": this decision
+   already names the `_bundle` marker as one of the two pieces of state that
+   legitimately survive, beside dismissals. C2 reads a NEW fact out of that same
+   marker - which groups a create recorded as excluded - and nothing else. No new
+   table, no new `appconfig` key, no migration, and a project deleted takes its
+   exclusion with it, because the only reader, `_compound_splits`, reads the
+   marker that project's own row owns. Both directions of that reading are
+   pinned: a marker written before C2 (six keys, no `groups`) re-offers nothing at
+   all and leaves its absorbed group exactly where it was
+   (`test_a_pre_c2_marker_re_offers_nothing`), and a marker that recorded an
+   exclusion re-offers precisely the group it names and nothing else
+   (`test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered`).
 
 4. **The folder is the truth; a twin zip is provenance only.** When a directory
    and a `<name>.zip` sit side by side (`twin_key` casefolds the basename and
@@ -538,6 +556,30 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     still writes nothing: the hand-made project is never stamped with a marker,
     which is what makes the identity a read and not a silent adoption.
 
+    **Extended by Mf-ao6r.** The compound and the split need no new identity.
+    `find_existing_project` is unchanged: the compound row is a marker hit on its
+    own key, and a re-offered group is a marker hit on ITS key, because its create
+    writes an ordinary six-key marker. A hand-made project over the group's own
+    files still answers `assets`, which is
+    `test_a_hand_made_project_over_the_mount_files_reports_already_created_by_assets`.
+
+    The ordering of the create path is deliberate: exclusion validation
+    (`_exclusion_prefixes`) runs before `find_existing_project`, so an
+    already-created compound row whose group list moved under the operator answers
+    `unknown_group` / `not_a_foreign_group` / `not_separable_group` rather than
+    `already_created`. The failure this prevents is a request that changes nothing
+    while the response reads as success; the cost is that a stale group name masks
+    the idempotency answer, and that is a recorded tradeoff (residual 7 of
+    Decision 24).
+
+    The consequence of "never touches the row" is that a split is taken once. A
+    compound created WITH a group included can never be split afterwards: a later
+    create carrying an exclusion is `already_created` and the marker is not
+    rewritten - `test_a_second_create_of_a_compound_row_is_already_created`
+    asserts the project's `metadata_json` is byte-identical after a second create
+    naming a different exclusion. The split is therefore a decision taken at the
+    only moment it is free.
+
 12. **`library_scan.RESERVED_DIRS` already owns `bundles/`.** The scanner prunes
     the top-level names `thumbs`, `bundles` and `.incoming`, so a top-level
     `bundles/` directory is invisible to detection - which is correct, because
@@ -642,6 +684,29 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     re-judged, and `contains_bundles` is untouched: a compound answers that belt
     because its snapshot is the whole subtree rather than a claimed-children view,
     not because it is exempt from it.
+
+    **The ONE bounded exception above is now the first of two (`Mf-ao6r`).** A
+    path the ledger names `member-of-bundle` may be OFFERED AGAIN only when a
+    created project's own `_bundle` marker records that the operator excluded that
+    group; the ledger itself is unchanged, the walk still names the path
+    `member-of-bundle`, and the re-offer is a report-level act bounded by the
+    markers in the database. Nothing an operator did not explicitly exclude is
+    ever re-offered: an absorbed key with no marker behind it answers
+    `unknown bundle`
+    (`test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered`),
+    and the row list never names a directory the ledger also refuses
+    (`test_no_directory_is_both_a_row_and_a_refusal`).
+
+    **The `contains_bundles` sentence above gets its FIRST WITNESS here.**
+    `test_a_registered_asset_that_vanished_from_the_disk_still_answers_the_belt`
+    registers the tree, deletes one model from disk after registration, and the
+    create answers `failed` / `contains_bundles` with zero projects - which is
+    only true while `assets` and `own_assets` stay unfiltered by the exclusion.
+    Filter either by the excluded prefixes and every excluded create reads as a
+    container; exempt the compound row from the belt and the witness creates a
+    project. That is the sense in which a compound answers the belt because its
+    snapshot is the whole subtree rather than a claimed-children view, not because
+    it is exempt from it.
 
 16. **A document says what it is; the filename is a tie-break.** Detection was
     originally keyed to file names: `README.txt` had to carry `created by
@@ -1595,6 +1660,210 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     refuse. The database counts read **NOT MEASURED**, `assets` and `projects`
     both `null`, because the development database is empty - nulls, not zeros.
 
+24. **Creating from a compound row is an ATTACH decision, and an excluded
+    group's survival is justified by the created project's own marker, not by the
+    ledger.** `Mf-ao6r` answers the question Decision 23 left open - what a create
+    does with the groups a compound row names - and the clause list is short: one
+    project per compound row, never one per group; every included part attached;
+    the confirmation list shows every group with its part count; and only a
+    foreign, separable group may be excluded. Nothing detection reports changes;
+    the rule set and its stamp are untouched (`2026-11-05.1` / `2dcd2b70...`). All
+    four clauses are pinned:
+    `test_service_creating_from_a_compound_row_makes_one_project_with_every_part`
+    (one project, 60 parts, and a set equality of attached `Asset.storage_path`
+    against every registered model),
+    `test_service_xbox360_shell_creates_one_project_with_all_31_parts` (27 own
+    parts plus the foreign 4), the seven `BundleReviewView compound groups` vitest
+    cases (the confirmation list, with each group's part count), and
+    `test_the_three_exclusion_refusals` together with
+    `test_an_exclusion_of_a_group_that_was_never_a_row_is_refused` (the fourth).
+
+    **What the exclusion changes, and what it leaves alone.** A create with an
+    excluded group attaches the included parts only, and the compound row read
+    back after the create is unchanged as far as detection is concerned - same
+    counts, same groups, same cover asset, same status - because the exclusion is
+    an attach decision and is stored nowhere near the detector
+    (`test_excluding_the_foreign_group_creates_one_project_of_its_own_27`). The
+    excluded group then comes back on the next report as a row of its own, with
+    `detector` and `confidence` recomputed from its own documents rather than
+    copied from the compound's `low`: the xbox mount re-offers as
+    `thingiverse-readme` / `high`
+    (`test_the_excluded_group_is_offered_as_its_own_row`,
+    `test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered`).
+    A second create of the compound is `already_created`, and a second create of
+    the split is a marker hit on its own key
+    (`test_a_second_create_of_a_compound_row_is_already_created`,
+    `test_a_second_create_of_the_split_group_is_already_created`), while the
+    create audit names the exclusions every time, `[]` included
+    (`test_the_create_audit_records_the_excluded_groups`).
+
+    **`groups` versus `separable`, and why the field belongs to the service.** The
+    wire row's `BundleGroupOut` carries the detector's three facts (`name`,
+    `model_count`, `foreign`) plus a REQUIRED `separable`: "was this directory a
+    row of its own before R7 absorbed it?", i.e. is there a row for its parts to
+    fall back to? That question is a SERVICE fact - the pure detector never sees
+    the row set or the ledger - which is why `BundleFacts.groups` /
+    `BundleGroup` stay three-field and `RULE_SET_VERSION` / `RULE_SET_STAMP` are
+    untouched. A defaulted `separable` would read falsy on a payload that forgot
+    it and silently switch every exclusion checkbox off, which is why it is
+    required rather than defaulted. Separability is NEVER derived from the
+    refusals ledger: `_reconcile_refusals` labels every directory strictly inside
+    an offered one `member-of-bundle`, so a ledger-derived answer would make every
+    group separable and `not_separable_group` dead code.
+
+    **The attach set.** It is every registered MODEL asset under the key that is
+    not under an excluded prefix. The prefix carries a trailing slash on purpose,
+    so a FILE literally named `<key>/<name>` is never excluded - only what sits
+    inside the group's directory is the group - and the tests compare sets of
+    `Asset.storage_path` rather than counts, because a count can pass on the wrong
+    27 assets. The belt is restated here because it is the one thing an exclusion
+    may not touch: `assets` and `own_assets` are NEVER filtered by the exclusion.
+    Filtering makes `len(assets) > len(own_assets)` true for every excluded create
+    and turns every exclusion into `failed` / `contains_bundles`; "exempt the
+    compound row from the belt" is the named anti-fix that was refused, and the
+    belt stays live on a `low` compound row
+    (`test_a_registered_asset_that_vanished_from_the_disk_still_answers_the_belt`).
+
+    **The marker shape, verbatim.** Every marker carries the six keys `key`,
+    `detector`, `confidence`, `rel_dir`, `archive`, `twin_verified`, plus
+    `enrichment` when a page supplied one. A compound row carries three more:
+    `shape: "compound"`; `groups`, a list of
+    `{name, model_count, foreign, included, attached}` in the row's own group
+    order; and `cover`, `{asset_id, rel_path, reason, group}`. `model_count` is
+    what the WALK counted, AppleDouble `._*` copies included; `attached` is how
+    many registered MODEL assets of that group are in the attach set. So a later
+    reader can see 12 counted / 6 attached and the account still adds up, and
+    `test_a_non_compound_marker_is_unchanged_in_both_directions` pins the six-,
+    six- and nine-key split in both directions.
+
+    The marker's `cover.rel_path` is STORAGE-root-relative on every leg, and that
+    is a settled invariant rather than a coincidence, because `_cover`'s own legs
+    do not share a key space: the three registered legs report an `asset.path`,
+    which is already storage-relative, while `largest-image-unregistered` reports
+    `facts.cover_entry`, an entry relative to the bundle directory. `_create_one`
+    therefore normalises once and uses that single path for both the marker's
+    `rel_path` and `cover.group`'s attribution, so a later reader can attribute
+    the face without knowing which leg won. Both directions are pinned:
+    `test_the_marker_names_the_group_of_an_unregistered_cover` (the unregistered
+    leg, where `group` would read `None` without the normalisation) and
+    `test_excluding_the_foreign_group_creates_one_project_of_its_own_27` (the
+    registered leg, `group: null` for a cover that belongs to no group).
+
+    The 96-vs-48 fact is the same shape
+    at library scale: the Rocket's row counts 96 and its project holds 48, and NO
+    code excludes dotfiles - the difference is walk-versus-registration, pinned by
+    `test_the_row_counts_what_the_walk_saw_and_the_project_holds_what_the_scan_registered`
+    so a future `library_scan` change reds with a name instead of silently
+    shifting 48 -> 96.
+
+    **Three refusals, all `failed`, never `blocked`.** `unknown_group` means no
+    group carries that name, matched exactly and case-sensitively because a group
+    name is a path segment; `not_a_foreign_group` means the group is this
+    product's own; and `not_separable_group` means a FOREIGN group that was never
+    a row of its own - R9's case, where R3 needs the trio, R1 the markers and R5 a
+    title-shaped name, so excluding it would leave its parts in no project and in
+    NO row, which is the ticket's vanish. `blocked` keeps meaning database
+    readiness (Mf-um7x; Decision 15), and an unusable group name is a malformed
+    request rather than a blocked one. Duplicate names are idempotent
+    (`dict.fromkeys`) and an empty list is a no-op on any row, a non-compound one
+    included. `test_the_three_exclusion_refusals` names all three and the edges;
+    R9's case has its own witness,
+    `test_an_exclusion_of_a_group_that_was_never_a_row_is_refused`, whose Leg B
+    fixture's foreign group is named for a vendor id, holds four models and
+    nothing else, and therefore reads `separable: false`.
+
+    **The cover, re-picked and named.** `_cover` is reused verbatim, never a
+    second cover rule: largest registered image, then `facts.cover_entry` (an
+    image the documents name but the scan has not registered), then the largest
+    registered renderable model, then none, with `reason` naming which leg won and
+    `rel_path` naming the file. With an exclusion the pick is recomputed over the
+    INCLUDED assets, and a facts-level `cover_entry` under an excluded prefix is
+    dropped through `dataclasses.replace` so the face can never be the thing the
+    operator just removed. Note the identity that comparison needs: `cover_entry`
+    is bundle-relative while an excluded prefix is storage-relative, so the key is
+    prepended before the two are compared. The re-pick and the group attribution
+    are pinned by
+    `test_excluding_the_foreign_group_creates_one_project_of_its_own_27`,
+    `test_service_xbox360_shell_creates_one_project_with_all_31_parts` and
+    `test_the_cover_never_picks_an_unregistered_image_under_an_excluded_group`;
+    the real-library outcome is a PREDICTION, not a measurement: all three
+    compound trees have 0 images and 0 text, so a Stagetop create lands on the
+    `model-preview` leg and the face is the largest registered `.stl`/`.step`
+    part, with `reason` naming the source kind and `rel_path` naming the part.
+    That is the ticket's own worry - dozens of parts and an arbitrary one as the
+    face - answered by naming the source rather than by hiding the choice. The
+    measured artefacts cannot settle it because they carry no cover at all
+    (`bundle_serialize`'s `BASELINE_ROW_KEYS` has 8 keys), which is why this is a
+    prediction and not a measurement (residual 3).
+
+    **One request cannot both exclude and create the split.** `[{the compound row
+    with the mount excluded}, {the mount key}]` in ONE request gives the compound
+    `created` and the mount `failed` / `unknown bundle`, because the report is
+    recomputed once before any item runs; the mount row appears on the NEXT report
+    read, and the review hook already refetches after a create. The limitation is
+    exactly what keeps the marker the single, once-written justification: there is
+    no path in which the create pass reads a marker the same request has just
+    written. `test_a_split_sent_with_its_parent_in_one_request_fails_on_the_second_item`
+    pins it.
+
+    **Other bounded limitations, recorded rather than witnessed.** A renamed
+    directory un-dismisses (Decision 8) and also un-re-offers, because the marker
+    keys on the path; deleting the compound project takes the exclusion with it,
+    so the compound row returns whole and re-creating it attaches every part; and
+    a re-offered row is `blocked` / `unresolved_directory` until a `Folder` row
+    for the group exists, exactly like any other row
+    (`test_a_re_offered_group_without_a_folder_row_is_blocked_and_creates_nothing`).
+
+    **The C2/C3 boundary.** The grouped PROJECT presentation and the variant
+    filter are C3 (`Mf-aaqi`). The review queue's confirmation list is the only
+    new UI this decision adds, plus one wire field and one wire fact (a group's
+    `separable`, and the `exclude_groups` a create carries).
+
+    **The residuals, RECORDED, NOT PINNED - a weaker class than the rest of this
+    decision, and the batch must be read that way:**
+
+    1. A re-offered row's interaction with `limit` / `truncated` and the counts
+       block is not measured.
+    2. Only the xbox mount is a measured witness for a re-offered group keeping
+       its ORIGINAL detector and confidence. The reason is not that the other
+       groups were never rows - the Rocket's eight variants and Stagetop's
+       `Wave 1.5` were all `generic-bundle` rows and are `separable: true` - but
+       that only a FOREIGN group may be excluded, and the xbox mount is the only
+       foreign group among the three measured trees. A separable non-foreign
+       group can therefore never reach the re-offer, so no second witness for
+       this fact is reachable from these fixtures.
+    3. Real-library behaviour is never measured - the development database holds
+       0 projects - and the Stagetop cover is a prediction, not a measurement.
+    4. The cover re-pick is pinned; the CLIENT's primed thumbnail is not, because
+       it was rendered for the un-excluded cover (Mf-15xj's window).
+    5. The AppleDouble gap between `model_count` and `attached` is measured on the
+       Rocket alone; no other `._*`-heavy group is.
+    6. A compound created WITH a group included can never be split later.
+    7. The converse of the validation ordering: a stale group name masks
+       `already_created`.
+    8. There is no re-offered-row dedupe; it is unreachable by marker identity.
+    9. A `pair_only`-only group reads non-separable and is refused.
+    10. Nested-absorption refusals under a group that was never a row are not
+        witnessed.
+    11. The re-offer pays one `find_existing_project` per row, and that cost is
+        not measured; nor is `_compound_splits`'s, which is one full `Project`
+        scan plus a marker parse on EVERY report read, splits or no splits. The
+        measured `184 -> 184, 0 changed` is therefore conditional on the
+        development database's empty project table (residual 3).
+    12. A re-offered row is `blocked` / `unresolved_directory` until a `Folder`
+        row exists (pinned only for the missing-row direction).
+    13. `separable` is computed at render time and re-checked at create time, so a
+        group list that moved between the two can diverge; the only divergence
+        direction is a checkbox that then refuses, which is the safe one.
+
+    **One consequence of the confirmation surface, stated because a reader will
+    find it.** The exclusion checkbox lives only in the detail pane's "Create
+    project"; the bulk doors ("Create selected", "Create low as name-only") send
+    no `exclude_groups` and therefore mean "include every group", so an exclusion
+    toggled in the detail pane does not travel with a bulk create. That is pinned
+    by the seven `BundleReviewView compound groups` vitest cases, the last of
+    which is the bulk-door witness.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -1720,6 +1989,15 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   has since moved, a sweeper for abandoned rows, and a second source of truth
   next to the disk. The report is a pure function of the tree and the rows, so
   the table would exist only to make the answer older.
+- **Exclusions stored in `appconfig`** (one map of `key -> excluded group
+  names`) instead of derived from the created project's marker. Rejected for the
+  `bundle_candidates` reason above - the staleness policy and the sweeper that
+  bullet names are exactly what an exclusion map would need as well, because a
+  stored exclusion goes stale the moment the project it describes is deleted -
+  and for a second reason that bullet cannot state: an exclusion is a property
+  of the project that was created, so it should live and die with that project,
+  not outlive it in a settings key that a second operator's next create could
+  inherit.
 - **A new `Project.origin` value (`'bundle'`) or a `Project.bundle_key`
   column.** Rejected: `origin`'s `CHECK (origin IN ('own','imported'))` is a
   closed vocabulary about *where the bytes came from*, and a bundle's bytes came
@@ -2264,6 +2542,91 @@ unchanged.
   and `test_the_committed_openapi_fixture_declares_the_group_component` (the
   committed fixture declares `BundleGroupOut`'s three required fields, so a
   skipped regeneration cannot leave stale-but-valid JSON).
+- **Decision 24's witnesses are named, and each one reds a different mutation.**
+  In `tests/test_bundle_service.py`, against temporary roots built from the
+  measured trees:
+  `test_service_creating_from_a_compound_row_makes_one_project_with_every_part`
+  (the Stagetop row creates ONE project holding all 60 parts, asserted by set
+  equality over `Asset.storage_path` against every registered model, with the
+  marker naming both groups 45/15 - attaching one group reds it);
+  `test_the_row_counts_what_the_walk_saw_and_the_project_holds_what_the_scan_registered`
+  (the Rocket counts 12 per group and attaches 6, so the AppleDouble gap is a
+  named fact rather than a silent drift - registering the `._*` copies moves both
+  the marker and `assets_added`);
+  `test_service_xbox360_shell_creates_one_project_with_all_31_parts` (27 own
+  parts plus the foreign 4, cover `model-preview` on the mount's
+  `bracket-0.stl` with `cover.group` naming the mount - the 40-byte tie broken by
+  path order, so dropping the foreign group from the attach set reds the 31
+  relation);
+  `test_excluding_the_foreign_group_creates_one_project_of_its_own_27` (the
+  exclusion is an attach decision: 27 attached, the mount's parts absent, the
+  cover re-picked to `shell-0.stl` with `cover.group` `None`, and the compound
+  row's counts, groups, cover asset and status unchanged after the create -
+  filtering the belt reds it);
+  `test_the_excluded_group_is_offered_as_its_own_row` (the row comes back at both
+  scopes, the ledger still says `member-of-bundle`, and the scoped read names the
+  same absolute key - dropping the second loop in `_report_from_scan` reds it);
+  `test_no_directory_is_both_a_row_and_a_refusal` (the offered set and the ledger
+  are disjoint before and after - dropping the `reoffered_relative` filter reds
+  it);
+  `test_a_dismissed_re_offered_group_is_not_stale_and_a_vanished_key_is` (a
+  dismissed re-offer still names a live row - building `live_keys` from
+  `scan.candidates` alone reds it);
+  `test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered`
+  (absorbed-but-not-excluded is `unknown bundle`, the split's marker carries only
+  the six keys and its OWN `high` detector, and a second tree leaves its group
+  alone);
+  `test_a_re_offered_group_without_a_folder_row_is_blocked_and_creates_nothing`
+  (AC-3e: a re-offer resolves on exactly the terms of any other row);
+  `test_a_second_create_of_a_compound_row_is_already_created` (a marker hit, and
+  the marker byte-identical even when the second create names a different
+  exclusion);
+  `test_a_second_create_of_the_split_group_is_already_created` (two rows, both
+  `already_created`, `counts.already_created == 2`);
+  `test_a_hand_made_project_over_the_mount_files_reports_already_created_by_assets`
+  (the `assets` identity still answers for a re-offered row with no marker, no
+  source and another name);
+  `test_the_compound_marker_names_the_groups_and_their_counts` (three compound
+  markers, group order and counts matching the row, `attached` adding up to what
+  the account needs);
+  `test_a_non_compound_marker_is_unchanged_in_both_directions` (six keys ordinary,
+  six on the split, nine on the compound - writing `shape` / `groups` / `cover`
+  unconditionally reds it);
+  `test_an_exclusion_of_a_group_that_was_never_a_row_is_refused` (the R9 shape,
+  `separable: false`, `not_separable_group`, no project);
+  `test_the_three_exclusion_refusals` (all three reasons, the case-sensitive
+  `unknown_group`, the file-named-group trailing slash, the duplicate-name
+  idempotence, the empty-list no-op and validation before the marker check);
+  `test_a_split_sent_with_its_parent_in_one_request_fails_on_the_second_item`
+  (the same-request limitation: `unknown bundle` on item two and `ready` on the
+  next read);
+  `test_the_create_audit_records_the_excluded_groups` (always present, `[]`
+  included);
+  `test_a_registered_asset_that_vanished_from_the_disk_still_answers_the_belt`
+  (the belt is live and unfiltered - filtering either list reds it);
+  `test_the_cover_never_picks_an_unregistered_image_under_an_excluded_group`
+  (the facts-level `cover_entry` is dropped so the face is never the excluded
+  group's own image);
+  `test_the_marker_names_the_group_of_an_unregistered_cover` (the marker's
+  `cover.rel_path` is normalised to storage-relative, so `cover.group` names the
+  group for the unregistered leg too - comparing the bundle-relative entry reads
+  `None`); `test_a_pre_c2_marker_re_offers_nothing` (a six-key marker written
+  before this decision re-offers nothing, so treating an absent `groups` as
+  "everything was excluded" reds it); and
+  `test_a_refused_container_is_not_creatable_by_key`
+  (endorphin is `unknown bundle`, so a refused checkout cannot become one
+  project). In `curiarium/web/src/ui/review/BundleReviewView.test.tsx` the seven
+  `BundleReviewView compound groups` cases pin the confirmation surface: every
+  group's name and part count with the singular "1 part", the `unrelated` marker
+  on a foreign group, no checkbox for a non-foreign or a non-separable group, one
+  checked-by-default `Include <group>` box, `exclude_groups` carrying the name
+  verbatim when it is unchecked, `exclude_groups` ABSENT (not present-and-empty)
+  when nothing was unchecked, no group block and the old body for `groups: []`,
+  and the bulk doors still sending no `exclude_groups` after an exclusion was
+  toggled. The measurement was re-run after the change: `--diff` against
+  `2026-11-05-bundles-mf8xrc-after.json` reports `comparable: YES`, 0 added, 0
+  removed, 0 changed and the same stamp, because C2 changes what CREATING does,
+  not what is DETECTED.
 
 ## Superseding conditions
 

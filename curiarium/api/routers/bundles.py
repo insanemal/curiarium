@@ -80,8 +80,15 @@ def create_bundles(
     client sends is never trusted on its own. A bundle that is blocked, or that
     already became a project, creates nothing and says so per item.
     """
+    # Mf-ao6r: a declared-but-unforwarded field is the silent no-op `extra="forbid"`
+    # cannot catch - nothing is unknown to the schema, the value is just dropped.
     items = [
-        bundle_service.BundleCreateItem(key=item.key, name=item.name, name_only=item.name_only)
+        bundle_service.BundleCreateItem(
+            key=item.key,
+            name=item.name,
+            name_only=item.name_only,
+            exclude_groups=tuple(item.exclude_groups),
+        )
         for item in body.items
     ]
     return bundle_service.create_bundles(items, audit.context_for(request, context))

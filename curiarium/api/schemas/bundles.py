@@ -60,6 +60,12 @@ class BundleGroupOut(BaseModel):
   name: str
   model_count: int
   foreign: bool
+  # REQUIRED, never defaulted: a defaulted False would silently switch every
+  # checkbox off. This is a SERVICE fact - was this directory a row of its own
+  # before R7 absorbed it, i.e. can excluding it leave a creatable row behind -
+  # which the pure detector cannot know, so `BundleFacts.groups`/`BundleGroup`
+  # deliberately stay three-field and the rule-set stamp is untouched.
+  separable: bool
 
 
 class BundleDuplicateGroupOut(BaseModel):
@@ -186,6 +192,10 @@ class BundleCreateItemIn(BaseModel):
   key: str
   name: Optional[str] = None
   name_only: bool = False
+  # The compound row's foreign groups the operator says are NOT this product.
+  # Additive and defaulted, so a pre-existing payload still validates; each name
+  # must be a group the report marked `separable`, else the item fails.
+  exclude_groups: List[str] = []
 
 
 class BundleCreateRequest(BaseModel):

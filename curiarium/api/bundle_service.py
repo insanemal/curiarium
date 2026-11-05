@@ -160,7 +160,7 @@ all about them.
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import AbstractSet, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
@@ -328,6 +328,10 @@ class BundleScan:
     # from the candidate set, never an input to it: adding a refusal can never
     # change which rows are offered.
     refusals: Tuple[BundleRefusal, ...] = ()
+    # The candidates R7 absorbed, carried so the report can re-offer a group an
+    # operator excluded at confirmation. Never part of `candidates`, so the
+    # offered set and the refused ledger are unchanged by their presence here.
+    absorbed: Tuple[BundleCandidate, ...] = ()
 
 
 def _entry_size(entry) -> int:
@@ -610,7 +614,7 @@ def _compound_pass(
     files_by_dir: Mapping[str, Sequence[Tuple[str, int]]],
     found: Sequence[BundleCandidate],
     refusals: Dict[str, str],
-) -> List[BundleCandidate]:
+) -> Tuple[List[BundleCandidate], List[BundleCandidate]]:
     """R7: turn a folder holding ONE product in several parts into one row.
 
     **Why a post-pass and not a ``detect_bundle`` branch.** The folder walk is
@@ -655,6 +659,11 @@ def _compound_pass(
     is O(dirs x subtree entries) at worst, like ``_relates_to_any``, and every
     key that is already a row or sits inside one is skipped before its own
     snapshot is built. Shallowest-first, so a parent claims before its child.
+
+    Returns ``(offered, absorbed)``: every row that survives the pass (the
+    compound rows included), and the child rows it absorbed, in the order they
+    were absorbed. The absorbed list is what lets a later reader re-offer a group
+    an operator excluded without re-deriving it from the ledger.
     """
     offered = {candidate.key for candidate in found}
     # A directory is a repository dump when its OWN immediate children carry a
@@ -666,6 +675,7 @@ def _compound_pass(
     archives = _zip_files(files_by_dir)
     accepted: set = set()
     compounds: List[BundleCandidate] = []
+    absorbed_rows: List[BundleCandidate] = []
     for key in sorted(folded, key=lambda item: (_depth(item), item.casefold(), item)):
         if not key or key in offered:
             continue
@@ -695,6 +705,7 @@ def _compound_pass(
             # override is what puts one there.
             _refuse(refusals, absorbed_key, REFUSAL_MEMBER_OF_BUNDLE, override=True)
         found = [candidate for candidate in found if candidate.key not in absorbed_keys]
+        absorbed_rows.extend(absorbed)
         for zip_rel in archives:
             if not zip_rel.startswith(key + "/"):
                 continue
@@ -720,7 +731,7 @@ def _compound_pass(
             )
         )
         accepted.add(key)
-    return list(found) + compounds
+    return list(found) + compounds, absorbed_rows
 
 
 def _build_candidates(
@@ -729,8 +740,8 @@ def _build_candidates(
     dirs_by_parent: Mapping[str, set],
     suppressed: AbstractSet[str],
     refusals: Dict[str, str],
-) -> List[BundleCandidate]:
-    """Every bundle under ``root`` from one walk's listings.
+) -> Tuple[List[BundleCandidate], List[BundleCandidate]]:
+    """Every bundle under ``root`` from one walk's listings, as ``(offered, absorbed)``.
 
     ``suppressed`` holds the duplicate archives: a byte-identical copy is not a
     bundle of its own, so both archive passes skip it and only the group's
@@ -1085,37 +1096,43 @@ def _build_candidates(
     # Placed before the `with_twins` loop so the new row gets the same archive
     # attachment and the same sort as every other row, and so every pass that
     # decides every OTHER row is untouched.
-    found = _compound_pass(folded, files_by_dir, found, refusals)
+    found, absorbed = _compound_pass(folded, files_by_dir, found, refusals)
 
     # A folder candidate's archive is provenance: reported, never a member. A row
     # that is already archive-only is reported as it was built.
+    #
+    # The absorbed candidates ride through the SAME loop: a group re-offered at
+    # confirmation has to be byte-for-byte the row R7 dropped, archive included.
     with_twins: List[BundleCandidate] = []
-    for candidate in found:
-        if candidate.offers_archive_only:
-            with_twins.append(candidate)
-            continue
-        stem = _twin_archive(candidate.key, files_by_dir)
-        archive, entry_root = stem, None
-        if candidate.archive_owned or stem is None:
-            paired = pairs.get(candidate.key)
-            if paired:
-                archive, entry_root = _paired_archive(paired)
-        with_twins.append(
-            BundleCandidate(
-                key=candidate.key,
-                snapshot=candidate.snapshot,
-                archive_path=archive,
-                is_archive=candidate.is_archive,
-                confidence=candidate.confidence,
-                entry_root=entry_root,
-                pair_only=candidate.pair_only,
-                archive_owned=candidate.archive_owned,
-                title_name=candidate.title_name,
-                compound=candidate.compound,
+    absorbed_with_twins: List[BundleCandidate] = []
+    for candidates, output in ((found, with_twins), (absorbed, absorbed_with_twins)):
+        for candidate in candidates:
+            if candidate.offers_archive_only:
+                output.append(candidate)
+                continue
+            stem = _twin_archive(candidate.key, files_by_dir)
+            archive, entry_root = stem, None
+            if candidate.archive_owned or stem is None:
+                paired = pairs.get(candidate.key)
+                if paired:
+                    archive, entry_root = _paired_archive(paired)
+            output.append(
+                BundleCandidate(
+                    key=candidate.key,
+                    snapshot=candidate.snapshot,
+                    archive_path=archive,
+                    is_archive=candidate.is_archive,
+                    confidence=candidate.confidence,
+                    entry_root=entry_root,
+                    pair_only=candidate.pair_only,
+                    archive_owned=candidate.archive_owned,
+                    title_name=candidate.title_name,
+                    compound=candidate.compound,
+                )
             )
-        )
     with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
-    return with_twins
+    absorbed_with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
+    return with_twins, absorbed_with_twins
 
 
 def scan_bundles(root: Path) -> BundleScan:
@@ -1148,7 +1165,9 @@ def scan_bundles(root: Path) -> BundleScan:
     duplicates = duplicate_archives(root, files_by_dir)
     suppressed = frozenset(bundle_detect.duplicate_archive_paths(duplicates))
     refusals: Dict[str, str] = {}
-    candidates = _build_candidates(root, files_by_dir, dirs_by_parent, suppressed, refusals)
+    candidates, absorbed = _build_candidates(root, files_by_dir, dirs_by_parent, suppressed, refusals)
+    # Only the offered rows name bundle directories: an absorbed key is already
+    # inside its compound key, so adding it would only restate the subtree.
     bundle_dirs = {candidate.key for candidate in candidates if not candidate.is_archive}
     nested = _nested_archives(files_by_dir, bundle_dirs)
     duplicates = _without_nested_members(duplicates, nested)
@@ -1163,6 +1182,7 @@ def scan_bundles(root: Path) -> BundleScan:
             suppressed=suppressed,
             files_by_dir=files_by_dir,
         ),
+        absorbed=tuple(absorbed),
     )
 
 
@@ -1628,6 +1648,39 @@ def _bundle_marker(metadata_json: Optional[str]) -> dict:
     return marker if isinstance(marker, dict) else {}
 
 
+def _compound_splits(session: Session) -> Dict[str, Tuple[str, ...]]:
+    """Which groups a created project's own marker records as excluded, by bundle key.
+
+    The marker is the ONLY justification this report accepts for re-offering a
+    path the walk named ``member-of-bundle``: it is the app's own statement that
+    an operator created this product WITHOUT that part, so the part is a product
+    of its own rather than a member. A pre-C2 marker has no ``groups`` at all and
+    therefore re-offers nothing - absence is the correct answer, because nothing
+    was ever excluded. Deleting the project deletes the marker, so the exclusion
+    goes with it and no stored setting can outlive the thing it described.
+
+    Separability is deliberately never derived from the refusals ledger:
+    ``_reconcile_refusals`` labels EVERY directory strictly inside an offered row
+    ``member-of-bundle``, so a ledger-derived answer would make every group
+    separable and ``not_separable_group`` dead code.
+    """
+    splits: Dict[str, Tuple[str, ...]] = {}
+    for project in session.exec(select(Project).order_by(Project.id)):
+        marker = _bundle_marker(project.metadata_json)
+        key = marker.get("key")
+        groups = marker.get("groups")
+        if not isinstance(groups, list):
+            continue
+        excluded = tuple(
+            group["name"]
+            for group in groups
+            if isinstance(group, dict) and group.get("included") is False and isinstance(group.get("name"), str)
+        )
+        if isinstance(key, str) and excluded:
+            splits[key] = tuple(dict.fromkeys(splits.get(key, ()) + excluded))
+    return splits
+
+
 class ExistingProject(NamedTuple):
     """The project a bundle already became, and which identity proved it.
 
@@ -1850,6 +1903,7 @@ def _report_row(
     asset_index: Mapping[str, Tuple[str, ...]],
     dismissals: Mapping[str, dict],
     enrichments: Mapping[str, dict],
+    absorbed_keys: AbstractSet[str],
 ) -> Optional[dict]:
     """One wire row for one candidate, or ``None`` when its own detect refuses it.
 
@@ -1940,8 +1994,16 @@ def _report_row(
         # R7's breakdown: one entry per model-bearing group, so a row that covers
         # 60 parts in two editions says so instead of showing an anonymous total.
         # Empty for every row that is not compound.
+        #
+        # `separable` is compared in the walk's own relative key space because
+        # that is the space the candidate and the absorbed set share.
         "groups": [
-            {"name": group.name, "model_count": group.model_count, "foreign": group.foreign}
+            {
+                "name": group.name,
+                "model_count": group.model_count,
+                "foreign": group.foreign,
+                "separable": f"{candidate.key}/{group.name}" in absorbed_keys,
+            }
             for group in facts.groups
         ],
         "cover": _cover(own_assets, facts),
@@ -2011,6 +2073,15 @@ def _report_from_scan(
 
     The enrich map is read ONCE per report unless the caller already holds it: a
     read per row would be one Session and one query per bundle.
+
+    A group an operator excluded at confirmation comes back as its own row here.
+    The justification is the created project's own marker (``_compound_splits``),
+    never the ledger, and the row is a real ``_report_row`` result stamped with
+    the same rule set as every other row - a hand-built dict would answer a
+    different shape and detonate the counts pass. The set this can add is BOUNDED
+    by the markers in the database: one exclusion re-offers exactly the groups
+    that project recorded as excluded, so a storage tree with no created splits
+    re-offers nothing at all and the report is unchanged.
     """
     dismissals = get_dismissals()
     if enrichments is None:
@@ -2019,10 +2090,15 @@ def _report_from_scan(
     # are the same value even if a table is edited mid-run.
     rule_set = bundle_detect.rule_set()
     rows: List[dict] = []
+    # Walk-relative, exactly the space the candidates and the refusal paths live in.
+    absorbed_keys = {candidate.key for candidate in scan.absorbed}
+    absorbed_by_key = {candidate.key: candidate for candidate in scan.absorbed}
+    reoffered: List[str] = []
     with Session(engine) as session:
         folders = _folder_index(session)
         # One query for ALL candidates: containment is a dict lookup per row.
         asset_index = project_assets_index(session)
+        splits = _compound_splits(session)
         for candidate in scan.candidates:
             row = _report_row(
                 session,
@@ -2033,11 +2109,42 @@ def _report_from_scan(
                 asset_index=asset_index,
                 dismissals=dismissals,
                 enrichments=enrichments,
+                absorbed_keys=absorbed_keys,
             )
             if row is not None:
                 row["rule_set"] = rule_set["stamp"]
                 rows.append(row)
+        # The excluded groups, re-offered as rows of their own. An absorbed group
+        # had a row only BECAUSE it was absorbed, so re-offering it is what keeps
+        # the parts the operator excluded out of the vanish case. `_qualify` is
+        # used for the MARKER match only: the marker stores root-relative keys,
+        # while `absorbed_by_key` is keyed by the unqualified walk-relative key.
+        for candidate in scan.candidates:
+            for name in splits.get(_qualify(scope, candidate.key), ()):
+                relative = f"{candidate.key}/{name}"
+                absorbed = absorbed_by_key.get(relative)
+                if absorbed is None:
+                    continue
+                row = _report_row(
+                    session,
+                    root=root,
+                    scope=scope,
+                    candidate=absorbed,
+                    folders=folders,
+                    asset_index=asset_index,
+                    dismissals=dismissals,
+                    enrichments=enrichments,
+                    absorbed_keys=absorbed_keys,
+                )
+                if row is None:
+                    continue
+                row["rule_set"] = rule_set["stamp"]
+                rows.append(row)
+                reoffered.append(relative)
 
+    # Re-offered rows are appended after the candidates; this sort is what keeps
+    # the physical order independent of that.
+    rows.sort(key=lambda row: (row["key"].casefold(), row["key"]))
     visible = rows if include_dismissed else [row for row in rows if not row["dismissed"]]
     counts = {
         "total": len(visible),
@@ -2050,7 +2157,14 @@ def _report_from_scan(
         "already_created": sum(1 for row in visible if row["existing_project_id"]),
     }
     bound = max(0, int(limit))
-    live_keys = {_qualify(scope, candidate.key) for candidate in scan.candidates}
+    live_keys = {_qualify(scope, candidate.key) for candidate in scan.candidates} | {
+        _qualify(scope, key) for key in reoffered
+    }
+    # The re-offer is a REPORT-level act: the ledger still says these paths were
+    # absorbed by R7, and only the row list contradicts it. Comparing the raw
+    # walk-relative `refusal.rel_path` against the walk-relative re-offered keys
+    # is what keeps the two spaces from drifting under a scope.
+    reoffered_relative = set(reoffered)
     scoped_duplicates = tuple(
         bundle_detect.DuplicateGroup(
             digest=group.digest,
@@ -2083,6 +2197,7 @@ def _report_from_scan(
             (
                 {"rel_path": _qualify(scope, refusal.rel_path), "rule": refusal.rule, "kind": refusal.kind}
                 for refusal in scan.refusals
+                if refusal.rel_path not in reoffered_relative
             ),
             key=lambda item: item["rel_path"],
         ),
@@ -2091,11 +2206,19 @@ def _report_from_scan(
 
 @dataclass(frozen=True)
 class BundleCreateItem:
-    """One confirmed bundle: which one, what to call it, and whether to enrich it."""
+    """One confirmed bundle: which one, what to call it, and whether to enrich it.
+
+    ``exclude_groups`` names the compound row's groups the operator says are NOT
+    part of this product. Each must be a foreign group the walk absorbed as a row
+    of its own: ``_exclusion_prefixes`` states why a group outside that set is
+    refused, and it is the ticket's "when excluded it must remain a bundle row of
+    its own rather than vanishing".
+    """
 
     key: str
     name: Optional[str] = None
     name_only: bool = False
+    exclude_groups: Tuple[str, ...] = ()
 
 
 def _result(
@@ -2134,6 +2257,63 @@ def _enrichment(row: Mapping, name_only: bool) -> dict:
     }
 
 
+def _exclusion_prefixes(
+    key: str, groups: Sequence[Mapping], names: Sequence[str]
+) -> Tuple[Tuple[str, ...], Optional[str]]:
+    """The excluded group prefixes, or the reason the request cannot be honoured.
+
+    Matching is exact and case-sensitive: a group name is a path segment, and two
+    spellings of one directory are two directories. The returned prefix carries a
+    trailing slash so a FILE literally named ``<key>/<name>`` is never excluded -
+    only what sits INSIDE the group's directory is the group. A duplicated name is
+    idempotent: the prefixes are de-duplicated through ``dict.fromkeys``, and the
+    attach set is built from them, so asking twice can never attach twice.
+
+    Every reason is a ``failed``, never a ``blocked``: ``blocked`` means database
+    readiness (Mf-um7x), and an unusable group name is a malformed request.
+
+    The checks run in the plan's order and answer two different questions.
+    ``foreign`` is what makes an exclusion MEANINGFUL at all: a group of this
+    product's own is not somebody else's thing, so removing it is simply the
+    wrong request, and no later fact could rescue it. ``separable`` is what makes
+    the exclusion POSSIBLE: the group needs a row of its own to fall back to, so a
+    foreign group that was never a row is refused because its parts would
+    otherwise land in no project and in no row - the ticket's "when excluded it
+    must remain a bundle row of its own rather than vanishing". The remaining
+    reason is the malformed request: a name no group of the row carries.
+    """
+    wanted = tuple(dict.fromkeys(names))
+    if not wanted:
+        return (), None
+    by_name = {group["name"]: group for group in groups}
+    for name in wanted:
+        group = by_name.get(name)
+        if group is None:
+            return (), "unknown_group"
+        if not group["foreign"]:
+            return (), "not_a_foreign_group"
+        if not group["separable"]:
+            return (), "not_separable_group"
+    return tuple(f"{key}/{name}/" for name in wanted), None
+
+
+def _cover_group(rel_path: Optional[str], key: str, groups: Sequence[Mapping]) -> Optional[str]:
+    """The group whose prefix the created cover sits under, or None.
+
+    ``rel_path`` is STORAGE-relative: the caller normalises it first, because
+    ``_cover``'s unregistered leg names a BUNDLE-relative entry while its other
+    legs name a storage-relative asset path. Recorded in the marker so a later
+    reader can tell a cover picked from the product's own parts from one picked
+    out of a group, without re-walking.
+    """
+    if not rel_path:
+        return None
+    for group in groups:
+        if rel_path.startswith(f"{key}/{group['name']}/"):
+            return group["name"]
+    return None
+
+
 def _create_one(
     item: BundleCreateItem,
     row: Optional[Mapping],
@@ -2147,6 +2327,15 @@ def _create_one(
         return _result(key, CREATE_FAILED, reason="unknown bundle")
     if row["status"] == BLOCKED:
         return _result(key, CREATE_BLOCKED, reason=row["blocked_reason"] or BLOCKED)
+    # Validation runs before anything that touches the session, and before
+    # `find_existing_project` on purpose: an already-created compound row whose
+    # group list moved answers a validation reason, never `already_created`.
+    # `row.get("groups") or []` because a hand-built row need not carry the key.
+    groups = row.get("groups") or []
+    prefixes, refusal = _exclusion_prefixes(key, groups, item.exclude_groups)
+    if refusal is not None:
+        return _result(key, CREATE_FAILED, reason=refusal)
+    excluded_names = set(item.exclude_groups)
     name = (item.name or "").strip() or row["name_suggestion"]
     enrichment = _enrichment(row, item.name_only)
     marker = {
@@ -2170,7 +2359,46 @@ def _create_one(
         assets = registered_assets(session, key)
         own = _own_paths(key, candidate)
         own_assets = [asset for asset in assets if asset.path in own]
-        model_assets = [asset.id for asset in own_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
+        # The ATTACH set, filtered: an excluded group's parts stay registered and
+        # stay in the row's own paths, they are simply not this product's. The
+        # empty case is a no-op because `startswith(())` is False.
+        included_assets = [asset for asset in own_assets if not asset.path.startswith(prefixes)]
+        included_models = [
+            asset for asset in included_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES
+        ]
+        model_assets = [asset.id for asset in included_models]
+        # Bucket the attach set by group once, so `attached` below is a lookup
+        # rather than a prefix scan repeated for every group.
+        models_by_group: Dict[str, int] = {}
+        key_prefix = f"{key}/"
+        for asset in included_models:
+            group_name = asset.path[len(key_prefix):].split("/", 1)[0]
+            models_by_group[group_name] = models_by_group.get(group_name, 0) + 1
+        cover = row["cover"]
+        if prefixes:
+            # Same cover rule, re-asked over the included parts: a second rule
+            # here would be free to disagree with the report's.
+            cover_facts = _candidate_facts(STORAGE, candidate)
+            if cover_facts is not None:
+                # A facts-level cover under an excluded prefix names the very
+                # thing the operator said is not part of this product, so it is
+                # dropped rather than allowed to win the unregistered-image leg.
+                # `cover_entry` is BUNDLE-relative while a prefix is
+                # storage-relative, so the key is prepended before comparing -
+                # without that the two spaces never intersect and the leg wins.
+                if cover_facts.cover_entry and f"{key}/{cover_facts.cover_entry}".startswith(prefixes):
+                    cover_facts = replace(cover_facts, cover_entry=None)
+                cover = _cover(included_assets, cover_facts)
+            else:
+                # No facts means no cover can be proven outside the exclusion.
+                cover = _cover_none_fields(None, COVER_NONE)
+        # `_cover`'s legs do not share a key space: the registered legs name a
+        # storage-relative asset path, the unregistered leg a bundle-relative
+        # entry. Settle one storage-relative path here so the marker never
+        # records two spaces for one field.
+        cover_rel_path = cover["rel_path"]
+        if cover_rel_path and not cover_rel_path.startswith(key_prefix):
+            cover_rel_path = f"{key_prefix}{cover_rel_path}"
         existing = find_existing_project(
             session,
             key=key,
@@ -2187,18 +2415,47 @@ def _create_one(
                 name=existing.project.name,
                 reason="already_created",
             )
-        # The create-time belt is the same rule: every inferred confidence is
-        # refused when its assets include another bundle's, not just `low`. The
-        # difference is another bundle's assets, and the refusal comes before
-        # the project row, so it can never leave a half-created project.
+        # THE BELT IS UNTOUCHED, and neither `assets` nor `own_assets` is filtered
+        # by the exclusion. The create-time belt is the same rule the report
+        # applies: every inferred confidence, not just `low`, is refused when its
+        # assets include another bundle's, and the difference it looks for is
+        # another bundle's assets. Filtering either list would make
+        # `len(assets) > len(own_assets)` true for EVERY excluded create, so every
+        # exclusion would answer `failed`/`contains_bundles`; and exempting the
+        # compound row from the belt is the named anti-fix. The belt stays live on
+        # a `low` compound row, and the refusal comes before the project row, so
+        # it can never leave a half-created project.
         if row["confidence"] in bundle_detect.INFERRED_CONFIDENCES and len(assets) > len(own_assets):
             return _result(key, CREATE_FAILED, reason=CONTAINS_BUNDLES)
+        if candidate.compound:
+            # The guard uses the walk's own verdict, not the row's: in-process both
+            # come from ONE `scan`, so they cannot disagree.
+            # `model_count` stays what the WALK counted (AppleDouble `._*` files
+            # included), while `attached` is how many registered MODEL assets are
+            # in the attach set, so a later reader can see 12 counted / 6 attached.
+            marker["_bundle"]["shape"] = "compound"
+            marker["_bundle"]["groups"] = [
+                {
+                    "name": group["name"],
+                    "model_count": group["model_count"],
+                    "foreign": group["foreign"],
+                    "included": group["name"] not in excluded_names,
+                    "attached": models_by_group.get(group["name"], 0),
+                }
+                for group in groups
+            ]
+            marker["_bundle"]["cover"] = {
+                "asset_id": cover["asset_id"],
+                "rel_path": cover_rel_path,
+                "reason": cover["reason"],
+                "group": _cover_group(cover_rel_path, key, groups),
+            }
         try:
             project = project_service.create_project(
                 session,
                 name,
                 enrichment["description"],
-                row["cover"]["asset_id"],
+                cover["asset_id"],
                 creator=enrichment["creator"],
                 source_url=enrichment["source_url"],
                 licence=enrichment["licence"],
@@ -2228,6 +2485,9 @@ def _create_one(
                 "detector": row["detector"],
                 "confidence": row["confidence"],
                 "name_only": bool(item.name_only),
+                # Always present, `[]` when nothing was excluded, so a reader can
+                # tell "no exclusion" from a row that predates the field.
+                "excluded_groups": [group["name"] for group in groups if group["name"] in excluded_names],
             },
         ),
         ctx=ctx,
@@ -2256,6 +2516,11 @@ def create_bundles(items: Sequence[BundleCreateItem], ctx: audit.AuditContext) -
     report = _report_from_scan(scan, root=STORAGE, scope="", limit=MAX_SCAN_ENTRIES, include_dismissed=True)
     rows = {row["key"]: row for row in report["bundles"]}
     by_key = {candidate.key: candidate for candidate in scan.candidates}
+    # The candidate rides along so the create door can reach an absorbed group;
+    # the `in rows` filter keeps the candidate map honest to the same set the
+    # report offered. The actual refusal for an un-offered key happens at the row
+    # lookup at the top of `_create_one`, not here.
+    by_key.update({candidate.key: candidate for candidate in scan.absorbed if candidate.key in rows})
     # One query for the whole create pass, so a create is never O(items) queries.
     with Session(engine) as session:
         asset_index = project_assets_index(session)
