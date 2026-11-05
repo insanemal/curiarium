@@ -74,6 +74,30 @@ MAKERWORLD_PAID_PAGE = """
 </head></html>
 """
 
+MAKERWORLD_URL = "https://makerworld.com/en/models/1-benchy"
+MAKERWORLD_MODEL_DOWNLOAD_URL = "https://makerworld.com/api/v1/models/1/download"
+MAKERWORLD_ANONYMOUS_CANDIDATES = (
+    "https://makerworld.com/api/v1/models/1",
+    "https://makerworld.com/api/v1/models/1/files",
+    "https://makerworld.com/api/v1/model/1",
+    "https://makerworld.com/api/v1/model/1/files",
+)
+
+# A free page that names its file, so a fall-through past the refusal has
+# somewhere to go: find_download_url finds this href and re-enters the fetch,
+# which the scripted page fetch answers with an AssertionError.
+MAKERWORLD_PAGE_WITH_A_FILE_LINK = """
+<html><head>
+<title>MakerWorld</title>
+<meta property="og:title" content="Benchy Boat">
+<meta name="author" content="Generic Author">
+<link rel="license" href="https://creativecommons.org/licenses/by/4.0/">
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"design":{"name":"Benchy Boat","creator":{"name":"Overlay Creator"},"licenceType":"CC BY","price":0}}}}
+</script>
+</head><body><a href="https://cdn.makerworld.com/assets/cube.stl">cube.stl</a></body></html>
+"""
+
 PRINTABLES_FREE_PAGE = """
 <html><head>
 <meta property="og:title" content="Free Planter">
@@ -266,7 +290,7 @@ def script_page(monkeypatch: pytest.MonkeyPatch, html: str, url: str) -> list[st
 
 
 def script_resolver(monkeypatch: pytest.MonkeyPatch, *outcomes: object) -> list[str]:
-    """Answer the Thingiverse resolver's own fetch, recording each URL it asked for."""
+    """Answer a host resolver's own fetch, recording each URL it asked for."""
     urls: list[str] = []
     queue = list(outcomes)
 
@@ -284,13 +308,17 @@ def script_resolver(monkeypatch: pytest.MonkeyPatch, *outcomes: object) -> list[
 
 
 def resolver_http_error(code: int, body: bytes) -> HTTPError:
-    """A vendor refusal with a readable JSON body, so parse_json_error_message runs."""
+    """A vendor refusal with a readable JSON body, so parse_json_error_message runs.
+
+    The URL it carries is the error's filename only; a door test asserts the URL the
+    resolver actually asked for, never this one.
+    """
     headers = Message()
     headers["Content-Type"] = "application/json"
     return HTTPError(THINGIVERSE_URL, code, f"HTTP {code}", headers, io.BytesIO(body))
 
 
-def pin_thingiverse_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+def pin_public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resolve any host to a public address so a door test needs no resolver.
 
     ``_resolve_import`` validates the URL before it fetches and that validation is
@@ -935,7 +963,7 @@ def test_a_tokenless_view_token_at_the_door_refuses_the_cookie_and_creates_nothi
     fetch a second time and trip the scripted page fetch. The resolver's recorded
     URLs prove the import stopped at the token step.
     """
-    pin_thingiverse_dns(monkeypatch)
+    pin_public_dns(monkeypatch)
     page_calls = script_page(monkeypatch, THINGIVERSE_PAGE_WITH_A_FILE_LINK, THINGIVERSE_URL)
     resolver_urls = script_resolver(monkeypatch, ScriptedResponse(b"{}", "application/json", THINGIVERSE_URL))
     captured: dict[str, ImportAttempt] = {}
@@ -967,7 +995,7 @@ def test_a_tokenless_view_token_at_the_door_refuses_the_cookie_and_creates_nothi
 
 def test_a_free_page_whose_files_api_refuses_creates_no_project(monkeypatch: pytest.MonkeyPatch) -> None:
     """Row F at the door: the files step refuses, so nothing is written."""
-    pin_thingiverse_dns(monkeypatch)
+    pin_public_dns(monkeypatch)
     page_calls = script_page(monkeypatch, THINGIVERSE_PAGE_WITH_A_FILE_LINK, THINGIVERSE_URL)
     resolver_urls = script_resolver(
         monkeypatch,
@@ -994,7 +1022,7 @@ def test_a_thingiverse_url_with_no_thing_id_still_answers_the_direct_link_400(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """R16: with no thing id the cookie is not implicated, so today's 400 stands."""
-    pin_thingiverse_dns(monkeypatch)
+    pin_public_dns(monkeypatch)
     url = "https://www.thingiverse.com/explore"
     page_calls = script_page(monkeypatch, THINGIVERSE_PAGE_WITHOUT_A_THING_ID, url)
     resolver_urls = script_resolver(monkeypatch)
@@ -1008,3 +1036,98 @@ def test_a_thingiverse_url_with_no_thing_id_still_answers_the_direct_link_400(
     assert page_calls == [url]
     assert resolver_urls == [], "no thing id means no resolver request at all"
     assert project_count() == before
+
+
+@pytest.mark.parametrize(
+    "code, expected_status",
+    [
+        pytest.param(401, 403, id="401-reported-as-403"),
+        pytest.param(403, 403, id="403-carried-through"),
+        pytest.param(429, 429, id="429-carried-through"),
+    ],
+)
+def test_a_credentialed_download_api_refusal_at_the_door_skips_every_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+    expected_status: int,
+) -> None:
+    """The MakerWorld AC at the door: the real resolver raises, and nothing past it runs.
+
+    The page names a real file, so a fall-through past the refusal would fetch a
+    second time and trip the scripted page fetch. Only the model download URL is
+    recorded: the model fallback, the four anonymous candidates and the
+    `find_download_url` href rescue never ran. All three statuses travel the whole
+    route, because the remap and the carry-through are not the resolver's alone.
+    """
+    pin_public_dns(monkeypatch)
+    page_calls = script_page(monkeypatch, MAKERWORLD_PAGE_WITH_A_FILE_LINK, MAKERWORLD_URL)
+    resolver_urls = script_resolver(monkeypatch, resolver_http_error(code, b'{"error": "Unauthorized"}'))
+    before = project_count()
+
+    with pytest.raises(import_resolvers.CredentialRefusal) as caught:
+        project_import.import_into_project(
+            MAKERWORLD_URL, ImportProjectRequest(url=MAKERWORLD_URL, makerworld_cookie="mw_session=abc")
+        )
+
+    assert caught.value.status_code == expected_status
+    assert caught.value.detail.endswith(import_resolvers.MAKERWORLD_COOKIE_REMEDY)
+    assert "refused the download API for design 1" in caught.value.detail
+    assert f"(HTTP {code})" in caught.value.detail, "the vendor's own code stays visible, even when 401 is reported as 403"
+    assert "mw_session=abc" not in caught.value.detail
+    assert page_calls == [MAKERWORLD_URL]
+    assert resolver_urls == [MAKERWORLD_MODEL_DOWNLOAD_URL]
+    assert project_count() == before
+
+
+def test_the_anonymous_column_at_the_door_keeps_the_generic_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cookie-less import is not the credential's fault, so today's 400 is byte-identical.
+
+    The environment variable is cleared first: a stray MAKERWORLD_COOKIE in the
+    test runner's environment must not quietly turn this column credentialed.
+    """
+    monkeypatch.delenv("MAKERWORLD_COOKIE", raising=False)
+    pin_public_dns(monkeypatch)
+    page_calls = script_page(monkeypatch, MAKERWORLD_FREE_PAGE, MAKERWORLD_URL)
+    resolver_urls = script_resolver(
+        monkeypatch,
+        resolver_http_error(403, b'{"error": "Unauthorized"}'),
+        resolver_http_error(404, b""),
+        resolver_http_error(404, b""),
+        resolver_http_error(404, b""),
+        resolver_http_error(404, b""),
+    )
+    before = project_count()
+
+    with pytest.raises(HTTPException) as caught:
+        project_import.import_into_project(MAKERWORLD_URL, ImportProjectRequest(url=MAKERWORLD_URL))
+
+    assert caught.value.status_code == 400
+    assert not isinstance(caught.value, import_resolvers.CredentialRefusal)
+    assert caught.value.detail == "No downloadable model file found. Use a direct download link."
+    assert page_calls == [MAKERWORLD_URL]
+    assert resolver_urls == [MAKERWORLD_MODEL_DOWNLOAD_URL, *MAKERWORLD_ANONYMOUS_CANDIDATES]
+    assert project_count() == before
+
+
+def test_a_makerworld_credential_refusal_on_a_paid_page_keeps_the_details_only_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page's own flag is checked first, so a paid page keeps its details-only outcome."""
+    target = page(MAKERWORLD_URL, MAKERWORLD_PAID_PAGE)
+    refusal = import_resolvers.CredentialRefusal(
+        status_code=403,
+        detail=import_resolvers._makerworld_cookie_detail(
+            "MakerWorld refused the download API for design 1 (HTTP 403): Unauthorized."
+        ),
+    )
+    stub_attempt(monkeypatch, ImportAttempt(page=target, error=refusal))
+
+    outcome = project_import.import_into_project(
+        MAKERWORLD_URL, ImportProjectRequest(url=MAKERWORLD_URL, makerworld_cookie="mw_session=abc")
+    )
+
+    assert outcome.gated is True
+    assert outcome.message == GATED_IMPORT_DETAIL
+    assert json.loads(project_row(outcome.project_id).metadata_json) == {"_files": "user-supplied"}

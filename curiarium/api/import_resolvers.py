@@ -33,23 +33,33 @@ class CredentialRefusal(HTTPException):
     English. ``project_import._is_gated`` matches it with ``isinstance``, the
     same way ``entry_policy.is_entry_failure`` matches ``AssetFilenameError``.
 
-    Every detail a subclass path raises composes ``THINGIVERSE_COOKIE_REMEDY``
-    through ``_thingiverse_cookie_detail``, so the remedy is written once.
+    Every detail a subclass path raises composes one site's remedy through that
+    site's composer (``_thingiverse_cookie_detail`` or
+    ``_makerworld_cookie_detail``), so each remedy is written once.
     """
 
     def __init__(self, status_code: int, detail: str) -> None:
         super().__init__(status_code=status_code, detail=detail)
 
 
-# The one remedy both Thingiverse cookie refusals share. It names both surfaces on
-# purpose: the paste lives under Settings > Import sources and wins over
-# THINGIVERSE_COOKIE (see resolve_thingiverse_cookie), so naming only one of them
-# sends half the operators to a control they cannot use.
-THINGIVERSE_COOKIE_REMEDY = (
+# One remedy, formatted twice. The paste lives under Settings > Import sources and
+# wins over the environment variable (see resolve_thingiverse_cookie and
+# resolve_makerworld_cookie), so naming only one of them sends half the operators
+# to a control they cannot use. MakerWorld's remedy is this sentence with the one
+# variable renamed, which is what the tests pin: the two cannot drift apart.
+_COOKIE_REMEDY_TEMPLATE = (
     "Paste the Cookie header from a signed-in browser session under Settings > Import sources, "
-    "or set the THINGIVERSE_COOKIE environment variable on the server and restart the API. "
+    "or set the {variable} environment variable on the server and restart the API. "
     "Nothing was changed."
 )
+
+# The bound on every piece of vendor-controlled text that lands in a detail: a
+# chatty or hostile body must not push the remedy off the screen. Both sites'
+# composers take it, so neither can bury the remedy the other one names.
+_VENDOR_TEXT_BOUND = 300
+
+THINGIVERSE_COOKIE_REMEDY = _COOKIE_REMEDY_TEMPLATE.format(variable="THINGIVERSE_COOKIE")
+MAKERWORLD_COOKIE_REMEDY = _COOKIE_REMEDY_TEMPLATE.format(variable="MAKERWORLD_COOKIE")
 
 
 def makerworld_html_headers(referer: Optional[str] = None, cookie: Optional[str] = None) -> dict:
@@ -380,11 +390,76 @@ def extract_download_url_from_response(data: Any, base_url: str) -> Optional[str
     return find_download_url_in_json(data, base_url)
 
 
+def _makerworld_bounded_message(message: Optional[str], fallback: str = "MakerWorld blocked the request") -> str:
+    """The vendor's own words, bounded, carrying no period of their own.
+
+    The bound is taken FIRST, on the raw vendor string, and periods are stripped
+    from that bounded result only. The vendor controls the punctuation, so
+    stripping first would let a run of periods survive a truncation that lands
+    inside it and the composed sentence would read "Forbidden..". The fallback
+    carries no period either, so the lead ends with exactly one either way.
+    """
+    text = (message or "").strip()
+    if not text:
+        return fallback
+    bounded = text[:_VENDOR_TEXT_BOUND].rstrip(".")
+    return bounded or fallback
+
+
+def _makerworld_bounded_id(value: str) -> str:
+    """A page-supplied id quoted in a message is bounded; the request keeps the raw one."""
+    return value[:64]
+
+
+def _makerworld_cookie_detail(lead: str) -> str:
+    """The one MakerWorld composer: a lead sentence, then the remedy both surfaces share."""
+    return f"{lead} {MAKERWORLD_COOKIE_REMEDY}"
+
+
+# The Settings card's own promise, said once here so a refusal cannot contradict
+# it: MakerWorld's cookie is a rate-limit workaround for FREE models, and paid or
+# account-gated files are never fetched (see ImportsSection.tsx). It belongs in
+# the lead, before the remedy, because a paid model whose ``gated`` flag failed to
+# parse reaches this refusal and must not be told a cookie would have helped.
+_MAKERWORLD_PAID_HEDGE = (
+    "The cookie is only a rate-limit workaround for free models: paid or account-gated files are never fetched."
+)
+
+
+def _refuse_makerworld_credential(err: HTTPError, makerworld_cookie: Optional[str], subject: str) -> None:
+    """Refuse a download-API answer that blames the cookie, or answer ``None`` otherwise.
+
+    Two things about the order here are load-bearing. Without a cookie this
+    returns before ``err.read()`` is called at all, so the caller's
+    ``find_download_url`` rescue and the generic 400 are byte-identical by
+    construction rather than by assertion. And the vendor's status is carried
+    through unchanged except for 401, which is reported as 403 on purpose: the
+    web client throws ``UnauthorizedError`` on a 401 before it reads ``detail``,
+    so a 401 would hide the remedy. The vendor's own code stays in the lead, so
+    nothing about the answer is hidden either way.
+    """
+    if not makerworld_cookie or err.code not in {401, 403, 429}:
+        return None
+    try:
+        message = parse_json_error_message(err.read())
+    except Exception:
+        message = None
+    vendor = _makerworld_bounded_message(message)
+    lead = f"MakerWorld refused the download API for {subject} (HTTP {err.code}): {vendor}. {_MAKERWORLD_PAID_HEDGE}"
+    raise CredentialRefusal(status_code=403 if err.code == 401 else err.code, detail=_makerworld_cookie_detail(lead))
+
+
 def fetch_makerworld_instance_download_url(
     instance_id: str,
     page_url: str,
     makerworld_cookie: Optional[str],
 ) -> Optional[str]:
+    """One download-API answer for the design's default instance, or ``None``.
+
+    A 401/403/429 while a cookie was sent is the dead-credential answer
+    ``_refuse_makerworld_credential`` turns into a refusal; without a cookie the
+    caller's rescue still runs exactly as before.
+    """
     api_url = (
         "https://makerworld.com/api/v1/design-service/instance/"
         f"{instance_id}/f3mf?type=download&fileType=3mfstl"
@@ -392,7 +467,10 @@ def fetch_makerworld_instance_download_url(
     req = Request(api_url, headers=makerworld_api_headers(referer=page_url, cookie=makerworld_cookie))
     try:
         resp = safe_urlopen(req, timeout=IMPORT_TIMEOUT_SECONDS)
-    except HTTPError:
+    except HTTPError as err:
+        _refuse_makerworld_credential(
+            err, makerworld_cookie, f"the design's default instance {_makerworld_bounded_id(instance_id)}"
+        )
         return None
     except URLError:
         return None
@@ -419,11 +497,18 @@ def fetch_makerworld_model_download_url(
     nonce: Optional[str],
     makerworld_cookie: Optional[str],
 ) -> Optional[str]:
+    """One download-API answer for ``model_id``, or ``None`` when it carries no URL.
+
+    A 401/403/429 while a cookie was sent is the dead-credential answer
+    ``_refuse_makerworld_credential`` turns into a refusal; without a cookie the
+    four anonymous candidates and the caller's rescue still run exactly as before.
+    """
     api_url = f"https://makerworld.com/api/v1/models/{model_id}/download"
     req = Request(api_url, headers=makerworld_api_headers(referer=page_url, nonce=nonce, cookie=makerworld_cookie))
     try:
         resp = safe_urlopen(req, timeout=IMPORT_TIMEOUT_SECONDS)
-    except HTTPError:
+    except HTTPError as err:
+        _refuse_makerworld_credential(err, makerworld_cookie, f"design {_makerworld_bounded_id(model_id)}")
         return None
     except URLError:
         return None
@@ -786,7 +871,7 @@ def _vendor_prefix(message: Optional[str], fallback: str = "Thingiverse blocked 
     it. Both callers take the bound, so the files step cannot push the remedy off
     the screen any more than the view-token step can.
     """
-    return message[:300] if message else fallback
+    return message[:_VENDOR_TEXT_BOUND] if message else fallback
 
 
 def _refuse_credential(cookie_sent: bool, lead: str) -> None:
