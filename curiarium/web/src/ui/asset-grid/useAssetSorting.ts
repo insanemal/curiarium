@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 
 import { Asset, Folder } from "../../lib/api";
-import { childFolders } from "../../lib/folderTree";
+import { childFolders, folderPath, type FolderPathSegment } from "../../lib/folderTree";
 import { extOf, type GroupBucket, type SortDir, type SortKey } from "./assetGridMeta";
 
 type AssetSortingOptions = {
@@ -56,24 +56,33 @@ export function useAssetSorting({
 
   const folderNames = useMemo(() => {
     const m: Record<string, string> = {};
-    const pathFor = (f: Folder): string => {
-      const parts = [f.name || "Untitled"];
-      let current = f;
-      const guard = new Set<string>([f.id]);
-      while (current.parent_id) {
-        const parent = folderById[current.parent_id];
-        if (!parent || guard.has(parent.id)) break;
-        parts.unshift(parent.name || "Untitled");
-        guard.add(parent.id);
-        current = parent;
-      }
-      return parts.join(" / ");
-    };
+    // Cost note (accepted, not hidden): this asks `folderPath` once per folder,
+    // and `folderPath` rebuilds its own index on every call, so building names
+    // for N folders is O(N^2) whenever the folder array changes - now including
+    // every project mount. `folderTree.ts` is outside this ticket and the
+    // `pathFor` cache below cannot lower the call count (that wrapper also calls
+    // `folderPath`), so the cost stays. It is accepted because folder counts are
+    // in the hundreds and this memo runs only when `folders` changes.
     for (const f of folders) {
-      m[f.id] = pathFor(f);
+      m[f.id] = folderPath(folders, f.id).map(segment => segment.name).join(" / ");
     }
     return m;
-  }, [folders, folderById]);
+  }, [folders]);
+
+  // One path builder for the whole hook: `folderPath` is cycle-guarded and
+  // applies the "Untitled" fallback, so the names map and the bucket trails
+  // can never disagree. Memoised per folder id for the items on screen.
+  const pathFor = useMemo(() => {
+    const cache = new Map<string | null, FolderPathSegment[]>();
+    return (folderId: string | null | undefined): FolderPathSegment[] => {
+      const key = folderId ?? null;
+      const cached = cache.get(key);
+      if (cached) return cached;
+      const path = folderPath(folders, key);
+      cache.set(key, path);
+      return path;
+    };
+  }, [folders]);
 
   // Direct subfolders of the open folder, derived from the folder list the grid
   // already fetched — no extra requests.
@@ -97,8 +106,12 @@ export function useAssetSorting({
     return copy;
   }, [items, sortKey, sortDir, folderNames]);
 
+  // Derived unconditionally, not only for the `Folder` sort: project mode
+  // sections its members by folder and cannot select that sort, while the
+  // library's `Folder` sort reads the very same buckets. The bucket ids, the
+  // `Unassigned` pile and the ordering are unchanged, and `path` carries the
+  // root→leaf trail the project view trims its own root off.
   const folderGroups = useMemo<GroupBucket[]>(() => {
-    if (sortKey !== "folder") return [];
     const grouping: Record<string, GroupBucket> = {};
     for (const item of items) {
       const key = item.folder_id || "__ungrouped";
@@ -107,6 +120,8 @@ export function useAssetSorting({
           id: `folder:${key}`,
           title: item.folder_id ? folderNames[item.folder_id] || "Untitled" : "Unassigned",
           items: [],
+          // The unassigned pile is not a folder, so it has no trail at all.
+          path: item.folder_id ? pathFor(item.folder_id) : undefined,
         };
       }
       grouping[key].items.push(item);
@@ -118,7 +133,7 @@ export function useAssetSorting({
         ...group,
         items: group.items.sort((a, b) => a.filename.localeCompare(b.filename)),
       }));
-  }, [items, folderNames, sortKey, sortDir]);
+  }, [items, folderNames, pathFor, sortDir]);
 
   const typeGroups = useMemo<GroupBucket[]>(() => {
     if (sortKey !== "type") return [];

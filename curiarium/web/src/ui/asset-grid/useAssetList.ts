@@ -19,6 +19,7 @@ import { refreshWindow } from "../../lib/assetPaging";
 import { notifyError } from "../../lib/toast";
 import { useStableCallback } from "../../lib/useStableCallback";
 import {
+  PROJECT_PAGE_SIZE,
   ROWS_PER_BATCH,
   fetchAssetPage,
   rowsBatchSizeForWidth,
@@ -128,6 +129,10 @@ export function useAssetList({
     if (typeof window === "undefined") return ROWS_PER_BATCH;
     return rowsBatchSizeForWidth(window.innerWidth);
   });
+  // A project's parts must all be loaded in one page: the sectioned view counts
+  // the loaded rows, so a 60-part project paged at a screenful would under-report
+  // every section count on the first page. Files mode keeps the screenful.
+  const effectivePageSize = isProject ? PROJECT_PAGE_SIZE : pageSize;
   // Newest request wins: `refresh` and `loadMore` both rebuild their request
   // from this render's closure and then write `items`/`offset`/`hasMore`, so a
   // response that started earlier must never land after one that started later.
@@ -177,7 +182,7 @@ export function useAssetList({
     const creator = opts.creator !== undefined ? opts.creator : activeCreator;
     const effectiveSortKey = opts.sortKey ?? sortKey;
     const effectiveSortDir = opts.sortDir ?? sortDir;
-    const paging = refreshWindow(offset, pageSize, opts.keepLoadedPages);
+    const paging = refreshWindow(offset, effectivePageSize, opts.keepLoadedPages);
     try {
       const [assetsResult, tagsResult, creatorsResult] = await Promise.allSettled([
         fetchAssetPage({
@@ -279,7 +284,7 @@ export function useAssetList({
         creator: activeCreator ?? undefined,
         sort: serverSortKey(sortKey) ?? undefined,
         order: sortDir,
-        limit: pageSize,
+        limit: effectivePageSize,
         offset,
       });
       // Superseded by a newer request: appending here would splice a stale page
@@ -329,8 +334,10 @@ export function useAssetList({
     refresh({ keepLoadedPages: true });
   }, [assetsVersion, refresh]);
   useEffect(() => {
-    // Project mode never shows (or needs) the folder tree.
-    if (isProject) return;
+    // Project mode reads the tree too (Mf-aaqi): the sectioned project view is
+    // built from it. This reverses the earlier "project mode never touches
+    // folders" rule on purpose - the tree is presentation only here and never
+    // scopes the project listing, which is scoped by membership.
     (async () => {
       try {
         setFolders(await listFolders());

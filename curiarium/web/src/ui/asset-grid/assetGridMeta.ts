@@ -4,6 +4,7 @@ import {
   listAssets,
   listProjectAssets,
 } from "../../lib/api";
+import type { FolderPathSegment } from "../../lib/folderTree";
 import { colsForWidth } from "../../lib/virtualGrid";
 
 /** Sort modes offered by the toolbar; the grouped sorts render section buckets. */
@@ -40,7 +41,17 @@ export type RefreshOpts = {
  */
 export type MissingScanOutcome = "unknown" | "clean" | "failed";
 
-export type GroupBucket = { id: string; title: string; items: Asset[] };
+/**
+ * One bucket of a grouped sort (a folder or a file type). `path` is the
+ * root→leaf folder trail for a folder bucket; the project's sectioned view
+ * derives its depth from it. Absent for type buckets and the unassigned pile.
+ */
+export type GroupBucket = {
+  id: string;
+  title: string;
+  items: Asset[];
+  path?: FolderPathSegment[];
+};
 export type PreviewVariant = "card" | "modal";
 
 export function extOf(name: string) {
@@ -71,6 +82,14 @@ export const ENGRAVING_EXTS = new Set([
 ]);
 
 export const ROWS_PER_BATCH = 5;
+/**
+ * First-load page size in project mode: `MEMBER_PAGE_SIZE` in `ProjectLanding`
+ * asks for the same ceiling, and it is `MAX_ASSET_PAGE_LIMIT` (1000). Every part
+ * of a project must arrive in one page, because the sectioned view counts the
+ * loaded rows: a 60-part project split across pages would under-report every
+ * section count on the first page.
+ */
+export const PROJECT_PAGE_SIZE = 1000;
 /** Cards rendered per group before the "Show all" affordance is offered. */
 export const GROUP_CARD_CAP = 24;
 /** Upper bound on how long a re-scan triggered from a card is polled. */
@@ -96,10 +115,12 @@ export function noop(): void {}
 
 /**
  * The one place that decides between the folder-scoped and project-scoped asset
- * listing. A project has no folder axis, so `folderId` and `unfiled` are ignored
- * there. `notInProject` is files-only: a project listing is already scoped by
- * membership. `unfiled` narrows the files listing to the library root and is
- * mutually exclusive with `folderId`.
+ * listing. A project listing takes no folder scope because membership IS the
+ * scope; the folder tree is fetched separately and used only for presentation
+ * (the sectioned view), never to narrow the listing. So `folderId` and `unfiled`
+ * are ignored on the project branch. `notInProject` is files-only: a project
+ * listing is already scoped by membership. `unfiled` narrows the files listing
+ * to the library root and is mutually exclusive with `folderId`.
  */
 export function fetchAssetPage(opts: {
   projectId?: string | null;

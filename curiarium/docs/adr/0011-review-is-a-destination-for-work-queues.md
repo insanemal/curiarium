@@ -267,7 +267,21 @@ destination model, the count rule, the role threshold and the fetch policy.
     list, and the grouped `File type`/`Folder` sorts' 24-card sections with
     "Show all N", exactly as in the library - plus selection and bulk bar,
     keyboard operation, previews and card actions, all of them already proven
-    in the library, under a scope that cannot be escaped. What the toolbar
+    in the library, under a scope that cannot be escaped. Project mode also
+    derives its own sectioned view from the folder tree (Mf-aaqi): depth-aware,
+    with the project root taken as the longest common prefix of the members'
+    folder paths trimmed off and one remaining level shown as the group itself,
+    under a top-level filter row that is a pure predicate over the loaded items
+    (no refetch). This is new presentation, not data the grid already had: the
+    tree read had been short-circuited in project mode, so the sectioned view
+    makes project mode issue one `GET /folders` per tree-read activation - mount,
+    a folder-tree version bump, or entering project mode - rather than promising
+    one per mount: that read sits outside the StrictMode one-read claim recorded
+    below, so it is not covered by the listing's `walked` guard. It is
+    presentation only - it never scopes the listing, which is scoped by
+    membership alone - but it is a new failure path, because a failed tree read
+    now degrades project mode to the flat grid and toasts. No new entity and no
+    listing API change. What the toolbar
     keeps is what only narrows - search, sort, tag chips, the creator facet and
     "not in any project" - and `Reset` clears tags and creator only. The folder
     chrome (breadcrumbs, folder tiles, the uploader, drag/drop) is closed in
@@ -473,7 +487,37 @@ destination model, the count rule, the role threshold and the fetch policy.
 - One limitation stays inherited and unchanged: only the flat branch of the grid
   is virtualised. The grouped (folder/type) branch remains a 24-card cap with a
   "Show all N" control, preserved as it was at HEAD, because retrofitting group
-  virtualisation is a different ticket.
+  virtualisation is a different ticket. The project's sectioned view (Mf-aaqi)
+  is a SECOND unvirtualised branch and keeps the same 24-card cap per section
+  with its "Show all N" escape, so the cap bounds EACH SECTION, not the branch:
+  200 sections of 5 parts is ~1000 live cards. What is disclosed where is also
+  precise: the section header carries the section's own count, the group chip
+  carries the group's total, and the escape control names the capped section's
+  full count only when that section is capped. A project above the 1000-member
+  page shows loaded counts, disclosed as "loaded ... more to load" rather than
+  presenting the loaded page as the whole project. Grouped-section
+  virtualisation remains that separate ticket, and it now covers both branches.
+- The toolbar sort still applies inside a section (Mf-aaqi): a section's item
+  order is the loaded, server-ordered listing, so `Size`/`Creator`/`Asc`/`Desc`
+  keep changing what is shown. Only the section LAYOUT is the project's folder
+  structure, and it deliberately does not follow `sortDir`.
+- A residual path-build cost is accepted and disclosed: building `folderNames`
+  calls `folderPath` once per folder, and `folderPath` rebuilds its own index per
+  call, so it is O(folders^2) whenever the folder array changes - now including
+  every project mount. The single-index fix (build that index once and reuse it
+  across the calls) does live inside this ADR's reach but is deliberately out of
+  scope for this ticket: it belongs in `folderTree.ts`, a shared module another
+  change is touching, and the cached `pathFor` wrapper cannot lower the call
+  count because that wrapper also calls `folderPath`. The cost is disclosed here
+  so it stays visible rather than silently inherited; folder counts are in the
+  hundreds and the memo runs only when the array changes.
+- One invariant was deliberately reversed, and the reversal is recorded here
+  rather than the assertion quietly deleted: project mode now reads the folder
+  tree. It previously never did - `useAssetList.ts` short-circuited the tree
+  fetch in project mode and `AssetGrid.project.test.tsx` pinned
+  "never touches folders". The tree is presentation only for a project: the
+  listing is still scoped by membership alone, so reading it cannot change which
+  parts are listed, only how they are sectioned.
 - An untouched, pre-existing heuristic remains a known sharp edge. A successful
   walk over a partially mounted storage root can flag present files as missing,
   because presence falls through to `(root/managed_rel).exists()`, which is
