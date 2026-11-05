@@ -342,6 +342,16 @@
         "title": "Dismissed",
         "type": "boolean"
       },
+      "enrichment": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BundleEnrichmentOut"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "existing_project_id": {
         "anyOf": [
           {
@@ -541,6 +551,208 @@
       "reclaimable_bytes"
     ],
     "title": "BundleDuplicateGroupOut",
+    "type": "object"
+  },
+  "BundleEnrichItemOut": {
+    "description": "What happened to one bundle: its status, its values and the reason for any refusal.",
+    "properties": {
+      "creator": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Creator"
+      },
+      "fetched_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Fetched At"
+      },
+      "filled": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Filled",
+        "type": "array"
+      },
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "licence": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Licence"
+      },
+      "licence_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Licence Url"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "source_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Source Url"
+      },
+      "status": {
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "key",
+      "status"
+    ],
+    "title": "BundleEnrichItemOut",
+    "type": "object"
+  },
+  "BundleEnrichRequest": {
+    "additionalProperties": false,
+    "description": "The bundles whose vendor pages to read.\n\n`refresh` re-reads a page the cache already answered. The cookie is the same\nplumbing the import door uses and is never stored or audited.",
+    "properties": {
+      "keys": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Keys",
+        "type": "array"
+      },
+      "refresh": {
+        "default": false,
+        "title": "Refresh",
+        "type": "boolean"
+      },
+      "thingiverse_cookie": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Thingiverse Cookie"
+      }
+    },
+    "title": "BundleEnrichRequest",
+    "type": "object"
+  },
+  "BundleEnrichResponse": {
+    "description": "Per-status counters plus one result per requested bundle.",
+    "properties": {
+      "cached": {
+        "default": 0,
+        "title": "Cached",
+        "type": "integer"
+      },
+      "fetched": {
+        "default": 0,
+        "title": "Fetched",
+        "type": "integer"
+      },
+      "refused": {
+        "default": 0,
+        "title": "Refused",
+        "type": "integer"
+      },
+      "results": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleEnrichItemOut"
+        },
+        "title": "Results",
+        "type": "array"
+      },
+      "unavailable": {
+        "default": 0,
+        "title": "Unavailable",
+        "type": "integer"
+      },
+      "unknown": {
+        "default": 0,
+        "title": "Unknown",
+        "type": "integer"
+      }
+    },
+    "title": "BundleEnrichResponse",
+    "type": "object"
+  },
+  "BundleEnrichmentOut": {
+    "description": "Which of the row's fields came from the vendor page, and when.",
+    "properties": {
+      "fetched_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Fetched At"
+      },
+      "fields": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Fields",
+        "type": "array"
+      },
+      "source_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Source Url"
+      }
+    },
+    "title": "BundleEnrichmentOut",
     "type": "object"
   },
   "BundleReportOut": {

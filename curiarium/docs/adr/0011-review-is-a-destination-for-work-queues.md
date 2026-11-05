@@ -176,12 +176,12 @@ destination model, the count rule, the role threshold and the fetch policy.
 
 7. **A row's role threshold is its route's threshold, per row.** The bundle card
    sat inside Settings behind an editor-only gate, which was stricter than the
-   API: `GET /bundles/detect` is `require_read`, and `POST /bundles/create` and
-   `/bundles/dismiss` are `require_contribute`. A queue that exists in order to
-   act takes the same threshold, so a contributor can use the surface the API
-   always granted them, and a viewer gets no bundle row and no detection request
-   at all - the settings card's deliberate "detection must never be fired for a
-   viewer" invariant is preserved.
+   API: `GET /bundles/detect` is `require_read`, and `POST /bundles/create`,
+   `/bundles/dismiss` and `/bundles/enrich` are `require_contribute`. A queue that
+   exists in order to act takes the same threshold, so a contributor can use the
+   surface the API always granted them, and a viewer gets no bundle row and no
+   detection request at all - the settings card's deliberate "detection must never
+   be fired for a viewer" invariant is preserved.
 
    The threshold is per row (`minRole` on `QUEUES` in `ui/review/queues.ts`,
    the table `ReviewNav.tsx` used to own), not one gate on the group, because

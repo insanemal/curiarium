@@ -69,6 +69,7 @@ def isolated_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     yield storage
     settings_service.set_storage_template(template_before)
     settings_service.set_setting(settings_service.BUNDLE_DISMISSALS_KEY, "")
+    settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, "")
     with Session(engine) as session:
         for membership in list(session.exec(select(ProjectAsset))):
             if membership.project_id not in projects_before:

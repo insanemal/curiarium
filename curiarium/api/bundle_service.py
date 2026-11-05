@@ -173,6 +173,7 @@ from sqlmodel import Session, select
 import asset_urls
 import audit
 import bundle_detect
+import bundle_enrich
 import db
 import library_scan
 import project_service
@@ -192,6 +193,9 @@ DEFAULT_LIMIT = 200
 # Duplicate detection reads an archive in bounded chunks, never one whole file
 # into memory: a multi-gigabyte zip is hashed at this cost, not doubled.
 HASH_CHUNK_BYTES = 1024 * 1024
+# One enrich request names a working set, not a library: every key is a page
+# fetch, so the click is bounded the way a dismiss batch is.
+ENRICH_MAX_KEYS = 25
 
 READY = "ready"
 BLOCKED = "blocked"
@@ -1411,6 +1415,30 @@ def set_dismissals(keys: Sequence[str], dismissed: bool, ctx: audit.AuditContext
     return {"dismissed": sorted(current), "stale_dismissals": stale}
 
 
+def get_enrichments() -> Dict[str, dict]:
+    """The enrichment cache, keyed by ``thingiverse:<id>``; anything malformed reads ``{}``."""
+    raw = settings_service.get_setting(settings_service.BUNDLE_ENRICHMENTS_KEY)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): value if isinstance(value, dict) else {} for key, value in parsed.items()}
+
+
+def _set_enrichments(records: Mapping[str, dict]) -> None:
+    """Write the whole enrich map in one read-modify-write per request.
+
+    One write for the whole request is what keeps a bulk enrich from losing an
+    entry per item; the accepted concurrency trade-off is the dismissals one, and
+    the worst case here is one extra fetch, never a wrong row.
+    """
+    settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, json.dumps(dict(records), sort_keys=True))
+
+
 def _bundle_marker(metadata_json: Optional[str]) -> dict:
     """The reserved ``_bundle`` marker of one project row, or ``{}``."""
     try:
@@ -1638,11 +1666,26 @@ def _report_row(
     folders: Mapping[str, str],
     asset_index: Mapping[str, Tuple[str, ...]],
     dismissals: Mapping[str, dict],
+    enrichments: Mapping[str, dict],
 ) -> Optional[dict]:
+    """One wire row for one candidate, or ``None`` when its own detect refuses it.
+
+    The row is clock-free: a cached page's facts fill an empty creator or licence
+    whether or not the record is still fresh, because TTL gates only the enrich
+    action, never what the report shows. That is what keeps two reports of the
+    same disk identical from one minute to the next, and it means a record that
+    supplies nothing THIS row needed contributes no ``enrichment`` block at all.
+    """
     facts = _candidate_facts(root, candidate)
     if facts is None:
         return None
     key = _qualify(scope, candidate.key)
+    # The disk row is the truth and the page may only fill what it left blank, so
+    # the page can never overwrite a creator a human or the vendor already named.
+    cache_key = bundle_enrich.cache_key(facts.source_url)
+    record = enrichments.get(cache_key) if cache_key is not None else None
+    values, fields = bundle_enrich.fills(facts.creator, facts.licence, facts.licence_url, record)
+    enrichment = bundle_enrich.provenance(record, fields) if fields else None
     suggestion = (facts.title or "").strip() or "bundle"
     assets: List[RegisteredAsset] = []
     own_assets: List[RegisteredAsset] = []
@@ -1698,9 +1741,10 @@ def _report_row(
         "rel_path": key,
         "title": facts.title,
         "name_suggestion": suggestion,
-        "creator": facts.creator,
-        "licence": facts.licence,
-        "licence_url": facts.licence_url,
+        "creator": values["creator"],
+        "licence": values["licence"],
+        "licence_url": values["licence_url"],
+        "enrichment": enrichment,
         "source_url": facts.source_url,
         "detector": facts.detector,
         "confidence": facts.confidence,
@@ -1767,14 +1811,20 @@ def _report_from_scan(
     scope: str,
     limit: int,
     include_dismissed: bool,
+    enrichments: Optional[Mapping[str, dict]] = None,
 ) -> dict:
     """Turn one walk into the wire report; the disk walk has already happened.
 
     Duplicate archives are scoped like every other key and rendered as one group
     per content hash plus a copyable text block naming the same paths. They are
     not capped by ``limit``: the walk is already bounded by ``MAX_SCAN_ENTRIES``.
+
+    The enrich map is read ONCE per report unless the caller already holds it: a
+    read per row would be one Session and one query per bundle.
     """
     dismissals = get_dismissals()
+    if enrichments is None:
+        enrichments = get_enrichments()
     # One rule set for the whole report, so every row's stamp and the report's own
     # are the same value even if a table is edited mid-run.
     rule_set = bundle_detect.rule_set()
@@ -1792,6 +1842,7 @@ def _report_from_scan(
                 folders=folders,
                 asset_index=asset_index,
                 dismissals=dismissals,
+                enrichments=enrichments,
             )
             if row is not None:
                 row["rule_set"] = rule_set["stamp"]
@@ -1918,6 +1969,10 @@ def _create_one(
             "twin_verified": (row["archive"] or {}).get("twin_verified") if row["archive"] else None,
         }
     }
+    # The project records what the page supplied, so a later reader can tell the
+    # vendor's word from a human's; `name_only` deliberately records none.
+    if not item.name_only and row.get("enrichment"):
+        marker["_bundle"]["enrichment"] = row["enrichment"]
     with Session(engine) as session:
         # The same set the report used: the files this bundle's snapshot names,
         # never a nested child bundle's models under the recursive prefix. Hoisted
@@ -2028,3 +2083,186 @@ def create_bundles(items: Sequence[BundleCreateItem], ctx: audit.AuditContext) -
         "failed": counters[CREATE_FAILED],
         "results": results,
     }
+
+
+def _enrich_result(
+    key: str,
+    status: str,
+    source_url: Optional[str],
+    values: Mapping[str, Optional[str]],
+    filled: Sequence[str],
+    fetched_at: Optional[str],
+    reason: Optional[str],
+) -> dict:
+    """One enrich result, so every status reports the same fields and no more."""
+    return {
+        "key": key,
+        "status": status,
+        "source_url": source_url,
+        "creator": values["creator"],
+        "licence": values["licence"],
+        "licence_url": values["licence_url"],
+        "filled": list(filled),
+        "fetched_at": fetched_at,
+        "reason": reason,
+    }
+
+
+def _row_values(row: Optional[Mapping]) -> Dict[str, Optional[str]]:
+    """A row's creator, licence and licence URL as this action leaves them."""
+    source = row or {}
+    return {"creator": source.get("creator"), "licence": source.get("licence"), "licence_url": source.get("licence_url")}
+
+
+def enrich_bundles(keys: Sequence[str], *, cookie: Optional[str], refresh: bool, ctx: audit.AuditContext) -> dict:
+    """Read the vendor pages these bundles name and cache what the pages say.
+
+    On demand, never part of detection: the report is recomputed from disk on
+    every read and must stay a read, so the one outbound call in this module
+    lives here and behind a human's click. A key that is not a live bundle and a
+    bundle whose row names no vendor id both short-circuit before any fetch, so
+    the only request that leaves this server is for a URL the report already
+    showed. All fetches share ONE cache write: a record per item would be a
+    settings write per item and a lost entry under concurrency.
+
+    A refusal is a per-item status, not a failed request: the same bulk
+    partial-success contract as ``create_bundles``, because one rate-limited
+    thing must not discard the nine pages that answered.
+    """
+    cleaned: List[str] = []
+    for key in keys:
+        text = (key or "").strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    if len(cleaned) > ENRICH_MAX_KEYS:
+        raise HTTPException(status_code=400, detail=f"enrich at most {ENRICH_MAX_KEYS} bundles at a time")
+    if not cleaned:
+        return {"fetched": 0, "cached": 0, "refused": 0, "unavailable": 0, "unknown": 0, "results": []}
+    # The `create_bundles` shape: a client key is never trusted, so every key is
+    # looked up in a report recomputed from disk right now. One snapshot of the
+    # cache serves both the report and the merge below, so a bulk enrich cannot
+    # read the map twice and see two different answers.
+    scan = scan_bundles(STORAGE)
+    records = get_enrichments()
+    report = _report_from_scan(
+        scan, root=STORAGE, scope="", limit=MAX_SCAN_ENTRIES, include_dismissed=True, enrichments=records
+    )
+    rows = {row["key"]: row for row in report["bundles"]}
+    now = datetime.now(timezone.utc)
+    stamp = now.isoformat(timespec="seconds")
+    pending: Dict[str, dict] = {}
+    counters = {
+        bundle_enrich.STATUS_FETCHED: 0,
+        bundle_enrich.STATUS_CACHED: 0,
+        bundle_enrich.STATUS_REFUSED: 0,
+        bundle_enrich.STATUS_UNAVAILABLE: 0,
+        bundle_enrich.STATUS_UNKNOWN: 0,
+    }
+    results: List[dict] = []
+    for key in cleaned:
+        row = rows.get(key)
+        if row is None:
+            results.append(
+                _enrich_result(key, bundle_enrich.STATUS_UNKNOWN, None, _row_values(None), (), None, "not a live bundle")
+            )
+            counters[bundle_enrich.STATUS_UNKNOWN] += 1
+            continue
+        # The id comes from the resolver, the one definition ``cache_key`` is built
+        # from, so the page fetched and the key written cannot name different
+        # things. Both are None for the same URL, hence one refusal.
+        thing_id = bundle_detect.thingiverse_thing_id_from_url(row["source_url"] or "")
+        cache_key = bundle_enrich.cache_key(row["source_url"])
+        if thing_id is None or cache_key is None:
+            results.append(
+                _enrich_result(
+                    key,
+                    bundle_enrich.STATUS_UNAVAILABLE,
+                    row["source_url"],
+                    _row_values(row),
+                    (),
+                    None,
+                    "this bundle names no vendor id, so there is no page to read",
+                )
+            )
+            counters[bundle_enrich.STATUS_UNAVAILABLE] += 1
+            continue
+        # ``pending`` is not consulted here: the report snapshot predates this
+        # request's records, so a row answered from one would claim nothing was
+        # filled for it. The fetch branch below reuses the pending record instead.
+        record = records.get(cache_key)
+        if record and not refresh and bundle_enrich.record_is_fresh(record, now):
+            filled = list((row.get("enrichment") or {}).get("fields") or ())
+            results.append(
+                _enrich_result(
+                    key,
+                    bundle_enrich.STATUS_CACHED,
+                    row["source_url"],
+                    _row_values(row),
+                    filled,
+                    record.get("fetched_at"),
+                    None,
+                )
+            )
+            counters[bundle_enrich.STATUS_CACHED] += 1
+            continue
+        # Function-local on purpose: the one name that can open a socket stays out
+        # of this module's scope so the report path cannot reach it (see the AST
+        # test). Importing here costs a dict lookup and nothing else.
+        from import_resolvers import fetch_thingiverse_thing_page, thingiverse_no_metadata_detail
+
+        new_record = pending.get(cache_key)
+        if new_record is None:
+            try:
+                html = fetch_thingiverse_thing_page(thing_id, cookie)
+            except HTTPException as exc:
+                results.append(
+                    _enrich_result(
+                        key,
+                        bundle_enrich.STATUS_REFUSED,
+                        row["source_url"],
+                        _row_values(row),
+                        (),
+                        None,
+                        str(exc.detail),
+                    )
+                )
+                counters[bundle_enrich.STATUS_REFUSED] += 1
+                continue
+            facts = bundle_enrich.parse_thing_page(html)
+            if facts is None:
+                results.append(
+                    _enrich_result(
+                        key,
+                        bundle_enrich.STATUS_REFUSED,
+                        row["source_url"],
+                        _row_values(row),
+                        (),
+                        None,
+                        thingiverse_no_metadata_detail(thing_id),
+                    )
+                )
+                counters[bundle_enrich.STATUS_REFUSED] += 1
+                continue
+            new_record = bundle_enrich.record_from_page(facts, row["source_url"], stamp)
+        row_values = _row_values(row)
+        values, fields = bundle_enrich.fills(
+            row_values["creator"], row_values["licence"], row_values["licence_url"], new_record
+        )
+        # The page DID answer, so the record is cached even when it filled nothing
+        # for this row: a sibling row with the same id, or a later create, takes it.
+        pending[cache_key] = new_record
+        audit.record(
+            audit.Event(
+                audit.BUNDLE_ENRICH,
+                key,
+                {"thing_id": thing_id, "source_url": row["source_url"], "fields": list(fields)},
+            ),
+            ctx=ctx,
+        )
+        results.append(
+            _enrich_result(key, bundle_enrich.STATUS_FETCHED, row["source_url"], values, fields, stamp, None)
+        )
+        counters[bundle_enrich.STATUS_FETCHED] += 1
+    if pending:
+        _set_enrichments(bundle_enrich.prune_records({**records, **pending}))
+    return {**counters, "results": results}

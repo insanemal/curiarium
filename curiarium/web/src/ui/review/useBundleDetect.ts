@@ -5,9 +5,11 @@ import React from "react";
 // those mocks. `App.tsx` documents the same constraint for `../lib/api/auth`.
 import {
   createBundles,
+  enrichBundles,
   getBundleReport,
   setBundleDismissed,
   type BundleCreateItem,
+  type BundleEnrichItemResult,
   type BundleReport,
 } from "../../lib/api/bundles";
 import { UnauthorizedError } from "../../lib/api/http";
@@ -33,8 +35,50 @@ export type BundleDetectState = {
   refresh: () => Promise<void>;
   create: (items: BundleCreateItem[]) => Promise<void>;
   dismiss: (keys: string[], dismissed: boolean) => Promise<void>;
+  enrich: (keys: string[], options?: { refresh?: boolean }) => Promise<void>;
+  /** A line about the last enrichment that is news rather than a failure. */
+  notice: string | null;
   afterExtract: (results: ArchiveExtractResult[]) => Promise<SettleOutcome>;
 };
+
+/** What an enrichment response means to the operator.
+ *
+ *  A refusal is the server's operator sentence, kept verbatim and deduped: two
+ *  rows refused for the same reason must not print it twice. Every other
+ *  outcome is a notice, because a click that did something must not look like
+ *  a broken button. `fetched` is the silent success: the report itself changes,
+ *  which is the visible answer.
+ */
+function enrichmentMessage(results: BundleEnrichItemResult[]): {
+  error: string | null;
+  notice: string | null;
+} {
+  const refused = results.filter(result => result.status === "refused");
+  if (refused.length > 0) {
+    const reasons = Array.from(
+      new Set(
+        refused
+          .map(result => result.reason)
+          .filter((reason): reason is string => Boolean(reason)),
+      ),
+    );
+    return {
+      error: reasons.length > 0 ? reasons.join(" - ") : "The source page refused to be read.",
+      notice: null,
+    };
+  }
+  if (results.some(result => result.status === "fetched")) return { error: null, notice: null };
+  if (results.some(result => result.status === "cached")) {
+    return { error: null, notice: "Already checked from the source page" };
+  }
+  if (results.some(result => result.status === "unavailable")) {
+    return { error: null, notice: "This bundle names no vendor page to read" };
+  }
+  if (results.some(result => result.status === "unknown")) {
+    return { error: null, notice: "That bundle is no longer in the report" };
+  }
+  return { error: null, notice: null };
+}
 
 /**
  * Vendor bundle detection for the review queue. The queue owns the hook now: it
@@ -76,6 +120,7 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
   const [fetching, setFetching] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = React.useState<number | null>(null);
   const [showDismissed, setShowDismissed] = React.useState(false);
   const [showCreated, setShowCreated] = React.useState(false);
@@ -133,6 +178,10 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     async (call: () => Promise<unknown>, fallback: string) => {
       if (!enabled) return;
       setBusy(true);
+      // A create or a dismissal is a new decision, so the last enrichment's
+      // notice no longer describes what the operator just did. `refresh` never
+      // clears it: a refetch is not a new answer.
+      setNotice(null);
       try {
         await call();
         setError(null);
@@ -162,6 +211,36 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
       );
     },
     [mutate],
+  );
+
+  // Deliberately not routed through `mutate`: that helper discards the
+  // response, and the response is the whole answer here - a refusal carries the
+  // operator's reason, and `cached`/`unavailable`/`unknown` each need their own
+  // words. The ordering matters as much: `refresh` writes `error` itself, so
+  // the message is computed and set AFTER the refetch it waited for, or the
+  // refetch would clear it. `notice` survives `refresh` for the same reason the
+  // toggle state does: only a new answer replaces it.
+  const enrich = React.useCallback(
+    async (keys: string[], options: { refresh?: boolean } = {}) => {
+      if (!enabled) return;
+      setBusy(true);
+      try {
+        const response = await enrichBundles(keys, { refresh: options.refresh });
+        await refresh();
+        const message = enrichmentMessage(response.results);
+        setError(message.error);
+        setNotice(message.notice);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) onUnauthorized?.();
+        setError(
+          err instanceof Error && err.message ? err.message : "Failed to read the source page.",
+        );
+        setNotice(null);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [enabled, onUnauthorized, refresh],
   );
 
   const afterExtract = React.useCallback(
@@ -196,6 +275,8 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     refresh,
     create,
     dismiss,
+    enrich,
+    notice,
     afterExtract,
   };
 }

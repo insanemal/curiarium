@@ -7,6 +7,7 @@ vi.mock("../../lib/api/bundles", () => ({
   getBundleReport: vi.fn(),
   createBundles: vi.fn(),
   setBundleDismissed: vi.fn(),
+  enrichBundles: vi.fn(),
 }));
 
 // The real settle loop polls for ten minutes; a hook test must never run it.
@@ -17,9 +18,12 @@ vi.mock("../../lib/scanSettle", () => ({
 
 import {
   createBundles,
+  enrichBundles,
   getBundleReport,
   setBundleDismissed,
   type BundleDetectItem,
+  type BundleEnrichItemResult,
+  type BundleEnrichResponse,
   type BundleReport,
 } from "../../lib/api/bundles";
 import { UnauthorizedError } from "../../lib/api/http";
@@ -30,6 +34,7 @@ import { useBundleDetect } from "./useBundleDetect";
 const getBundleReportMock = vi.mocked(getBundleReport);
 const createBundlesMock = vi.mocked(createBundles);
 const setBundleDismissedMock = vi.mocked(setBundleDismissed);
+const enrichBundlesMock = vi.mocked(enrichBundles);
 const settleAfterExtractMock = vi.mocked(settleAfterExtract);
 
 function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
@@ -109,6 +114,35 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
+/** One result in an enrichment response; the counts are derived below so a
+ *  fixture cannot claim a status its `results` do not contain. */
+function enrichResult(overrides: Partial<BundleEnrichItemResult> = {}): BundleEnrichItemResult {
+  return {
+    key: "Moai statue",
+    status: "fetched",
+    source_url: "https://www.thingiverse.com/thing:2493386",
+    creator: "sculpteo",
+    licence: "CC BY",
+    licence_url: null,
+    filled: ["creator", "licence"],
+    fetched_at: "2026-11-05T12:00:00+00:00",
+    reason: null,
+    ...overrides,
+  };
+}
+
+function enrichResponse(results: BundleEnrichItemResult[]): BundleEnrichResponse {
+  const count = (status: string) => results.filter(result => result.status === status).length;
+  return {
+    fetched: count("fetched"),
+    cached: count("cached"),
+    refused: count("refused"),
+    unavailable: count("unavailable"),
+    unknown: count("unknown"),
+    results,
+  };
+}
+
 beforeEach(() => {
   getBundleReportMock.mockReset();
   getBundleReportMock.mockResolvedValue(report);
@@ -116,6 +150,8 @@ beforeEach(() => {
   createBundlesMock.mockResolvedValue({ created: 1, skipped: 0, blocked: 0, failed: 0, results: [] });
   setBundleDismissedMock.mockReset();
   setBundleDismissedMock.mockResolvedValue({ dismissed: ["Moai statue"], stale_dismissals: [] });
+  enrichBundlesMock.mockReset();
+  enrichBundlesMock.mockResolvedValue(enrichResponse([enrichResult()]));
   settleAfterExtractMock.mockReset();
 });
 
@@ -234,6 +270,166 @@ describe("useBundleDetect", () => {
     expect(setBundleDismissedMock).toHaveBeenCalledWith(["Moai statue"], true);
     expect(getBundleReportMock).toHaveBeenCalledTimes(2);
     expect(result.current.busy).toBe(false);
+  });
+
+  it("enriches the keys, then refetches before it speaks", async () => {
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    const answering = deferred<BundleEnrichResponse>();
+    enrichBundlesMock.mockReturnValueOnce(answering.promise);
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.enrich(["Moai statue"]);
+    });
+
+    // The keys reach the client with no forced refresh: a first pass reads the
+    // page only to fill the empties.
+    expect(enrichBundlesMock).toHaveBeenCalledWith(["Moai statue"], { refresh: undefined });
+    // Nothing is fetched while the page is still in flight.
+    expect(getBundleReportMock).toHaveBeenCalledTimes(1);
+    expect(result.current.busy).toBe(true);
+
+    await act(async () => {
+      answering.resolve(enrichResponse([enrichResult()]));
+      await pending;
+    });
+
+    // The refetch, and only then the message: `refresh` writes `error` itself,
+    // so a message set first would be cleared by the refetch it waited for.
+    expect(getBundleReportMock).toHaveBeenCalledTimes(2);
+    expect(result.current.error).toBeNull();
+    expect(result.current.notice).toBeNull();
+    expect(result.current.busy).toBe(false);
+  });
+
+  it("keeps a refusal's sentence and calls the page once, not twice", async () => {
+    const reason = "The site refused to be read. Set THINGIVERSE_COOKIE and try again.";
+    enrichBundlesMock.mockResolvedValueOnce(
+      enrichResponse([enrichResult({ status: "refused", reason })]),
+    );
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    await act(async () => {
+      await result.current.enrich(["Moai statue"]);
+    });
+
+    // The server's operator sentence, verbatim: rewriting it would lose the
+    // env var it names.
+    expect(result.current.error).toBe(reason);
+    expect(result.current.notice).toBeNull();
+    // A refusal is not a flaky network: a retry would only refuse again.
+    expect(enrichBundlesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("prints each distinct refusal reason once, joined", async () => {
+    const cookie = "Set THINGIVERSE_COOKIE and try again.";
+    const blocked = "The site blocked this client.";
+    enrichBundlesMock.mockResolvedValueOnce(
+      enrichResponse([
+        enrichResult({ key: "One", status: "refused", reason: cookie }),
+        enrichResult({ key: "Two", status: "refused", reason: cookie }),
+        enrichResult({ key: "Three", status: "refused", reason: blocked }),
+      ]),
+    );
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    await act(async () => {
+      await result.current.enrich(["One", "Two", "Three"]);
+    });
+
+    expect(result.current.error).toBe(`${cookie} - ${blocked}`);
+  });
+
+  it("says a cached answer did something rather than nothing, and a refetch keeps it", async () => {
+    enrichBundlesMock.mockResolvedValueOnce(
+      enrichResponse([enrichResult({ status: "cached", filled: [] })]),
+    );
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    await act(async () => {
+      await result.current.enrich(["Moai statue"]);
+    });
+
+    expect(result.current.notice).toBe("Already checked from the source page");
+    expect(result.current.error).toBeNull();
+
+    // `refresh` is not a new answer, so it must not clear the notice: only a
+    // new enrich (or a create/dismiss) does.
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.notice).toBe("Already checked from the source page");
+  });
+
+  it.each([
+    ["unavailable", "This bundle names no vendor page to read"],
+    ["unknown", "That bundle is no longer in the report"],
+  ] as const)("says what a %s result means", async (status, message) => {
+    enrichBundlesMock.mockResolvedValueOnce(enrichResponse([enrichResult({ status })]));
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    await act(async () => {
+      await result.current.enrich(["Moai statue"]);
+    });
+
+    expect(result.current.notice).toBe(message);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("turns a failed enrichment into an error that keeps the server's message", async () => {
+    enrichBundlesMock.mockRejectedValueOnce(
+      new Error("enrich at most 25 bundles at a time"),
+    );
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    await act(async () => {
+      await result.current.enrich(["Moai statue"]);
+    });
+
+    expect(result.current.error).toBe("enrich at most 25 bundles at a time");
+    expect(result.current.busy).toBe(false);
+    // A failed mutation must not refetch over the error it just recorded.
+    expect(getBundleReportMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards a forced re-check", async () => {
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    await act(async () => {
+      await result.current.enrich(["Moai statue"], { refresh: true });
+    });
+
+    expect(enrichBundlesMock).toHaveBeenCalledWith(["Moai statue"], { refresh: true });
+  });
+
+  it("reports an unauthorized enrichment to the caller", async () => {
+    enrichBundlesMock.mockRejectedValueOnce(new UnauthorizedError());
+    const onUnauthorized = vi.fn();
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true, onUnauthorized }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    await act(async () => {
+      await result.current.enrich(["Moai statue"]);
+    });
+
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    // Exactly what `mutate` records for the same failure: the error's own
+    // message, never a second wording.
+    expect(result.current.error).toBe("Unauthorized");
   });
 
   it("keeps the show-dismissed toggle", async () => {

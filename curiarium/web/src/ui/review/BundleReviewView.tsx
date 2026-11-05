@@ -1,11 +1,12 @@
 import React from "react";
 import { Check } from "lucide-react";
 
-import type {
-  BundleCover,
-  BundleCreateItem,
-  BundleDetectItem,
-  BundleReport,
+import {
+  ENRICH_MAX_KEYS,
+  type BundleCover,
+  type BundleCreateItem,
+  type BundleDetectItem,
+  type BundleReport,
 } from "../../lib/api/bundles";
 // The type comes from the domain module, not the `../../lib/api` barrel: the
 // tests replace that barrel with a fixed object, so a named import from it
@@ -24,11 +25,15 @@ import { ModelSnapshot } from "../ModelViewer";
 import {
   BUNDLE_FILTERS,
   archiveLine,
+  canEnrich,
+  canRecheck,
   confidenceLabel,
   countLabel,
   countsLine,
   coverLine,
   createdProjectLine,
+  enrichSelectionLabel,
+  enrichmentLine,
   headline,
   isArchiveOnly,
   isCreatable,
@@ -133,6 +138,15 @@ function extractTargets(rows: BundleDetectItem[]): ExtractTarget[] {
     const path = row.archive?.rel_path;
     return path ? [{ path, label: row.title }] : [];
   });
+}
+
+/** The detail pane's one enrichment door: a row with a gap gets the first
+ *  pass, and a row the page already answered can only be re-checked. Returns
+ *  null when neither applies, so the button is not rendered at all. */
+function enrichActionLabel(row: BundleDetectItem): string | null {
+  if (canEnrich(row)) return "Enrich from source page";
+  if (canRecheck(row)) return "Re-check source page";
+  return null;
 }
 
 type Props = {
@@ -347,6 +361,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const selected = visible.filter(row => selectedKeys.includes(row.key));
   const creatableSelected = selected.filter(isCreatable);
   const extractableSelected = selected.filter(isArchiveOnly);
+  const enrichableSelected = selected.filter(canEnrich);
   // Deliberately `low` only, never `medium`: the bulk bar sends `name_only: true`,
   // which writes no source URL, and a medium row's whole point is the URL derived
   // from the id in its folder name. A medium row is created from the detail panel,
@@ -356,6 +371,8 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const activeRow = filtered.find(row => row.key === activeKey) ?? null;
   const activeArchive = activeRow === null ? null : archiveLine(activeRow);
   const activeCreatedLine = activeRow === null ? null : createdProjectLine(activeRow);
+  const activeEnrichmentLine = activeRow === null ? null : enrichmentLine(activeRow);
+  const activeEnrichLabel = activeRow === null ? null : enrichActionLabel(activeRow);
 
   // The active key, not an index: a refetch reorders rows and an index would
   // silently point at a different bundle after every mutation.
@@ -422,6 +439,14 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
     void state.dismiss(selected.map(row => row.key), true);
   };
 
+  // The server refuses more than `ENRICH_MAX_KEYS` keys per request, so the
+  // bulk door sends the first ones in row order and its label says so
+  // (`enrichSelectionLabel`).
+  const enrichSelected = () => {
+    const keys = enrichableSelected.slice(0, ENRICH_MAX_KEYS).map(row => row.key);
+    if (keys.length > 0) void state.enrich(keys);
+  };
+
   const openExtract = (targets: ExtractTarget[], returnKey: string | null) => {
     if (!canContribute || targets.length === 0) return;
     setSettleTimedOut(false);
@@ -486,6 +511,19 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
 
   const dismissActive = () => {
     if (activeRow) void state.dismiss([activeRow.key], !activeRow.dismissed);
+  };
+
+  // A re-check is a forced refetch of a page that already answered; a first
+  // pass reads the page only to fill the empties. The two branches pass a
+  // different argument count on purpose, so each door's call is what the hook
+  // and its tests see.
+  const enrichActive = () => {
+    if (!activeRow) return;
+    if (canRecheck(activeRow)) {
+      void state.enrich([activeRow.key], { refresh: true });
+      return;
+    }
+    void state.enrich([activeRow.key]);
   };
 
   const moveActive = (index: number) => {
@@ -763,6 +801,15 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
             <button
               type="button"
               className={SECONDARY_BUTTON}
+              data-bundle-enrich-selected="true"
+              disabled={busy || enrichableSelected.length === 0}
+              onClick={enrichSelected}
+            >
+              {enrichSelectionLabel(enrichableSelected.length, selected.length)}
+            </button>
+            <button
+              type="button"
+              className={SECONDARY_BUTTON}
               disabled={busy || selected.length === 0}
               onClick={dismissSelected}
             >
@@ -836,6 +883,12 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                   {activeRow.licence && <span>{`Licence ${activeRow.licence}`}</span>}
                   {activeRow.source_url && <span>{`Source ${activeRow.source_url}`}</span>}
                   <span>{`Detected by ${activeRow.detector} (${activeRow.metadata_shape})`}</span>
+                  {/* What the vendor's page supplied, set apart from the
+                      detector's own verdict above so a reader can tell the
+                      two apart. */}
+                  {activeEnrichmentLine && (
+                    <span data-bundle-enrichment="true">{activeEnrichmentLine}</span>
+                  )}
                   {activeRow.description_excerpt && (
                     <span className="review-detail-excerpt">{activeRow.description_excerpt}</span>
                   )}
@@ -877,6 +930,18 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                       >
                         {activeRow.dismissed ? "Undo dismiss" : "Dismiss"}
                       </button>
+                      {activeEnrichLabel !== null && (
+                        <button
+                          type="button"
+                          className={SECONDARY_BUTTON}
+                          data-bundle-enrich="true"
+                          disabled={busy}
+                          title="Read the creator and licence from the bundle's source page (only empty fields are filled)"
+                          onClick={enrichActive}
+                        >
+                          {activeEnrichLabel}
+                        </button>
+                      )}
                     </div>
                   </>
                 )}
@@ -935,6 +1000,11 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
         <div className="review-error" role="alert">
           <p>{error}</p>
         </div>
+      )}
+      {state.notice && (
+        <p className="review-notice" role="status">
+          {state.notice}
+        </p>
       )}
       {body}
       {extractRequest && (

@@ -1803,6 +1803,50 @@
       "summary": "Dismiss Bundles"
     }
   },
+  "/bundles/enrich": {
+    "post": {
+      "description": "Read the vendor pages these bundles name and cache what the pages say.\n\nOn demand by a human, never part of `GET /bundles/detect`: that report is a\ndisk walk and must stay offline and deterministic. It fills only empty fields\nand never invents a licence. A per-item `refused` is the bulk partial-success\ncontract, so one rate-limited thing does not discard the pages that answered.\nA 429 detail names `THINGIVERSE_COOKIE` as the environment variable it is.",
+      "operationId": "enrich_bundles_bundles_enrich_post",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BundleEnrichRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleEnrichResponse"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Enrich Bundles"
+    }
+  },
   "/creators": {
     "get": {
       "description": "Distinct non-empty creators, deduped and sorted case-insensitively.\n\nTakes the same scoping filters as `GET /assets` and `GET /tags`, so the\nfacet works in library mode, folder mode, root mode (`unfiled`), missing\nmode (`missing`) and project mode. An unknown project is a 404 like every\nother project route. Each facet takes the listing's whole scope on purpose:\nan unscoped facet next to a scoped listing is a lying control, because the\nchip count would describe a different set than the grid.",

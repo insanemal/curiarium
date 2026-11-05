@@ -72,6 +72,9 @@ PROJECT_RENAME = "project.rename"
 # bundle is a report filter, but a reversible one worth reading back.
 BUNDLE_CREATE = "bundle.create"
 BUNDLE_DISMISS = "bundle.dismiss"
+# The act is an outbound fetch plus a stored claim about a model's licence, so it
+# is recorded; a refusal changes nothing and is reported per item instead.
+BUNDLE_ENRICH = "bundle.enrich"
 TRASH_PURGE = "trash.purge"
 SETTINGS_STORAGE_UPDATE = "settings.storage.update"
 SETTINGS_MOUNT_IMPORT_UPDATE = "settings.mount_import.update"
@@ -150,6 +153,7 @@ ACTIONS: frozenset[str] = frozenset({
     PROJECT_RENAME,
     BUNDLE_CREATE,
     BUNDLE_DISMISS,
+    BUNDLE_ENRICH,
     TRASH_PURGE,
     SETTINGS_STORAGE_UPDATE,
     SETTINGS_MOUNT_IMPORT_UPDATE,
@@ -401,6 +405,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     # keeps the history free of duplicates (Mf-vwqf).
     ("POST", "/bundles/create"): (BUNDLE_CREATE,),
     ("POST", "/bundles/dismiss"): (BUNDLE_DISMISS,),
+    ("POST", "/bundles/enrich"): (BUNDLE_ENRICH,),
     ("POST", "/trash/purge"): (TRASH_PURGE, DESTRUCTIVE_SNAPSHOT_TAKEN, DESTRUCTIVE_SNAPSHOT_MISSED),
     ("POST", "/settings/storage"): (SETTINGS_STORAGE_UPDATE,),
     ("POST", "/settings/mount-import"): (SETTINGS_MOUNT_IMPORT_UPDATE,),

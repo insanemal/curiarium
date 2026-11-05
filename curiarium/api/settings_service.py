@@ -16,6 +16,9 @@ DEFAULT_STORAGE_TEMPLATE = "{folder}/{model}/{filename}"
 # One key holds the whole dismissal map: a bundle key is a rel path, so a row per
 # bundle would be a working set we never read one row at a time (Mf-vwqf).
 BUNDLE_DISMISSALS_KEY = "bundle.dismissals"
+# One key holds the whole enrich map, keyed by `thingiverse:<id>`: a cached page
+# is a working set read whole, exactly like the dismissals above (Mf-nivh).
+BUNDLE_ENRICHMENTS_KEY = "bundle.enrichments"
 
 
 def get_setting(key: str) -> Optional[str]:

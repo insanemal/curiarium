@@ -1,16 +1,26 @@
 import { describe, expect, it } from "vitest";
 
-import type { BundleDetectCounts, BundleDetectItem } from "../../lib/api/bundles";
+import {
+  ENRICH_MAX_KEYS,
+  type BundleDetectCounts,
+  type BundleDetectItem,
+  type BundleEnrichment,
+} from "../../lib/api/bundles";
 import {
   ROW_STATE_CREATED,
   ROW_STATE_DISMISSED,
   ROW_STATE_IN_PROJECT,
   archiveLine,
+  canEnrich,
+  canRecheck,
   confidenceLabel,
   countLabel,
   countsLine,
   coverLine,
   createdProjectLine,
+  enrichSelectionLabel,
+  enrichmentLine,
+  hasThingSource,
   headline,
   isArchiveOnly,
   isBlocked,
@@ -18,6 +28,7 @@ import {
   matchesFilter,
   matchesVisibility,
   needsDecision,
+  needsEnrichment,
   rowBucket,
   rowStateChip,
   statusLine,
@@ -650,5 +661,147 @@ describe("headline", () => {
     expect(headline(makeCounts({ total: 4, high: 1, medium: 2, low: 1 }))).toBe(
       "4 bundles found - 1 high confidence, 2 medium, 1 low",
     );
+  });
+});
+
+const PROJECT_ID = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
+
+function enrichment(overrides: Partial<BundleEnrichment> = {}): BundleEnrichment {
+  return {
+    source_url: "https://www.thingiverse.com/thing:5390184",
+    fetched_at: "2026-11-05T12:00:00+00:00",
+    fields: ["creator", "licence"],
+    ...overrides,
+  };
+}
+
+describe("hasThingSource", () => {
+  it("accepts a row that names its vendor page", () => {
+    expect(hasThingSource(makeBundle())).toBe(true);
+  });
+
+  it("rejects a row without a source URL", () => {
+    expect(hasThingSource(makeBundle({ source_url: null }))).toBe(false);
+  });
+});
+
+describe("needsEnrichment", () => {
+  it("accepts a row missing either field", () => {
+    expect(needsEnrichment(makeBundle({ creator: null, licence: null }))).toBe(true);
+    expect(needsEnrichment(makeBundle({ creator: null, licence: "CC BY" }))).toBe(true);
+    expect(needsEnrichment(makeBundle({ creator: "sculpteo", licence: null }))).toBe(true);
+  });
+
+  it("rejects a row whose creator and licence are both known", () => {
+    expect(needsEnrichment(makeBundle())).toBe(false);
+  });
+});
+
+describe("canEnrich", () => {
+  const GAP = { creator: null, licence: null } as const;
+  const cases: [string, BundleDetectItem, boolean][] = [
+    // The happy path: a source to read and a gap to fill.
+    ["a source and a gap", makeBundle(GAP), true],
+    // A LOW hash-named row carries no server-issued key, so there is no page.
+    ["no source URL", makeBundle({ ...GAP, source_url: null }), false],
+    // Already answered: a second bulk pass would be a request with nothing to
+    // fill. `null` is the server saying this row took nothing from the page,
+    // which is the same as no record at all, so it stays enrichable.
+    ["an existing page record", makeBundle({ ...GAP, enrichment: enrichment() }), false],
+    ["an explicit null page record", makeBundle({ ...GAP, enrichment: null }), true],
+    // An already-created row's values are never used again.
+    ["an existing project", makeBundle({ ...GAP, existing_project_id: PROJECT_ID }), false],
+    // Nothing the page could supply.
+    ["both fields present", makeBundle({ creator: "sculpteo", licence: "CC BY" }), false],
+  ];
+
+  it.each(cases)("answers %s", (_label, row, expected) => {
+    expect(canEnrich(row)).toBe(expected);
+  });
+});
+
+describe("canRecheck", () => {
+  it("accepts a live row the page already answered", () => {
+    expect(canRecheck(makeBundle({ enrichment: enrichment() }))).toBe(true);
+  });
+
+  it("rejects a row that has not been enriched yet", () => {
+    expect(canRecheck(makeBundle())).toBe(false);
+    expect(canRecheck(makeBundle({ enrichment: null }))).toBe(false);
+  });
+
+  it("rejects a row without a source URL", () => {
+    expect(canRecheck(makeBundle({ enrichment: enrichment(), source_url: null }))).toBe(false);
+  });
+
+  it("rejects an already-created row", () => {
+    expect(canRecheck(makeBundle({ enrichment: enrichment(), existing_project_id: PROJECT_ID }))).toBe(
+      false,
+    );
+  });
+});
+
+describe("enrichmentLine", () => {
+  const fetched = (fields: string[]): BundleDetectItem =>
+    makeBundle({ enrichment: enrichment({ fields }) });
+
+  it("names all three fields", () => {
+    expect(enrichmentLine(fetched(["creator", "licence", "licence_url"]))).toBe(
+      "From the source page: creator, licence, licence URL (fetched 2026-11-05)",
+    );
+  });
+
+  it("names only the fields this row took", () => {
+    expect(enrichmentLine(fetched(["creator", "licence_url"]))).toBe(
+      "From the source page: creator, licence URL (fetched 2026-11-05)",
+    );
+  });
+
+  it("names a single field", () => {
+    expect(enrichmentLine(fetched(["licence"]))).toBe(
+      "From the source page: licence (fetched 2026-11-05)",
+    );
+  });
+
+  it("still dates a page that supplied nothing", () => {
+    expect(enrichmentLine(fetched([]))).toBe("From the source page (fetched 2026-11-05)");
+  });
+
+  it("names the fields and says the date is unknown when the record has no stamp", () => {
+    // A record written by an older build, or a cache entry whose stamp was lost,
+    // still says what the page said. The date is said to be unknown, not
+    // dropped and not invented, and the sentence must not print `null`.
+    const line = enrichmentLine(makeBundle({ enrichment: enrichment({ fetched_at: null }) }));
+    expect(line).toBe("From the source page: creator, licence (fetched date unknown)");
+    expect(line).not.toContain("null");
+  });
+
+  it("still says the date is unknown for a stamp-less page that supplied nothing", () => {
+    const line = enrichmentLine(
+      makeBundle({ enrichment: enrichment({ fetched_at: null, fields: [] }) }),
+    );
+    expect(line).toBe("From the source page (fetched date unknown)");
+    expect(line).not.toContain("null");
+  });
+
+  it("returns null for a row the page never answered", () => {
+    expect(enrichmentLine(makeBundle({ enrichment: null }))).toBeNull();
+    // `undefined` is "the server did not say", and it must read as no line.
+    expect(enrichmentLine(makeBundle())).toBeNull();
+  });
+});
+
+describe("enrichSelectionLabel", () => {
+  it("counts the enrichable selection when it fits", () => {
+    expect(enrichSelectionLabel(1, 1)).toBe("Enrich selected (1)");
+    expect(enrichSelectionLabel(1, 3)).toBe("Enrich selected (1)");
+    expect(enrichSelectionLabel(ENRICH_MAX_KEYS, ENRICH_MAX_KEYS)).toBe("Enrich selected (25)");
+  });
+
+  it("names the truncation once the selection exceeds the server's cap", () => {
+    expect(enrichSelectionLabel(ENRICH_MAX_KEYS + 1, ENRICH_MAX_KEYS + 1)).toBe(
+      "Enrich selected (25 of 26)",
+    );
+    expect(enrichSelectionLabel(30, 30)).toBe("Enrich selected (25 of 30)");
   });
 });

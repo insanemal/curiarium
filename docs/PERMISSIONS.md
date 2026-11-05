@@ -237,8 +237,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 100 routes: 11 public, 36 read,
-22 contribute, 13 write, 18 admin.
+Paths are FastAPI templates exactly as declared. 101 routes: 11 public, 36 read,
+23 contribute, 13 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -333,6 +333,7 @@ on.
 | DELETE | `/project/{project_id}/assets`              | removes a membership row, not an asset; the bytes stay (the one DELETE with a JSON body) |
 | POST   | `/bundles/create`                           | creates one project per confirmed bundle from that report; idempotent, and a blocked bundle creates nothing |
 | POST   | `/bundles/dismiss`                          | hides bundles from the report, or undoes a dismissal: one appconfig value, and it removes nothing from the library |
+| POST   | `/bundles/enrich`                           | asks the vendor page a bundle already names for its missing creator/licence, filling **only empty fields**: an outbound fetch, but the report itself never fetches and a page that states no licence leaves it null |
 
 ### write (editor or admin)
 

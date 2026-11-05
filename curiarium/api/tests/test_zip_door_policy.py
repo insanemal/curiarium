@@ -103,6 +103,7 @@ def isolated_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         assets_before = {asset.id for asset in session.exec(select(Asset))}
     yield storage
     settings_service.set_setting(settings_service.BUNDLE_DISMISSALS_KEY, "")
+    settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, "")
     with Session(engine) as session:
         # Projects first: `idx_project_name_unique` is case-insensitive, so a
         # leaked row would 409 the next test's project.

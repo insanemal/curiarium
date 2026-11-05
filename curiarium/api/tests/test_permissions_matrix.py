@@ -1,7 +1,7 @@
 """Per-route permission sweeps driven by `permissions.ROUTE_PERMISSIONS`.
 
 Why this file exists: Mf-2nbc enforces a level with a *per-route dependency*, and
-the only thing that keeps 100 hand-written declarations honest is a test that
+the only thing that keeps 101 hand-written declarations honest is a test that
 visits every route at every role. The sweeps below are parametrised from
 `permissions.ROUTE_PERMISSIONS`, so that table is both the documentation and the
 test plan: add a route without classifying it and
@@ -52,6 +52,7 @@ import asset_service
 import auth
 import bundle_service
 import db
+import import_resolvers
 import import_runs
 import library_scan
 import login_throttle as login_throttle_module
@@ -980,6 +981,31 @@ def call_dismiss_bundles(client: TestClient, headers: dict[str, str], ids: Ids, 
     return client.post("/bundles/dismiss", json={"keys": ["no/such/bundle"], "dismissed": True}, headers=headers)
 
 
+def call_enrich_bundles(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    """An unknown key short-circuits before any fetch, so this stays hermetic.
+
+    The tripwire and the cache-write assertion make the sweep hermetic on its own
+    merits: the suite's empty storage root is an accident of the current fixture,
+    not a guarantee that no row wants a page.
+    """
+
+    def refuse_fetch(*args, **kwargs):
+        raise AssertionError("the permission sweep must not fetch a vendor page")
+
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", refuse_fetch)
+    writes: list[str] = []
+    real_set_setting = settings_service.set_setting
+
+    def spy(key: str, value: str, **kwargs) -> None:
+        writes.append(key)
+        real_set_setting(key, value, **kwargs)
+
+    monkeypatch.setattr(settings_service, "set_setting", spy)
+    response = client.post("/bundles/enrich", json={"keys": ["no/such/bundle"]}, headers=headers)
+    assert settings_service.BUNDLE_ENRICHMENTS_KEY not in writes, "an unknown key must not write the enrich cache"
+    return response
+
+
 # SSO is off in this module (the matrix tests never configure a provider), so
 # these three answer 503 rather than redirecting. What is under test here is the
 # permission level, and a public route is public either way.
@@ -1208,6 +1234,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("GET", "/bundles/detect"): call_bundle_report,
     ("POST", "/bundles/create"): call_create_bundles,
     ("POST", "/bundles/dismiss"): call_dismiss_bundles,
+    ("POST", "/bundles/enrich"): call_enrich_bundles,
 }
 
 # What a permitted caller must get back. The five `/import*` routes are absent on
@@ -1326,6 +1353,7 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("GET", "/bundles/detect"): 200,
     ("POST", "/bundles/create"): 200,
     ("POST", "/bundles/dismiss"): 200,
+    ("POST", "/bundles/enrich"): 200,
 }
 
 
@@ -1451,7 +1479,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 100 routes - 11 public / 36 read / 22 contribute / 13 write / 18 admin.
+    """The matrix is pinned at 101 routes - 11 public / 36 read / 23 contribute / 13 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1461,11 +1489,11 @@ def test_the_matrix_is_the_documented_size() -> None:
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 100, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 101, counts
     assert counts == {
         permissions.PUBLIC: 11,
         permissions.READ: 36,
-        permissions.CONTRIBUTE: 22,
+        permissions.CONTRIBUTE: 23,
         permissions.WRITE: 13,
         permissions.ADMIN: 18,
     }, counts

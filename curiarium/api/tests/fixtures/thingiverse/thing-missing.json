@@ -1,0 +1,10 @@
+{
+  "source_url": "https://www.thingiverse.com/thing:999999999",
+  "captured_at": "2026-11-05",
+  "captured_with": "config.IMPORT_BROWSER_USER_AGENT plus import_resolvers.thingiverse_html_headers(), no cookie",
+  "http_status": 200,
+  "live_body_bytes": 20755,
+  "live_body_sha256": "c4bcfabc254519eb41da72d9c0df9d2e8161b40af9832b30522a3bd9c1d1e0b2",
+  "note": "The page head only: <meta name=\"author\">, og:title, and (when present) the single application/ld+json block. The meta author is what makes import_metadata.parse_page_metadata answer creator='Thingiverse.com' here, which is why bundle_enrich parses the ld+json node itself. The whole page is not committed; the sha256 above identifies the body these bytes were cut from. a thing that does not exist answers 200 with a generic page and NO ld+json at all",
+  "html": "<head>\n<meta name=\"author\" content=\"Thingiverse.com\"/>\n<meta property=\"og:title\" content=\"Thingiverse - The community for Open Hardware\"/>\n\n</head>"
+}

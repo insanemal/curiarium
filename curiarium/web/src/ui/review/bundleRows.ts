@@ -2,7 +2,11 @@
 // lets the render stay declarative and the wording stay unit-testable without
 // mounting a component.
 
-import type { BundleDetectCounts, BundleDetectItem } from "../../lib/api/bundles";
+import {
+  ENRICH_MAX_KEYS,
+  type BundleDetectCounts,
+  type BundleDetectItem,
+} from "../../lib/api/bundles";
 
 export type BundleFilter = "all" | "ready" | "blocked" | "medium" | "low";
 
@@ -50,6 +54,73 @@ export function isBlocked(row: BundleDetectItem): boolean {
  *  the identity, so a nameless project is still settled. */
 export function isCreatable(row: BundleDetectItem): boolean {
   return !isBlocked(row) && !row.existing_project_id;
+}
+
+/** Whether the row names a vendor page an enrichment could read. The server
+ *  only issues an enrichable key when the row names a vendor id, so a LOW
+ *  hash-named row carries no source at all. */
+export function hasThingSource(row: BundleDetectItem): boolean {
+  return Boolean(row.source_url);
+}
+
+/** Whether the row still has a field the source page could supply. Either gap
+ *  is enough: the action fills only what is empty, so a known creator does not
+ *  make a missing licence unreachable. */
+export function needsEnrichment(row: BundleDetectItem): boolean {
+  return !row.creator || !row.licence;
+}
+
+/** A row the bulk bar may send: a source to read, a gap to fill, no page record
+ *  yet, and not already a project. A row the page already answered is not
+ *  re-fetched by a second bulk pass, and an already-created row's values are
+ *  never used again, so both are excluded here rather than at the call site. */
+export function canEnrich(row: BundleDetectItem): boolean {
+  return (
+    hasThingSource(row) && needsEnrichment(row) && !row.enrichment && !row.existing_project_id
+  );
+}
+
+/** The detail pane's re-check door: the page answered before and the row is
+ *  still live, so asking again (with `refresh: true`) is a real action. A row
+ *  that took nothing yet belongs to `canEnrich` instead, not both. */
+export function canRecheck(row: BundleDetectItem): boolean {
+  return hasThingSource(row) && !row.existing_project_id && Boolean(row.enrichment);
+}
+
+/** How each supplied field reads inside the provenance sentence. An unknown
+ *  field from a newer server falls back to its own name rather than vanishing:
+ *  the sentence still has to say what the page supplied. */
+const ENRICHMENT_FIELD_LABELS: Record<string, string> = {
+  creator: "creator",
+  licence: "licence",
+  licence_url: "licence URL",
+};
+
+/** The provenance sentence for the detail pane, or null for a row the page
+ *  never answered. `fields` names only what THIS row took, so the sentence says
+ *  exactly that and nothing about the other rows in the same request. A record
+ *  without a stamp still speaks its fields, with the date said to be unknown
+ *  rather than dropped or invented. */
+export function enrichmentLine(row: BundleDetectItem): string | null {
+  const enrichment = row.enrichment;
+  if (!enrichment) return null;
+  const stamp = enrichment.fetched_at ? enrichment.fetched_at.slice(0, 10) : null;
+  const when = stamp ? `fetched ${stamp}` : "fetched date unknown";
+  const fields = enrichment.fields
+    .map(field => ENRICHMENT_FIELD_LABELS[field] ?? field)
+    .join(", ");
+  if (!fields) return `From the source page (${when})`;
+  return `From the source page: ${fields} (${when})`;
+}
+
+/** The bulk bar's words. The server caps a request at `ENRICH_MAX_KEYS`, so the
+ *  label makes the truncation visible instead of letting the server reject the
+ *  request. `enrichable` is the count this button acts on; `selected` is the
+ *  whole selection, named only by the truncated form so the reader can see how
+ *  much was left behind. */
+export function enrichSelectionLabel(enrichable: number, selected: number): string {
+  if (enrichable <= ENRICH_MAX_KEYS) return `Enrich selected (${enrichable})`;
+  return `Enrich selected (${ENRICH_MAX_KEYS} of ${selected})`;
 }
 
 /** A row the queue may extract in place: it is blocked as an archive the scan

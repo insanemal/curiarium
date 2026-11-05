@@ -314,6 +314,9 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("POST", "/bundles/create"): CONTRIBUTE,
     # A dismissal is a reversible report filter, not a library edit.
     ("POST", "/bundles/dismiss"): CONTRIBUTE,
+    # A contributor may ask the vendor for a bundle's missing metadata; it fills
+    # empty fields only and the report itself never fetches.
+    ("POST", "/bundles/enrich"): CONTRIBUTE,
     ("PATCH", "/project/{project_id}"): CONTRIBUTE,
     ("POST", "/project/{project_id}/assets"): CONTRIBUTE,
     # Removes membership, not the asset: the join row goes, the bytes stay.

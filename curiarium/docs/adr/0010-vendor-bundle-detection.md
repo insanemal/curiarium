@@ -53,6 +53,13 @@ as `already_created` and named on the wire by which identity matched).
 
 **Extended:** ticket `Mf-tcrw` (a sixth rule, R6 `archive-bundle`, offers an ARCHIVE whose models and images sit under a single root entry directory with no text file at `low`, consulted only on the archive carrier after R1/R2/R4/R3 refused, so no row those rules produced can be lowered and the refusal vocabulary is unchanged).
 
+**Extended:** 2026-11-05 - ticket `Mf-nivh` (the detector still attributes
+nothing; an explicit operator action, `POST /bundles/enrich`, may fill ONLY an
+empty creator/licence from the vendor's own page, with `fetched_at`, the URL and
+the field list recorded on the row and in the project's `_bundle` marker, and a
+page that states no licence leaves it null; enrichment never runs during
+detection).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -939,6 +946,10 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     diverge - `thingiverse_thing_id_from_url(source_url) == thing_id` by
     construction rather than by two code paths agreeing. Mutation: stamp a creator
     or a licence onto the row and the `None` assertions in both witness tests red.
+
+    **Extended:** 2026-11-05 - ticket `Mf-nivh`: the detector still attributes
+    nothing; an explicit operator action fills only an empty creator/licence - see
+    the `Mf-nivh` entry in the Extended log at the top of this ADR.
 
     **R4 outranks R3 in the order, and never competes with R1 or R2.** An
     id-named directory that also satisfies R3's model+image+text trio must read

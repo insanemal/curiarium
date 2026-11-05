@@ -12,9 +12,13 @@ tests drive the real ``/bundles`` routes through the app; the service-level test
 below prove the same core contract without the request layer.
 """
 
+import ast
+import dataclasses
 import json
 import re
 import shutil
+import socket
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional
@@ -31,8 +35,10 @@ import asset_file_service
 import asset_service
 import audit
 import bundle_detect
+import bundle_enrich
 import bundle_service
 import db
+import import_resolvers
 import library_scan
 import main
 import project_service
@@ -93,6 +99,7 @@ def isolated_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     yield storage
     settings_service.set_storage_template(template_before)
     settings_service.set_setting(settings_service.BUNDLE_DISMISSALS_KEY, "")
+    settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, "")
     with Session(engine) as session:
         # Projects first: `idx_project_name_unique` is case-insensitive, so a
         # leaked row would 409 the next test's project.
@@ -4000,3 +4007,736 @@ def test_service_every_archive_is_offered_or_refused_with_a_named_rule(isolated_
     assert not (offered & refused), "no archive is both a row and a refusal"
     for item in scan.refusals:
         assert item.rule in bundle_service.REFUSAL_RULES, (item.rel_path, item.rule)
+
+
+# --- enrichment: what the report applies and what the action fetches (Mf-nivh) ---
+
+PAGE_FIXTURE_DIR = Path(__file__).parent.joinpath("fixtures/thingiverse")
+DRAGON_CACHE_KEY = "thingiverse:5390184"
+MOAI_CACHE_KEY = "thingiverse:2493386"
+# A fixed stamp: the report is clock-free, so the freshness of a record never
+# changes what a report shows and this literal can be used on either side.
+STALE_STAMP = "2020-01-01T00:00:00+00:00"
+CACHED_STAMP = "2026-11-05T00:00:00+00:00"
+CC_BY_NC_SA_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+
+
+def page_html(name: str) -> str:
+    """The real captured page head from this module's own fixture tree."""
+    return json.loads(PAGE_FIXTURE_DIR.joinpath(name).read_text())["html"]
+
+
+def fresh_stamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def page_record(
+    source_url: str = DRAGON_URL,
+    fetched_at: str = CACHED_STAMP,
+    creator: Optional[str] = "P1lotz",
+    licence: Optional[str] = "CC BY-NC-SA",
+    licence_url: Optional[str] = CC_BY_NC_SA_URL,
+) -> dict:
+    """A cache record in the shipped shape (``bundle_enrich.record_from_page``)."""
+    return {
+        "source_url": source_url,
+        "fetched_at": fetched_at,
+        "creator": creator,
+        "licence": licence,
+        "licence_url": licence_url,
+    }
+
+
+def store_enrichments(records: Mapping[str, dict]) -> None:
+    settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, json.dumps(dict(records), sort_keys=True))
+
+
+def enrichments() -> dict:
+    return bundle_service.get_enrichments()
+
+
+def spy_settings_writes(monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
+    """Record every ``set_setting`` call so "one write per request" is countable."""
+    writes: List[tuple] = []
+    original = settings_service.set_setting
+
+    def spy(key: str, value: str, **kwargs) -> None:
+        writes.append((key, value))
+        original(key, value, **kwargs)
+
+    monkeypatch.setattr(settings_service, "set_setting", spy)
+    return writes
+
+
+def stub_thing_page(monkeypatch: pytest.MonkeyPatch, html: str) -> List[str]:
+    """Replace the fetch the service imports INSIDE ``enrich_bundles``; return its calls."""
+    calls: List[str] = []
+
+    def fake_fetch(thing_id: str, thingiverse_cookie: Optional[str]) -> str:
+        calls.append(thing_id)
+        return html
+
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", fake_fetch)
+    return calls
+
+
+def test_a_report_applies_a_cached_record_to_empty_fields(isolated_storage: Path) -> None:
+    """AC-1: a cached page fills the empty creator, licence and licence URL of a row.
+
+    The 5390184 export names its own thing in its directory name and carries no
+    documents, so the row starts empty; the record is what makes it attributable.
+
+    Mutation: read the record per row or skip ``fills`` and the three values red;
+    stamp an ``enrichment`` block when nothing was taken and the block assertion
+    reds. Detection is untouched: detector, confidence and source_url stay.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    store_enrichments({DRAGON_CACHE_KEY: page_record()})
+
+    row = row_for(bundle_service.build_report(), f"import/{DRAGON}")
+
+    assert row["creator"] == "P1lotz"
+    assert row["licence"] == "CC BY-NC-SA"
+    assert row["licence_url"] == CC_BY_NC_SA_URL
+    assert row["enrichment"] == {
+        "source_url": DRAGON_URL,
+        "fetched_at": CACHED_STAMP,
+        "fields": ["creator", "licence", "licence_url"],
+    }
+    assert row["detector"] == "thingiverse-id-name"
+    assert row["confidence"] == "medium"
+    assert row["source_url"] == DRAGON_URL
+    assert row["status"] == "ready"
+
+
+def test_a_stale_record_still_fills_the_report(isolated_storage: Path) -> None:
+    """AC-1b: the TTL gates only the enrich ACTION, never what the report shows.
+
+    The 5390184 row starts empty, so an eight-day-old record is the only thing
+    that can attribute it, and the report applies it all the same. Mutation: let
+    ``_report_row`` honour ``record_is_fresh`` and this reds - the silent
+    consequence would be a seven-day-old page suddenly supplying nothing to
+    reports OR to creates.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    stale_stamp = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat(timespec="seconds")
+    store_enrichments({DRAGON_CACHE_KEY: page_record(fetched_at=stale_stamp)})
+
+    row = row_for(bundle_service.build_report(), f"import/{DRAGON}")
+
+    assert row["creator"] == "P1lotz"
+    assert row["licence"] == "CC BY-NC-SA"
+    assert row["enrichment"]["fields"], "the stale page still supplied this row"
+
+
+def test_a_record_that_supplies_nothing_here_adds_no_block(isolated_storage: Path) -> None:
+    """A record that filled none of THIS row's gaps contributes no provenance block.
+
+    The Moai row already carries its README creator and licence, so the record
+    under its key - which says something, just nothing this row needed - may not
+    be stamped as if it had. Mutation: stamp ``enrichment`` unconditionally and
+    this reds; on the web side that would flip the row from ``canEnrich`` to
+    ``canRecheck`` for a page that never gave it anything.
+    """
+    moai_bundle(isolated_storage)
+    scan()
+    store_enrichments({MOAI_CACHE_KEY: page_record(source_url=THING_URL)})
+
+    row = row_for(bundle_service.build_report(), MOAI)
+
+    assert row["creator"] == "moai_maker", "the detector's creator is not the record's to replace"
+    assert row["licence"] == "CC BY-NC", "the detector's licence is not the record's to replace"
+    assert row["enrichment"] is None, "a record that supplied nothing here has no block to add"
+
+
+def test_a_readme_creator_keeps_the_page_out_of_its_field(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a value the documents already state is never overwritten; only the gap is filled.
+
+    No detector can produce a HIGH row with a creator and no licence (R1/R2 need
+    both markers), so the seam that builds the row is narrowed here: the licence
+    is dropped while the README creator, title and URL stay real.
+
+    Mutation: let the record win over a truthy row value and the creator changes
+    to P1lotz; keep the licence/licence_url pair apart and only one of the two
+    reds.
+    """
+    moai_bundle(isolated_storage)
+    real_facts = bundle_service._candidate_facts
+
+    def licence_less(root: Path, candidate: bundle_service.BundleCandidate):
+        facts = real_facts(root, candidate)
+        if facts is None:
+            return None
+        return dataclasses.replace(facts, licence=None, licence_url=None)
+
+    monkeypatch.setattr(bundle_service, "_candidate_facts", licence_less)
+    scan()
+    store_enrichments({"thingiverse:2493386": page_record(source_url=THING_URL)})
+
+    row = row_for(bundle_service.build_report(), MOAI)
+
+    assert row["confidence"] == "high"
+    assert row["creator"] == "moai_maker", "the README's creator is not the page's to replace"
+    assert row["licence"] == "CC BY-NC-SA"
+    assert row["licence_url"] == CC_BY_NC_SA_URL
+    assert row["enrichment"]["fields"] == ["licence", "licence_url"]
+
+
+def test_a_report_opens_no_socket_and_writes_no_cache(isolated_storage: Path) -> None:
+    """AC-3: the report is a read, even when a row wants enrichment.
+
+    The corpus holds a row that WOULD be enriched (5390184) beside an ordinary
+    README bundle, so "no fetch" is meaningful next to a row that wants one, and
+    the cached creator still arrives - the report ran, it just did not call out.
+
+    Mutation: move the fetch into ``_report_row`` (or read the page "while we are
+    here") and every tripwire reds.
+    """
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the report must not open a socket or write a cache")
+
+    write_dragon(isolated_storage)
+    moai_bundle(isolated_storage)
+    scan()
+    store_enrichments({DRAGON_CACHE_KEY: page_record()})
+    # A context, not the fixture's own monkeypatch: the autouse fixture's
+    # ``db.STORAGE``/``bundle_service.STORAGE`` patches must survive, and its own
+    # teardown writes a setting after the tripwire has to be gone.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(socket, "socket", refuse)
+        mp.setattr(socket, "getaddrinfo", refuse)
+        mp.setattr(import_resolvers, "safe_urlopen", refuse)
+        mp.setattr(settings_service, "set_setting", refuse)
+        report = bundle_service.build_report()
+
+    assert sorted(row["key"] for row in report["bundles"]) == sorted([f"import/{DRAGON}", MOAI])
+    assert row_for(report, f"import/{DRAGON}")["creator"] == "P1lotz"
+
+
+def test_the_report_layer_imports_nothing_that_can_open_a_socket() -> None:
+    """AC-4 (structural): the module-scope imports are a frozen, socket-free set.
+
+    This is the structural half; ``test_a_report_opens_no_socket_and_writes_no_cache``
+    is the behavioural half and neither is trusted alone - an import can be added
+    without a report calling it, and a call can be added behind an attribute walk
+    that this file would not see.
+
+    Mutation: add ``import import_resolvers`` (or ``socket``/``urllib``) at the
+    top of ``bundle_service`` and the subset assertion reds; delete the fetch by
+    deleting its function-local import and the last assertion reds, so the pin
+    cannot be satisfied by removing the call it protects.
+    """
+    allowed = frozenset(
+        {
+            "asset_urls",
+            "audit",
+            "bundle_detect",
+            "bundle_enrich",
+            "dataclasses",
+            "datetime",
+            "db",
+            "fastapi",
+            "hashlib",
+            "json",
+            "library_scan",
+            "models",
+            "pathlib",
+            "project_service",
+            "settings_service",
+            "sqlalchemy",
+            "sqlmodel",
+            "typing",
+            "zip_service",
+            "zipfile",
+        }
+    )
+    forbidden = {"import_resolvers", "safe_http", "socket", "urllib", "http"}
+
+    tree = ast.parse(Path(bundle_service.__file__).read_text())
+    module_imports = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            module_imports.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            module_imports.add(node.module.split(".")[0])
+
+    assert module_imports <= allowed, module_imports - allowed
+    assert not (module_imports & forbidden), module_imports & forbidden
+    assert "fetch_thingiverse_thing_page" in _local_imports(tree, "enrich_bundles")
+
+
+def _local_imports(tree: ast.Module, function_name: str) -> set:
+    """Every name ``function_name``'s own body imports, nested blocks included.
+
+    Both spellings count: ``from import_resolvers import x`` and a bare
+    ``import import_resolvers`` reach the same module.
+    """
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            names: set = set()
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.ImportFrom) and inner.module == "import_resolvers":
+                    names.update(alias.name for alias in inner.names)
+                elif isinstance(inner, ast.Import):
+                    names.update(alias.name for alias in inner.names if alias.name == "import_resolvers")
+            return names
+    raise AssertionError(f"no function named {function_name} in bundle_service")
+
+
+def _imports_import_resolvers(node: ast.AST) -> bool:
+    """Whether ``node``'s subtree reaches ``import_resolvers`` by either import form."""
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.ImportFrom) and (inner.module or "").split(".")[0] == "import_resolvers":
+            return True
+        if isinstance(inner, ast.Import) and any(alias.name.split(".")[0] == "import_resolvers" for alias in inner.names):
+            return True
+    return False
+
+
+def test_the_report_route_is_not_where_the_fetch_lives() -> None:
+    """AC-13: exactly one function in this module reaches for ``import_resolvers``.
+
+    Mutation: call the fetch from ``_report_row``, ``_report_from_scan`` or
+    ``build_report`` (by moving or copying the import) and the set grows.
+    """
+    tree = ast.parse(Path(bundle_service.__file__).read_text())
+    importers = {
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef) and _imports_import_resolvers(node)
+    }
+
+    assert importers == {"enrich_bundles"}
+
+
+def test_enrich_fills_and_reports_what_it_took(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: one click reads one page, caches it once and the next report shows it.
+
+    Mutation: return the row's values instead of the page's and the result reds;
+    write per item and the write count reds; skip the cache and the report after
+    the call still has an empty creator.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    writes = spy_settings_writes(monkeypatch)
+    calls = stub_thing_page(monkeypatch, page_html("thing-5390184.json"))
+
+    result = bundle_service.enrich_bundles([f"import/{DRAGON}"], cookie=None, refresh=False, ctx=audit_ctx())
+
+    assert calls == ["5390184"]
+    assert (result["fetched"], result["cached"], result["refused"], result["unavailable"], result["unknown"]) == (
+        1,
+        0,
+        0,
+        0,
+        0,
+    )
+    item = result["results"][0]
+    assert item["key"] == f"import/{DRAGON}"
+    assert item["status"] == "fetched"
+    assert item["source_url"] == DRAGON_URL
+    assert (item["creator"], item["licence"], item["licence_url"]) == (
+        "P1lotz",
+        "CC BY-NC-SA",
+        CC_BY_NC_SA_URL,
+    )
+    assert item["filled"] == ["creator", "licence", "licence_url"]
+    assert item["reason"] is None
+    assert datetime.fromisoformat(item["fetched_at"]).tzinfo is not None
+
+    assert len(writes) == 1, "one write for the whole request"
+    key, value = writes[0]
+    assert key == settings_service.BUNDLE_ENRICHMENTS_KEY
+    assert json.loads(value)[DRAGON_CACHE_KEY]["creator"] == "P1lotz"
+    assert json.loads(value)[DRAGON_CACHE_KEY]["fetched_at"] == item["fetched_at"]
+
+    row = row_for(bundle_service.build_report(), f"import/{DRAGON}")
+    assert row["creator"] == "P1lotz"
+    assert row["enrichment"]["fields"] == ["creator", "licence", "licence_url"]
+
+
+def test_the_enrich_counters_are_exactly_the_status_vocabulary(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The counters and ``bundle_enrich.ENRICH_STATUSES`` are one vocabulary, two files.
+
+    The empty request's response names every counter the action can report, and a
+    real answer may only use a status the vocabulary holds. Mutation: add a
+    status constant without wiring its counter, or wire a counter the vocabulary
+    does not name, and one of the two assertions reds here.
+    """
+    empty = bundle_service.enrich_bundles([], cookie=None, refresh=False, ctx=audit_ctx())
+
+    assert set(empty) - {"results"} == set(bundle_enrich.ENRICH_STATUSES)
+
+    write_dragon(isolated_storage)
+    scan()
+    stub_thing_page(monkeypatch, page_html("thing-5390184.json"))
+
+    result = bundle_service.enrich_bundles([f"import/{DRAGON}"], cookie=None, refresh=False, ctx=audit_ctx())
+
+    assert {item["status"] for item in result["results"]} <= bundle_enrich.ENRICH_STATUSES
+
+
+def test_enrich_does_not_refetch_a_fresh_record(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: a fresh record answers instead of a fetch, and writes nothing.
+
+    Mutation: compare the TTL the wrong way round (or skip ``record_is_fresh``)
+    and the fetch stub raises; drop the cached branch's ``filled`` and the
+    reporting assertion reds.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    stamp = fresh_stamp()
+    store_enrichments({DRAGON_CACHE_KEY: page_record(fetched_at=stamp)})
+    writes = spy_settings_writes(monkeypatch)
+
+    def must_not_fetch(thing_id: str, thingiverse_cookie: Optional[str]) -> str:
+        raise AssertionError("must not fetch a fresh record")
+
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", must_not_fetch)
+
+    result = bundle_service.enrich_bundles([f"import/{DRAGON}"], cookie=None, refresh=False, ctx=audit_ctx())
+
+    assert result["cached"] == 1
+    assert result["fetched"] == 0
+    item = result["results"][0]
+    assert item["status"] == "cached"
+    assert item["filled"] == ["creator", "licence", "licence_url"]
+    assert item["fetched_at"] == stamp
+    assert writes == [], "a cached answer caches nothing"
+
+
+def test_enrich_refetches_a_stale_record(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7a: past the TTL the page is read again, so a vendor edit is eventually seen."""
+    write_dragon(isolated_storage)
+    scan()
+    store_enrichments({DRAGON_CACHE_KEY: page_record(fetched_at=STALE_STAMP)})
+    writes = spy_settings_writes(monkeypatch)
+    calls = stub_thing_page(monkeypatch, page_html("thing-5390184.json"))
+
+    result = bundle_service.enrich_bundles([f"import/{DRAGON}"], cookie=None, refresh=False, ctx=audit_ctx())
+
+    assert calls == ["5390184"]
+    assert result["fetched"] == 1
+    assert len(writes) == 1
+    assert json.loads(writes[0][1])[DRAGON_CACHE_KEY]["fetched_at"] != STALE_STAMP
+
+
+def test_enrich_refresh_reaches_past_a_fresh_record(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7b: ``refresh=True`` is the operator's "ask again now", TTL or not."""
+    write_dragon(isolated_storage)
+    scan()
+    store_enrichments({DRAGON_CACHE_KEY: page_record(fetched_at=fresh_stamp())})
+    calls = stub_thing_page(monkeypatch, page_html("thing-5390184.json"))
+
+    result = bundle_service.enrich_bundles([f"import/{DRAGON}"], cookie=None, refresh=True, ctx=audit_ctx())
+
+    assert calls == ["5390184"]
+    assert result["fetched"] == 1
+
+
+def test_enrich_reports_unknown_and_unavailable_without_a_fetch(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8: a key that is not a live bundle and a row with no vendor id never leave the server.
+
+    Mutation: look the key up in the request instead of a fresh report, or build
+    a cache key from a URL-less row, and one of the two fetch assertions reds.
+    """
+    generic_bundle(isolated_storage, "Generic Thing")
+    scan()
+    writes = spy_settings_writes(monkeypatch)
+
+    def must_not_fetch(thing_id: str, thingiverse_cookie: Optional[str]) -> str:
+        raise AssertionError("neither key names a page to read")
+
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", must_not_fetch)
+
+    result = bundle_service.enrich_bundles(
+        ["no/such/bundle", "Generic Thing"], cookie=None, refresh=False, ctx=audit_ctx()
+    )
+
+    assert (result["unknown"], result["unavailable"]) == (1, 1)
+    assert (result["fetched"], result["cached"], result["refused"]) == (0, 0, 0)
+    assert [item["status"] for item in result["results"]] == ["unknown", "unavailable"]
+    assert result["results"][0]["reason"] == "not a live bundle"
+    assert result["results"][1]["reason"] == "this bundle names no vendor id, so there is no page to read"
+    assert writes == [], "nothing fetched, nothing cached"
+
+
+def test_a_page_without_metadata_is_refused_and_not_cached(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-9: a 200 page with no ld+json is the measured "missing thing" answer.
+
+    Mutation: treat the empty parse as a success and the row gains a blank
+    record (and the write assertion reds); cache it and a later report would
+    claim a page supplied nothing.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    writes = spy_settings_writes(monkeypatch)
+    stub_thing_page(monkeypatch, page_html("thing-missing.json"))
+
+    result = bundle_service.enrich_bundles([f"import/{DRAGON}"], cookie=None, refresh=False, ctx=audit_ctx())
+
+    assert result["refused"] == 1
+    item = result["results"][0]
+    assert item["status"] == "refused"
+    assert "5390184" in item["reason"]
+    assert "no creator or licence" in item["reason"]
+    assert writes == []
+    row = row_for(bundle_service.build_report(), f"import/{DRAGON}")
+    assert (row["creator"], row["licence"], row["licence_url"]) == (None, None, None)
+
+
+def test_one_vendor_failure_does_not_discard_the_other_answers(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5b: a vendor refusal is a per-item status, so the batch keeps its other answers.
+
+    Mutation: let the first failure raise and the whole batch is a 500 with no
+    cache write - the page that DID answer is discarded with the one that did not.
+    """
+    write_dragon(isolated_storage)
+    write_file(isolated_storage / "import" / "62536_standing_cat" / "files" / "cat.stl", STL_BYTES)
+    scan()
+    writes = spy_settings_writes(monkeypatch)
+    page = page_html("thing-5390184.json")
+
+    def fake_fetch(thing_id: str, thingiverse_cookie: Optional[str]) -> str:
+        if thing_id == "62536":
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Thingiverse answered HTTP 503 for thing 62536, which this action does not read. "
+                    "Nothing was changed."
+                ),
+            )
+        return page
+
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", fake_fetch)
+
+    result = bundle_service.enrich_bundles(
+        ["import/62536_standing_cat", f"import/{DRAGON}"], cookie=None, refresh=False, ctx=audit_ctx()
+    )
+
+    assert (result["fetched"], result["refused"]) == (1, 1)
+    refused, fetched = result["results"]
+    assert refused["key"] == "import/62536_standing_cat"
+    assert refused["status"] == "refused"
+    assert "HTTP 503" in refused["reason"] and "62536" in refused["reason"]
+    assert fetched["key"] == f"import/{DRAGON}"
+    assert fetched["status"] == "fetched"
+    assert fetched["creator"] == "P1lotz"
+    assert len(writes) == 1, "one write for the whole request, carrying the page that answered"
+    assert set(json.loads(writes[0][1])) == {DRAGON_CACHE_KEY}
+
+
+def test_two_rows_naming_one_thing_id_are_fetched_once(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5d: two rows naming the same thing in ONE request are one page, one fetch.
+
+    Mutation: look only in ``records`` for a record to reuse and the second row
+    asks the vendor for the URL the first row just read, while both answers stay
+    the same - so only the call count reds.
+    """
+    write_dragon(isolated_storage)
+    write_file(isolated_storage / "import" / "5390184_dragon_twin" / "files" / "twin.stl", STL_BYTES)
+    scan()
+    writes = spy_settings_writes(monkeypatch)
+    calls = stub_thing_page(monkeypatch, page_html("thing-5390184.json"))
+
+    result = bundle_service.enrich_bundles(
+        [f"import/{DRAGON}", "import/5390184_dragon_twin"], cookie=None, refresh=False, ctx=audit_ctx()
+    )
+
+    assert calls == ["5390184"], "one page, asked for once"
+    assert [item["status"] for item in result["results"]] == ["fetched", "fetched"]
+    assert [item["filled"] for item in result["results"]] == [
+        ["creator", "licence", "licence_url"],
+        ["creator", "licence", "licence_url"],
+    ]
+    assert len(writes) == 1
+
+
+def test_a_page_that_fills_nothing_for_this_row_is_still_cached(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5c: the cache rule is "the page answered", not "the row changed".
+
+    The Moai row already carries its README creator and licence, so the page fills
+    nothing for it - and is still cached under its own id: a page that answered is
+    a true statement about the vendor, and a sibling row or a later create may
+    need it. Only a page that said nothing is uncacheable, so the next click
+    retries. Mutation: cache only when ``fields`` is non-empty and the record (and
+    the second call's ``cached``) reds.
+    """
+    moai_bundle(isolated_storage)
+    scan()
+    writes = spy_settings_writes(monkeypatch)
+    calls = stub_thing_page(monkeypatch, page_html("thing-5390184.json"))
+
+    first = bundle_service.enrich_bundles([MOAI], cookie=None, refresh=False, ctx=audit_ctx())
+
+    assert calls == ["2493386"]
+    item = first["results"][0]
+    assert item["status"] == "fetched"
+    assert item["filled"] == [], "the README already named both, so the page took nothing"
+    assert item["creator"] == "moai_maker"
+    assert len(writes) == 1
+    assert json.loads(writes[0][1])[MOAI_CACHE_KEY]["creator"] == "P1lotz"
+
+    second = bundle_service.enrich_bundles([MOAI], cookie=None, refresh=False, ctx=audit_ctx())
+
+    assert second["results"][0]["status"] == "cached"
+    assert calls == ["2493386"], "a second click answers from the cache"
+    assert len(writes) == 1, "a cached answer writes nothing"
+
+
+def test_enrich_records_no_cookie_in_the_audit_event(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-10: the audit row says what was taken and never carries the session cookie.
+
+    Mutation: put the request headers (or the cookie) in the detail and the
+    substring assertion reds - an audit log is readable by every admin.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    stub_thing_page(monkeypatch, page_html("thing-5390184.json"))
+    events: List[audit.Event] = []
+    monkeypatch.setattr(bundle_service.audit, "record", lambda *recorded, ctx: events.extend(recorded))
+
+    bundle_service.enrich_bundles(
+        [f"import/{DRAGON}"], cookie="session=supersecret", refresh=False, ctx=audit_ctx()
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.action == "bundle.enrich"
+    assert event.target == f"import/{DRAGON}"
+    assert event.detail == {
+        "thing_id": "5390184",
+        "source_url": DRAGON_URL,
+        "fields": ["creator", "licence", "licence_url"],
+    }
+    serialised = json.dumps(event.detail, sort_keys=True).lower()
+    assert "cookie" not in serialised
+    assert "supersecret" not in serialised
+
+
+def test_a_created_project_records_the_enrichment_in_its_marker(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-11: the created project carries the page's values AND their provenance.
+
+    Mutation: write the marker without ``enrichment`` and the block assertion
+    reds; write it only for ``name_only`` and the created values red.
+    """
+    write_dragon(isolated_storage)
+    scan()
+    stub_thing_page(monkeypatch, page_html("thing-5390184.json"))
+    bundle_service.enrich_bundles([f"import/{DRAGON}"], cookie=None, refresh=False, ctx=audit_ctx())
+    row = row_for(bundle_service.build_report(), f"import/{DRAGON}")
+
+    created = bundle_service.create_bundles(
+        [bundle_service.BundleCreateItem(key=f"import/{DRAGON}")], audit_ctx()
+    )
+
+    assert created["created"] == 1
+    with Session(engine) as session:
+        project = session.exec(select(Project)).one()
+    marker = json.loads(project.metadata_json)["_bundle"]
+    assert marker["enrichment"] == row["enrichment"]
+    assert (project.creator, project.licence, project.licence_url) == (
+        "P1lotz",
+        "CC BY-NC-SA",
+        CC_BY_NC_SA_URL,
+    )
+
+
+def test_the_cache_is_pruned_to_its_bound(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-12: the write goes through ``prune_records``, so the key cannot grow forever.
+
+    The bound is patched down to 2 rather than seeding 500 records: the property
+    under test is that the service prunes at all and keeps the newest, not the
+    arithmetic of the shipped limit (that is ``test_bundle_enrich``'s).
+    """
+    write_dragon(isolated_storage)
+    scan()
+    store_enrichments(
+        {
+            "thingiverse:1111": page_record(source_url="https://www.thingiverse.com/thing:1111", fetched_at=STALE_STAMP),
+            "thingiverse:2222": page_record(
+                source_url="https://www.thingiverse.com/thing:2222", fetched_at="2021-01-01T00:00:00+00:00"
+            ),
+        }
+    )
+    stub_thing_page(monkeypatch, page_html("thing-5390184.json"))
+    real_prune = bundle_enrich.prune_records
+
+    def bounded(records: Mapping[str, dict], limit: int = bundle_enrich.MAX_ENRICHMENT_ENTRIES) -> dict:
+        return real_prune(records, limit=2)
+
+    monkeypatch.setattr(bundle_service.bundle_enrich, "prune_records", bounded)
+
+    bundle_service.enrich_bundles([f"import/{DRAGON}"], cookie=None, refresh=False, ctx=audit_ctx())
+
+    stored = enrichments()
+    assert set(stored) == {DRAGON_CACHE_KEY, "thingiverse:2222"}, "the oldest record is the one dropped"
+
+
+# --- the request budget (R7) ------------------------------------------------
+
+# The reverse proxy's read timeout is the outermost bound on one click, and it
+# lives outside this module's build context, so the index is guarded: the API
+# image's root is ``curiarium/api``, which is shallower than the repository and
+# ``parents[3]`` would raise there (AGENTS.md guardrail 3).
+HERE = Path(__file__).resolve()
+REPO_ROOT = HERE.parents[3] if len(HERE.parents) > 3 else None
+NGINX_CONF = REPO_ROOT / "curiarium" / "web" / "nginx.conf" if REPO_ROOT is not None else None
+
+
+def proxy_read_timeout_seconds() -> float:
+    """The ``proxy_read_timeout`` nginx.conf states, in seconds."""
+    assert NGINX_CONF is not None
+    text = NGINX_CONF.read_text(encoding="utf-8")
+    match = re.search(r"^\s*proxy_read_timeout\s+(\d+)s;", text, re.MULTILINE)
+    assert match is not None, "nginx.conf states no proxy_read_timeout"
+    return float(match.group(1))
+
+
+def test_the_enrich_budget_fits_inside_the_proxy_timeout() -> None:
+    """R7: one click's worst case must finish inside the proxy's read timeout.
+
+    The four numbers live in three files and none of them knows the others, so the
+    product is asserted here: keys * timeout * (1 + redirects). Mutation: bump any
+    of the three (or lower the proxy's timeout) and the click outlives the proxy,
+    so the operator gets a gateway timeout instead of the per-item answers.
+    """
+    if NGINX_CONF is None or not NGINX_CONF.exists():
+        pytest.skip("host-only: curiarium/web/nginx.conf is outside the API image build context")
+
+    budget = (
+        bundle_service.ENRICH_MAX_KEYS
+        * import_resolvers.ENRICH_TIMEOUT_SECONDS
+        * (1 + import_resolvers.ENRICH_MAX_REDIRECTS)
+    )
+
+    assert budget < proxy_read_timeout_seconds()

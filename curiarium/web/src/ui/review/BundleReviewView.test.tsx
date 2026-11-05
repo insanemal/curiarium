@@ -29,10 +29,11 @@ vi.mock("../ModelViewer", () => ({
 }));
 
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
-import type {
-  BundleDetectItem,
-  BundleDuplicateGroup,
-  BundleReport,
+import {
+  ENRICH_MAX_KEYS,
+  type BundleDetectItem,
+  type BundleDuplicateGroup,
+  type BundleReport,
 } from "../../lib/api/bundles";
 import type { SettleOutcome } from "../../lib/scanSettle";
 import { getToasts, resetToasts } from "../../lib/toast";
@@ -351,6 +352,8 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
     refresh: vi.fn(async () => {}),
     create: vi.fn(async () => {}),
     dismiss: vi.fn(async () => {}),
+    enrich: vi.fn(async () => {}),
+    notice: null,
     afterExtract: vi.fn(async (): Promise<SettleOutcome> => "settled"),
     ...overrides,
   };
@@ -1035,6 +1038,150 @@ describe("BundleReviewView writes", () => {
     expect(within(detail()).queryByRole("button", { name: "Create project" })).toBeNull();
     expect(within(detail()).queryByLabelText("Name for Moai created")).toBeNull();
     expect(within(detail()).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+});
+
+describe("BundleReviewView source-page enrichment", () => {
+  const ENRICHED_AT = "2026-11-05T12:00:00+00:00";
+
+  /** A medium row: the folder name carried the Thingiverse id, so the source
+   *  URL exists while both fields are still empty - the first pass's row. */
+  function enrichableRow(index: number): BundleDetectItem {
+    return makeBundle({
+      key: `Dragon_${index}`,
+      rel_path: `Dragon_${index}`,
+      title: `Dragon ${index}`,
+      name_suggestion: `Dragon ${index}`,
+      creator: null,
+      licence: null,
+      licence_url: null,
+      source_url: `https://www.thingiverse.com/thing:${index}`,
+      confidence: "medium",
+    });
+  }
+
+  function answeredRow(fields: string[]): BundleDetectItem {
+    return makeBundle({
+      key: "Dragon_5390184",
+      rel_path: "Dragon_5390184",
+      title: "Articulated ice dragon",
+      name_suggestion: "Articulated ice dragon",
+      creator: "P1lotz",
+      licence: "CC BY-NC-SA",
+      licence_url: "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+      source_url: "https://www.thingiverse.com/thing:5390184",
+      confidence: "medium",
+      enrichment: {
+        source_url: "https://www.thingiverse.com/thing:5390184",
+        fetched_at: ENRICHED_AT,
+        fields,
+      },
+    });
+  }
+
+  it("offers the first pass for a row with a source and a gap, and sends only that row", () => {
+    const state = makeState({ report: makeReport([mediumDragon]) });
+    renderView(state);
+
+    const button = within(detail()).getByRole("button", { name: "Enrich from source page" });
+    expect(button.getAttribute("data-bundle-enrich")).toBe("true");
+    // The title has to say what the action will and will not do: it reads the
+    // page but never overwrites a value the row already has.
+    expect(button.getAttribute("title")).toContain("only empty fields are filled");
+
+    fireEvent.click(button);
+    expect(state.enrich).toHaveBeenCalledTimes(1);
+    // Exactly one argument: a first pass sends no options at all.
+    expect(state.enrich).toHaveBeenCalledWith(["Dragon_5390184"]);
+  });
+
+  it("offers a re-check once the page has answered, and it forces a refetch", () => {
+    const state = makeState({ report: makeReport([answeredRow(["creator", "licence"])]) });
+    renderView(state);
+
+    // The two doors are exclusive: a row the page already answered belongs to
+    // the re-check, not the first pass, or the label would understate the call.
+    expect(within(detail()).queryByRole("button", { name: "Enrich from source page" })).toBeNull();
+    fireEvent.click(within(detail()).getByRole("button", { name: "Re-check source page" }));
+
+    expect(state.enrich).toHaveBeenCalledWith(["Dragon_5390184"], { refresh: true });
+  });
+
+  it("renders no enrichment door for a row that names no source page", () => {
+    renderView(makeState({ report: makeReport([cableClip]) }));
+
+    expect(detail().querySelector("[data-bundle-enrich]")).toBeNull();
+    expect(screen.queryByRole("button", { name: /source page/ })).toBeNull();
+  });
+
+  it("counts only the enrichable selected rows in the bulk label", () => {
+    const state = makeState({ report: makeReport([moai, mediumDragon, cableClip]) });
+    renderView(state);
+
+    const none = screen.getByRole("button", {
+      name: "Enrich selected (0)",
+    }) as HTMLButtonElement;
+    expect(none.getAttribute("data-bundle-enrich-selected")).toBe("true");
+    expect(none.disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+
+    // Moai has both fields (no gap) and Cable_clip has no source, so only the
+    // dragon is enrichable even though three rows are selected.
+    fireEvent.click(screen.getByRole("button", { name: "Enrich selected (1)" }));
+    expect(state.enrich).toHaveBeenCalledWith(["Dragon_5390184"]);
+  });
+
+  it("caps the bulk request at 25 and says how many it leaves behind", () => {
+    const rows = Array.from({ length: ENRICH_MAX_KEYS + 5 }, (_, index) =>
+      enrichableRow(index + 1),
+    );
+    const state = makeState({ report: makeReport(rows) });
+    renderView(state);
+
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    fireEvent.click(screen.getByRole("button", { name: "Enrich selected (25 of 30)" }));
+
+    expect(state.enrich).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(state.enrich).mock.calls[0][0]).toEqual(
+      rows.slice(0, ENRICH_MAX_KEYS).map(row => row.key),
+    );
+  });
+
+  it("puts the page's provenance after the detector's own line", () => {
+    renderView(
+      makeState({
+        report: makeReport([answeredRow(["creator", "licence", "licence_url"])]),
+      }),
+    );
+
+    const line = detail().querySelector<HTMLElement>("[data-bundle-enrichment]");
+    expect(line?.textContent).toBe(
+      "From the source page: creator, licence, licence URL (fetched 2026-11-05)",
+    );
+
+    // The order is the point: the detector's guess is stated first, then what
+    // the vendor's page supplied, so the two claims cannot be read as one.
+    const facts = Array.from(detail().querySelectorAll(".review-detail-facts > span"));
+    const detectedAt = facts.findIndex(node => node.textContent?.startsWith("Detected by"));
+    expect(detectedAt).toBeGreaterThan(-1);
+    expect(facts.indexOf(line as HTMLElement)).toBeGreaterThan(detectedAt);
+  });
+
+  it("keeps the server's refusal sentence verbatim in the alert", () => {
+    const reason = "The site refused to be read. Set THINGIVERSE_COOKIE and try again.";
+    renderView(makeState({ report: makeReport([mediumDragon]), error: reason }));
+
+    expect(screen.getByRole("alert").textContent).toBe(reason);
+  });
+
+  it("shows a not-news notice as a status line, not an alert", () => {
+    renderView(makeState({ notice: "Already checked from the source page" }));
+
+    const notice = screen.getByText("Already checked from the source page");
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.className).toBe("review-notice");
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 

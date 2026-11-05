@@ -26,6 +26,9 @@ vi.mock("../lib/api", () => ({
 }));
 
 vi.mock("../lib/api/bundles", () => ({
+  // A value, not a type: `BundleReviewView` reads the cap to slice the bulk
+  // request, so the mock has to answer it or the render throws.
+  ENRICH_MAX_KEYS: 25,
   getBundleReport: vi.fn(),
   createBundles: vi.fn(),
   setBundleDismissed: vi.fn(),

@@ -2,7 +2,7 @@ import json
 import os
 import re
 from html.parser import HTMLParser
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request
@@ -80,7 +80,17 @@ def resolve_makerworld_cookie(body: ImportRequest) -> Optional[str]:
     return value or None
 
 
-def resolve_thingiverse_cookie(body: ImportRequest) -> Optional[str]:
+class _ThingiverseCookieBody(Protocol):
+    """The one attribute ``resolve_thingiverse_cookie`` reads off a request body.
+
+    Structural on purpose: ``ImportRequest`` and the enrich request model both
+    carry the field, and neither should be a type lie just to share the resolver.
+    """
+
+    thingiverse_cookie: Optional[str]
+
+
+def resolve_thingiverse_cookie(body: _ThingiverseCookieBody) -> Optional[str]:
     raw = (body.thingiverse_cookie or os.getenv("THINGIVERSE_COOKIE", "")).strip()
     if not raw:
         return None
@@ -652,6 +662,14 @@ def resolve_printables_download_url(page_url: str) -> Optional[str]:
     return None
 
 
+# A thing page is one HTML document, not a file: 10 s is generous for it while a
+# hung vendor still fails a human's click quickly.
+ENRICH_TIMEOUT_SECONDS = 10
+# The canonical thing URL answers 200 directly (measured), so a redirect is a site
+# change we do not follow: refusing it keeps this call to one request.
+ENRICH_MAX_REDIRECTS = 0
+
+
 def is_thingiverse_page_host(host: str) -> bool:
     host = (host or "").lower()
     return host in {"thingiverse.com", "www.thingiverse.com"}
@@ -782,6 +800,105 @@ def fetch_thingiverse_view_token(page_url: str, thingiverse_cookie: Optional[str
             if isinstance(token, str) and token.strip():
                 return token.strip()
     return None
+
+
+def fetch_thingiverse_thing_page(thing_id: str, thingiverse_cookie: Optional[str]) -> str:
+    """GET the public thing page; the ONLY outbound call the enrich action makes.
+
+    It never retries: a rate limit is a refusal a human acts on, not a loop, and
+    this function is reached only from ``bundle_service.enrich_bundles``, never
+    from the report. Every status this call can meet becomes ONE
+    ``HTTPException`` written for an operator, and names the cookie as the
+    environment variable it really is. A status with no mapping of its own is
+    reported as a 502 rather than escaping as a raw ``HTTPError``, because the
+    batch must keep its other answers and its single cache write.
+    """
+    url = f"https://www.thingiverse.com/thing:{thing_id}"
+    req = Request(url, headers=thingiverse_html_headers(referer=None, cookie=thingiverse_cookie))
+    try:
+        resp = safe_urlopen(req, timeout=ENRICH_TIMEOUT_SECONDS, max_redirects=ENRICH_MAX_REDIRECTS)
+    except HTTPError as err:
+        if err.code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Thingiverse is rate limiting this server (HTTP 429) for thing {thing_id}. Thingiverse "
+                    "throttles unauthenticated traffic: set the THINGIVERSE_COOKIE environment variable to a "
+                    "Cookie header copied from a signed-in browser session, restart the API, and try again."
+                ),
+            ) from err
+        if err.code in {401, 403}:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Thingiverse refused the page (HTTP {err.code}) for thing {thing_id}; a Cloudflare challenge "
+                    "looks like this. Set the THINGIVERSE_COOKIE environment variable to a Cookie header copied "
+                    "from a signed-in browser session, restart the API, and try again. Nothing was changed."
+                ),
+            ) from err
+        if err.code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Thingiverse has no such thing: it answered HTTP 404 for thing {thing_id}.",
+            ) from err
+        # Any other status - a 5xx, or a 4xx this action has no reading for - is
+        # the vendor failing the request, not a bug here: report it as one so the
+        # batch keeps the pages that answered.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Thingiverse answered HTTP {err.code} for thing {thing_id}, which this action does not read. "
+                "Nothing was changed."
+            ),
+        ) from err
+    except HTTPException as err:
+        if err.status_code != 400:
+            raise
+        # `safe_urlopen(max_redirects=0)` reports a redirect as a 400; say what it
+        # means here rather than leaving the operator with a generic message.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The Thingiverse page for thing {thing_id} redirected, and this action does not follow "
+                "redirects. Nothing was changed."
+            ),
+        ) from err
+    except (URLError, TimeoutError, OSError) as err:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Thingiverse did not answer in time or could not be reached for thing {thing_id}. Check this "
+                "server's network access and try again; nothing was changed."
+            ),
+        ) from err
+
+    with resp:
+        raw = resp.read(IMPORT_HTML_MAX_BYTES + 1)
+        if len(raw) > IMPORT_HTML_MAX_BYTES:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"The Thingiverse page for thing {thing_id} was larger than the import cap "
+                    f"({IMPORT_HTML_MAX_BYTES} bytes), so it was not read. Nothing was changed."
+                ),
+            )
+        charset = resp.headers.get_content_charset() or "utf-8"
+        return raw.decode(charset, errors="replace")
+
+
+def thingiverse_no_metadata_detail(thing_id: str) -> str:
+    """Why a 200 page with no thing metadata is a refusal, and what to do next.
+
+    Thingiverse answers a nonexistent id with a generic 200 page (measured), so
+    absent metadata is the only signal there is: the id may name a deleted or
+    private thing, or the site may have served a challenge page instead.
+    """
+    return (
+        f"Thingiverse answered thing {thing_id} with a page that carried no creator or licence. The thing may "
+        "not exist any more (deleted or private), or Thingiverse may have answered a challenge page instead: "
+        "set the THINGIVERSE_COOKIE environment variable to a Cookie header copied from a signed-in browser "
+        "session and restart the API. Nothing was changed."
+    )
 
 
 def resolve_thingiverse_download_url(page_url: str, thingiverse_cookie: Optional[str]) -> Optional[str]:

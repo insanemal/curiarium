@@ -143,6 +143,10 @@ function makeState(report: BundleReport | null): BundleDetectState {
     refresh: async () => undefined,
     create: async () => undefined,
     dismiss: async () => undefined,
+    // Source-page enrichment is the queue view's concern; these fixtures never
+    // call it and never show a notice.
+    enrich: async () => undefined,
+    notice: null,
     // Extraction settling is the queue view's concern; this hook's fixtures
     // report a settled scan so no timer is ever armed here.
     afterExtract: async () => "settled" as const,

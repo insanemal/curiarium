@@ -31,6 +31,23 @@ export type BundleArchive = {
  *  strong evidence about the files but say nothing about intent. */
 export type ExistingProjectMatch = "marker" | "source_url" | "name" | "assets";
 
+/** What a row took from its vendor page, and when. `fields` names only what
+ *  THIS row took: a request may enrich several bundles, and each record speaks
+ *  for its own row rather than the request's. */
+export type BundleEnrichment = {
+  source_url: string;
+  // NULLABLE on the wire: a record written by an older build, or a cache entry
+  // whose stamp was lost, still holds what the page said. The row shows those
+  // fields with an unknown date rather than hiding the record or inventing one.
+  fetched_at: string | null;
+  fields: string[];
+};
+
+/** The server refuses more than 25 keys per request, so the client's cap and its
+ *  label must be the same number: one constant feeds both, and they cannot
+ *  drift into a request the server would reject. */
+export const ENRICH_MAX_KEYS = 25;
+
 /** One detected bundle. `status` and `confidence` are orthogonal. */
 export type BundleDetectItem = {
   key: string;
@@ -62,6 +79,11 @@ export type BundleDetectItem = {
   // and every existing fixture (including the ones another lane owns) must keep
   // compiling. `undefined` means "the server did not say", never "assets".
   existing_project_match?: ExistingProjectMatch | null;
+  // OPTIONAL on purpose, exactly as `existing_project_match` is: a payload from
+  // before the source-page action existed omits it, and every existing fixture
+  // must keep compiling. `undefined` means "the server did not say"; `null` is
+  // the server saying this row took nothing from the page.
+  enrichment?: BundleEnrichment | null;
   dismissed: boolean;
 };
 
@@ -143,6 +165,32 @@ export type BundleDismissResponse = {
   stale_dismissals: string[];
 };
 
+export type BundleEnrichItemResult = {
+  key: string;
+  /** `fetched` (the page answered now), `cached` (a fresh record answered, no
+   *  request), `refused` (the site refused; `reason` names the env var to set),
+   *  `unavailable` (the bundle names no vendor id) or `unknown` (not live). */
+  status: string;
+  source_url: string | null;
+  creator: string | null;
+  licence: string | null;
+  licence_url: string | null;
+  /** The fields the PAGE supplied, which may be fewer than the empty ones this
+   *  row still has: the page only knows what it carries. */
+  filled: string[];
+  fetched_at: string | null;
+  reason: string | null;
+};
+
+export type BundleEnrichResponse = {
+  fetched: number;
+  cached: number;
+  refused: number;
+  unavailable: number;
+  unknown: number;
+  results: BundleEnrichItemResult[];
+};
+
 /** The report is a dry run: detection writes nothing to disk and no rows. */
 export async function getBundleReport(params: BundleReportQuery = {}): Promise<BundleReport> {
   const qs = new URLSearchParams();
@@ -184,6 +232,31 @@ export async function setBundleDismissed(
   if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) {
     throw new Error(await readErrorMessage(res, "Failed to dismiss the selected bundles"));
+  }
+  return res.json();
+}
+
+/** Fills the gaps from each bundle's vendor page. The report is still the
+ *  truth: this refetches after the call, and the response only says what
+ *  happened, so the caller can tell an answered page from a refused one. */
+export async function enrichBundles(
+  keys: string[],
+  options: { refresh?: boolean; thingiverseCookie?: string } = {},
+): Promise<BundleEnrichResponse> {
+  const res = await fetch(`${apiBase()}/bundles/enrich`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      keys,
+      refresh: options.refresh ?? false,
+      ...(options.thingiverseCookie
+        ? { thingiverse_cookie: options.thingiverseCookie }
+        : {}),
+    }),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, "Failed to read the source page"));
   }
   return res.json();
 }
