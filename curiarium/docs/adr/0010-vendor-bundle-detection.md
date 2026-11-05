@@ -60,6 +60,13 @@ the field list recorded on the row and in the project's `_bundle` marker, and a
 page that states no licence leaves it null; enrichment never runs during
 detection).
 
+**Extended:** 2026-11-05 - ticket `Mf-au4k` (the report's own rule-set stamp and its
+refused ledger are declared on the response model and served on `GET /bundles/detect`;
+the per-row stamp stays off the row model on purpose, one rule set per report. The
+decision is unchanged - `tests/test_bundles_api.py` now actually asserts the body
+against the model, which is what makes the pre-existing "the report body matches the
+pinned schema" claim in Verification true rather than aspirational).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the

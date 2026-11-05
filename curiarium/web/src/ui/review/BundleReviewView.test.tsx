@@ -338,6 +338,28 @@ function duplicatePanel(): HTMLElement {
   return node as HTMLElement;
 }
 
+const FIDELITY_STAMP = "c".repeat(64);
+const FIDELITY_RULE_SET = { version: "2026-11-04.2", stamp: FIDELITY_STAMP };
+const FIDELITY_REFUSALS = [
+  { rel_path: "import/models-only.zip", rule: "R3:trio-no-image", kind: "archive" },
+  { rel_path: "import/stray-folder", rule: "R1:no-markers", kind: "directory" },
+];
+
+function withFidelity(overrides: Partial<BundleReport> = {}): BundleReport {
+  return makeReport([moai], {
+    rule_set: FIDELITY_RULE_SET,
+    refused: FIDELITY_REFUSALS,
+    ...overrides,
+  });
+}
+
+/** The fidelity notice, found by its own attribute: it is not a landmark. */
+function scanFidelityPanel(): HTMLElement {
+  const node = document.querySelector("[data-scan-fidelity]");
+  if (!node) throw new Error("no scan fidelity panel");
+  return node as HTMLElement;
+}
+
 function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectState {
   return {
     report: makeReport([moai, cableClip, legacyVase, moaiZip]),
@@ -1970,5 +1992,76 @@ describe("BundleReviewView duplicate archives", () => {
     expect(
       within(duplicatePanel()).getByText("2 duplicate groups - 3.0 KB reclaimable"),
     ).toBeTruthy();
+  });
+});
+
+describe("BundleReviewView scan fidelity", () => {
+  it("announces the refused count and the rule-set stamp beside the duplicate report", () => {
+    renderView(
+      makeState({
+        report: withDuplicates({ rule_set: FIDELITY_RULE_SET, refused: FIDELITY_REFUSALS }),
+      }),
+    );
+
+    const panel = scanFidelityPanel();
+    expect(within(panel).getByText("2 paths refused")).toBeTruthy();
+    // The full stamp stays reachable in the sr-only span; the visible line only
+    // carries the version and a prefix, which is enough to spot a change.
+    expect(panel.textContent).toContain(FIDELITY_STAMP);
+    expect(panel.textContent).toContain(FIDELITY_RULE_SET.version);
+    expect(panel.textContent).toContain(FIDELITY_STAMP.slice(0, 8));
+    // Both notices hold their own place: the new one did not displace the old.
+    expect(
+      within(document.querySelector("[data-duplicate-report]") as HTMLElement).getByText(
+        "2 duplicate groups - 3.0 KB reclaimable",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("adds no element at all when the server said nothing about the scan", () => {
+    // Byte-for-byte: the whole queue's markup with the panel present, minus the
+    // panel's own serialisation, must equal the markup with no panel at all. A
+    // stray wrapper, an empty `<div>` or a leftover placeholder cannot pass.
+    // Each fixture is compared against its OWN baseline, because a truncated
+    // report legitimately renders other notices too.
+    const shapes: Array<Partial<BundleReport>> = [{}, { truncated: true }];
+    for (const shape of shapes) {
+      renderView(makeState({ report: withFidelity(shape) }));
+      const panelHtml = scanFidelityPanel().outerHTML;
+      const withHtml = (document.querySelector(".review-queue") as HTMLElement).innerHTML;
+      expect(withHtml).toContain(panelHtml);
+      cleanup();
+
+      // The second fixture is the payload an older server sends: the fields omitted.
+      renderView(makeState({ report: makeReport([moai], shape) }));
+      expect(document.querySelector("[data-scan-fidelity]")).toBeNull();
+      expect((document.querySelector(".review-queue") as HTMLElement).innerHTML).toBe(
+        withHtml.replace(panelHtml, ""),
+      );
+      cleanup();
+    }
+  });
+
+  it("renders zero as zero rather than a dash", () => {
+    renderView(makeState({ report: withFidelity({ refused: [] }) }));
+
+    // A real zero is the server's answer, and the notice exists because it said so.
+    const panel = scanFidelityPanel();
+    expect(panel.textContent).toContain("0 paths refused");
+    expect(within(panel).queryByText(`Paths refused: \u2013`)).toBeNull();
+  });
+
+  it("offers no control that acts on a path", () => {
+    renderView(makeState({ report: withFidelity() }));
+
+    const panel = scanFidelityPanel();
+    expect(panel.querySelectorAll("button, a")).toHaveLength(0);
+    // Not even a disabled one: a control that names a delete is a claim that
+    // something here can delete.
+    const names = screen.getAllByRole("button").map(button => button.textContent ?? "");
+    expect(names.length).toBeGreaterThan(0);
+    expect(names.filter(name => /delete|remove|move|rename|prune|clean|purge/i.test(name))).toEqual(
+      [],
+    );
   });
 });

@@ -755,6 +755,30 @@
     "title": "BundleEnrichmentOut",
     "type": "object"
   },
+  "BundleRefusalOut": {
+    "description": "One path the walk saw and did not offer, with the rule that refused it.",
+    "properties": {
+      "kind": {
+        "title": "Kind",
+        "type": "string"
+      },
+      "rel_path": {
+        "title": "Rel Path",
+        "type": "string"
+      },
+      "rule": {
+        "title": "Rule",
+        "type": "string"
+      }
+    },
+    "required": [
+      "rel_path",
+      "rule",
+      "kind"
+    ],
+    "title": "BundleRefusalOut",
+    "type": "object"
+  },
   "BundleReportOut": {
     "description": "A dry-run view of the storage root. Reading it writes nothing.",
     "properties": {
@@ -787,9 +811,20 @@
         "title": "Duplicates Total Bytes",
         "type": "integer"
       },
+      "refused": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleRefusalOut"
+        },
+        "title": "Refused",
+        "type": "array"
+      },
       "root": {
         "title": "Root",
         "type": "string"
+      },
+      "rule_set": {
+        "$ref": "#/components/schemas/BundleRuleSetOut"
       },
       "stale_dismissals": {
         "default": [],
@@ -807,9 +842,29 @@
     },
     "required": [
       "root",
-      "counts"
+      "counts",
+      "rule_set"
     ],
     "title": "BundleReportOut",
+    "type": "object"
+  },
+  "BundleRuleSetOut": {
+    "description": "The rule set one report was decided against: its revision, and what its tables were.",
+    "properties": {
+      "stamp": {
+        "title": "Stamp",
+        "type": "string"
+      },
+      "version": {
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "version",
+      "stamp"
+    ],
+    "title": "BundleRuleSetOut",
     "type": "object"
   }
 }

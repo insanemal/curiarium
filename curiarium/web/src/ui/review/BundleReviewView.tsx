@@ -56,6 +56,7 @@ import {
   showsDuplicateReport,
 } from "./duplicateArchives";
 import ReviewQueueView from "./ReviewQueueView";
+import ScanFidelityNotice from "./ScanFidelityNotice";
 import type { BundleDetectState } from "./useBundleDetect";
 import { bundleBadgeCount, describeQueueCount } from "./useReviewCounts";
 
@@ -693,6 +694,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
         </p>
       )}
       {report && <DuplicateArchivesPanel report={report} />}
+      {report && <ScanFidelityNotice report={report} />}
     </>
   );
 

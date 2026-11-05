@@ -32,6 +32,7 @@ import accounts
 import asset_file_service
 import asset_service
 import audit
+import bundle_detect
 import bundle_service
 import db
 import import_resolvers
@@ -43,6 +44,7 @@ import settings_service
 from db import engine
 from migrations import run_migrations
 from models import Asset, AssetFile, AuditEvent, Folder, MfaRecoveryCode, Project, ProjectAsset, User, UserSession
+from schemas.bundles import BundleDetectItemOut, BundleRefusalOut, BundleReportOut, BundleRuleSetOut
 
 ADMIN_USERNAME = "root"
 ADMIN_PASSWORD = "root-password-1"
@@ -383,6 +385,94 @@ def test_a_duplicate_archive_is_reported_and_never_a_bundle_row(
     assert f"{MOAI}.zip" in report["duplicates_text"]
     assert f"{MOAI} (1).zip" in report["duplicates_text"]
     assert "duplicate" in report["duplicates_text"]
+
+
+# --- scan fidelity: the report's own rule set and refused ledger (Mf-au4k) ---
+
+
+def test_the_report_model_declares_every_key_the_service_computes(
+    isolated_storage: Path,
+) -> None:
+    """The model and the service name the same keys, and the one drop is deliberate.
+
+    `build_report` is called directly, so the response model is not in the loop: the
+    dict it returns is the whole truth about what the service computes. The per-row
+    `rule_set` stamp is LEFT OFF `BundleDetectItemOut` on purpose - one rule set per
+    report, and the offline artifact keeps the per-row copy - so it is named in an
+    assertion rather than tolerated as an unexplained extra. Mutation: delete either
+    field from `BundleReportOut` and the set comparison reds; declare the per-row
+    stamp on the row model and the named-difference assertion reds.
+    """
+    moai_bundle(isolated_storage)
+    write_zip(
+        isolated_storage / "import" / "models-only.zip",
+        {"part-a.stl": b"s" * 40, "part-b.stl": b"s" * 41, "part-c.stl": b"s" * 42},
+    )
+    scan()
+
+    report = bundle_service.build_report()
+
+    assert report["refused"], "the fixture must refuse at least one path"
+    assert report["rule_set"]["stamp"], "every report names the rule set it was taken at"
+    assert set(report) == set(BundleReportOut.model_fields), "the model declares exactly the keys served"
+    assert set(report["rule_set"]) == set(BundleRuleSetOut.model_fields)
+    assert set(report["refused"][0]) == set(BundleRefusalOut.model_fields)
+    assert set(report["bundles"][0]) - set(BundleDetectItemOut.model_fields) == {
+        "rule_set"
+    }, "the per-row stamp is deliberately off the model"
+    assert set(BundleDetectItemOut.model_fields) - set(report["bundles"][0]) == set()
+
+
+def test_the_detect_report_serves_the_rule_set_stamp_and_the_refusal_ledger(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """The live route keeps both fields: the walk's rule set and every path it refused.
+
+    The stamp is compared to the constants the detector exports rather than to any
+    literal, so a rule-table edit moves both sides together. Mutation: drop
+    `rule_set`/`refused` from the response model and this reds - that is exactly the
+    shape Mf-nivh found for `enrichment`.
+    """
+    moai_bundle(isolated_storage)
+    write_zip(
+        isolated_storage / "import" / "models-only.zip",
+        {"part-a.stl": b"s" * 40, "part-b.stl": b"s" * 41, "part-c.stl": b"s" * 42},
+    )
+    scan()
+
+    body = report_for(client, contributor)
+
+    assert body["rule_set"] == {
+        "version": bundle_detect.RULE_SET_VERSION,
+        "stamp": bundle_detect.RULE_SET_STAMP,
+    }
+    assert body["refused"], "the models-only archive is in the ledger"
+    assert body["refused"] == bundle_service.build_report()["refused"], "the route never reshapes the ledger"
+    for item in body["refused"]:
+        assert item["kind"] in {"archive", "directory"}, item
+        assert item["rule"] in bundle_service.REFUSAL_RULES, item
+    assert [item["rel_path"] for item in body["refused"]] == sorted(
+        item["rel_path"] for item in body["refused"]
+    ), "the ledger is sorted by path"
+    assert "import/models-only.zip" in {item["rel_path"] for item in body["refused"]}
+
+
+def test_an_empty_ledger_is_served_as_an_empty_list_not_omitted(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """Nothing on disk still serves `refused: []`: an empty answer is an answer.
+
+    Mutation: drop `refused` from the model and the key disappears from the body;
+    make it `Optional[...] = None` and this serves `null` instead of `[]` - either
+    way a client can no longer tell "nothing was refused" from "no ledger here".
+    Whether it is DEFAULTED rather than required is the fixture's required/default
+    list, pinned by `test_openapi_contract.py`, not by this test.
+    """
+    body = report_for(client, contributor)
+
+    assert "refused" in body, "an empty ledger is served, never omitted"
+    assert body["refused"] == []
+    assert body["rule_set"]["stamp"] == bundle_detect.RULE_SET_STAMP
 
 
 # --- enrichment over HTTP (Mf-nivh) -----------------------------------------
