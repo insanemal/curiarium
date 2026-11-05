@@ -17,7 +17,7 @@ Batch 15 landed that same evening, after this ADR was accepted: `Mf-h8kp`
 `curiarium/web/src/lib/api/`, and `Mf-avo9` (`29330d6`, 2026-10-29) split
 `api/schemas.py` into `curiarium/api/schemas/`. The import-cookie citation
 `api/schemas.py:21-22` now lives at
-`curiarium/api/schemas/imports.py:30-31` (`makerworld_cookie`,
+`curiarium/api/schemas/imports.py:33-34` (`makerworld_cookie`,
 `thingiverse_cookie` on `ImportRequest`), re-exported through the
 `curiarium/api/schemas/__init__.py` barrel. The client citations
 `web/src/lib/api.ts:876-880` (`fileUrl`), `:886-888` (`assetFilePreviewUrl`) and
@@ -99,10 +99,10 @@ Verified facts at the time of this decision:
   `imports.rememberCookies` is true (`settings.ts:111,367-381`); they reach the
   API as JSON body fields, never a header (`api/schemas.py:21-22`); the API
   proxies them only to a closed host registry
-  (`api/import_policy.py:45-48,86-95`, with `makerworld.com` plus subdomains and
+  (`api/import_policy.py:51-54,92-101`, with `makerworld.com` plus subdomains and
   the exact `thingiverse.com`/`www.thingiverse.com` set in
-  `api/import_resolvers.py:457-464,655-657`), through a single entry point
-  (`api/import_service.py:63-82` `import_request_headers`), re-derived per hop
+  `api/import_resolvers.py:587-594,793-795`), on the importer path through
+  `import_request_headers` (`api/import_service.py:63-82`), re-derived per hop
   (`:98,153-160`), and stripped on cross-origin redirect
   (`api/safe_http.py:45,160-161`). They are never persisted server-side and
   never logged, pinned by `api/tests/test_import_policy.py:230-248` and `:251`.
@@ -114,6 +114,18 @@ Verified facts at the time of this decision:
   records the intended consequence, "Replace broad reusable bearer URLs with
   narrow, short-lived grants", and the ADR queue item 4 is "File-scoped
   browser-to-bridge handoff grants".
+
+Since this decision, enrich is a second credential egress the host registry
+never sees (`Mm-folh`): `bundle_service.enrich_bundles` reaches
+`import_resolvers.fetch_thingiverse_thing_page`, which puts the cookie on a
+`GET` to the literal `https://www.thingiverse.com/thing:{id}` via
+`thingiverse_html_headers` (`import_resolvers.py:1035`; `:798` builds the
+headers), without `import_request_headers` or `credentialed_source_for`. That
+host is a literal in the f-string, never a user URL, so no user-controlled host
+can receive the credential, and the cookie is still never persisted server-side
+or logged. The invariant is enforced per site now, not at one choke point: a
+third credentialed caller is a reviewed edit at its own site, not merely a
+`CREDENTIALED_HOST_MATCHERS` edit.
 
 ## Decision
 

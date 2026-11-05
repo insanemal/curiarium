@@ -10,6 +10,12 @@ receive a cookie, because ``import_service.import_request_headers`` asks
 :func:`credentialed_source_for` and attaches nothing when it answers ``None``.
 Adding a third credentialed source must be a deliberate, reviewed edit here.
 
+The invariant is enforced per site, not at one choke point: the enrich path
+(``import_resolvers.fetch_thingiverse_thing_page``) attaches the cookie to a
+hard-coded literal host, never one resolved from user input, so it cannot reach
+a different host - but a new credentialed caller must be reviewed at its own
+site, not only here (``Mm-folh``).
+
 The *purchase-state URL check* is UX, not the boundary. It turns "we fetched a
 checkout page and found nothing" into a clear message. Its storefront, path and
 query lists are conservative and additive: being incomplete cannot leak

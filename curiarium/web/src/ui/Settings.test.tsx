@@ -363,6 +363,10 @@ describe("Settings imports (AC-5)", () => {
     // Both cards state that the cookie is never used for paid content.
     expect((await screen.findAllByText(/Never used for paid content/)).length).toBe(2);
 
+    // The Thingiverse paste is read by the review queue's enrich action as well
+    // as by an import, so the copy must not scope it to importing alone.
+    expect((await screen.findAllByText(/when importing or enriching free models/)).length).toBe(1);
+
     fireEvent.click(screen.getByLabelText(/Remember import cookies on this device/));
 
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1];
