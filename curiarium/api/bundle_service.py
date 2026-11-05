@@ -627,7 +627,7 @@ def _compound_pass(
     claimed children stripped by ``_forget_claimed_subtree``, so it reads 0
     models for ``import/Stagetop``; ``folded`` is the unclaimed full-subtree
     listing, which is exactly what the row's counts have to describe (``Stagetop``
-    reads 60, the Rocket 96, ``import/xbox360_shell`` 31 = 27 own + 4 foreign).
+    reads 60, the Rocket 48, ``import/xbox360_shell`` 31 = 27 own + 4 foreign).
 
     **The overlap guard.** A key that is already a row, or that sits strictly
     inside one, is never compounded. R7 can therefore never lower, split or
@@ -2430,9 +2430,17 @@ def _create_one(
         if candidate.compound:
             # The guard uses the walk's own verdict, not the row's: in-process both
             # come from ONE `scan`, so they cannot disagree.
-            # `model_count` stays what the WALK counted (AppleDouble `._*` files
-            # included), while `attached` is how many registered MODEL assets are
-            # in the attach set, so a later reader can see 12 counted / 6 attached.
+            # `model_count` is what the SCAN registers, and `attached` is how many
+            # registered MODEL assets of the group are in the attach set. Since
+            # Mf-94od the count asks the scanner's own basename predicate, so a
+            # `._*` AppleDouble sidecar names no model and the two numbers agree on
+            # a whole group; they differ only by an EXCLUSION, which `attached`
+            # carries alone. That agreement is a property of the two doors asking
+            # the same hidden-name rule: the storage scan and the detector both run
+            # with hidden names skipped (the default). Opening the MOUNT door with
+            # `IMPORT_MOUNT_INCLUDE_HIDDEN=1` makes it register the sidecars the
+            # detector still refuses, which separates the numbers again - named in
+            # ADR 0010 Decision 25, off by default and untested.
             marker["_bundle"]["shape"] = "compound"
             marker["_bundle"]["groups"] = [
                 {

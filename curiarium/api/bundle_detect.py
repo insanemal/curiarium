@@ -141,9 +141,16 @@ from dataclasses import dataclass, replace
 from pathlib import PurePath
 from typing import AbstractSet, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import library_scan
 from config import IMPORT_ALLOWED_EXTS
 from import_resolvers import thingiverse_thing_id_from_url
-from library_scan import IMAGE_SUFFIXES
+from library_scan import IMAGE_SUFFIXES, is_skipped_name
+
+# The scan's own two tables are STAMPED but not aliased here (Mf-94od): a copy of
+# the name would freeze a stale table while `is_skipped_name` kept reading the
+# module that owns it, so `rule_set_tables` reads `library_scan` directly and a
+# rebind of either table moves the stamp. The predicate itself is one function
+# object, asserted by `test_bundle_detect_asks_the_scan_its_own_predicate`.
 
 # The model extensions the import door accepts, minus the archive: a `.zip` is a
 # container, never a bundle member.
@@ -195,7 +202,7 @@ SHAPE_ARCHIVE_ROOT = "archive-root"
 # The rule-set version, bumped by hand whenever a row-deciding table changes.
 # It is a human-readable companion to the derived stamp below: the version says
 # *which* revision a report was taken at, the stamp proves *what* the tables were.
-RULE_SET_VERSION = "2026-11-05.1"
+RULE_SET_VERSION = "2026-11-05.2"
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"
@@ -442,6 +449,12 @@ def rule_set_tables() -> dict:
         # Suffix tables and shape bounds.
         "MODEL_SUFFIXES": sorted(MODEL_SUFFIXES),
         "IMAGE_SUFFIXES": sorted(IMAGE_SUFFIXES),
+        # The library scan's own two tables (Mf-94od). The model count asks the
+        # scanner's basename predicate, so the tables that decide it are stamped
+        # here by value, read from the module that OWNS them: a rebind there moves
+        # the stamp, which a captured alias could not do.
+        "SKIPPED_FILENAMES": sorted(library_scan.IGNORED_FILENAMES),
+        "HIDDEN_NAME_PREFIX": library_scan.HIDDEN_NAME_PREFIX,
         "BUNDLE_TEXT_EXTS": sorted(BUNDLE_TEXT_EXTS),
         "R3_MODEL_DIRS": sorted(R3_MODEL_DIRS),
         "GENERIC_CONTAINER_ROOTS": sorted(GENERIC_CONTAINER_ROOTS),
@@ -731,6 +744,38 @@ def classify_entry(rel_path: str, size: int) -> str:
     if suffix in BUNDLE_TEXT_EXTS:
         return TEXT
     return OTHER
+
+
+def is_counted_entry(rel_path: str) -> bool:
+    """Whether the library scan would REGISTER this entry at all.
+
+    The scan's rule is the basename predicate alone, asked here through the very
+    function ``_register_tree`` calls, so the two doors cannot drift apart
+    (Mf-94od). Deliberately NOT ``entry_policy.is_junk_entry`` and NOT
+    ``is_macosx_artifact``: the scan REGISTERS a non-dot file under a nested
+    ``__MACOSX/`` (measured: ``g/__MACOSX/g/plain.stl`` registers), and the junk
+    predicate would UNDER-count a part the project really holds. Classifying a
+    ``._a.stl`` sidecar through the junk vocabulary would also miss a plain
+    ``.hidden.stl``, which the junk predicate calls not junk at all.
+
+    It asks the scan's DEFAULT door - a hidden name is skipped. The mount door can
+    be opened with ``IMPORT_MOUNT_INCLUDE_HIDDEN=1``, and then the scan registers
+    names this predicate still refuses; that conditional is named in ADR 0010
+    Decision 25 rather than hidden here, because the detector never sees the
+    door's flag and a parameter nobody passes would read as support it does not
+    have.
+    """
+    return not is_skipped_name(PurePath(rel_path).name)
+
+
+def is_counted_model(rel_path: str, size: int) -> bool:
+    """A MODEL the scan would register: the model count, through both doors.
+
+    ``classify_entry`` stays SUFFIX-ONLY on purpose (Mf-tkdp's stem rule): a role
+    is a property of the path. This composite is what the counting sites ask, so
+    an AppleDouble ``._a.stl`` beside ``a.stl`` names no model.
+    """
+    return classify_entry(rel_path, size) == MODEL and is_counted_entry(rel_path)
 
 
 def display_name(name: str) -> str:
@@ -1070,8 +1115,22 @@ def doc_entry_candidates(snapshot: BundleSnapshot) -> Tuple[str, ...]:
 
 
 def _counts(snapshot: BundleSnapshot) -> BundleCounts:
+    """The REPORTED role counts: what the library scan would register.
+
+    A name the scan would skip is counted in NO bucket, OTHER included: the row
+    describes what the library HOLDS, and `._a.stl` is not a file the scan
+    registers (Mf-94od). ``detect_bundle_decision``'s R3 ladder deliberately does
+    NOT read these buckets - see ``_walk_has_role``, because "does this folder
+    HAVE a preview" is evidence rather than a count. The two COUNT-driven rules
+    (R6's archive trio in ``single_root_archive_facts``, R7's group leg in
+    ``compound_groups``/``root_model_count``, and the compound absorb guard in
+    ``bundle_service``) DO read them, on purpose: a resource fork is not a
+    document, a preview or a part of a product.
+    """
     counts = {MODEL: 0, IMAGE: 0, TEXT: 0, OTHER: 0, ARCHIVE: 0}
     for entry in snapshot.entries:
+        if not is_counted_entry(entry.rel_path):
+            continue
         counts[classify_entry(entry.rel_path, entry.size)] += 1
     return BundleCounts(
         model=counts[MODEL],
@@ -1080,6 +1139,21 @@ def _counts(snapshot: BundleSnapshot) -> BundleCounts:
         other=counts[OTHER],
         archive=counts[ARCHIVE],
     )
+
+
+def _walk_has_role(snapshot: BundleSnapshot, role: str) -> bool:
+    """Whether the WALK sees at least one entry of ``role`` - the EVIDENCE view.
+
+    R3's trio gate asks whether the folder HAS a preview and a document, and that
+    is evidence rather than a count, so it keeps the wide reading: a bundle whose
+    only preview is an AppleDouble ``._cover.png`` must still be OFFERED, because
+    refusing it is a worse error than a cover pick that is never registered (that
+    pick already has a named reason, ``largest-image-unregistered``). Mutation:
+    ask ``_counts().image``/``._text`` here instead and that row newly refuses
+    ``R3:trio-no-image`` (Mf-94od's blast radius is the model count, not a
+    verdict).
+    """
+    return any(classify_entry(entry.rel_path, entry.size) == role for entry in snapshot.entries)
 
 
 def _cover_entry(snapshot: BundleSnapshot) -> Optional[str]:
@@ -1111,7 +1185,7 @@ def _own_depth_model_count(snapshot: BundleSnapshot) -> int:
     own = 0
     unnamed: Dict[str, int] = {}
     for entry in snapshot.entries:
-        if classify_entry(entry.rel_path, entry.size) != MODEL:
+        if not is_counted_model(entry.rel_path, entry.size):
             continue
         parts = entry.rel_path.split("/")
         if len(parts) == 1:
@@ -1131,7 +1205,7 @@ def _own_depth_model_count(snapshot: BundleSnapshot) -> int:
 def _model_entries(snapshot: BundleSnapshot) -> Tuple[str, ...]:
     return tuple(
         sorted(
-            (entry.rel_path for entry in snapshot.entries if classify_entry(entry.rel_path, entry.size) == MODEL),
+            (entry.rel_path for entry in snapshot.entries if is_counted_model(entry.rel_path, entry.size)),
             key=_path_order,
         )
     )
@@ -1351,7 +1425,7 @@ def detect_bundle_decision(snapshot: BundleSnapshot, docs: Mapping[str, str]) ->
         )
         return Detection(facts=facts, refusal=None)
 
-    if own_models >= 1 and counts.image >= 1 and counts.text >= 1:
+    if own_models >= 1 and _walk_has_role(snapshot, IMAGE) and _walk_has_role(snapshot, TEXT):
         return Detection(facts=_generic_facts(snapshot, counts, cover, models), refusal=None)
 
     # Nothing fired: name the FIRST rule the listing failed, in rule order.
@@ -1363,7 +1437,7 @@ def detect_bundle_decision(snapshot: BundleSnapshot, docs: Mapping[str, str]) ->
         refusal = REFUSAL_R4_NO_OWN_DEPTH_MODEL
     elif own_models < 1:
         refusal = REFUSAL_R3_NO_OWN_DEPTH_MODEL
-    elif counts.image < 1:
+    elif not _walk_has_role(snapshot, IMAGE):
         refusal = REFUSAL_R3_TRIO_NO_IMAGE
     else:
         refusal = REFUSAL_R3_TRIO_NO_TEXT
@@ -1617,7 +1691,7 @@ def root_model_count(snapshot: BundleSnapshot) -> int:
     return sum(
         1
         for entry in snapshot.entries
-        if len(entry.rel_path.split("/")) == 1 and classify_entry(entry.rel_path, entry.size) == MODEL
+        if len(entry.rel_path.split("/")) == 1 and is_counted_model(entry.rel_path, entry.size)
     )
 
 
@@ -1671,16 +1745,15 @@ def compound_groups(snapshot: BundleSnapshot) -> Tuple[BundleGroup, ...]:
     """
     counts: Dict[str, int] = {}
     for entry in snapshot.entries:
-        if classify_entry(entry.rel_path, entry.size) != MODEL:
+        if not is_counted_model(entry.rel_path, entry.size):
             continue
         # AppleDouble cruft must never NAME a group: a top-level `__MACOSX`
         # would otherwise appear as a junk group in the breakdown (and could
         # silently change whether the folder is compound-shaped at all). Only
-        # group MEMBERSHIP skips it. The MODEL COUNT is deliberately untouched,
-        # here and in `root_model_count`: the `._*` copies are real files on the
-        # measured disk and count exactly as they always have (the Rocket reads
-        # 12 per group and 96 in total - 6 real + 6 `._*`), so the two numbers
-        # cannot disagree about what is on disk.
+        # group MEMBERSHIP skips it here; the MODEL COUNT already skipped the
+        # `._*` copies in `is_counted_model`, because the library scan does not
+        # register them either (Mf-94od). The measured Rocket is 6 per group and
+        # 48 in total, not the 12/96 a walk-count reads.
         if is_macosx_artifact(entry.rel_path):
             continue
         parts = entry.rel_path.split("/")
@@ -1757,7 +1830,7 @@ def compound_bundle_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
 
        * **Leg A** (the ticket's rule sentence): nothing at depth 0 and at least
          ``COMPOUND_MIN_GROUPS`` groups - ``import/Stagetop`` (45 + 15) and
-         ``import/Rocket Filement support`` (8 x 12) are the witnesses;
+         ``import/Rocket Filement support`` (8 x 6) are the witnesses;
        * **Leg B** (the ticket's "fix the loss"): the folder holds models of its
          own, every group below it is foreign, the folder's own models are the
          majority and at least one group carries a vendor id. This is what gives

@@ -44,6 +44,7 @@ NO_MARKERS = "just some notes about printing\n"
 FATES_END = "import/01_Fates End - Wizard Tower"
 DRAGON = "import/5390184_DRAGON"
 PILE = "import/pile"
+TRIO = "import/Trio"
 DUPLICATE_SUPPRESSED = "import/dupes/B.zip"
 
 
@@ -295,6 +296,157 @@ def test_a_rule_change_diff_names_every_changed_added_and_removed_row(
     assert "comparable: NO" in text
     for name in (*added, *removed, *detector_changed, *confidence_changed):
         assert name in text, f"{name} missing from the printed diff"
+
+
+def test_a_row_carries_its_counts_so_a_rule_change_is_visible(storage: Path) -> None:
+    """A row records the role counts it was decided from, so 96 -> 48 is VISIBLE.
+
+    The baseline row carries no count at all, which is why the Rocket's 96 -> 48
+    could not be shown in the artifact that recorded the change (Mf-94od). Every
+    serialised row is the service row's own counts, groups and shape, so the two
+    readings cannot disagree. Mutation: drop ``counts`` and the diff below cannot
+    name a count change.
+    """
+    artifact = bundle_serialize.serialise_report(storage)
+    assert artifact["artifact_schema"] == "bundle-report/3"
+
+    previous = bundle_service.STORAGE
+    bundle_service.STORAGE = storage
+    try:
+        report = bundle_service.build_report(limit=bundle_service.MAX_SCAN_ENTRIES)
+    finally:
+        bundle_service.STORAGE = previous
+    service = {row["key"]: row for row in report["bundles"]}
+
+    assert artifact["rows"], "the corpus must offer rows"
+    for row in artifact["rows"]:
+        source = service[row["rel_path"]]
+        assert row["counts"] == {field[: -len("_count")]: source[field] for field in bundle_serialize.COUNT_FIELDS}
+        assert row["shape"] == source["metadata_shape"]
+        assert row["groups"] == source["groups"]
+
+    trio = rows_by_path(artifact)[TRIO]
+    assert trio["counts"] == {"model": 1, "image": 1, "text": 1, "other": 0}
+
+
+def test_the_diff_names_a_count_change_and_admits_an_old_artifact_without_one(
+    storage: Path,
+) -> None:
+    """A count-only rule change is named, and a schema-2 artifact is not invented.
+
+    The count delta is the whole point of Mf-94od, and an artifact taken before
+    rows carried counts (schema 2) cannot be compared on them. Mutation: assume
+    ``counts`` exists and an old artifact produces a fabricated delta instead of
+    the honest ``not recorded``.
+    """
+    before = bundle_serialize.serialise_report(storage)
+    after = deepcopy(before)
+    changed = rows_by_path(after)[TRIO]
+    changed["counts"] = dict(changed["counts"], model=changed["counts"]["model"] + 1)
+
+    diff = bundle_serialize.diff_artifacts(before, after)
+    assert diff["counts_recorded"] is True
+    assert [item["rel_path"] for item in diff["counts_changed"]] == [TRIO]
+    assert diff["counts_changed"][0]["old"]["model"] == 1
+    assert diff["counts_changed"][0]["new"]["model"] == 2
+    text = bundle_serialize.format_diff(diff)
+    assert "counts changed (1)" in text
+    assert TRIO in text
+
+    old = deepcopy(before)
+    for item in old["rows"]:
+        item.pop("counts")
+    diff = bundle_serialize.diff_artifacts(old, after)
+    assert diff["counts_recorded"] is False
+    assert diff["counts_changed"] == []
+    text = bundle_serialize.format_diff(diff)
+    assert "counts: not recorded" in text
+    assert "counts changed (0)" not in text, "an unavailable comparison must not read as a verified non-change"
+
+
+def test_one_schema_2_row_does_not_suppress_the_deltas_the_others_prove(
+    storage: Path,
+) -> None:
+    """A single row without counts must not hide every delta the rest can prove.
+
+    The first shape of this code asked "does EVERY common row carry counts?" and
+    then dropped the whole block, which is the invisible-count-movement failure
+    the ticket exists to prevent - one stale row and the Rocket's 96 -> 48 goes
+    unmentioned. Mutation: go back to one global flag and the delta below vanishes
+    while ``counts_unavailable`` stays empty.
+    """
+    before = bundle_serialize.serialise_report(storage)
+    after = deepcopy(before)
+    rows = rows_by_path(after)
+    moved = rows[TRIO]
+    moved["counts"] = dict(moved["counts"], model=moved["counts"]["model"] + 1)
+    rows[DRAGON].pop("counts")
+
+    diff = bundle_serialize.diff_artifacts(before, after)
+
+    assert diff["counts_recorded"] is True, "the other rows CAN be compared"
+    assert [item["rel_path"] for item in diff["counts_changed"]] == [TRIO]
+    assert diff["counts_unavailable"] == [DRAGON]
+    text = bundle_serialize.format_diff(diff)
+    assert "counts changed (1)" in text
+    assert TRIO in text.split("counts changed (1):", 1)[1]
+    assert "counts: not recorded for 1 of the common rows" in text
+    assert DRAGON in text
+
+    # An incomplete comparison is not an unchanged pair: the missing row is named,
+    # so the summary must not also say nothing changed. Mutation: drop
+    # `counts_unavailable` from the `unchanged` computation and both lines print.
+    stripped_only = deepcopy(before)
+    rows_by_path(stripped_only)[DRAGON].pop("counts")
+    unavailable = bundle_serialize.diff_artifacts(before, stripped_only)
+    unavailable_text = bundle_serialize.format_diff(unavailable)
+    assert "counts: not recorded for 1 of the common rows" in unavailable_text
+    assert "no row or refusal changed" not in unavailable_text
+
+
+def test_a_diff_with_no_common_row_does_not_invent_a_counts_verdict(storage: Path) -> None:
+    """Disjoint row sets are not "an old artifact": there is nothing to compare.
+
+    Mutation: collapse the empty-``common`` case into ``counts_recorded = False``
+    and the printed diff claims a schema-2 artifact, a fabricated reason for a
+    pair where every delta is already named as added/removed.
+    """
+    before = bundle_serialize.serialise_report(storage)
+    old = deepcopy(before)
+    old["rows"] = [item for item in old["rows"] if item["rel_path"] != TRIO]
+    new = deepcopy(before)
+    new["rows"] = [item for item in new["rows"] if item["rel_path"] == TRIO]
+
+    diff = bundle_serialize.diff_artifacts(old, new)
+
+    assert diff["added"] == [TRIO]
+    assert diff["removed"]
+    assert diff["counts_recorded"] is None
+    assert diff["counts_changed"] == []
+    assert diff["counts_unavailable"] == []
+    text = bundle_serialize.format_diff(diff)
+    assert "not recorded" not in text
+    assert "counts changed" not in text
+
+
+def test_the_unchanged_summary_does_not_survive_a_count_change(storage: Path) -> None:
+    """A count-only change is a change, and the summary must not say otherwise.
+
+    Mutation: drop ``counts_changed`` from the ``unchanged`` computation and a
+    diff whose ONLY movement is a count prints "no row or refusal changed".
+    """
+    before = bundle_serialize.serialise_report(storage)
+    assert "no row or refusal changed" in bundle_serialize.format_diff(
+        bundle_serialize.diff_artifacts(before, before)
+    )
+
+    after = deepcopy(before)
+    changed = rows_by_path(after)[TRIO]
+    changed["counts"] = dict(changed["counts"], model=changed["counts"]["model"] + 1)
+
+    text = bundle_serialize.format_diff(bundle_serialize.diff_artifacts(before, after))
+    assert "counts changed (1)" in text
+    assert "no row or refusal changed" not in text
 
 
 def test_refusals_are_additive_and_do_not_change_the_offered_rows(storage: Path) -> None:

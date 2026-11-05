@@ -37,7 +37,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-ARTIFACT_SCHEMA = "bundle-report/2"
+ARTIFACT_SCHEMA = "bundle-report/3"
 # The keys the hand-taken baseline row carries. A row in this artifact carries
 # these with the same meaning, plus the rule-set stamp that dates it.
 BASELINE_ROW_KEYS = (
@@ -50,6 +50,11 @@ BASELINE_ROW_KEYS = (
     "existing_project_name",
     "twin_verified",
 )
+# The row's role counts, added by Mf-94od and read from the report's own
+# `model_count` / `image_count` / ... fields. Without them the Rocket's 96 -> 48
+# could not be seen at all: the baseline row carries no count, so the artifact
+# that recorded the rule change could not show the number the rule changed.
+COUNT_FIELDS = ("model_count", "image_count", "text_count", "other_count")
 
 
 def _repo_root(start=None) -> Optional[Path]:
@@ -186,6 +191,17 @@ def serialise_report(root, *, limit=None, command=None, database_path=None) -> d
         serialised = {key: row.get(key) for key in BASELINE_ROW_KEYS}
         serialised["twin_verified"] = archive["twin_verified"] if archive else None
         serialised["rule_set"] = row["rule_set"]
+        # The counts and the shapes the row was DECIDED from. A count-only rule
+        # change is invisible in a before/after pair of baseline rows, so these
+        # are recorded here rather than left to a reader's memory (Mf-94od).
+        serialised["counts"] = {
+            field[: -len("_count")]: row.get(field) for field in COUNT_FIELDS
+        }
+        # A report row always carries both: `groups` is built unconditionally and
+        # the row's shape field is `metadata_shape` (there is no `shape` key on a
+        # row - only a marker has one).
+        serialised["groups"] = row["groups"]
+        serialised["shape"] = row["metadata_shape"]
         rows.append(serialised)
     rows.sort(key=lambda item: item["rel_path"])
 
@@ -300,9 +316,29 @@ def diff_artifacts(old, new) -> dict:
     status_changed = []
     match_changed = []
     twin_changed = []
-    for rel_path in sorted(set(old_rows) & set(new_rows)):
+    counts_changed = []
+    common = sorted(set(old_rows) & set(new_rows))
+    # Counts were added to a row in schema 3 (Mf-94od). An older artifact carries
+    # none, so a count delta is DECLARED unavailable rather than invented - the
+    # same shape as the pre-Mf-9ygi refusal ledger above. The comparison is PER
+    # ROW: one schema-2 row must never suppress the deltas the other rows can
+    # still prove, which is the invisible-count-movement failure this ticket
+    # exists to prevent.
+    counts_unavailable = [
+        rel_path
+        for rel_path in common
+        if old_rows[rel_path].get("counts") is None or new_rows[rel_path].get("counts") is None
+    ]
+    counts_recorded = None if not common else len(counts_unavailable) < len(common)
+    for rel_path in common:
         before = old_rows[rel_path]
         after = new_rows[rel_path]
+        if before.get("counts") is None or after.get("counts") is None:
+            continue
+        if before["counts"] != after["counts"]:
+            counts_changed.append(
+                {"rel_path": rel_path, "old": before["counts"], "new": after["counts"]}
+            )
         if before.get("detector") != after.get("detector"):
             detector_changed.append({"rel_path": rel_path, "old": before.get("detector"), "new": after.get("detector")})
         if before.get("confidence") != after.get("confidence"):
@@ -355,6 +391,9 @@ def diff_artifacts(old, new) -> dict:
         "new_rows": len(new_rows),
         "added": added,
         "removed": removed,
+        "counts_recorded": counts_recorded,
+        "counts_unavailable": counts_unavailable,
+        "counts_changed": counts_changed,
         "detector_changed": detector_changed,
         "confidence_changed": confidence_changed,
         "status_changed": status_changed,
@@ -369,6 +408,13 @@ def diff_artifacts(old, new) -> dict:
 
 def _names(values) -> str:
     return ", ".join(values) if values else "-"
+
+
+def _counts_text(counts) -> str:
+    """One role-count mapping as ``model=48 image=0 ...``, keys sorted."""
+    if not counts:
+        return "-"
+    return " ".join(f"{key}={counts[key]}" for key in sorted(counts))
 
 
 def format_diff(result) -> str:
@@ -398,6 +444,25 @@ def format_diff(result) -> str:
     lines.append(f"rows: {result['old_rows']} -> {result['new_rows']}")
     lines.append(f"added ({len(result['added'])}): {_names(result['added'])}")
     lines.append(f"removed ({len(result['removed'])}): {_names(result['removed'])}")
+    if result["counts_recorded"] is False:
+        lines.append(
+            "counts: not recorded in either artifact (a pre-Mf-94od schema-2 row), "
+            "so a count delta cannot be named"
+        )
+    # `counts_recorded is None` means no row is in common at all, so there is
+    # nothing to compare and nothing to admit - an empty "counts changed (0)"
+    # would read as a verified non-change.
+    if result["counts_recorded"] is True:
+        if result["counts_unavailable"]:
+            lines.append(
+                f"counts: not recorded for {len(result['counts_unavailable'])} of the common rows "
+                f"(a pre-Mf-94od schema-2 row): {_names(result['counts_unavailable'])}"
+            )
+        lines.append(f"counts changed ({len(result['counts_changed'])}):")
+        for item in result["counts_changed"]:
+            lines.append(f"  {item['rel_path']}: {_counts_text(item['old'])} -> {_counts_text(item['new'])}")
+        if not result["counts_changed"]:
+            lines.append("  -")
     lines.append(f"detector changed ({len(result['detector_changed'])}):")
     for item in result["detector_changed"]:
         lines.append(f"  {item['rel_path']}: {item['old']} -> {item['new']}")
@@ -435,6 +500,8 @@ def format_diff(result) -> str:
     unchanged = not (
         result["added"]
         or result["removed"]
+        or result["counts_changed"]
+        or result["counts_unavailable"]
         or result["detector_changed"]
         or result["confidence_changed"]
         or result["status_changed"]
