@@ -47,7 +47,7 @@ export type ExtractAndCreateDeps = {
   onPhase?: (phase: ExtractAndCreatePhase) => void;
 };
 
-export type NothingWrittenCause = "extract-failed" | "junk-only";
+type NothingWrittenCause = "extract-failed" | "junk-only";
 
 export type ExtractAndCreateOutcome =
   | { kind: "listing-failed"; detail: string | null }
@@ -162,7 +162,7 @@ export async function runExtractAndCreate(run: {
   // Skip the wait only when this request wrote nothing, which is measured, not
   // assumed. `already_present` is `_already_present`, a stat of every target:
   // that early return answers `files=0, already_present=True, scan_started=False`
-  // (`archive_service.py:144-151`), so no file was written and no scan was
+  // (`archive_service._already_present`), so no file was written and no scan was
   // started. `settleAfterExtract` returns `"settled"` without any network read
   // when nothing was written (`scanSettle.ts:124-125`), so skipping the wait
   // here is the same answer, not a shortcut around a proof. The create response
@@ -193,7 +193,7 @@ export async function runExtractAndCreate(run: {
   if (response === null) return { kind: "cancelled" };
 
   // Exactly one item is sent and the server echoes the request's key
-  // (`bundle_service.py:2325`), so a results list that does not name this row
+  // (`bundle_service._result`), so a results list that does not name this row
   // answers nothing about it. Falling back to `results[0]` would let another
   // row's verdict speak for this one.
   const result = response.results.find(candidate => candidate.key === item.key) ?? null;

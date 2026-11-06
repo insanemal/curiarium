@@ -2546,6 +2546,264 @@ describe("BundleReviewView extract and create", () => {
     fireEvent.click(selectionCheck("Moai_zip"));
     expect(screen.getByRole("button", { name: "Extract selected archives (1)" })).toBeTruthy();
   });
+
+  /** A zip-only row that also names a source page, so the detail pane renders
+   *  its enrich door beside the one-step door and the gate can be seen on
+   *  both. */
+  function enrichableZip(): BundleDetectItem {
+    return makeBundle({
+      ...moaiZip,
+      source_url: "https://www.thingiverse.com/thing:2493386",
+    });
+  }
+
+  it("locks every other mutating door while the one-step run is in flight", async () => {
+    let settle: (outcome: SettleOutcome) => void = () => {};
+    const afterExtract = vi.fn(
+      () =>
+        new Promise<SettleOutcome>(resolve => {
+          settle = resolve;
+        }),
+    );
+    const state = makeState({
+      report: makeReport([moai, enrichableZip()]),
+      afterExtract,
+      createReporting: vi.fn(async () => makeCreateResponse()),
+    });
+    renderView(state);
+
+    // The ready row is selected first, so the bulk create door is live on its
+    // own account and disabling it below can only be the run's doing.
+    fireEvent.click(selectionCheck("Moai"));
+    fireEvent.click(rowElement("Moai_zip"));
+    expect(detailTitle()).toBe("Moai zip");
+    const bulkCreate = screen.getByRole("button", {
+      name: "Create selected (1)",
+    }) as HTMLButtonElement;
+    expect(bulkCreate.disabled).toBe(false);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+    );
+
+    // `busy` is false here: this is the scan wait, not the final create, and
+    // the run still owns the queue's writes for the whole of it.
+    expect(state.busy).toBe(false);
+    expect((oneStepButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (within(detail()).getByRole("button", { name: "Dismiss" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (within(detail()).getByRole("button", { name: "Enrich from source page" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(bulkCreate.disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: /^Dismiss selected/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    // The ready row is a second detail target, so its own Create project door
+    // is gated by the run too: it is not merely disabled by its own row.
+    fireEvent.click(rowElement("Moai"));
+    expect(detailTitle()).toBe("Moai statue");
+    expect(
+      (within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    settle("settled");
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+    );
+
+    // The run has answered, so every door it held comes back.
+    expect(
+      (within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(bulkCreate.disabled).toBe(false);
+    fireEvent.click(rowElement("Moai_zip"));
+    expect((oneStepButton() as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("cannot dismiss the row being processed, so a dismissed row cannot still create", async () => {
+    let settle: (outcome: SettleOutcome) => void = () => {};
+    const afterExtract = vi.fn(
+      () =>
+        new Promise<SettleOutcome>(resolve => {
+          settle = resolve;
+        }),
+    );
+    const createReporting = vi.fn(async () => makeCreateResponse());
+    const state = makeState({ report: makeReport([moaiZip]), afterExtract, createReporting });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+    );
+
+    // The very row the run is processing: a dismissal written now would hide
+    // it while the run's create still lands, so nothing may be written.
+    fireEvent.click(within(detail()).getByRole("button", { name: "Dismiss" }));
+    expect(state.dismiss).not.toHaveBeenCalled();
+
+    settle("settled");
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+    );
+    expect(createReporting).toHaveBeenCalledTimes(1);
+  });
+
+  it("shuts the plain extract door while the one-step run is in flight", async () => {
+    let settle: (outcome: SettleOutcome) => void = () => {};
+    const afterExtract = vi.fn(
+      () =>
+        new Promise<SettleOutcome>(resolve => {
+          settle = resolve;
+        }),
+    );
+    const state = makeState({
+      report: makeReport([moaiZip]),
+      afterExtract,
+      createReporting: vi.fn(async () => makeCreateResponse()),
+    });
+    renderView(state);
+
+    /** The detail pane's own AT-safe extract door, named for the archive. */
+    function detailExtract(): HTMLButtonElement {
+      return within(detail()).getByRole("button", {
+        name: "Extract Moai zip",
+      }) as HTMLButtonElement;
+    }
+
+    // Both plain doors are live before the run, so what the assertions below
+    // see can only be the run's doing.
+    expect(detailExtract().disabled).toBe(false);
+    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
+    expect(statusCell("Moai_zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+    );
+
+    // (a) A second extract landing now would run a second settle and a second
+    // refetch, so the detail pane's own extract action refuses at every stage.
+    expect(detailExtract().disabled).toBe(true);
+
+    // (b) The row's blocked-reason cell is the mouse's door. It keeps its
+    // sentence but loses the door: a click on it opens nothing, and it no
+    // longer reads as a control.
+    const cell = statusCell("Moai_zip");
+    expect(cell.getAttribute("title")).toBeNull();
+    expect(cell.className).toBe("review-row-status");
+    fireEvent.click(cell);
+    expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
+
+    // (c) Enter on the option is that same door from the keyboard: it opens
+    // nothing, and the option stops advertising the shortcut it cannot honour.
+    fireEvent.keyDown(rowElement("Moai_zip"), { key: "Enter" });
+    expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
+    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBeNull();
+
+    settle("settled");
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+    );
+
+    // The run has answered, so the door comes back - and it is a door again,
+    // not a cell that looks live while refusing.
+    expect(detailExtract().disabled).toBe(false);
+    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
+    expect(statusCell("Moai_zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
+    fireEvent.click(statusCell("Moai_zip"));
+    expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
+  });
+
+  it("shuts the confirm panel it already had open, so no second extract can fire", async () => {
+    let settle: (outcome: SettleOutcome) => void = () => {};
+    const afterExtract = vi.fn(
+      () =>
+        new Promise<SettleOutcome>(resolve => {
+          settle = resolve;
+        }),
+    );
+    const state = makeState({
+      report: makeReport([moaiZip]),
+      afterExtract,
+      createReporting: vi.fn(async () => makeCreateResponse()),
+    });
+    renderView(state);
+
+    // A panel the operator already opened and whose count is on screen: its
+    // "Extract 2 files" button is the very second extract the run must refuse,
+    // because it would run a second settle and a second refetch.
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
+    const confirmButton = (await screen.findByRole("button", {
+      name: "Extract 2 files",
+    })) as HTMLButtonElement;
+    expect(confirmButton.disabled).toBe(false);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+    );
+
+    const extractsBefore = extractArchiveMock.mock.calls.length;
+    expect(confirmButton.disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    fireEvent.click(confirmButton);
+
+    expect(extractArchiveMock.mock.calls.length).toBe(extractsBefore);
+    expect(afterExtract).toHaveBeenCalledTimes(1);
+
+    settle("settled");
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+    );
+    // The panel is a door again once the run has answered.
+    expect(confirmButton.disabled).toBe(false);
+  });
+
+  it("still selects the row when the shut blocked-reason cell is clicked", async () => {
+    let settle: (outcome: SettleOutcome) => void = () => {};
+    const afterExtract = vi.fn(
+      () =>
+        new Promise<SettleOutcome>(resolve => {
+          settle = resolve;
+        }),
+    );
+    renderView(
+      makeState({
+        report: makeReport([moai, moaiZip]),
+        afterExtract,
+        createReporting: vi.fn(async () => makeCreateResponse()),
+      }),
+    );
+
+    fireEvent.click(rowElement("Moai_zip"));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+    );
+
+    fireEvent.click(rowElement("Moai"));
+    expect(detailTitle()).toBe("Moai statue");
+
+    // The shut cell opens nothing, and the click still reaches the row: moving
+    // the detail target is a read, so the lock must not swallow it.
+    fireEvent.click(statusCell("Moai_zip"));
+
+    expect(detailTitle()).toBe("Moai zip");
+    expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
+
+    settle("settled");
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+    );
+  });
 });
 
 describe("BundleReviewView new parts on an already-created row", () => {

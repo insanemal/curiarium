@@ -18,6 +18,11 @@ type Props = {
   label: string;
   /** "detail" for the asset preview footer, "row" for a compact settings-card row. */
   variant?: "detail" | "row";
+  /**
+   * Refuse every control this instance renders, at every stage: the caller has
+   * another write in flight on the same archive and this one would race it.
+   */
+  disabled?: boolean;
   /** Fires after a successful extract so the caller can refresh what it shows. */
   onExtracted?: (result: ArchiveExtractResult) => void;
 };
@@ -92,6 +97,7 @@ export default function ArchiveExtractAction({
   path,
   label,
   variant = "detail",
+  disabled = false,
   onExtracted,
 }: Props): ReactElement | null {
   const [stage, setStage] = useState<Stage>("idle");
@@ -219,12 +225,17 @@ export default function ArchiveExtractAction({
           <button
             type="button"
             className={primaryButton}
-            disabled={extracting}
+            disabled={disabled || extracting}
             onClick={() => void confirmExtract()}
           >
             {extracting ? "Extracting..." : `Extract ${countLabel(entries.length)}`}
           </button>
-          <button type="button" className={button} disabled={extracting} onClick={cancel}>
+          <button
+            type="button"
+            className={button}
+            disabled={disabled || extracting}
+            onClick={cancel}
+          >
             Cancel
           </button>
         </div>
@@ -239,7 +250,7 @@ export default function ArchiveExtractAction({
         type="button"
         aria-label={`Extract ${label}`}
         className={primaryButton}
-        disabled={stage === "listing"}
+        disabled={disabled || stage === "listing"}
         onClick={() => void startListing()}
       >
         {stage === "listing" ? "Listing..." : "Extract archive"}

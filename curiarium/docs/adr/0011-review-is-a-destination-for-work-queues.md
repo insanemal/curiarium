@@ -393,46 +393,59 @@ destination model, the count rule, the role threshold and the fetch policy.
     create hides its own row by default (`showCreated` off) and a one-way write
     must leave a sentence behind.
 
+    The run is not cancellable, and the queue's mutating doors are shut for its
+    duration rather than left open: a dismissal written mid-run would either have
+    to be undone or would still race the in-flight create. The doors are the five
+    bulk buttons, the detail pane's create/dismiss/enrich and its own extract
+    action, and the blocked-reason cell and Enter on a zip-only row. What the run
+    does not lock is what cannot race it - the filters, the reveal toggles,
+    Refresh, selection, the typed names and the group checkboxes - because it
+    snapshots what it needs when it starts and writes only the row it was given.
+    Leaving the queue is the cancellation: `afterExtract` answers `cancelled` on
+    unmount and `runExtractAndCreate` then creates nothing, so the one way out of
+    a run is the way that writes nothing.
+
     Four server facts shape what the client will and will not claim.
     `POST /import/archive` reports no per-entry failures: `ArchiveExtractOut`
-    carries only `path`, `destination`, `files`, `bytes`, `already_present` and
-    `scan_started` (`curiarium/api/schemas/imports.py:76-92`). So "a partially
-    failed extraction" can only be answered honestly as "0 of M entries were
-    written" - M from the pre-extract listing - plus the server's own message. A
-    per-entry failure report would be a contract change to that schema and to
-    `entry_policy`, and is a separate ticket; no count is ever invented that the
-    response does not carry. The extract is all-or-nothing, so that zero is the
-    truth and nothing was left half-written: the junk-only no-op returns
-    `files=0, already_present=False` before any write
-    (`archive_service.py:125-138`), the every-destination-exists no-op returns
-    `files=0, already_present=True` (`:141-151`), `_refuse_occupied` refuses a
+    carries only `path`, `destination`, `files`, `bytes`, `already_present`
+    and `scan_started` (`curiarium/api/schemas/imports.py:76-92`). So "a
+    partially failed extraction" can only be answered honestly as "0 of
+    M entries were written" - M from the pre-extract listing - plus the
+    server's own message. A per-entry failure report would be a contract
+    change to that schema and to `entry_policy`, and is a separate ticket; no
+    count is ever invented that the response does not carry. The extract is
+    all-or-nothing, so that zero is the truth and nothing was left half-written:
+    the junk-only no-op returns `files=0, already_present=False` before
+    any write (`archive_service.py:125-138`), the every-destination-exists
+    no-op returns `files=0, already_present=True` (the early return guarded
+    by `archive_service._already_present`), `_refuse_occupied` refuses a
     partial collision at 409 *before* staging (`:153`, `:369-385`), and a
-    mid-publish failure unlinks this request's own publications newest-first and
-    re-raises (`:199-208`). The settle does not distinguish a failed scan from a
-    clean one: `SettleOutcome` is only `settled | timeout | cancelled`
-    (`curiarium/web/src/lib/scanSettle.ts:42`). So after a clean settle the create
-    response is the only readiness authority - a still-blocked row answers
-    `CREATE_BLOCKED` with the row's own `blocked_reason`
-    (`curiarium/api/bundle_service.py:2328-2329`, with `NOT_SCANNED =
-    "not_scanned"` at `:203`), worded through the existing
-    `BLOCKED_REASON_LABELS` table and never inferred client-side from the
-    refetched report, which would also race a stale one. One reason is the
-    exception: `archive_only` is what this run just acted on, so its own sentence
-    replaces the table's instruction to re-extract and names the pairing the scan
-    still has not made instead. The `still-blocked` outcome carries `wrote` -
-    `extracted.files > 0` - because the `already_present` route creates without
-    writing a byte, and the sentence states which of the two happened. Exactly
-    one item is sent and the server echoes its key (`bundle_service.py:2325`), so
-    a response whose `results` do not name this row is a failure and never
-    another row's verdict. And idempotence is the
-    server's: `find_existing_project` answers `CREATE_SKIPPED`/`already_created`
-    with the existing project's id and name (`bundle_service.py:2402-2416`), so a
-    second invocation reports already-created and never makes a second project. A
-    settle `timeout` or `cancelled` creates nothing at all, and a create that
-    answers `failed` after a successful extraction keeps the files, leaves the
-    row ready and the plain `Create project` affordance as the retry - the run
-    rolls nothing back, and the deps type carries no rollback member at all (a
-    compile-time fact, not a runtime lookup).
+    mid-publish failure unlinks this request's own publications newest-first
+    and re-raises (`:199-208`). The settle does not distinguish a failed scan
+    from a clean one: `SettleOutcome` is only `settled | timeout | cancelled`
+    (`curiarium/web/src/lib/scanSettle.ts:42`). So after a clean settle
+    the create response is the only readiness authority - a still-blocked
+    row answers `CREATE_BLOCKED` with the row's own `blocked_reason`
+    (`curiarium/api/bundle_service._create_one`, with `bundle_service.NOT_SCANNED`
+    as `"not_scanned"`), worded through the existing `BLOCKED_REASON_LABELS`
+    table and never inferred client-side from the refetched report, which
+    would also race a stale one. One reason is the exception: `archive_only`
+    is what this run just acted on, so its own sentence replaces the table's
+    instruction to re-extract and names the pairing the scan still has not made
+    instead. The `still-blocked` outcome carries `wrote` - `extracted.files > 0`
+    - because the `already_present` route creates without writing a byte, and
+    the sentence states which of the two happened. Exactly one item is sent
+    and the server echoes its key (`bundle_service._result`), so a response
+    whose `results` do not name this row is a failure and never another row's
+    verdict. And idempotence is the server's: `find_existing_project` answers
+    `CREATE_SKIPPED`/`already_created` with the existing project's id and name
+    (`_create_one`'s `find_existing_project` skip), so a second invocation reports
+    already-created and never makes a second project. A settle `timeout` or
+    `cancelled` creates nothing at all, and a create that answers `failed` after
+    a successful extraction keeps the files, leaves the row ready and the plain
+    `Create project` affordance as the retry - the run rolls nothing back, and
+    the deps type carries no rollback member at all (a compile-time fact, not a
+    runtime lookup).
 
     The compound case is the server's as well: ONE item is sent for the row, so
     the server's own compound branch makes one project with its groups; the

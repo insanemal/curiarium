@@ -132,6 +132,16 @@ function visibilityToggle(
   );
 }
 
+/** The blocked-reason cell has two faces. It is a zip-only row's only door, so
+ *  its live face carries the door's own underline and pointer; its shut face is
+ *  the same sentence styled as any plain row's, because a cell that still looks
+ *  like a door while refusing is the defect the run's write gate exists
+ *  against. */
+function blockedReasonClass(live: boolean): string {
+  if (!live) return "review-row-status";
+  return "review-row-status underline decoration-dotted underline-offset-2 hover:text-accent cursor-pointer";
+}
+
 function rowClassName(selected: boolean, active: boolean): string {
   const classes = ["review-row"];
   if (selected) classes.push("is-selected");
@@ -351,14 +361,33 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const [settleTimedOut, setSettleTimedOut] = React.useState(false);
   // The one-step door's narration. It lives in the VIEW, not in the hook: a
   // successful create hides the row, and the hook clears `notice` on every
-  // mutation. `running` is what keeps a second click off while a run is in
-  // flight; `key` is the row it belongs to.
+  // mutation. `key` is the row it belongs to; `running` is the run's own
+  // in-flight flag, and it reaches every mutating door through `actionsLocked`
+  // below.
   const [extractAndCreate, setExtractAndCreate] = React.useState<{
     key: string;
     line: string | null;
     running: boolean;
   } | null>(null);
   const extractAndCreateRunning = extractAndCreate?.running === true;
+  // One gate on every MUTATING door in the queue: the five bulk buttons, the
+  // detail pane's create/dismiss/enrich, the detail pane's own extract action,
+  // the blocked-reason cell and Enter on a zip-only row. `busy` alone reports
+  // only the final `creating` phase, while a one-step run owns the queue's
+  // writes across all four of its phases, from the listing to the create - so
+  // its own `running` flag locks its siblings for the whole of it. The run is
+  // not cancellable, and a dismissal written mid-run would either have to be
+  // undone or would still race the in-flight create; leaving the queue is the
+  // cancellation (`afterExtract` answers `cancelled` on unmount, and
+  // `runExtractAndCreate` then creates nothing). The controls it leaves alone
+  // are the ones that cannot race the run: the filters, the reveal toggles,
+  // Refresh, `Select all shown` / `Clear selection` and the typed-name and
+  // group-include inputs, because the run snapshots what it needs when it
+  // starts. It does shut two things that write nothing on their own - the
+  // extract action's listing trigger and its confirm panel's `Cancel` - and
+  // that is the action's own contract: every control of an instance whose
+  // write would race the run refuses.
+  const actionsLocked = busy || extractAndCreateRunning;
   const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
   // Where the active row sat before a refetch reordered or removed it. A key
   // survives a reorder; the remembered index is only the fallback for a row
@@ -661,10 +690,10 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
       case "Enter": {
         // The blocked-reason cell is the mouse's door (it cannot be focusable
         // inside an option); Enter is its keyboard equivalent, gated on the
-        // same `canContribute && isArchiveOnly` predicate so the two cannot
-        // disagree about who may extract.
+        // same `canContribute && isArchiveOnly` predicate plus the run's write
+        // lock, so the two cannot disagree about who may extract when.
         event.preventDefault();
-        if (!canContribute || activeKey === null) break;
+        if (!canContribute || actionsLocked || activeKey === null) break;
         const row = filtered.find(item => item.key === activeKey);
         if (row && isArchiveOnly(row)) openExtract(extractTargets([row]), row.key);
         break;
@@ -694,6 +723,10 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
     const isSelected = selectedKeys.includes(row.key);
     const isActive = row.key === activeKey;
     const chip = rowStateChip(row);
+    // The cell only renders for a contributor; whether its door is live also
+    // needs the archive-only shape and a queue whose writes are not held by the
+    // one-step run.
+    const archiveDoorLive = !actionsLocked && isArchiveOnly(row);
     return (
       <div
         key={row.key}
@@ -702,8 +735,12 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
         // The row the detail panel describes, not only the row styled as current.
         aria-current={isActive ? "true" : undefined}
         // Only the archive-only option advertises Enter, and `aria-keyshortcuts`
-        // is the one way to say so without adding a tab stop.
-        aria-keyshortcuts={canContribute && isArchiveOnly(row) ? "Enter" : undefined}
+        // is the one way to say so without adding a tab stop. While the run
+        // holds the queue's writes the door is shut, so the shortcut is not
+        // advertised either.
+        aria-keyshortcuts={
+          canContribute && !actionsLocked && isArchiveOnly(row) ? "Enter" : undefined
+        }
         data-bundle-row={row.key}
         tabIndex={isActive ? 0 : -1}
         className={rowClassName(isSelected, isActive)}
@@ -747,13 +784,18 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
             `role="button"` and not `tabIndex` - nothing focusable may live
             inside an option, or the listbox would have a second tab stop per
             row (see the glyph above). Space is already bulk selection, so
-            Enter on the option is the keyboard equivalent. Every other row
-            keeps a plain, inert status cell. */}
+            Enter on the option is the keyboard equivalent. Every other row,
+            and this cell while a one-step run holds the queue's writes, keeps
+            a plain, inert status cell. */}
         {canContribute && isArchiveOnly(row) ? (
           <span
-            className="review-row-status underline decoration-dotted underline-offset-2 hover:text-accent cursor-pointer"
-            title={archiveExtractTitle(row)}
+            className={blockedReasonClass(archiveDoorLive)}
+            title={archiveDoorLive ? archiveExtractTitle(row) : undefined}
             onClick={event => {
+              // Shut while the run owns the queue's writes. Returning before
+              // `stopPropagation` lets the row's own click move the detail
+              // target, which is a read and never a write.
+              if (!archiveDoorLive) return;
               event.stopPropagation();
               openExtract(extractTargets([row]), row.key);
             }}
@@ -885,7 +927,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
             <button
               type="button"
               className={PRIMARY_BUTTON}
-              disabled={busy || creatableSelected.length === 0}
+              disabled={actionsLocked || creatableSelected.length === 0}
               onClick={createSelected}
             >
               {`Create selected (${creatableSelected.length})`}
@@ -893,7 +935,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
             <button
               type="button"
               className={SECONDARY_BUTTON}
-              disabled={busy || lowCreatable.length === 0}
+              disabled={actionsLocked || lowCreatable.length === 0}
               onClick={createLowAsNameOnly}
             >
               {`Create low as name-only (${lowCreatable.length})`}
@@ -901,7 +943,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
             <button
               type="button"
               className={SECONDARY_BUTTON}
-              disabled={busy || extractableSelected.length === 0}
+              disabled={actionsLocked || extractableSelected.length === 0}
               onClick={extractSelected}
             >
               {`Extract selected archives (${extractableSelected.length})`}
@@ -911,7 +953,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
               className={SECONDARY_BUTTON}
               data-bundle-enrich-selected="true"
               title={bulkEnrichTitle(enrichableSelected.length, selected.length)}
-              disabled={busy || enrichableSelected.length === 0}
+              disabled={actionsLocked || enrichableSelected.length === 0}
               onClick={enrichSelected}
             >
               {enrichSelectionLabel(enrichableSelected.length, selected.length)}
@@ -919,7 +961,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
             <button
               type="button"
               className={SECONDARY_BUTTON}
-              disabled={busy || selected.length === 0}
+              disabled={actionsLocked || selected.length === 0}
               onClick={dismissSelected}
             >
               {`Dismiss selected (${selected.length})`}
@@ -1087,7 +1129,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                           type="button"
                           className={PRIMARY_BUTTON}
                           data-extract-and-create="true"
-                          disabled={busy || extractAndCreateRunning}
+                          disabled={actionsLocked}
                           title={EXTRACT_AND_CREATE_HINT}
                           onClick={() => startExtractAndCreate(activeRow)}
                         >
@@ -1098,7 +1140,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                         <button
                           type="button"
                           className={PRIMARY_BUTTON}
-                          disabled={busy || !isCreatable(activeRow)}
+                          disabled={actionsLocked || !isCreatable(activeRow)}
                           onClick={createActive}
                         >
                           Create project
@@ -1107,7 +1149,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                       <button
                         type="button"
                         className={SECONDARY_BUTTON}
-                        disabled={busy}
+                        disabled={actionsLocked}
                         onClick={dismissActive}
                       >
                         {activeRow.dismissed ? "Undo dismiss" : "Dismiss"}
@@ -1117,7 +1159,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                           type="button"
                           className={SECONDARY_BUTTON}
                           data-bundle-enrich="true"
-                          disabled={busy}
+                          disabled={actionsLocked}
                           title="Read the creator and licence from the bundle's source page (only empty fields are filled)"
                           onClick={enrichActive}
                         >
@@ -1156,6 +1198,11 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                     path={activeRow.archive.rel_path}
                     label={activeRow.title}
                     variant="detail"
+                    // A second extract landing while the run's settle is
+                    // pending would run a second settle and a second refetch,
+                    // so this action refuses at every stage while the run owns
+                    // the queue's writes.
+                    disabled={actionsLocked}
                     // The two doors - this AT-safe button and the dialog the
                     // blocked-reason cell / Enter / bulk bar open - share
                     // `handleExtracted`, so neither can refresh differently.
