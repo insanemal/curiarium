@@ -2105,7 +2105,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     selection's model entries and `attached` the ones that produced a row (the
     same scan-count/attach-set split `_create_one` records, and on this door the
     two can differ only by a per-entry extraction failure - an absent member, an
-    oversize member, a directory member, a name conflict or an oversize budget;
+    oversize member, a directory member, a name conflict;
     `test_a_group_records_what_was_selected_and_what_was_attached` pins one);
     `shape: "compound"` iff there are groups; and `cover: {asset_id, rel_path,
     reason, group}`, written even when the reason is `none` because this door has
@@ -2163,8 +2163,9 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     guard inside `create_project`); the marker is free because it rides the create
     INSERT; an archive with no registered image now costs +0, because no cover is
     written. The row-level before/after artifacts are
-    `.plans/measurements/2026-11-06-zip-project-mfqbji-{before,after}.json`, same
-    four synthetic zips and the same in-process harness on both sides.
+    `.plans/measurements/2026-11-06-zip-project-mfqbji-{before,after}.json`, the
+    same four synthetic zips, and a harness rebuilt from the before artifact's
+    recorded description because the original was not kept.
 
 27. **A bundle folder that grows after its project exists is surfaced, never
     automated - computed on every read, honest in three states, and MODEL-scoped.**

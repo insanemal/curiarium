@@ -1031,6 +1031,122 @@ def test_the_zip_project_marker_names_the_door_its_key_and_its_groups(
     assert mixed_marker["cover"]["group"] is None, "the root-level preview belongs to no group"
 
 
+def test_a_cover_filename_shared_by_two_folders_records_no_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Several matches: two folders name the cover, so the folder is a guess and None.
+
+    `_cover_group_for_entries` answers only when EXACTLY one entry's basename is
+    the cover asset's filename. Two folders holding a `preview.png` are two
+    matches, and the marker's `group` stays None even though the cover itself was
+    picked - a provenance field takes the miss, not a coin toss.
+    """
+    url = "https://www.printables.com/model/216-shared-cover"
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["PartA/preview.png", "PartB/preview.png", "PartA/bracket.stl"],
+        entries=["PartA/preview.png", "PartB/preview.png", "PartA/bracket.stl"],
+        url=url,
+        payloads={"PartA/preview.png": png_bytes(16, 16), "PartB/preview.png": png_bytes(2, 2)},
+    )
+
+    marker = json.loads(project_row(outcome.project_id).metadata_json)["_bundle"]
+    same_name = [asset for asset in outcome.assets if asset.filename == "preview.png"]
+    assert len(same_name) == 2, "the fixture must give the cover's name two homes"
+    assert marker["cover"]["reason"] == bundle_service.COVER_LARGEST_IMAGE
+    assert marker["cover"]["asset_id"] == max(same_name, key=lambda asset: asset.size).id
+    assert marker["cover"]["group"] is None, "two entries name the cover, so no folder is named"
+
+
+def test_a_cover_filename_no_selected_entry_names_records_no_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Zero matches: the asset row's filename is not the entry's basename.
+
+    `create_asset_record` renders the model name through `sanitize_path_segment`
+    and only then takes the filename, so the `:` in `prev:iew.png` re-renders to
+    `_` and no selected entry's basename equals the cover's filename. The rule
+    must answer None rather than borrow the folder of the one image present.
+    """
+    url = "https://www.printables.com/model/217-rendered-cover"
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["PartA/bracket.stl", "prev:iew.png"],
+        entries=["PartA/bracket.stl", "prev:iew.png"],
+        url=url,
+        payloads={"prev:iew.png": png_bytes(4, 4)},
+    )
+
+    marker = json.loads(project_row(outcome.project_id).metadata_json)["_bundle"]
+    cover = next(asset for asset in outcome.assets if asset.id == marker["cover"]["asset_id"])
+    assert cover.filename == "prev_iew.png", "the renderer renamed the cover, so no entry matches it"
+    assert marker["cover"]["reason"] == bundle_service.COVER_LARGEST_IMAGE
+    assert marker["cover"]["group"] is None, "no entry is named like the re-rendered cover filename"
+
+
+def test_a_selection_with_no_group_records_neither_shape_nor_groups(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`shape` is written iff there are groups: a flat selection gains neither key.
+
+    Every selected entry sits at the archive root, so `_entry_group` answers None
+    for all of them and `_marker_groups` returns []. The marker must then carry
+    no `shape` and no `groups` key at all - not `shape: null`, and not an empty
+    list a reader could mistake for "known to have none".
+    """
+    url = "https://www.printables.com/model/218-flat"
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["part-a.stl", "part-b.stl"],
+        entries=["part-a.stl", "part-b.stl"],
+        url=url,
+    )
+
+    marker = json.loads(project_row(outcome.project_id).metadata_json)["_bundle"]
+    assert marker["source"] == project_import.ZIP_PROJECT_SOURCE
+    assert "shape" not in marker
+    assert "groups" not in marker
+
+
+def test_a_flat_and_a_one_part_archive_record_rel_dir_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No honest walk root: `rel_dir` is present and None, never absent.
+
+    A flat archive puts every part at the root, so no folder spans them and the
+    `posixpath.commonpath` of their storage directories would be the empty
+    string - the honest answer is None. A one-part selection shares its directory
+    with nothing, so recording that part's own directory would move the field on
+    a re-import that extracts one new part.
+    """
+    flat_url = "https://www.printables.com/model/219-flat-root"
+    flat = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["alpha.stl", "beta.stl", "gamma.stl"],
+        entries=["alpha.stl", "beta.stl", "gamma.stl"],
+        url=flat_url,
+    )
+    flat_marker = json.loads(project_row(flat.project_id).metadata_json)["_bundle"]
+    assert "rel_dir" in flat_marker, "the key is always written"
+    assert flat_marker["rel_dir"] is None, "a flat archive has no walk root"
+
+    one_url = "https://www.printables.com/model/220-one-part"
+    one = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["Solo/only.stl"],
+        entries=["Solo/only.stl"],
+        url=one_url,
+    )
+    one_marker = json.loads(project_row(one.project_id).metadata_json)["_bundle"]
+    assert "rel_dir" in one_marker
+    assert one_marker["rel_dir"] is None, "a single part shares no directory"
+
+
 def test_a_re_import_never_clobbers_a_human_cover_or_a_detection_marker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

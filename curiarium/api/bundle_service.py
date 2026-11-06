@@ -1455,8 +1455,8 @@ def registered_index(session: Session) -> List[Tuple[str, str, int]]:
 
     Built ONCE per report beside the membership index, because drift is answered
     from these two lists by string prefix and dictionary lookup. Reading the set
-    per row would be one statement per candidate - the owner's library is 91
-    projects, so that is the difference between one query and ninety-one.
+    per row would be one statement per candidate, so this is the difference
+    between one query whatever the candidate count and one per candidate.
 
     Only rows with a ``storage_path`` are indexed: a row with no location is not
     a file under any bundle's root, the same refusal ``registered_assets`` makes.

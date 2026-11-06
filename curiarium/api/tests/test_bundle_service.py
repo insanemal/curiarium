@@ -6581,8 +6581,7 @@ def test_service_the_drift_index_is_one_statement_per_report(
     which is measured here so the index's own cost stays pinned.
 
     Mutation: call ``registered_assets`` per row to answer drift and the index
-    count becomes one per candidate (2, then 5), which on the owner's 91-project
-    library is 91 queries.
+    count becomes one per candidate (2, then 5).
     """
     for index in range(2):
         thingiverse_bundle(isolated_storage, f"Two {index}", 1000 + index)

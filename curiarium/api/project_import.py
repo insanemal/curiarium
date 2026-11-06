@@ -168,9 +168,9 @@ def _marker_groups(entries: Sequence[str], failed: Sequence[str]) -> List[dict]:
     its attach set. The caller has already filtered the selection to non-junk
     entries, so every entry here is one the extractor was asked to write; an
     entry is in `failed` exactly when the extractor wrote no row for it (an absent
-    member, an oversize member, a directory member, a name conflict, an oversize
-    budget - every path in `zip_service.extract_zip_entries_to_assets` that
-    creates no asset appends there). Counting a group's non-refused model entries
+    member, an oversize member, a directory member, a name conflict - every path in
+    `zip_service.extract_zip_entries_to_assets` that creates no asset appends
+    there). Counting a group's non-refused model entries
     is therefore the count of its extracted MODEL rows without a basename join
     that two folders could confuse. `foreign` and `included` are constants here:
     this door has no foreign-group vocabulary and never excludes.
@@ -211,7 +211,7 @@ def _shared_rel_dir(entries: Sequence[str], assets: Sequence[Asset]) -> Optional
     like drift. A one-part selection records None too, because a single part shares
     a directory with nothing and its own model directory is not a root anything
     spans - recording it would move this field on a re-import that extracts one
-    new part. Two of the four measured zips answer None; that is the truth about
+    new part. Three of the four measured zips answer None; that is the truth about
     them, not a gap.
     """
     roots = {_entry_group(entry) for entry in entries}
