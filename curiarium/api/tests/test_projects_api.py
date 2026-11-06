@@ -1431,3 +1431,58 @@ def test_a_zip_identity_marker_reports_unknown_rather_than_zero() -> None:
         # `unknown` must cost the same as `not_applicable`: the identity key is
         # never prefix-queried, so there is no third statement to run.
         assert statements_for(lambda: bundle_drift(client, headers, project["id"])) == 2
+
+
+def test_a_renamed_bundle_folder_reports_unknown_rather_than_a_false_zero(isolated_storage: Path) -> None:
+    """A folder renamed after creation leaves the marker's ``rel_dir`` stale.
+
+    ``rel_dir`` is a creation-time path that nothing rewrites when the folder is
+    renamed. End to end: two parts are registered under ``import/Alpha`` and
+    held by a fresh project whose marker names that root, so the read is
+    ``known``/0; ``PATCH /folder/{id}`` renames the folder to ``AlphaTwo`` (the
+    folder service rewrites every ``Asset.storage_path`` under it) and a rescan
+    finds the parts at the new path. The old prefix is now a directory nothing is
+    registered under, so a zero there would be a claim the server cannot support:
+    the route answers ``unknown``/``null``, the new path holds the parts and the
+    old one holds none.
+
+    Mutation: drop the presence probe and a renamed folder answers ``known``/0
+    forever. The cost of a stale root is the same three statements ``known``
+    runs - the one prefix SELECT answers presence too - while ``unknown`` with no
+    root stays 2 (`test_a_zip_identity_marker_reports_unknown_rather_than_zero`
+    pins that half).
+    """
+    with TestClient(main.app) as client:
+        headers = auth_header(client)
+        folder = isolated_storage / "import" / "Alpha"
+        write_file(folder / "part-a.stl")
+        write_file(folder / "part-b.stl")
+        scan()
+        project = create_project(client, headers, unique("Renamed bundle"))
+        members = [registered_asset_id("import/Alpha/part-a.stl"), registered_asset_id("import/Alpha/part-b.stl")]
+        add_members(client, headers, project["id"], members)
+        set_bundle_marker(project["id"], {"key": "import/Alpha", "rel_dir": "import/Alpha"})
+
+        assert bundle_drift(client, headers, project["id"]) == {"state": "known", "count": 0, "asset_ids": []}
+
+        with Session(engine) as session:
+            folder_row = session.exec(select(Folder).where(Folder.storage_path == "import/Alpha")).one()
+        # `FolderIn.parent_id` defaults to None and `move_folder` reparents on it,
+        # so the rename sends the row's own parent (as the folder panel does) to
+        # keep the folder under `import/`.
+        renamed = client.patch(
+            f"/folder/{folder_row.id}",
+            json={"name": "AlphaTwo", "parent_id": folder_row.parent_id},
+            headers=headers,
+        )
+        assert renamed.status_code == 200, renamed.text
+        scan()
+
+        stale = bundle_drift(client, headers, project["id"])
+
+        assert stale == {"state": "unknown", "count": None, "asset_ids": []}
+        assert registered_rows_under("import/AlphaTwo/"), "the parts moved with the folder"
+        assert registered_rows_under("import/Alpha/") == [], "nothing is registered under the old prefix"
+        # The stale root costs the same three statements `known` does: the one
+        # prefix SELECT is what the presence probe reads.
+        assert statements_for(lambda: bundle_drift(client, headers, project["id"])) == 3

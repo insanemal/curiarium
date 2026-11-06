@@ -5811,9 +5811,15 @@ def test_a_hand_made_project_over_the_mount_files_reports_already_created_by_ass
 ) -> None:
     """Asset containment is an identity even with no marker, no source and another name.
 
+    A project proved by shared files proves the FILES, not the intent, so there
+    is no marker folder to difference against and the row reports
+    ``not_applicable`` with a null count - which is not ``0``: the server never
+    measured a folder it has no record of.
+
     Mutation: drop the assets leg of `find_existing_project` for the re-offered
     row (or hand the row only the compound's containment) and this project is
-    reported as creatable, so a create would make a duplicate.
+    reported as creatable, so a create would make a duplicate. Map the
+    asset-matched row to ``known``/0 and the not_applicable assertion reds.
     """
     write_xbox360(isolated_storage)
     insert_folder_row(XBOX, f"import/{XBOX}")
@@ -5829,6 +5835,8 @@ def test_a_hand_made_project_over_the_mount_files_reports_already_created_by_ass
 
     assert row["existing_project_id"] == hand_made.id
     assert row["existing_project_match"] == "assets"
+    assert row["bundle_drift_state"] == "not_applicable"
+    assert row["bundle_drift_count"] is None
     assert table_counts()["projects"] == 2
 
 
@@ -6567,6 +6575,54 @@ def test_service_an_excluded_group_is_not_drift(
     drift = project_drift_out(client, headers, project_id)
     assert drift == {"state": "known", "count": 0, "asset_ids": []}
     assert not any(path.startswith(excluded_prefix) for path in project_storage_paths(project_id))
+
+
+def test_service_a_stale_walk_root_reports_unknown_rather_than_a_zero(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-2 on the QUEUE: a root no registered row lives under is `unknown`, not 0.
+
+    The route pins the real rename; this pins the queue's own wiring, which is the
+    half `bundle_service` owns: the row answers drift from ONE report-wide index,
+    so its presence probe is `bundle_drift.has_rows_under(registered, root)` and
+    adds no statement. The reachable queue shape is a root that still walks as a
+    candidate with no registered row under it - its registered rows deleted, or a
+    folder copied in ahead of the rescan. The app's own rename does not reach the
+    queue: for a detection marker it moves the key too, so the row matches by
+    shared files and reads `not_applicable` instead, and a zip marker's identity
+    key never equals a candidate path at all, so that row is `not_applicable` as
+    well. The fixture below is deliberately synthetic - `rel_dir` differs from
+    the marker's `key`, which no door writes - because what is under test is the
+    WIRING (marker match plus the presence answer), not a production marker.
+    What it pins is the answer: `unknown`/null, never the `known`/0 it used to
+    claim.
+
+    Mutation: always answer the probe `True` (or drop it) and this row reads
+    `known`/0 - the false zero the ticket forbids, on the surface the ticket is
+    named for.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+    with Session(engine) as session:
+        stale = project_service.create_project(session, "Stale Root", None, None, origin="imported")
+    project_service.set_project_metadata_marker(
+        stale.id, {"_bundle": {"key": f"import/{XBOX}", "rel_dir": "import/Gone"}}
+    )
+
+    row = row_for(detect(client, headers, limit=1000), f"import/{XBOX}")
+
+    assert row["existing_project_id"] == stale.id
+    assert row["existing_project_match"] == "marker", "the key still names this project"
+    assert row["bundle_drift_state"] == "unknown"
+    assert row["bundle_drift_count"] is None
+    # Measured, not asserted from prose: the presence probe reads the report-wide
+    # `registered` index this row already holds, so a whole report over this tree
+    # costs 8 statements (folders, memberships, the registered index, the
+    # compound splits, the settings reads, and this candidate's own reads). A
+    # probe that queried per candidate would be 9.
+    assert len(report_statements()) == 8
 
 
 def test_service_the_drift_index_is_one_statement_per_report(

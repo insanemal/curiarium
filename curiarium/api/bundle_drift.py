@@ -40,10 +40,23 @@ picks the state, the client formats the number):
 
 * ``not_applicable`` - no ``_bundle`` marker (a hand-made project, or malformed
   metadata): no notice, and no count at all;
-* ``known`` - a walk root exists, so ``count`` is the honest number and ``0``
-  renders as no notice, never as a rendered zero;
+* ``known`` - a walk root exists and still holds a registered row, so ``count``
+  is the honest number and ``0`` renders as no notice, never as a rendered zero;
 * ``unknown`` - the marker names no path this module may prefix-query (a
-  zip-project identity with no ``rel_dir``): the client renders an en dash.
+  zip-project identity with no ``rel_dir``), or it names a root no registered
+  row still lives under: the client renders an en dash.
+
+**A stale walk root is ``unknown``, not a zero.** ``rel_dir`` is a creation-time
+path that nothing rewrites when the folder is renamed, so a root that still
+holds no registered row is a directory the library no longer sees, and a ``0``
+there is exactly the false zero the ticket forbids: the state is ``unknown``.
+Presence is asked of REGISTERED ROWS, not of the folder table, because the route
+may not spend a statement on it. The recorded tradeoff: a bundle root whose
+registered rows were all deleted (or a folder that exists on disk with nothing
+registered under it) now answers ``unknown`` - an en dash - where it used to
+answer ``known``/0. That is the conservative direction, an en dash instead of a
+zero the server cannot support, and the smallest version that closes the rename
+hole.
 
 **An excluded group is subtracted.** A compound create with ``exclude_groups``
 leaves that group's models registered and unattached by design, so including
@@ -67,9 +80,6 @@ from models import Asset, Project, ProjectAsset
 DRIFT_NOT_APPLICABLE = "not_applicable"
 DRIFT_KNOWN = "known"
 DRIFT_UNKNOWN = "unknown"
-
-# Every state the wire may carry, in the order the docstring names them.
-DRIFT_STATES = (DRIFT_NOT_APPLICABLE, DRIFT_KNOWN, DRIFT_UNKNOWN)
 
 
 def _non_empty_string(value: object) -> Optional[str]:
@@ -103,7 +113,24 @@ def walk_root(marker: Mapping[str, object]) -> Optional[str]:
     return _non_empty_string(marker.get("key"))
 
 
-def classify(marker: object) -> Tuple[str, Optional[str]]:
+def has_rows_under(registered: Iterable[Tuple[str, str, int]], root: str) -> bool:
+    """Whether ANY registered row lives under ``root``; the presence probe.
+
+    A root nothing is registered under is a directory the library no longer
+    sees - a renamed folder leaves the marker's ``rel_dir`` pointing at a path
+    the library has moved away from - and ``0`` there is the false zero the
+    ticket forbids, so the caller answers ``unknown`` instead.
+
+    Path-boundary honest: ``import/Alpha2/x.stl`` is not under ``import/Alpha``.
+    """
+    prefix = root + "/"
+    for _asset_id, storage_path, _size in registered:
+        if isinstance(storage_path, str) and storage_path.startswith(prefix):
+            return True
+    return False
+
+
+def classify(marker: object, *, root_present: Callable[[str], bool]) -> Tuple[str, Optional[str]]:
     """``(state, walk_root)`` for one ``_bundle`` marker; the three cases, exhaustive.
 
     ``walk_root`` is ``None`` unless the state is ``known``, so a caller cannot
@@ -111,11 +138,23 @@ def classify(marker: object) -> Tuple[str, Optional[str]]:
     non-empty dict - ``{}`` for a project with no marker, a string a malformed
     metadata column produced - is ``not_applicable``: there is no question to
     answer, which is not the same answer as zero.
+
+    A walk root that exists but holds no registered row (``root_present`` says
+    ``False``) is ``unknown``, never ``known``/0: a renamed folder leaves the
+    marker's creation-time ``rel_dir`` pointing at a path nothing is registered
+    under, and a zero there would claim a measurement of a directory the library
+    no longer sees. ``root_present`` is consulted AT MOST ONCE - and only when
+    there is a root - so an identity-key marker still costs nothing.
+
+    Mutation: drop the presence check and a renamed folder answers ``known``/0
+    forever.
     """
     if not isinstance(marker, Mapping) or not marker:
         return DRIFT_NOT_APPLICABLE, None
     root = walk_root(marker)
     if root is None:
+        return DRIFT_UNKNOWN, None
+    if not root_present(root):
         return DRIFT_UNKNOWN, None
     return DRIFT_KNOWN, root
 
@@ -191,32 +230,59 @@ def project_drift(session: Session, project: Project) -> Tuple[str, Optional[int
     """``(state, count, asset ids)`` for one project: the route's one DB door.
 
     The marker is read from the project row the caller already holds, so the
-    non-``known`` states cost no statement at all. For ``known`` this asks one
-    SELECT - the assets under the walk-root prefix whose id has no membership row
-    to this project, filtered in the same statement - and applies the same
-    model/prefix/membership predicate ``drift_asset_ids`` states, so the route
-    and the report cannot answer differently. ``count`` is ``len(asset_ids)``:
-    the number and the action are the same set.
+    non-``known`` states cost no statement at all. ONE prefix SELECT answers both
+    questions ``known`` asks - whether the root still holds a registered row (the
+    presence probe ``classify`` needs) and, for each row it does hold, whether
+    this project already holds the asset (a correlated ``EXISTS`` flag) - and it
+    is run lazily from inside the presence callable, so ``not_applicable`` and
+    ``unknown`` with no root still run no prefix query. The id list is then built
+    by ``drift_asset_ids`` with that same membership flag, so the route and the
+    report cannot answer differently. ``count`` is ``len(asset_ids)``: the number
+    and the action are the same set.
+
+    The measured cost, in the suite's authenticated harness: ``known`` is 3
+    statements (the caller's auth lookup, the project row, one prefix SELECT),
+    ``not_applicable`` and ``unknown``-with-no-root are 2, and a STALE root is 3
+    and answers ``unknown`` - the same SELECT the presence probe reads.
     """
     marker = project_service.bundle_marker_of(project.metadata_json)
-    state, root = classify(marker)
+    rows: List[Tuple[str, str, int, bool]] = []
+
+    def root_present(root: str) -> bool:
+        """Run the one prefix SELECT (once) and answer the presence question."""
+        if not rows:
+            prefix = root + "/"
+            membership = (
+                select(ProjectAsset.asset_id)
+                .where(
+                    ProjectAsset.project_id == project.id,
+                    ProjectAsset.asset_id == Asset.id,
+                )
+                .exists()
+                .label("is_member")
+            )
+            statement = (
+                select(Asset.id, Asset.storage_path, Asset.size, membership)
+                .where(
+                    Asset.storage_path.is_not(None),
+                    func.substr(Asset.storage_path, 1, len(prefix)) == prefix,
+                )
+                .order_by(Asset.storage_path, Asset.id)
+            )
+            rows.extend(
+                (row[0], row[1], int(row[2] or 0), bool(row[3])) for row in session.exec(statement)
+            )
+        return bool(rows)
+
+    state, root = classify(marker, root_present=root_present)
     if state != DRIFT_KNOWN or root is None:
         return state, None, []
-    prefix = root + "/"
-    members = select(ProjectAsset.asset_id).where(ProjectAsset.project_id == project.id)
-    statement = (
-        select(Asset.id, Asset.storage_path, Asset.size)
-        .where(
-            Asset.storage_path.is_not(None),
-            func.substr(Asset.storage_path, 1, len(prefix)) == prefix,
-            Asset.id.not_in(members),
-        )
-        .order_by(Asset.storage_path, Asset.id)
-    )
-    rows = [(row[0], row[1], int(row[2] or 0)) for row in session.exec(statement)]
+    registered = [(asset_id, storage_path, size) for asset_id, storage_path, size, _member in rows]
+    members = {asset_id for asset_id, _storage_path, _size, is_member in rows if is_member}
     asset_ids = drift_asset_ids(
-        rows,
+        registered,
         root=root,
         prefixes=excluded_prefixes(root, marker),
+        is_member=members.__contains__,
     )
     return DRIFT_KNOWN, len(asset_ids), asset_ids

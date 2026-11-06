@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRef, useState, type ComponentProps } from "react";
 
 import type { Asset, Project } from "../lib/api";
@@ -70,7 +70,7 @@ import {
   uploadAssetFile,
 } from "../lib/api";
 import { saveResponseToDisk } from "../lib/download";
-import { getProjectBundleDrift } from "../lib/api/projects";
+import { getProjectBundleDrift, type ProjectBundleDrift } from "../lib/api/projects";
 import { getToasts, resetToasts } from "../lib/toast";
 
 const addProjectAssetsMock = vi.mocked(addProjectAssets);
@@ -1152,5 +1152,67 @@ describe("ProjectLanding bundle drift", () => {
     expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
     // The fact stays readable; the write does not exist for this role.
     expect(screen.queryByRole("button", { name: "Add them" })).toBeNull();
+  });
+
+  it("keeps a failed drift read as the en dash and toasts nothing", async () => {
+    // A failed read is a prompt the operator cannot act on, not an error: the
+    // project still renders normally and the line falls back to `unknown`, so
+    // the client shows the one formatter's en dash - never a zero it did not
+    // measure - and raises no toast and no alert. The dash is ALSO the
+    // pre-response state, so the read has to be proven asked and settled before
+    // any of this means anything: a failure that painted `known`/0 would
+    // otherwise pass on the idle render.
+    getProjectBundleDriftMock.mockRejectedValueOnce(new Error("network down"));
+    renderLanding({ project: makeProject({ metadata_json: { _bundle: BUNDLE_MARKER } }) });
+
+    await waitFor(() => expect(getProjectBundleDriftMock).toHaveBeenCalledWith("p1"));
+    await act(async () => {});
+
+    const line = await screen.findByText("\u2013 parts in this folder are not in the project");
+    expect(line.isConnected).toBe(true);
+    expect(screen.queryByText(/^0 parts/)).toBeNull();
+    expect(line.textContent).not.toContain("0");
+    expect(screen.getByRole("heading", { level: 1, name: "Hydra" })).toBeTruthy();
+    expect(getToasts()).toEqual([]);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("drops a late answer for a project that is no longer open", async () => {
+    // The effect's cleanup sets `cancelled`, so a read that resolves after the
+    // open project changed says nothing. A plain unmount is not observable here
+    // (React 18 makes a late setState on an unmounted tree a no-op on its own),
+    // so the discriminating case is a real project SWITCH: the first project's
+    // late answer must not overwrite the answer for the project now on screen.
+    let resolveFirst: (answer: ProjectBundleDrift) => void = () => {};
+    getProjectBundleDriftMock.mockImplementationOnce(
+      () =>
+        new Promise<ProjectBundleDrift>(resolve => {
+          resolveFirst = resolve;
+        }),
+    );
+    getProjectBundleDriftMock.mockResolvedValueOnce({ state: "known", count: 3, asset_ids: ["a", "b", "c"] });
+    const view = renderLanding({
+      project: makeProject({ id: "p1", metadata_json: { _bundle: BUNDLE_MARKER } }),
+    });
+    await waitFor(() => expect(getProjectBundleDriftMock).toHaveBeenCalledWith("p1"));
+
+    view.rerender(
+      <ProjectLanding
+        {...landingProps({
+          project: makeProject({ id: "p2", name: "Kraken", metadata_json: { _bundle: BUNDLE_MARKER } }),
+        })}
+      />,
+    );
+
+    expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
+
+    await act(async () => {
+      resolveFirst({ state: "known", count: 5, asset_ids: ["v", "w", "x", "y", "z"] });
+    });
+
+    // The stale answer painted nothing: the notice still carries p2's count.
+    expect(screen.getByText("3 parts in this folder are not in the project")).toBeTruthy();
+    expect(screen.queryByText(/^5 parts/)).toBeNull();
+    expect(getToasts()).toEqual([]);
   });
 });

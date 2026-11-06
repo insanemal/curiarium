@@ -32,7 +32,10 @@ def test_walk_root_reads_each_marker_shape() -> None:
     with a root that matches nothing - the false zero the ticket forbids.
     """
     detection = marker(key="import/Alpha", rel_dir="import/Alpha", source=None)
-    assert bundle_drift.classify(detection) == (bundle_drift.DRIFT_KNOWN, "import/Alpha")
+    assert bundle_drift.classify(detection, root_present=lambda _root: True) == (
+        bundle_drift.DRIFT_KNOWN,
+        "import/Alpha",
+    )
 
     detection_without_rel_dir = marker(key="import/Beta", source=None)
     assert bundle_drift.walk_root(detection_without_rel_dir) == "import/Beta", "the detection key IS a path"
@@ -40,38 +43,100 @@ def test_walk_root_reads_each_marker_shape() -> None:
     zip_with_rel_dir = marker(
         key="zip-project:https://x/y", source="zip-project-import", rel_dir="import/Thing"
     )
-    assert bundle_drift.classify(zip_with_rel_dir) == (bundle_drift.DRIFT_KNOWN, "import/Thing")
+    assert bundle_drift.classify(zip_with_rel_dir, root_present=lambda _root: True) == (
+        bundle_drift.DRIFT_KNOWN,
+        "import/Thing",
+    )
 
     zip_without_rel_dir = marker(
         key="zip-project:https://x/y", source="zip-project-import", rel_dir=None
     )
-    state, root = bundle_drift.classify(zip_without_rel_dir)
+    asked: List[str] = []
+    state, root = bundle_drift.classify(
+        zip_without_rel_dir, root_present=lambda root: asked.append(root) or True
+    )
 
     assert (state, root) == (bundle_drift.DRIFT_UNKNOWN, None)
     assert root != zip_without_rel_dir["key"], "the identity key is never a walk root"
+    assert asked == [], "no root means presence is never asked"
 
 
 def test_classify_is_exhaustive_over_the_three_states() -> None:
-    """No marker, a root, and an identity with no path: one state each, nothing unmapped.
+    """No marker, a live root, a stale root and an identity with no path: one state each.
 
     ``{}`` is a hand-made project or a malformed metadata column - there is no
     question, which is not the same answer as zero. A non-dict (a string or a
-    list where the ``_bundle`` object should be) is malformed the same way.
+    list where the ``_bundle`` object should be) is malformed the same way. A
+    root that still holds a registered row is ``known``; a root nothing is
+    registered under (a renamed folder) is ``unknown``.
 
     Mutation: map the no-marker case to ``known``/0 and the not_applicable
     assertion reds, and the client would render no notice but the server would be
     claiming to have measured something it never looked at.
     """
-    assert bundle_drift.classify({}) == (bundle_drift.DRIFT_NOT_APPLICABLE, None)
-    assert bundle_drift.classify(marker(key="import/Alpha", rel_dir="import/Alpha")) == (
+    assert bundle_drift.classify({}, root_present=lambda _root: True) == (bundle_drift.DRIFT_NOT_APPLICABLE, None)
+    assert bundle_drift.classify(
+        marker(key="import/Alpha", rel_dir="import/Alpha"), root_present=lambda _root: True
+    ) == (
         bundle_drift.DRIFT_KNOWN,
         "import/Alpha",
     )
     assert bundle_drift.classify(
-        marker(key="zip-project:https://x/y", source="zip-project-import", rel_dir=None)
+        marker(key="import/Alpha", rel_dir="import/Alpha"), root_present=lambda _root: False
+    ) == (bundle_drift.DRIFT_UNKNOWN, None)
+    assert bundle_drift.classify(
+        marker(key="zip-project:https://x/y", source="zip-project-import", rel_dir=None),
+        root_present=lambda _root: False,
     ) == (bundle_drift.DRIFT_UNKNOWN, None)
     for malformed in ("not a marker", ["groups"], 7, None):
-        assert bundle_drift.classify(malformed) == (bundle_drift.DRIFT_NOT_APPLICABLE, None)
+        assert bundle_drift.classify(malformed, root_present=lambda _root: True) == (
+            bundle_drift.DRIFT_NOT_APPLICABLE,
+            None,
+        )
+
+
+def test_a_marker_whose_root_holds_no_registered_row_answers_unknown() -> None:
+    """A renamed folder leaves the marker's ``rel_dir`` pointing at nothing registered.
+
+    Presence is asked exactly once, of the walk root, and the answer decides the
+    state: ``True`` is the honest ``known``, ``False`` is ``unknown`` with a
+    ``None`` root so no caller prefix-queries a directory the library no longer
+    sees.
+
+    Mutation: drop the presence check and a renamed folder answers ``known``/0
+    forever - the false zero the ticket forbids.
+    """
+    stale = marker(key="import/RenAlpha", rel_dir="import/RenAlpha")
+    asked: List[str] = []
+
+    def absent(root: str) -> bool:
+        asked.append(root)
+        return False
+
+    assert bundle_drift.classify(stale, root_present=absent) == (bundle_drift.DRIFT_UNKNOWN, None)
+    assert asked == ["import/RenAlpha"], "the probe is asked once, of the walk root"
+
+
+def test_has_rows_under_respects_the_path_boundary() -> None:
+    """Presence is a path-prefix question, not a string-prefix one.
+
+    A sibling directory whose name merely starts with the root's - ``import/Alpha2``
+    for ``import/Alpha`` - is NOT under the root, or a rename to a name sharing
+    the old prefix would keep a stale root reading ``known``. An empty or
+    missing ``storage_path`` is never under any root.
+
+    Mutation: test ``startswith(root)`` without the boundary and the ``Alpha2``
+    row makes the stale root answer ``known`` with a zero it cannot support.
+    """
+    rows: List[Tuple[str, object, int]] = [
+        ("sibling", "import/Alpha2/x.stl", 40),
+        ("blank", "", 40),
+        ("empty", None, 40),
+    ]
+
+    assert bundle_drift.has_rows_under(rows, "import/Alpha") is False
+    assert bundle_drift.has_rows_under([], "import/Alpha") is False
+    assert bundle_drift.has_rows_under(rows + [("under", "import/Alpha/part.stl", 40)], "import/Alpha") is True
 
 
 def test_excluded_prefixes_subtract_an_included_false_group() -> None:

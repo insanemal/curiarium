@@ -2038,14 +2038,20 @@ def _report_row(
     # was made from this bundle, so its marker is the walk root to difference
     # against. A project found by shared files (``assets``) or one a human typed
     # in proves the files, not the intent, so it reports no question at all -
-    # never a zero. Both indexes were built once for the whole report, so this
-    # row costs no statement; the count and the ids cannot disagree because the
-    # count IS the ids' length.
+    # never a zero. A stale walk root is ``unknown`` for the same reason an
+    # identity key is: the marker's creation-time ``rel_dir`` can outlive the
+    # folder, and a zero over a root nothing is registered under is a claim the
+    # state cannot support. Presence is asked of the report-wide ``registered``
+    # rows the report already holds, so the probe adds no statement; both indexes
+    # were built once for the whole report, so this row costs none; the count and
+    # the ids cannot disagree because the count IS the ids' length.
     drift_state = bundle_drift.DRIFT_NOT_APPLICABLE
     drift_count: Optional[int] = None
     if existing is not None and existing.match == MATCH_MARKER:
         marker = _bundle_marker(existing.project.metadata_json)
-        drift_state, drift_root = bundle_drift.classify(marker)
+        drift_state, drift_root = bundle_drift.classify(
+            marker, root_present=lambda root: bundle_drift.has_rows_under(registered, root)
+        )
         if drift_root is not None:
             owner = existing.project.id
             asset_ids = bundle_drift.drift_asset_ids(

@@ -2189,12 +2189,15 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     same harness (the one added statement is the report-wide index, constant in
     the number of candidates), `GET /projects` stayed at 2, and the new route
     runs 3 in the suite's authenticated harness - the caller's auth lookup, the
-    project row, and one prefix SELECT. That is the project row's pair plus one
-    query when the state is `known`, and the pair alone otherwise, so
-    `not_applicable` and `unknown` run no prefix query at all: pinned by
+    project row, and one prefix SELECT that also carries the membership flag.
+    That is the project row's pair plus one query when the state is `known`, the
+    pair alone for `not_applicable` and for `unknown` with no root (no prefix
+    query at all), and the same 3 for a STALE root that answers `unknown` - the
+    presence probe reads that one SELECT. Pinned by
     `test_a_grown_bundle_folder_reports_the_parts_that_are_not_in_the_project`,
-    `test_a_hand_made_project_reports_no_drift_question` and
-    `test_a_zip_identity_marker_reports_unknown_rather_than_zero`.
+    `test_a_hand_made_project_reports_no_drift_question`,
+    `test_a_zip_identity_marker_reports_unknown_rather_than_zero` and
+    `test_a_renamed_bundle_folder_reports_unknown_rather_than_a_false_zero`.
 
     **Three states, exhaustive, because count honesty has two owners.**
     `not_applicable` (no `_bundle` marker - a hand-made project or malformed
@@ -2202,9 +2205,25 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `0` renders NO notice at all, never a rendered zero, and `N > 0` renders one
     notice and one bulk add whose argument is the count's own evidence
     (`count == len(asset_ids)`). `unknown` (a marker that names no path this
-    server may query) renders an en dash U+2013. The server picks the state and
+    server may query, or names a root no registered row lives under) renders an
+    en dash U+2013. The server picks the state and
     never formats a number; the client formats, with the one shared formatter
     (ADR 0011's en dash rule).
+
+    **`known` also requires a walk root that still holds a registered row.** A
+    renamed folder leaves the marker's creation-time `rel_dir` pointing at a
+    path no registered row lives under, and a `0` there is exactly the false zero
+    the ticket forbids, so a stale root answers `unknown` (an en dash) instead.
+    The probe is free on the queue - it reads the report-wide registered list
+    the row already holds - and on the route it is part of the existing prefix
+    SELECT, not a query of its own. The tradeoff, stated honestly: presence is
+    asked of REGISTERED ROWS - any row counts, so a root holding only a
+    `cover.jpg` still reads `known`/0 - not of the folder table, because the
+    route may not spend a statement on it, so a bundle root whose registered
+    rows were all deleted (or a folder that exists on disk with no registered
+    row under it) now answers `unknown` where it used to answer `known`/0 - the
+    conservative direction, an en dash instead of a zero the server cannot
+    support.
 
     **The walk root has two key spaces, and the identity key is never
     prefix-queried.** `walk_root(marker)` is `rel_dir` when it names a
@@ -3143,21 +3162,31 @@ unchanged.
   `test_walk_root_reads_each_marker_shape` (the detection key, the zip
   `rel_dir`, and the identity key with no `rel_dir` answering `unknown` - never
   prefix-queried), `test_classify_is_exhaustive_over_the_three_states` (`{}` and
-  a malformed marker are `not_applicable`, never zero),
+  a malformed marker are `not_applicable`, never zero; a root that holds a row
+  is `known` and one that holds none is `unknown`),
   `test_excluded_prefixes_subtract_an_included_false_group` (only an explicit
   `included: False`, de-duplicated in marker order),
   `test_drift_is_model_scoped_so_support_files_are_never_drift` (the fake set
-  against the naive over-count it replaces) and
+  against the naive over-count it replaces),
   `test_the_asset_ids_are_ordered_by_path_not_row_order` (shuffled input, one
-  ordered answer). The two surfaces are pinned against the database:
+  ordered answer),
+  `test_a_marker_whose_root_holds_no_registered_row_answers_unknown` (a renamed
+  folder's stale `rel_dir` is `unknown`, and the probe is asked once, of the walk
+  root) and `test_has_rows_under_respects_the_path_boundary` (a sibling
+  `import/Alpha2` never counts for `import/Alpha`, and an empty or missing path
+  counts for no root). The two surfaces are pinned against the database:
   `test_a_grown_bundle_folder_reports_the_parts_that_are_not_in_the_project`
   (AC-1: `known`/1 naming the new id, adding exactly it clears to `known`/0, and
   the route measures three statements including the caller's session lookup),
   `test_a_fresh_bundle_project_has_nothing_to_report` (AC-4: the compound shape
   answers `known`/0 while the naive difference reads 8 == the model count),
   `test_a_hand_made_project_reports_no_drift_question` (AC-6:
-  `not_applicable`/`null`) and
-  `test_a_zip_identity_marker_reports_unknown_rather_than_zero` (AC-2); and on
+  `not_applicable`/`null`),
+  `test_a_zip_identity_marker_reports_unknown_rather_than_zero` (AC-2) and
+  `test_a_renamed_bundle_folder_reports_unknown_rather_than_a_false_zero` (a
+  folder renamed after creation leaves the marker's root stale, so the route
+  answers `unknown`/`null` for the same three statements `known` costs, while
+  the new path holds the parts and the old one holds none); and on
   the queue `test_service_a_grown_bundle_row_reports_the_new_parts` (AC-3/AC-7:
   still a marker match with the same `existing_project_id`, `known`/1, then
   `known`/0 after the add, with the second create still
@@ -3165,10 +3194,21 @@ unchanged.
   `test_service_a_fresh_bundle_project_reports_no_new_parts` (AC-4 on both
   surfaces), `test_service_an_excluded_group_is_not_drift` (AC-5: the excluded
   group's four models stay registered and unattached, `known`/0, and no offered
-  id sits under its prefix) and
+  id sits under its prefix),
   `test_service_the_drift_index_is_one_statement_per_report` (AC-8: one
   registered-index statement for two candidates and for five, with the report's
-  total statement count pinned). `test_the_report_model_declares_every_key_the_service_computes`
+  total statement count pinned),
+  `test_service_a_stale_walk_root_reports_unknown_rather_than_a_zero` (the
+  queue's half of the stale root: a marker-matched row whose root holds no
+  registered row answers `unknown`/`null`, and the whole report stays at eight
+  statements - a probe issuing its own SELECT per candidate would be nine) and
+  `test_a_hand_made_project_over_the_mount_files_reports_already_created_by_assets`
+  (an asset-matched row is `not_applicable`/`null`, never `0`: a project proved
+  by shared files has no marker folder to difference against). On the client
+  `ProjectLanding.test.tsx`'s `ProjectLanding bundle drift` cases pin that a
+  failed read stays the en dash and toasts nothing, and that a late answer for a
+  project that is no longer open is dropped rather than painted.
+  `test_the_report_model_declares_every_key_the_service_computes`
   names the two declared drift keys so the response model cannot silently drop
   them, and the permission/OpenAPI ledgers are pinned by
   `test_the_matrix_is_the_documented_size` (102 routes, 37 read) and
@@ -3299,4 +3339,8 @@ This ADR is superseded if any of the following becomes true:
   recording a cover or a `_bundle` marker.
 - the drift stops subtracting project membership, or stops being model-scoped,
   or the identity key starts being prefix-queried, or a fresh bundle project
-  starts reporting drift (Decision 27).
+  starts reporting drift (Decision 27);
+- a stale walk root starts answering `known`/0 again, or the presence probe
+  starts reading a stored fact (a count, a cached path) instead of the
+  registered rows a read already holds; equally if it starts costing a query per
+  candidate on the report.
