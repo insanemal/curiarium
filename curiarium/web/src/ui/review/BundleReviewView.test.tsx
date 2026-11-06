@@ -2547,3 +2547,54 @@ describe("BundleReviewView extract and create", () => {
     expect(screen.getByRole("button", { name: "Extract selected archives (1)" })).toBeTruthy();
   });
 });
+
+describe("BundleReviewView new parts on an already-created row", () => {
+  const projectId = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
+
+  /** A created row is hidden until Show created is on, so the harness starts
+   *  there: the sentence lives in the detail panel of a row a reader opened. */
+  function renderCreated(overrides: Partial<BundleDetectItem>) {
+    const row = makeBundle({
+      key: "Moai_created",
+      title: "Moai created",
+      existing_project_id: projectId,
+      existing_project_name: "Moai statue",
+      ...overrides,
+    });
+    render(<VisibilityHarness initial={makeState({ report: makeReport([row]), showCreated: true })} />);
+    return row;
+  }
+
+  /** The sentence's own span, found by its attribute: it sits beside the
+   *  created line rather than replacing any pinned string. */
+  function newPartsSpan(): HTMLElement | null {
+    return document.querySelector("[data-bundle-new-parts]");
+  }
+
+  it("reports the new parts beside the unchanged created line, with no create", () => {
+    renderCreated({ bundle_drift_state: "known", bundle_drift_count: 3 });
+
+    expect(newPartsSpan()?.textContent).toBe("3 new parts since this was created");
+    // The existing sentence is untouched and still present: this is a second
+    // fact about the same row, not a replacement.
+    expect(within(detail()).getByText("Already created as project Moai statue")).toBeTruthy();
+    // A second project for one folder is exactly what the marker prevents.
+    expect(within(detail()).queryByRole("button", { name: "Create project" })).toBeNull();
+    expect(within(detail()).queryByLabelText("Name for Moai created")).toBeNull();
+  });
+
+  it("stays quiet when the folder has not grown", () => {
+    renderCreated({ bundle_drift_state: "known", bundle_drift_count: 0 });
+
+    expect(newPartsSpan()).toBeNull();
+    expect(within(detail()).queryByText(/new parts since this was created/)).toBeNull();
+  });
+
+  it("renders an en dash when the server cannot tell, never a zero", () => {
+    renderCreated({ bundle_drift_state: "unknown", bundle_drift_count: null });
+
+    // U+2013, and the sentence counts nothing rather than claiming a zero.
+    expect(newPartsSpan()?.textContent).toBe("\u2013 new parts since this was created");
+    expect(newPartsSpan()?.textContent).not.toContain("0");
+  });
+});

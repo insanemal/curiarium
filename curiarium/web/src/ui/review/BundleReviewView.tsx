@@ -50,6 +50,7 @@ import {
   isCreatable,
   matchesFilter,
   matchesVisibility,
+  newPartsLine,
   rowBucket,
   rowStateChip,
   statusLine,
@@ -400,6 +401,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const activeExcluded = activeRow === null ? [] : excludedGroups[activeRow.key] ?? [];
   const activeArchive = activeRow === null ? null : archiveLine(activeRow);
   const activeCreatedLine = activeRow === null ? null : createdProjectLine(activeRow);
+  const activeNewPartsLine = activeRow === null ? null : newPartsLine(activeRow);
   const activeEnrichmentLine = activeRow === null ? null : enrichmentLine(activeRow);
   const activeEnrichLabel = activeRow === null ? null : enrichActionLabel(activeRow);
   const activeEnrichReason = activeRow === null ? null : enrichUnavailableLine(activeRow);
@@ -1013,6 +1015,9 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                     <span className="review-detail-excerpt">{activeRow.description_excerpt}</span>
                   )}
                   {activeCreatedLine && <span>{activeCreatedLine}</span>}
+                  {activeNewPartsLine && (
+                    <span data-bundle-new-parts="true">{activeNewPartsLine}</span>
+                  )}
                 </div>
                 {/* The compound row's breakdown. Only a row with groups renders
                     it, so every other pane is exactly as it was; the checkboxes

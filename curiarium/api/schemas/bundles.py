@@ -126,6 +126,15 @@ class BundleDetectItemOut(BaseModel):
   # the project from this bundle, a source URL is strong, a name is a guess, and
   # asset containment proves the FILES are the same but nothing about intent.
   existing_project_match: Optional[str] = None
+  # Drift on an already-created row (Mf-8i04): `not_applicable` | `known` |
+  # `unknown`, and the honest count only when `known`. Defaulted, so every row
+  # that is not marker-matched says nothing extra and every pre-existing payload
+  # still validates. Declared HERE or the response model silently drops both -
+  # the same trap `rule_set` and `refused` fell into. The server never formats a
+  # number and the state is its word for which of the three cases it is: the
+  # client renders `known`-0 as no notice at all and `unknown` as an en dash.
+  bundle_drift_state: str = "not_applicable"
+  bundle_drift_count: Optional[int] = None
   dismissed: bool = False
   # A None means nothing on this row came from a page. Declared HERE or the
   # response model silently drops it - the way `rule_set` and `refused` were
