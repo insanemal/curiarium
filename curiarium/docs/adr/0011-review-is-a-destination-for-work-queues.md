@@ -362,6 +362,83 @@ destination model, the count rule, the role threshold and the fetch policy.
     refuses the purge, so focus stays inside the dialog instead of landing on a
     disabled button.
 
+17. **A zip-only row gets one action, and it is a client-side sequence with the
+    server as the judge.** The row's one action lists the archive, extracts it,
+    waits for the library scan to register the files, and then creates one
+    project - four named phases, each said to the operator while it runs. It is
+    client-side on purpose. Extraction plus an asynchronous scan is inherently
+    two steps: `archive_service` ends with `scan_started =
+    bool(seams.start_scan())` and `library_scan.start_scan()` only starts a
+    daemon thread and returns at once, so the extracted files are invisible to
+    the bundle report until the walk registers them. A single server call that
+    claimed atomicity while scanning asynchronously would be a lie, and the
+    operator waiting on it would have no way to tell a slow scan from a hung
+    request. The honesty lives in a React-free, dependency-injected state machine,
+    `ui/review/extractAndCreate.ts`, so every branch is unit-testable with fakes;
+    the view only supplies the real deps and paints the sentences.
+
+    The predicate and the words live in `ui/review/bundleRows.ts`, not inline in
+    the component: `canExtractAndCreate` is the one rule that decides who gets
+    the door, and `EXTRACT_AND_CREATE_LABEL`, `EXTRACT_AND_CREATE_HINT` and
+    `archiveExtractTitle` are its sentences. `useBundleDetect` gained
+    `createReporting`, which refetches and then returns the server's answer,
+    while the existing `create` is untouched, so every bulk door is unchanged.
+    The hint says plain Extract's shortfall exactly: plain Extract runs the same
+    extraction and the same settle wait, and only stops before the project.
+    The action mounts in the detail panel beside the untouched
+    `ArchiveExtractAction` (decision 3: a selected item's row actions live in the
+    detail panel), and nothing focusable enters the listbox option, so Space stays
+    bulk selection and Enter stays plain Extract's door. The narration lives in
+    the queue's notices slot rather than in the aside, because a successful
+    create hides its own row by default (`showCreated` off) and a one-way write
+    must leave a sentence behind.
+
+    Four server facts shape what the client will and will not claim.
+    `POST /import/archive` reports no per-entry failures: `ArchiveExtractOut`
+    carries only `path`, `destination`, `files`, `bytes`, `already_present` and
+    `scan_started` (`curiarium/api/schemas/imports.py:76-92`). So "a partially
+    failed extraction" can only be answered honestly as "0 of M entries were
+    written" - M from the pre-extract listing - plus the server's own message. A
+    per-entry failure report would be a contract change to that schema and to
+    `entry_policy`, and is a separate ticket; no count is ever invented that the
+    response does not carry. The extract is all-or-nothing, so that zero is the
+    truth and nothing was left half-written: the junk-only no-op returns
+    `files=0, already_present=False` before any write
+    (`archive_service.py:125-138`), the every-destination-exists no-op returns
+    `files=0, already_present=True` (`:141-151`), `_refuse_occupied` refuses a
+    partial collision at 409 *before* staging (`:153`, `:369-385`), and a
+    mid-publish failure unlinks this request's own publications newest-first and
+    re-raises (`:199-208`). The settle does not distinguish a failed scan from a
+    clean one: `SettleOutcome` is only `settled | timeout | cancelled`
+    (`curiarium/web/src/lib/scanSettle.ts:42`). So after a clean settle the create
+    response is the only readiness authority - a still-blocked row answers
+    `CREATE_BLOCKED` with the row's own `blocked_reason`
+    (`curiarium/api/bundle_service.py:2328-2329`, with `NOT_SCANNED =
+    "not_scanned"` at `:203`), worded through the existing
+    `BLOCKED_REASON_LABELS` table and never inferred client-side from the
+    refetched report, which would also race a stale one. One reason is the
+    exception: `archive_only` is what this run just acted on, so its own sentence
+    replaces the table's instruction to re-extract and names the pairing the scan
+    still has not made instead. The `still-blocked` outcome carries `wrote` -
+    `extracted.files > 0` - because the `already_present` route creates without
+    writing a byte, and the sentence states which of the two happened. Exactly
+    one item is sent and the server echoes its key (`bundle_service.py:2325`), so
+    a response whose `results` do not name this row is a failure and never
+    another row's verdict. And idempotence is the
+    server's: `find_existing_project` answers `CREATE_SKIPPED`/`already_created`
+    with the existing project's id and name (`bundle_service.py:2402-2416`), so a
+    second invocation reports already-created and never makes a second project. A
+    settle `timeout` or `cancelled` creates nothing at all, and a create that
+    answers `failed` after a successful extraction keeps the files, leaves the
+    row ready and the plain `Create project` affordance as the retry - the run
+    rolls nothing back, and the deps type carries no rollback member at all (a
+    compile-time fact, not a runtime lookup).
+
+    The compound case is the server's as well: ONE item is sent for the row, so
+    the server's own compound branch makes one project with its groups; the
+    client adds no grouping logic and never sends `exclude_groups` from this
+    door.
+
 ## Consequences
 
 - Settings is configuration only. Its imports section is relabelled **Import
@@ -641,6 +718,30 @@ no API, permission, audit, migration or schema change is involved.
   queues raise no native dialog - the queue-native confirmations are
   `ConfirmDialog`, and asset deletion keeps its own typed `AssetDeleteDialog` -
   and every new rule comes from the existing `--mv-*` tokens.
+- `ui/review/extractAndCreate.test.ts` pins the four-phase order with recording
+  fakes and every honesty branch by itself: an extract failure reports 0 of M and
+  no create, a junk-only archive neither settles nor creates, a settle `timeout`
+  creates nothing at all, a settle `cancelled` is silent, a
+  `skipped`/`already_created` answer reports already-created and exactly one
+  project across two identical runs, a failed create leaves the files - the deps
+  type carries no rollback member (a compile-time fact) and the sentence says so
+  - a `blocked`/`not_scanned` answer speaks the row's own sentence and says the
+  extraction stands, a `blocked`/`archive_only` answer names the missing pairing
+  instead of repeating the table's re-extract instruction, the same answer on the
+  `already_present` route says the run wrote nothing, a `results` list naming
+  another key and an empty `results` list each fail with the no-result
+  sentence, a throwing `beforeCreate` cannot stop the create, and a
+  compound-shaped row sends one item.
+  `ui/review/bundleRows.test.ts` pins the predicate and both hover sentences,
+  `ui/review/useBundleDetect.test.tsx` pins `createReporting` (the server's answer
+  returned unchanged and the report refetched, the old `create` still returning
+  nothing), and `ui/review/BundleReviewView.test.tsx` pins the single button and
+  its absence for a ready row, an already-created row and a viewer, the narration
+  surviving the hidden row - the same component instance rerendered with the
+  created row hidden, its narration still on screen while the row is gone from
+  the listbox - the narration cleared by the queue's Refresh that its own
+  `settle-abandoned` sentence asks for, and plain Extract and the bulk label
+  unchanged beside it.
 
 At the time of landing: web 1356 tests in 117 files became 1451 in 122; the API
 suite (2326 passed, 1 skipped), the route count (100) and the schema (14) are

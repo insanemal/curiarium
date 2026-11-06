@@ -8,13 +8,18 @@ import {
 } from "../../lib/api/bundles";
 import {
   ENRICH_NONE_REASON,
+  EXTRACT_AND_CREATE_HINT,
+  EXTRACT_AND_CREATE_LABEL,
+  EXTRACT_AND_CREATE_ROW_TITLE,
   NO_SOURCE_PAGE_REASON,
   ROW_STATE_CREATED,
   ROW_STATE_DISMISSED,
   ROW_STATE_IN_PROJECT,
+  archiveExtractTitle,
   archiveLine,
   bulkEnrichTitle,
   canEnrich,
+  canExtractAndCreate,
   canRecheck,
   confidenceLabel,
   countLabel,
@@ -185,6 +190,79 @@ describe("isArchiveOnly", () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("canExtractAndCreate", () => {
+  // `BundleArchive.rel_path` is non-nullable on the wire, so the "no path"
+  // quadrant is forced here rather than widening the API type for a branch.
+  const noPath = { rel_path: null as unknown as string, twin_verified: false };
+  const zipOnly = makeBundle({
+    status: "blocked",
+    blocked_reason: "archive_only",
+    archive: { rel_path: "Moai.zip", twin_verified: false },
+  });
+
+  it("accepts the zip-only row that has a path and no project", () => {
+    expect(canExtractAndCreate(zipOnly)).toBe(true);
+  });
+
+  it("refuses every row the one-step door could not serve", () => {
+    // A ready row is not an archive waiting for its extraction.
+    expect(canExtractAndCreate(makeBundle())).toBe(false);
+    // A finished row's one create would only be answered `already_created`.
+    expect(canExtractAndCreate(makeBundle({ ...zipOnly, existing_project_id: PROJECT_ID }))).toBe(
+      false,
+    );
+    // Another blocked reason is not the archive door.
+    expect(
+      canExtractAndCreate(
+        makeBundle({
+          status: "blocked",
+          blocked_reason: "unresolved_directory",
+          archive: { rel_path: "Moai.zip", twin_verified: false },
+        }),
+      ),
+    ).toBe(false);
+    // No archive to extract, or a label with no path behind it.
+    expect(canExtractAndCreate(makeBundle({ ...zipOnly, archive: null }))).toBe(false);
+    expect(canExtractAndCreate(makeBundle({ ...zipOnly, archive: noPath }))).toBe(false);
+  });
+});
+
+describe("archiveExtractTitle", () => {
+  const zipOnly = makeBundle({
+    status: "blocked",
+    blocked_reason: "archive_only",
+    archive: { rel_path: "Moai.zip", twin_verified: false },
+  });
+
+  it("points a one-step row at the detail panel's whole job", () => {
+    expect(archiveExtractTitle(zipOnly)).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
+    expect(archiveExtractTitle(zipOnly)).toContain(EXTRACT_AND_CREATE_LABEL);
+  });
+
+  it("keeps the old sentence byte for byte on every other row", () => {
+    expect(archiveExtractTitle(makeBundle())).toBe("Extract this archive in place (Enter)");
+    expect(archiveExtractTitle(makeBundle({ ...zipOnly, existing_project_id: PROJECT_ID }))).toBe(
+      "Extract this archive in place (Enter)",
+    );
+  });
+});
+
+describe("extract-and-create words", () => {
+  it("names the door, and its hint says what plain Extract leaves out", () => {
+    expect(EXTRACT_AND_CREATE_LABEL).toBe("Extract and create project");
+    expect(EXTRACT_AND_CREATE_HINT).toContain("waits for the library scan");
+    // Plain Extract runs the wait too, so the hint must not claim it stops at
+    // the extraction: the project is the only step it leaves out.
+    expect(EXTRACT_AND_CREATE_HINT).toContain(
+      "The plain Extract button does the extraction and the wait, and stops before the project.",
+    );
+    expect(EXTRACT_AND_CREATE_HINT).not.toContain("stops after the extraction");
+    // No quoted control name: the plain door's visible text and its accessible
+    // name disagree, so a quote would name a control nobody hears.
+    expect(EXTRACT_AND_CREATE_HINT).not.toContain("'Extract archive'");
   });
 });
 

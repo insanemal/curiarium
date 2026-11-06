@@ -8,10 +8,14 @@ import {
   type BundleDetectItem,
   type BundleReport,
 } from "../../lib/api/bundles";
-// The type comes from the domain module, not the `../../lib/api` barrel: the
-// tests replace that barrel with a fixed object, so a named import from it
-// would throw "No export is defined on the mock".
-import type { ArchiveExtractResult } from "../../lib/api/imports";
+// Domain module, not the `../../lib/api` barrel: the tests replace that barrel
+// with a fixed object (that is what `ArchiveExtractAction` reaches), so a named
+// runtime import from it would throw "No export is defined on the mock".
+import {
+  extractArchive,
+  listArchiveEntries,
+  type ArchiveExtractResult,
+} from "../../lib/api/imports";
 import { fileUrl } from "../../lib/api/mediaUrls";
 import { extOf } from "../../lib/assetKinds";
 import { copyText } from "../../lib/clipboard";
@@ -25,9 +29,13 @@ import { ModelSnapshot } from "../ModelViewer";
 import {
   BUNDLE_FILTERS,
   ENRICH_NONE_REASON,
+  EXTRACT_AND_CREATE_HINT,
+  EXTRACT_AND_CREATE_LABEL,
+  archiveExtractTitle,
   archiveLine,
   bulkEnrichTitle,
   canEnrich,
+  canExtractAndCreate,
   canRecheck,
   confidenceLabel,
   countLabel,
@@ -58,6 +66,7 @@ import {
   duplicateToggleLabel,
   showsDuplicateReport,
 } from "./duplicateArchives";
+import { outcomeLine, phaseLine, runExtractAndCreate } from "./extractAndCreate";
 import ReviewQueueView from "./ReviewQueueView";
 import ScanFidelityNotice from "./ScanFidelityNotice";
 import type { BundleDetectState } from "./useBundleDetect";
@@ -339,6 +348,16 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   } | null>(null);
   const [settling, setSettling] = React.useState<string | null>(null);
   const [settleTimedOut, setSettleTimedOut] = React.useState(false);
+  // The one-step door's narration. It lives in the VIEW, not in the hook: a
+  // successful create hides the row, and the hook clears `notice` on every
+  // mutation. `running` is what keeps a second click off while a run is in
+  // flight; `key` is the row it belongs to.
+  const [extractAndCreate, setExtractAndCreate] = React.useState<{
+    key: string;
+    line: string | null;
+    running: boolean;
+  } | null>(null);
+  const extractAndCreateRunning = extractAndCreate?.running === true;
   const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
   // Where the active row sat before a refetch reordered or removed it. A key
   // survives a reorder; the remembered index is only the fallback for a row
@@ -531,9 +550,14 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
 
   // The timeout line tells the operator to refresh once the scan finishes, so
   // acting on that advice has to clear it: a notice that outlives its own
-  // instructions is a lie the next reader would believe.
+  // instructions is a lie the next reader would believe. The one-step door's
+  // verdict is the other notice this Refresh answers, so its line clears too - a
+  // "Refresh this queue" that leaves the stale verdict standing is the same
+  // complaint in a second place. Only the line goes: a run still in flight keeps
+  // `running`, so refreshing cannot re-enable the button under it.
   const refreshNow = () => {
     setSettleTimedOut(false);
+    setExtractAndCreate(current => (current ? { ...current, line: null } : null));
     void state.refresh();
   };
 
@@ -541,6 +565,41 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
     if (!activeRow) return;
     void primeModelCovers([activeRow], { mediaUrl: fileUrl });
     void state.create(createItems([activeRow], { excludeGroups: true }));
+  };
+
+  // One action, four named phases, and the server as the readiness authority:
+  // the orchestration itself is `runExtractAndCreate` (React-free, unit-tested),
+  // so this only supplies the real deps and paints what each phase said.
+  const startExtractAndCreate = (row: BundleDetectItem) => {
+    const path = row.archive?.rel_path;
+    if (!canContribute || !path) return;
+    const key = row.key;
+    // Each update is a function of the current state so a run that was
+    // superseded (or cleared) is never resurrected by a late phase.
+    const update = (line: string | null, running: boolean) => {
+      setExtractAndCreate(current =>
+        current && current.key === key ? { key, line, running } : current,
+      );
+    };
+    setExtractAndCreate({ key, line: phaseLine("listing"), running: true });
+    void runExtractAndCreate({
+      archivePath: path,
+      item: { key, name: typedName(names, row) || null },
+      deps: {
+        listEntries: listArchiveEntries,
+        extract: extractArchive,
+        settle: results => state.afterExtract(results),
+        // `?? Promise.resolve(null)`: the member is optional only because a
+        // fixture outside this ticket builds this shape without it.
+        create: items => state.createReporting?.(items) ?? Promise.resolve(null),
+        // The cover is cosmetic and must never block or fail the action, exactly
+        // as the other create doors treat it.
+        beforeCreate: () => {
+          void primeModelCovers([row], { mediaUrl: fileUrl });
+        },
+        onPhase: phase => update(phaseLine(phase), true),
+      },
+    }).then(outcome => update(outcomeLine(outcome), false));
   };
 
   const dismissActive = () => {
@@ -691,7 +750,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
         {canContribute && isArchiveOnly(row) ? (
           <span
             className="review-row-status underline decoration-dotted underline-offset-2 hover:text-accent cursor-pointer"
-            title="Extract this archive in place (Enter)"
+            title={archiveExtractTitle(row)}
             onClick={event => {
               event.stopPropagation();
               openExtract(extractTargets([row]), row.key);
@@ -728,6 +787,18 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
       )}
       {report && <DuplicateArchivesPanel report={report} />}
       {report && <ScanFidelityNotice report={report} />}
+      {/* A one-way write must leave a sentence behind even when its own row is
+          hidden by the create, so the verdict lives here rather than in the aside. */}
+      {extractAndCreate?.line && (
+        <p
+          className="review-notice"
+          role="status"
+          aria-live="polite"
+          data-extract-and-create-notice={extractAndCreate.key}
+        >
+          {extractAndCreate.line}
+        </p>
+      )}
     </>
   );
 
@@ -1003,6 +1074,21 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                       </label>
                     )}
                     <div className="review-detail-actions">
+                      {/* The one-step door. A zip-only row is blocked, so the plain Create button
+                          beside it is disabled - this is the action that makes the row creatable
+                          without a second click after a wait. */}
+                      {canExtractAndCreate(activeRow) && (
+                        <button
+                          type="button"
+                          className={PRIMARY_BUTTON}
+                          data-extract-and-create="true"
+                          disabled={busy || extractAndCreateRunning}
+                          title={EXTRACT_AND_CREATE_HINT}
+                          onClick={() => startExtractAndCreate(activeRow)}
+                        >
+                          {EXTRACT_AND_CREATE_LABEL}
+                        </button>
+                      )}
                       {!activeRow.existing_project_id && (
                         <button
                           type="button"

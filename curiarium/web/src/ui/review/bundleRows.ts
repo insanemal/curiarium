@@ -181,6 +181,38 @@ export function isArchiveOnly(row: BundleDetectItem): boolean {
   return row.blocked_reason === "archive_only" && Boolean(row.archive?.rel_path);
 }
 
+export const EXTRACT_AND_CREATE_LABEL = "Extract and create project";
+
+/** The new door's hover sentence: what it does that plain Extract does not.
+ *  Plain Extract runs the same extraction and the same settle wait
+ *  (`BundleReviewView.handleExtracted` -> `state.afterExtract`); the only step
+ *  it omits is the project, so the hint must not claim otherwise. Plain Extract
+ *  is named by what it does rather than by a quoted label: its visible text is
+ *  "Extract archive" while its accessible name is `Extract <title>`, so a quote
+ *  would be a name neither the operator nor a screen reader hears. */
+export const EXTRACT_AND_CREATE_HINT =
+  "Extracts the archive in place, waits for the library scan to register the files, then creates one project from the result. The plain Extract button does the extraction and the wait, and stops before the project.";
+
+/** The cell's title for a row both doors can serve. It quotes the new button's
+ *  own accessible name, which is a label the detail panel really carries. */
+export const EXTRACT_AND_CREATE_ROW_TITLE =
+  "Extract this archive in place (Enter). The detail panel's 'Extract and create project' does the whole job: extract, wait for the scan, then create the project.";
+
+/** A row the one-step door may run on: the zip-only row, and not one that
+ *  already became a project. The server's `already_created` is the real belt;
+ *  this is the pre-flight that keeps the button off a finished row. */
+export function canExtractAndCreate(row: BundleDetectItem): boolean {
+  return isArchiveOnly(row) && !row.existing_project_id;
+}
+
+/** The blocked-reason cell's hover sentence. It is a text edit only: the cell
+ *  keeps its click and Enter behaviour. A row the one-step door can serve gets
+ *  the pointer to it; every other row keeps the sentence it had, byte for byte. */
+export function archiveExtractTitle(row: BundleDetectItem): string {
+  if (canExtractAndCreate(row)) return EXTRACT_AND_CREATE_ROW_TITLE;
+  return "Extract this archive in place (Enter)";
+}
+
 /** The two reveal toggles that widen what the queue shows. */
 export type VisibilityOptions = {
   showDismissed: boolean;
