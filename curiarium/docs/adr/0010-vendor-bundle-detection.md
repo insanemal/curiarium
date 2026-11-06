@@ -2166,6 +2166,106 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `.plans/measurements/2026-11-06-zip-project-mfqbji-{before,after}.json`, same
     four synthetic zips and the same in-process harness on both sides.
 
+27. **A bundle folder that grows after its project exists is surfaced, never
+    automated - computed on every read, honest in three states, and MODEL-scoped.**
+    `Mf-8i04` answers the owner's question ("can it add the new stuff to an
+    existing project?") today's answer being "no, and silently": nothing watches
+    a folder for growth, and the already-created row stays hidden because the
+    marker key does not change when files appear inside the folder. The feature
+    is a PROMPT with the existing bulk-membership action behind it, never a
+    silent attach - membership is deliberate in a household vault. One new
+    contract module, `bundle_drift.py`, answers both surfaces (the project route
+    and the queue row), so they cannot disagree about the same folder.
+
+    **Drift is computed on every read, never stored.** A stored count is a false
+    count the moment a rescan registers the next part, and the parts it names are
+    rows the app already holds (`Asset.storage_path` and `ProjectAsset`), so
+    there is nothing to keep in sync and no migration - no column, no index, no
+    `models.py`. The read costs the project row plus ONE prefix SELECT on the
+    project view, and ONE report-wide `(id, storage_path, size)` index on the
+    queue side. Both are measured in the before/after pair rather than quoted:
+    `GET /bundles/detect` ran 8 statements before this change and 9 after on the
+    same harness (the one added statement is the report-wide index, constant in
+    the number of candidates), `GET /projects` stayed at 2, and the new route
+    runs 3 in the suite's authenticated harness - the caller's auth lookup, the
+    project row, and one prefix SELECT. That is the project row's pair plus one
+    query when the state is `known`, and the pair alone otherwise, so
+    `not_applicable` and `unknown` run no prefix query at all: pinned by
+    `test_a_grown_bundle_folder_reports_the_parts_that_are_not_in_the_project`,
+    `test_a_hand_made_project_reports_no_drift_question` and
+    `test_a_zip_identity_marker_reports_unknown_rather_than_zero`.
+
+    **Three states, exhaustive, because count honesty has two owners.**
+    `not_applicable` (no `_bundle` marker - a hand-made project or malformed
+    metadata) renders no notice and a `null` count. `known` is the honest number:
+    `0` renders NO notice at all, never a rendered zero, and `N > 0` renders one
+    notice and one bulk add whose argument is the count's own evidence
+    (`count == len(asset_ids)`). `unknown` (a marker that names no path this
+    server may query) renders an en dash U+2013. The server picks the state and
+    never formats a number; the client formats, with the one shared formatter
+    (ADR 0011's en dash rule).
+
+    **The walk root has two key spaces, and the identity key is never
+    prefix-queried.** `walk_root(marker)` is `rel_dir` when it names a
+    non-empty path (both doors record it); otherwise, for a marker that carries
+    no `source` - only the detection door omits it - the marker's `key`, which
+    `_create_one` writes as the row's storage-relative `rel_path`; otherwise
+    nothing. A zip-project marker's `key` is an IDENTITY
+    (`zip-project:<canonical url>`) and its `rel_dir` may legitimately be `None`
+    (Decision 26: mixed-root, flat and one-part selections), so a prefix query
+    on it matches nothing - the false zero this ticket forbids - and the state is
+    `unknown`, never `0`.
+
+    **Drift is MODEL-scoped, and the over-count is measured.** The set is
+    registered `bundle_detect.is_counted_model` rows under the root, minus the
+    prefix of any group the marker records as `included: False`, minus this
+    project's membership. Counting every asset reads the `cover.jpg`/`notes.txt`
+    files creation deliberately never attaches: on the measured compound tree
+    the naive all-asset difference is **26 at creation against an honest 0**, and
+    **27 against 1** after one new part joined
+    (`.plans/measurements/2026-11-06-bundle-drift-mf8i04-{before,after}.json`).
+    The predicate is the scan's own basename model rule (Decision 23's Mf-94od
+    change), which is why an AppleDouble `._a.stl` never counts as a part. It is
+    deliberately NOT the report's containment set: that one is the candidate's
+    own `_own_paths` tested for a model SUFFIX, so the two diverge in both
+    directions - that one counts a `._a.stl` copy and excludes a nested child
+    bundle's paths, while drift does the opposite in both places. The first
+    divergence is pinned (`test_drift_is_model_scoped_so_support_files_are_never_drift`);
+    the second is the accepted nested-bundle cost recorded below; and the
+    excluded-group subtraction is a third place drift is deliberately STRICTER.
+
+    **`groups` is the wrong basis for the notice.** The marker's group list is a
+    creation-time snapshot: a non-compound detection marker has no `groups` yet
+    is drift-able, and a brand-new subfolder is not a group at all - a per-group
+    notice would silently miss exactly the growth this ticket exists for (a false
+    zero). Hence ONE project-scoped notice, which is also one bulk add and one
+    click. **An excluded group is subtracted** because its models stay registered
+    and unattached by design; without the subtraction the prompt would never
+    clear and "Add them" would attach exactly what the operator excluded. This is
+    deliberately STRICTER than `find_existing_project`'s containment, which
+    ignores the exclusion; the divergence is pinned by its own test rather than
+    left to be discovered.
+
+    **`bundle_serialize.py` is deliberately NOT extended.** The drift count
+    depends on membership rows the artifact never records, so carrying it would
+    make two artifacts of one tree at different project states read as a rule
+    change - a false "changed" in the very comparer that exists to catch
+    unreported change. A future drift-predicate change is measured with a
+    bundle-drift before/after artifact instead (the pair above is that
+    measurement), so the omission is recorded rather than left as an omission.
+
+    **The ledgers move with the route.** One new `READ` route
+    (`GET /project/{project_id}/bundle-drift`) moves the permission matrix
+    `101 -> 102` routes (11 public, 36 -> 37 read, 23 contribute, 13 write,
+    18 admin), `test_permissions_matrix.py` gains its caller, `CALLS` and
+    `EXPECTED_STATUS` entries and the bumped size pin, and `docs/PERMISSIONS.md`
+    gains its table row. `audit.assert_audit_coverage` skips GETs, so no audit
+    action or `AUDIT.md` row appears. Deliberately NOT a field on
+    `GET /projects`: that list is one statement for many projects with its own
+    statement pin, and App refetches it on every `assetsVersion` bump; the client
+    asks the per-project route only when the project carries a `_bundle` marker,
+    so a hand-made project costs no request at all.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -2284,6 +2384,28 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   compound row is the same as for any other `low` row - reject it, dismiss it, or
   fix the created project.
 
+* **A grown bundle folder is no longer silent, and adding is still deliberate.**
+  The project view shows one notice with one bulk add when the folder holds parts
+  the project does not, the Review queue's already-created row says the same
+  number in its own words, and both clear the moment the operator adds them - no
+  create action is re-offered, and a fresh project shows no notice at all rather
+  than a zero.
+* **The accepted wrong direction is a nested bundle.** A separate bundle living
+  inside an already-created bundle folder is counted by the recursive prefix
+  (its models are registered under the root and are not members), so such a
+  folder would prompt for another bundle's parts. Accepted and recorded: the
+  report already refuses nested rows as `member-of-bundle` and R7 absorption
+  usually claims the subtree as groups, so the shape is rare; the fix would need
+  a per-row walk, which the report must not do.
+* **`bundle_serialize.py` stays one rule set deep.** The artifact records what
+  the rules say about a tree, not what the database says about a project, so a
+  drift count in it would turn a membership change into a rule change in
+  `diff_artifacts`; a future predicate change is measured with a bundle-drift
+  before/after artifact instead.
+* **The read costs what a read should.** The queue gains exactly one statement
+  per report (one report-wide registered index, constant in the number of
+  candidates) and the project route costs the project row plus one prefix SELECT
+  - no per-part query, no stored count, no cache to invalidate.
 ## Alternatives considered
 
 - **A `bundle_candidates` table, populated by a scan, confirmed later.**
@@ -3015,6 +3137,45 @@ unchanged.
   `.plans/measurements/2026-11-06-zip-project-mfqbji-{before,after}.json`; the
   statement cost is measured in the same pair rather than quoted.
 
+- Bundle drift (Decision 27) is pinned from literals in
+  `tests/test_bundle_drift.py`:
+  `test_walk_root_reads_each_marker_shape` (the detection key, the zip
+  `rel_dir`, and the identity key with no `rel_dir` answering `unknown` - never
+  prefix-queried), `test_classify_is_exhaustive_over_the_three_states` (`{}` and
+  a malformed marker are `not_applicable`, never zero),
+  `test_excluded_prefixes_subtract_an_included_false_group` (only an explicit
+  `included: False`, de-duplicated in marker order),
+  `test_drift_is_model_scoped_so_support_files_are_never_drift` (the fake set
+  against the naive over-count it replaces) and
+  `test_the_asset_ids_are_ordered_by_path_not_row_order` (shuffled input, one
+  ordered answer). The two surfaces are pinned against the database:
+  `test_a_grown_bundle_folder_reports_the_parts_that_are_not_in_the_project`
+  (AC-1: `known`/1 naming the new id, adding exactly it clears to `known`/0, and
+  the route measures three statements including the caller's session lookup),
+  `test_a_fresh_bundle_project_has_nothing_to_report` (AC-4: the compound shape
+  answers `known`/0 while the naive difference reads 8 == the model count),
+  `test_a_hand_made_project_reports_no_drift_question` (AC-6:
+  `not_applicable`/`null`) and
+  `test_a_zip_identity_marker_reports_unknown_rather_than_zero` (AC-2); and on
+  the queue `test_service_a_grown_bundle_row_reports_the_new_parts` (AC-3/AC-7:
+  still a marker match with the same `existing_project_id`, `known`/1, then
+  `known`/0 after the add, with the second create still
+  `skipped`/`already_created` and one `Project`),
+  `test_service_a_fresh_bundle_project_reports_no_new_parts` (AC-4 on both
+  surfaces), `test_service_an_excluded_group_is_not_drift` (AC-5: the excluded
+  group's four models stay registered and unattached, `known`/0, and no offered
+  id sits under its prefix) and
+  `test_service_the_drift_index_is_one_statement_per_report` (AC-8: one
+  registered-index statement for two candidates and for five, with the report's
+  total statement count pinned). `test_the_report_model_declares_every_key_the_service_computes`
+  names the two declared drift keys so the response model cannot silently drop
+  them, and the permission/OpenAPI ledgers are pinned by
+  `test_the_matrix_is_the_documented_size` (102 routes, 37 read) and
+  `tests/test_openapi_contract.py` against the three regenerated fixtures. The
+  row-level before/after artifacts are
+  `.plans/measurements/2026-11-06-bundle-drift-mf8i04-{before,after}.json`; the
+  statement cost is measured in the tests above rather than quoted.
+
 ## Superseding conditions
 
 This ADR is superseded if any of the following becomes true:
@@ -3135,3 +3296,6 @@ This ADR is superseded if any of the following becomes true:
   fill-only-what-is-empty rules);
 - the archive-as-single-asset door (`entries is None`) or the gated door starts
   recording a cover or a `_bundle` marker.
+- the drift stops subtracting project membership, or stops being model-scoped,
+  or the identity key starts being prefix-queried, or a fresh bundle project
+  starts reporting drift (Decision 27).

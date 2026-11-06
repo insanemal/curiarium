@@ -272,6 +272,8 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     # A report computed from disk on demand; it writes nothing, so a viewer reads it.
     ("GET", "/bundles/detect"): READ,
     ("GET", "/project/{project_id}/assets"): READ,
+    # A drift read: one prefix query over rows already registered, writing nothing.
+    ("GET", "/project/{project_id}/bundle-drift"): READ,
     # A pure SELECT that counts what a delete would remove.
     ("GET", "/folder/{folder_id}/delete-preview"): READ,
     ("GET", "/folder/{folder_id}/download"): READ,

@@ -312,6 +312,22 @@
         ],
         "title": "Blocked Reason"
       },
+      "bundle_drift_count": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Bundle Drift Count"
+      },
+      "bundle_drift_state": {
+        "default": "not_applicable",
+        "title": "Bundle Drift State",
+        "type": "string"
+      },
       "confidence": {
         "title": "Confidence",
         "type": "string"

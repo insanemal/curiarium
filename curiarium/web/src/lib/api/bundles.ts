@@ -125,6 +125,16 @@ export type BundleDetectItem = {
   // must keep compiling. `undefined` means "the server did not say"; `null` is
   // the server saying this row took nothing from the page.
   enrichment?: BundleEnrichment | null;
+  /** Does the bundle folder behind this already-created row still hold parts
+   *  the project does not? `bundle_drift_state` is the server's word
+   *  (`known | unknown | not_applicable`) and `bundle_drift_count` is null
+   *  unless it is `known`. Both are OPTIONAL on the wire type on purpose: the
+   *  two other factories in the tree (`App.review.test.tsx`,
+   *  `bundleCovers.test.ts`) build this object literally and are outside this
+   *  change - and an absent field means a payload from before this field
+   *  existed, which is `not_applicable` (nothing new to say), never `0`. */
+  bundle_drift_state?: string;
+  bundle_drift_count?: number | null;
   dismissed: boolean;
 };
 

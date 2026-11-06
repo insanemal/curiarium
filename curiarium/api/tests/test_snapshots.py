@@ -988,7 +988,7 @@ def test_audit_docs_describe_the_snapshot_actions() -> None:
     # The prose is hard-wrapped, so the sentence is pinned with its whitespace
     # normalised: the words are byte-for-byte, the wrap points are not.
     assert (
-        "The matrix has 101 routes, 40 of them `GET`; the remaining 61 split into 47 audited keys and 14 exempt keys."
+        "The matrix has 102 routes, 41 of them `GET`; the remaining 61 split into 47 audited keys and 14 exempt keys."
         in " ".join(text.split())
     )
     assert "fail-loud" in text

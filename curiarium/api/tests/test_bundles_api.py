@@ -399,9 +399,13 @@ def test_the_report_model_declares_every_key_the_service_computes(
     dict it returns is the whole truth about what the service computes. The per-row
     `rule_set` stamp is LEFT OFF `BundleDetectItemOut` on purpose - one rule set per
     report, and the offline artifact keeps the per-row copy - so it is named in an
-    assertion rather than tolerated as an unexplained extra. Mutation: delete either
-    field from `BundleReportOut` and the set comparison reds; declare the per-row
-    stamp on the row model and the named-difference assertion reds.
+    assertion rather than tolerated as an unexplained extra. The two drift keys
+    (`bundle_drift_state`/`bundle_drift_count`, Mf-8i04) ARE declared, so the
+    model cannot silently drop them the way `rule_set` and `refused` once were.
+    Mutation: delete either field from `BundleReportOut` and the set comparison
+    reds; delete either drift key from `BundleDetectItemOut` and the row
+    comparison reds; declare the per-row stamp on the row model and the
+    named-difference assertion reds.
     """
     moai_bundle(isolated_storage)
     write_zip(

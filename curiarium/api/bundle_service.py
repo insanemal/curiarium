@@ -173,6 +173,7 @@ from sqlmodel import Session, select
 import asset_urls
 import audit
 import bundle_detect
+import bundle_drift
 import bundle_enrich
 import db
 import library_scan
@@ -1449,6 +1450,26 @@ def project_assets_index(session: Session) -> Dict[str, Tuple[str, ...]]:
     return {asset_id: tuple(project_ids) for asset_id, project_ids in index.items()}
 
 
+def registered_index(session: Session) -> List[Tuple[str, str, int]]:
+    """Every registered asset as ``(id, storage_path, size)``, in one statement.
+
+    Built ONCE per report beside the membership index, because drift is answered
+    from these two lists by string prefix and dictionary lookup. Reading the set
+    per row would be one statement per candidate - the owner's library is 91
+    projects, so that is the difference between one query and ninety-one.
+
+    Only rows with a ``storage_path`` are indexed: a row with no location is not
+    a file under any bundle's root, the same refusal ``registered_assets`` makes.
+    Ordered by ``(storage_path, id)`` so every consumer sees the same order.
+    """
+    statement = (
+        select(Asset.id, Asset.storage_path, Asset.size)
+        .where(Asset.storage_path.is_not(None))
+        .order_by(Asset.storage_path, Asset.id)
+    )
+    return [(row[0], row[1], int(row[2] or 0)) for row in session.exec(statement)]
+
+
 class RegisteredAsset(NamedTuple):
     """One registered asset row, as the bundle report needs to read it.
 
@@ -1934,6 +1955,7 @@ def _report_row(
     candidate: BundleCandidate,
     folders: Mapping[str, str],
     asset_index: Mapping[str, Tuple[str, ...]],
+    registered: Sequence[Tuple[str, str, int]],
     dismissals: Mapping[str, dict],
     enrichments: Mapping[str, dict],
     absorbed_keys: AbstractSet[str],
@@ -1945,6 +1967,12 @@ def _report_row(
     action, never what the report shows. That is what keeps two reports of the
     same disk identical from one minute to the next, and it means a record that
     supplies nothing THIS row needed contributes no ``enrichment`` block at all.
+
+    The two drift keys are answered here from the report-wide indexes. Their
+    state is the wire's word for which of the three cases a marker-matched row
+    is, and the CLIENT owns the number's rendering - no notice at all for a
+    ``known`` zero, an en dash for ``unknown`` - because this server never formats
+    a number.
     """
     facts = _candidate_facts(root, candidate)
     if facts is None:
@@ -2006,6 +2034,27 @@ def _report_row(
     existing_project_name = existing.project.name if existing else None
     if existing_project_name is not None and not existing_project_name.strip():
         existing_project_name = None
+    # Drift is asked only of the app's OWN record: a marker is proof this project
+    # was made from this bundle, so its marker is the walk root to difference
+    # against. A project found by shared files (``assets``) or one a human typed
+    # in proves the files, not the intent, so it reports no question at all -
+    # never a zero. Both indexes were built once for the whole report, so this
+    # row costs no statement; the count and the ids cannot disagree because the
+    # count IS the ids' length.
+    drift_state = bundle_drift.DRIFT_NOT_APPLICABLE
+    drift_count: Optional[int] = None
+    if existing is not None and existing.match == MATCH_MARKER:
+        marker = _bundle_marker(existing.project.metadata_json)
+        drift_state, drift_root = bundle_drift.classify(marker)
+        if drift_root is not None:
+            owner = existing.project.id
+            asset_ids = bundle_drift.drift_asset_ids(
+                registered,
+                root=drift_root,
+                prefixes=bundle_drift.excluded_prefixes(drift_root, marker),
+                is_member=lambda asset_id: owner in asset_index.get(asset_id, ()),
+            )
+            drift_count = len(asset_ids)
     return {
         "key": key,
         "rel_path": key,
@@ -2047,6 +2096,12 @@ def _report_row(
         "existing_project_id": existing_project_id,
         "existing_project_name": existing_project_name,
         "existing_project_match": existing.match if existing else None,
+        # The state is the server's word for WHICH case this row is; the client
+        # formats any number (and renders an en dash for unknown) - the server
+        # never formats one. Declared on ``BundleDetectItemOut`` or the response
+        # model drops both keys silently.
+        "bundle_drift_state": drift_state,
+        "bundle_drift_count": drift_count,
         "dismissed": key in dismissals,
     }
 
@@ -2131,6 +2186,9 @@ def _report_from_scan(
         folders = _folder_index(session)
         # One query for ALL candidates: containment is a dict lookup per row.
         asset_index = project_assets_index(session)
+        # One registered set for the whole report too: drift is a string prefix
+        # and a dict lookup per row, never a per-candidate read.
+        registered = registered_index(session)
         splits = _compound_splits(session)
         for candidate in scan.candidates:
             row = _report_row(
@@ -2140,6 +2198,7 @@ def _report_from_scan(
                 candidate=candidate,
                 folders=folders,
                 asset_index=asset_index,
+                registered=registered,
                 dismissals=dismissals,
                 enrichments=enrichments,
                 absorbed_keys=absorbed_keys,
@@ -2165,6 +2224,7 @@ def _report_from_scan(
                     candidate=absorbed,
                     folders=folders,
                     asset_index=asset_index,
+                    registered=registered,
                     dismissals=dismissals,
                     enrichments=enrichments,
                     absorbed_keys=absorbed_keys,

@@ -38,6 +38,7 @@ import {
   matchesVisibility,
   needsDecision,
   needsEnrichment,
+  newPartsLine,
   rowBucket,
   rowStateChip,
   statusLine,
@@ -162,6 +163,21 @@ describe("isCreatable", () => {
     expect(isCreatable(makeBundle({ status: "ready", existing_project_id: "project-7" }))).toBe(
       false,
     );
+  });
+
+  it("never re-offers a create for a grown bundle", () => {
+    // A folder that grew is still the same folder: a second project for it is
+    // exactly what the marker prevents, whatever the new parts say.
+    expect(
+      isCreatable(
+        makeBundle({
+          status: "ready",
+          existing_project_id: "project-7",
+          bundle_drift_state: "known",
+          bundle_drift_count: 3,
+        }),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -468,6 +484,47 @@ describe("createdProjectLine", () => {
         makeBundle({ existing_project_id: projectId, existing_project_name: "Moai statue" }),
       ),
     ).toBe("Already created as project Moai statue");
+  });
+});
+
+describe("newPartsLine", () => {
+  const projectId = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
+  const created = (overrides: Partial<BundleDetectItem> = {}) =>
+    makeBundle({ existing_project_id: projectId, existing_project_name: "Moai statue", ...overrides });
+
+  it("says nothing for a row that never became a project", () => {
+    expect(newPartsLine(makeBundle({ bundle_drift_state: "known", bundle_drift_count: 3 }))).toBeNull();
+  });
+
+  it("says nothing for a project with no marker", () => {
+    expect(newPartsLine(created({ bundle_drift_state: "not_applicable" }))).toBeNull();
+  });
+
+  it("says nothing when the folder has not grown, so a quiet queue stays quiet", () => {
+    expect(newPartsLine(created({ bundle_drift_state: "known", bundle_drift_count: 0 }))).toBeNull();
+  });
+
+  it("says nothing for a payload from before the field existed", () => {
+    // Neither field: an older server, which is not_applicable rather than a 0.
+    expect(newPartsLine(created())).toBeNull();
+  });
+
+  it("counts the new parts in the plural", () => {
+    expect(newPartsLine(created({ bundle_drift_state: "known", bundle_drift_count: 3 }))).toBe(
+      "3 new parts since this was created",
+    );
+  });
+
+  it("counts one new part in the singular", () => {
+    expect(newPartsLine(created({ bundle_drift_state: "known", bundle_drift_count: 1 }))).toBe(
+      "1 new part since this was created",
+    );
+  });
+
+  it("renders an en dash when the server cannot tell, never a zero", () => {
+    const line = newPartsLine(created({ bundle_drift_state: "unknown" }));
+    expect(line).toBe("\u2013 new parts since this was created");
+    expect(line).not.toContain("0");
   });
 });
 

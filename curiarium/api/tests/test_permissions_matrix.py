@@ -1,7 +1,7 @@
 """Per-route permission sweeps driven by `permissions.ROUTE_PERMISSIONS`.
 
 Why this file exists: Mf-2nbc enforces a level with a *per-route dependency*, and
-the only thing that keeps 101 hand-written declarations honest is a test that
+the only thing that keeps 102 hand-written declarations honest is a test that
 visits every route at every role. The sweeps below are parametrised from
 `permissions.ROUTE_PERMISSIONS`, so that table is both the documentation and the
 test plan: add a route without classifying it and
@@ -945,6 +945,13 @@ def call_project_assets(client: TestClient, headers: dict[str, str], ids: Ids, m
     return client.get(f"/project/{ids.project_id}/assets", headers=headers)
 
 
+def call_project_bundle_drift(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    # The seeded project carries no `_bundle` marker, so this is the
+    # `not_applicable` read: no question, and no prefix query at all (pinned as a
+    # statement count in `test_a_hand_made_project_reports_no_drift_question`).
+    return client.get(f"/project/{ids.project_id}/bundle-drift", headers=headers)
+
+
 def call_add_project_assets(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     # Idempotent either way: the first pass adds, a repeat skips, both are a 200.
     return client.post(
@@ -1229,6 +1236,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("PATCH", "/project/{project_id}"): call_update_project,
     ("DELETE", "/project/{project_id}"): call_delete_project,
     ("GET", "/project/{project_id}/assets"): call_project_assets,
+    ("GET", "/project/{project_id}/bundle-drift"): call_project_bundle_drift,
     ("POST", "/project/{project_id}/assets"): call_add_project_assets,
     ("DELETE", "/project/{project_id}/assets"): call_remove_project_assets,
     ("GET", "/bundles/detect"): call_bundle_report,
@@ -1348,6 +1356,7 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("PATCH", "/project/{project_id}"): 200,
     ("DELETE", "/project/{project_id}"): 200,
     ("GET", "/project/{project_id}/assets"): 200,
+    ("GET", "/project/{project_id}/bundle-drift"): 200,
     ("POST", "/project/{project_id}/assets"): 200,
     ("DELETE", "/project/{project_id}/assets"): 200,
     ("GET", "/bundles/detect"): 200,
@@ -1479,7 +1488,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 101 routes - 11 public / 36 read / 23 contribute / 13 write / 18 admin.
+    """The matrix is pinned at 102 routes - 11 public / 37 read / 23 contribute / 13 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1489,10 +1498,10 @@ def test_the_matrix_is_the_documented_size() -> None:
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 101, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 102, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 36,
+        permissions.READ: 37,
         permissions.CONTRIBUTE: 23,
         permissions.WRITE: 13,
         permissions.ADMIN: 18,

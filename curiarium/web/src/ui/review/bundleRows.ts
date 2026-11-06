@@ -7,6 +7,15 @@ import {
   type BundleDetectCounts,
   type BundleDetectItem,
 } from "../../lib/api/bundles";
+import { DRIFT_KNOWN, DRIFT_NOT_APPLICABLE } from "../projectBundleDrift";
+// Declaration-only import cycles, proved green by these suites: this module
+// imports the count formatter from `useReviewCounts`, which imports
+// `needsDecision` back from here, and `projectBundleDrift` imports the same
+// formatter. Every module involved only declares functions and constants, none
+// reads another's value at module-evaluation time, and the repo's eslint config
+// has no `import/no-cycle` - so the en dash stays the ONE formatter instead of a
+// copy per module.
+import { formatReviewCount } from "./useReviewCounts";
 
 export type BundleFilter = "all" | "ready" | "blocked" | "medium" | "low";
 
@@ -282,6 +291,28 @@ export function createdProjectLine(row: BundleDetectItem): string | null {
   }
   if (name) return `Already created as project ${name}`;
   return "Already created as a project - its name is unavailable.";
+}
+
+/** The already-created row's second sentence: does this folder still hold parts
+ *  the project does not? null for every row the question does not apply to -
+ *  no existing project, a payload from before the field existed, or a project
+ *  whose folder has not grown - so a quiet queue stays quiet. */
+export function newPartsLine(row: BundleDetectItem): string | null {
+  if (!row.existing_project_id) return null;
+  // An absent field predates the drift contract, which is `not_applicable`
+  // (nothing new to say) rather than a zero.
+  const state = row.bundle_drift_state ?? DRIFT_NOT_APPLICABLE;
+  if (state === DRIFT_NOT_APPLICABLE) return null;
+  if (state === DRIFT_KNOWN) {
+    const count = row.bundle_drift_count;
+    // A known state's count is its own evidence; a missing or zero count means
+    // this folder has not grown, and the queue says nothing.
+    if (count === null || count === undefined || count <= 0) return null;
+    return `${countLabel(count, "new part", "new parts")} since this was created`;
+  }
+  // `unknown`, and any state this client does not know: the dash comes from the
+  // one formatter, never a zero.
+  return `${formatReviewCount(null)} new parts since this was created`;
 }
 
 /** The row chip's words, kept apart from `rowBucket` on purpose. The bucket is

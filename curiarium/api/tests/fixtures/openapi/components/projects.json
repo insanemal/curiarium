@@ -13,6 +13,39 @@
     "title": "ProjectAssetsRequest",
     "type": "object"
   },
+  "ProjectDriftOut": {
+    "description": "Whether a bundle project's folder has grown, and the parts it would add.\n\n`state` is one of three exhaustive cases, never a number by itself:\n\n* `not_applicable` - the project carries no `_bundle` marker (a hand-made\n  project, or malformed metadata): no question, so `count` is `null`;\n* `known` - the marker names a folder this server may walk, so `count` is the\n  honest number and `asset_ids` is exactly the set it counts. A `0` here means\n  the folder has nothing new and the client shows no notice at all - it never\n  renders a zero;\n* `unknown` - the marker's key is an identity (`zip-project:<url>`) with no\n  path to walk: `count` is `null` and the client renders an en dash.\n\n`count` is `len(asset_ids)` whenever the state is `known`, so the number and\nthe `POST /project/{id}/assets` action cannot disagree about what is new.",
+    "properties": {
+      "asset_ids": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Asset Ids",
+        "type": "array"
+      },
+      "count": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Count"
+      },
+      "state": {
+        "title": "State",
+        "type": "string"
+      }
+    },
+    "required": [
+      "state"
+    ],
+    "title": "ProjectDriftOut",
+    "type": "object"
+  },
   "ProjectIn": {
     "additionalProperties": false,
     "description": "Every field a project can be created with; the rest stays read-only.\n\nAn unknown field is a 422, matching `ProjectUpdate`: a silently ignored\nspelling mistake is a client bug the API should not hide.",

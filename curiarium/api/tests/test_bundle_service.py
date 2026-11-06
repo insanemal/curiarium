@@ -21,7 +21,7 @@ import socket
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 from zipfile import ZipFile
 
 import pytest
@@ -4236,6 +4236,7 @@ def test_the_report_layer_imports_nothing_that_can_open_a_socket() -> None:
             "asset_urls",
             "audit",
             "bundle_detect",
+            "bundle_drift",
             "bundle_enrich",
             "dataclasses",
             "datetime",
@@ -6358,3 +6359,252 @@ def test_a_refused_container_is_not_creatable_by_key(client: TestClient, isolate
     assert created["failed"] == 1
     assert created["results"][0]["reason"] == "unknown bundle"
     assert table_counts()["projects"] == 0
+
+
+# --- drift on an already-created row (Mf-8i04) ------------------------------
+
+
+def report_statements(*, mention: str = "") -> List[str]:
+    """The statements one ``build_report`` runs, whitespace-normalised and optionally filtered."""
+    statements: List[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        bundle_service.build_report(limit=1000)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    return [statement for statement in statements if mention in statement]
+
+
+REGISTERED_INDEX_SQL = "select asset.id, asset.storage_path, asset.size"
+
+
+def project_drift_out(client: TestClient, headers: dict, project_id: str) -> dict:
+    """The project route's body, so the two surfaces can be compared to each other."""
+    response = client.get(f"/project/{project_id}/bundle-drift", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def write_drift_compound(storage: Path) -> str:
+    """The measured compound shape, sized so the naive over-count equals the model count.
+
+    Two editions of the SAME product (the real Stagetop names, so R7's family
+    token is the evidence it acts on), each holding two part folders, and every
+    part folder ships two models PLUS the ``cover.jpg`` and ``notes.txt`` the
+    create door never attaches. Eight models and eight support files are
+    registered, so the naive all-asset difference reads 8 where the honest drift
+    is 0 - the ratio the owner's tree measured as 26 and 26 of 52.
+    """
+    root = storage / "import" / "DriftCompound"
+    for edition in (STAGETOP_WAVE_ONE, STAGETOP_WAVE):
+        for part in ("Part 0", "Part 1"):
+            folder = root / edition / part
+            for index in range(2):
+                write_file(folder / f"part-{index}.stl", b"s" * 40)
+            write_file(folder / "cover.jpg", b"j" * 40)
+            write_text(folder / "notes.txt", "print at 0.2mm\n")
+    return "import/DriftCompound"
+
+
+def service_assets_under(rel_dir: str) -> List[Tuple[str, str, int]]:
+    """Every registered row under ``rel_dir`` as ``(id, path, size)``, read from the DB."""
+    with Session(engine) as session:
+        registered = bundle_service.registered_index(session)
+    return [
+        (asset_id, path, size)
+        for asset_id, path, size in registered
+        if path.startswith(rel_dir + "/")
+    ]
+
+
+def test_service_a_grown_bundle_row_reports_the_new_parts(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-3/AC-7: the already-created row names the new parts, and no create is re-offered.
+
+    The xbox compound row is created with every part, so the row answers
+    ``known``/0. One model is then written into the folder and rescanned: the row
+    is still a marker match with the same ``existing_project_id`` - the marker's
+    job is duplicate prevention, and it is unchanged - but now carries
+    ``bundle_drift_state`` ``known`` and ``bundle_drift_count`` 1. The project
+    route names the same asset, and adding exactly it clears both. A second
+    create for that key is still ``skipped``/``already_created`` with one Project.
+
+    Mutation: emit 0 for an unresolvable walk root and the grown row reads 0
+    while the route finds the part; drop either key from the schema and the
+    response model silently loses it.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+
+    created = create(client, headers, [{"key": f"import/{XBOX}"}])
+
+    assert created["created"] == 1
+    project_id = created["results"][0]["project_id"]
+    fresh = service_row(f"import/{XBOX}")
+    assert fresh["existing_project_match"] == "marker"
+    assert fresh["bundle_drift_state"] == "known"
+    assert fresh["bundle_drift_count"] == 0
+    assert project_drift_out(client, headers, project_id)["count"] == 0
+
+    write_file(isolated_storage / "import" / XBOX / "new-part.stl", b"s" * 40)
+    scan()
+    new_id = asset_id_at(f"import/{XBOX}/new-part.stl")
+
+    grown = service_row(f"import/{XBOX}")
+
+    assert grown["existing_project_match"] == "marker"
+    assert grown["existing_project_id"] == project_id
+    assert grown["bundle_drift_state"] == "known"
+    assert grown["bundle_drift_count"] == 1
+    drift = project_drift_out(client, headers, project_id)
+    assert drift == {"state": "known", "count": 1, "asset_ids": [new_id]}
+    assert drift["count"] == len(drift["asset_ids"])
+
+    # AC-7: the marker still owns the key, so create is never re-offered.
+    second = create(client, headers, [{"key": f"import/{XBOX}"}])
+    assert second["created"] == 0
+    assert second["skipped"] == 1
+    assert second["results"][0]["reason"] == "already_created"
+    with Session(engine) as session:
+        assert len(session.exec(select(Project)).all()) == 1
+
+    added = client.post(
+        f"/project/{project_id}/assets", json={"asset_ids": drift["asset_ids"]}, headers=headers
+    ).json()
+
+    assert added["added"] == [new_id]
+    assert service_row(f"import/{XBOX}")["bundle_drift_count"] == 0
+    assert project_drift_out(client, headers, project_id) == {
+        "state": "known",
+        "count": 0,
+        "asset_ids": [],
+    }
+
+
+def test_service_a_fresh_bundle_project_reports_no_new_parts(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-4: creation attaches every model, so both surfaces answer the honest zero.
+
+    The measured compound shape: eight models in four part folders, each folder
+    also holding the ``cover.jpg`` and ``notes.txt`` a create never attaches. The
+    create attaches all eight models, the queue row and the project route both
+    answer ``known``/0, and the naive all-asset difference would answer 8 - the
+    model count - because the support files stay registered and unattached.
+    Mutation: count every registered asset and both answers read 8, prompting on
+    the very files creation deliberately skipped.
+    """
+    key = write_drift_compound(isolated_storage)
+    insert_folder_row("DriftCompound", key)
+    scan()
+    headers = auth_header(client)
+
+    created = create(client, headers, [{"key": key}])
+
+    assert created["created"] == 1
+    result = created["results"][0]
+    project_id = result["project_id"]
+    assert result["assets_added"] == 8
+    assert project_storage_paths(project_id) == registered_model_paths(key)
+
+    registered = service_assets_under(key)
+    members = set(project_asset_ids(client, headers, project_id))
+    naive = [path for asset_id, path, _size in registered if asset_id not in members]
+
+    assert len(registered) == 16, "eight models and eight support files"
+    assert len(naive) == 8 == len(members), "the naive difference answers the model count"
+
+    row = service_row(key)
+    assert row["bundle_drift_state"] == "known"
+    assert row["bundle_drift_count"] == 0
+    assert project_drift_out(client, headers, project_id) == {
+        "state": "known",
+        "count": 0,
+        "asset_ids": [],
+    }
+
+
+def test_service_an_excluded_group_is_not_drift(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-5: an excluded group's models stay unattached and are never offered as new parts.
+
+    The compound create excludes the foreign group, so its four models are
+    registered and unattached BY DESIGN. The marker records ``included: False``,
+    and drift subtracts that prefix: the row and the route both answer
+    ``known``/0, and no id the route offers sits under the group's path.
+
+    Mutation: drop the ``included: False`` subtraction and the row answers 4
+    forever, with "Add them" attaching exactly what the operator excluded.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+
+    created = create_for_exclusion(client, headers, [XBOX_GROUP])
+
+    assert created["created"] == 1
+    project_id = created["results"][0]["project_id"]
+    marker = project_marker(project_id)
+    assert [(group["name"], group["included"]) for group in marker["groups"]] == [(XBOX_GROUP, False)]
+
+    excluded_prefix = f"import/{XBOX}/{XBOX_GROUP}/"
+    unattached = registered_model_paths(f"import/{XBOX}") - project_storage_paths(project_id)
+    assert len(unattached) == XBOX_GROUP_MODELS
+    assert all(path.startswith(excluded_prefix) for path in unattached), "only the excluded group is unattached"
+
+    row = service_row(f"import/{XBOX}")
+    assert row["bundle_drift_state"] == "known"
+    assert row["bundle_drift_count"] == 0
+    drift = project_drift_out(client, headers, project_id)
+    assert drift == {"state": "known", "count": 0, "asset_ids": []}
+    assert not any(path.startswith(excluded_prefix) for path in project_storage_paths(project_id))
+
+
+def test_service_the_drift_index_is_one_statement_per_report(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-8: the registered index is ONE statement, however many candidates there are.
+
+    Two candidates and then five: exactly one statement selects
+    ``asset.id, asset.storage_path, asset.size`` in each report, so drift is
+    answered from a report-wide list rather than one read per row. The whole
+    report's statement count grows only by the existing per-candidate asset read,
+    which is measured here so the index's own cost stays pinned.
+
+    Mutation: call ``registered_assets`` per row to answer drift and the index
+    count becomes one per candidate (2, then 5), which on the owner's 91-project
+    library is 91 queries.
+    """
+    for index in range(2):
+        thingiverse_bundle(isolated_storage, f"Two {index}", 1000 + index)
+    scan()
+
+    two_candidates = len(report_statements())
+    two_index = report_statements(mention=REGISTERED_INDEX_SQL)
+
+    for index in range(2, 5):
+        thingiverse_bundle(isolated_storage, f"Two {index}", 1000 + index)
+    scan()
+
+    five_candidates = len(report_statements())
+    five_index = report_statements(mention=REGISTERED_INDEX_SQL)
+
+    assert len(two_index) == 1, "two candidates, one registered index"
+    assert len(five_index) == 1, "five candidates, still one registered index"
+    # Measured, not guessed: six report-wide statements (folders, memberships,
+    # the registered index, the compound splits and the two settings reads) plus
+    # three per candidate that already existed (its asset read, the marker
+    # lookup's project list and its own detect read). Drift adds the one in the
+    # middle and nothing per row.
+    assert two_candidates == 12, "two candidates"
+    assert five_candidates == 21, "five candidates: three more rows"
+

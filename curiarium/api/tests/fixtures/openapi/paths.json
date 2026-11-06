@@ -3684,6 +3684,51 @@
       "summary": "Add Project Assets"
     }
   },
+  "/project/{project_id}/bundle-drift": {
+    "get": {
+      "description": "Whether this bundle project's folder has grown, and the parts it would add.\n\nDeliberately NOT a field on `GET /projects`: that list is one statement for\nmany projects with its own statement pin, and App refetches it on every\n`assetsVersion` bump - far more often than anyone opens one project. The\nclient asks this route only when the project carries a `_bundle` marker, so a\nhand-made project costs no request at all.\n\nA read, and only a read: it never attaches the parts it names. The one action\nis the existing `POST /project/{id}/assets` with exactly `asset_ids`, which is\nwhy `count` is that list's length whenever the state is `known`.",
+      "operationId": "project_bundle_drift_project__project_id__bundle_drift_get",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "title": "Project Id",
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectDriftOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Project Bundle Drift"
+    }
+  },
   "/projects": {
     "get": {
       "operationId": "list_projects_projects_get",

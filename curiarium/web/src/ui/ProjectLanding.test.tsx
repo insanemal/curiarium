@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createRef, type ComponentProps } from "react";
+import { createRef, useState, type ComponentProps } from "react";
 
 import type { Asset, Project } from "../lib/api";
 
@@ -24,6 +24,15 @@ vi.mock("../lib/api", () => ({
 
 vi.mock("../lib/download", () => ({
   saveResponseToDisk: vi.fn(),
+}));
+
+// The drift read is imported from the DOMAIN module, not the barrel mocked
+// above - the same rule `useBundleDetect.ts` documents. The original module is
+// spread back so every other export keeps working.
+const driftApi = vi.hoisted(() => ({ getProjectBundleDrift: vi.fn() }));
+vi.mock("../lib/api/projects", async importOriginal => ({
+  ...(await importOriginal<typeof import("../lib/api/projects")>()),
+  getProjectBundleDrift: driftApi.getProjectBundleDrift,
 }));
 
 // The landing delegates the member list to the real grid; this stub records
@@ -61,6 +70,7 @@ import {
   uploadAssetFile,
 } from "../lib/api";
 import { saveResponseToDisk } from "../lib/download";
+import { getProjectBundleDrift } from "../lib/api/projects";
 import { getToasts, resetToasts } from "../lib/toast";
 
 const addProjectAssetsMock = vi.mocked(addProjectAssets);
@@ -74,6 +84,7 @@ const updateProjectMock = vi.mocked(updateProject);
 const uploadAssetMock = vi.mocked(uploadAsset);
 const uploadAssetFileMock = vi.mocked(uploadAssetFile);
 const saveResponseToDiskMock = vi.mocked(saveResponseToDisk);
+const getProjectBundleDriftMock = vi.mocked(getProjectBundleDrift);
 
 function makeProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -196,6 +207,13 @@ beforeEach(() => {
   );
   removeProjectAssetsMock.mockResolvedValue({ removed: [], skipped: [], failed: [] });
   addProjectAssetsMock.mockResolvedValue({ added: [], skipped: [], failed: [] });
+  // Default: a project with no folder identity. Most fixtures carry no
+  // `_bundle` marker, so this answer is never even asked for.
+  getProjectBundleDriftMock.mockResolvedValue({
+    state: "unknown",
+    count: null,
+    asset_ids: [],
+  });
   uploadAssetMock.mockImplementation(async (uploadedFile: File) =>
     makeAsset({ id: "new1", name: "Widget", filename: uploadedFile.name, size: uploadedFile.size }),
   );
@@ -1015,5 +1033,124 @@ describe("ProjectLanding attach escape guard", () => {
     );
     expect(seenOnDocument.some(event => event.defaultPrevented)).toBe(true);
     expect(screen.getByRole("heading", { level: 1, name: "Hydra" })).toBeTruthy();
+  });
+});
+
+/** A landing whose `assetsVersion` really bumps, the way App bumps it after
+ *  `onAssetsChanged` - the clear path needs the refetch, not a mocked callback. */
+function DriftHarness({
+  project,
+  canContribute = true,
+}: {
+  project: Project;
+  canContribute?: boolean;
+}) {
+  const [version, setVersion] = useState(0);
+  return (
+    <ProjectLanding
+      canContribute={canContribute}
+      canDelete={false}
+      project={project}
+      assetsVersion={version}
+      onProjectUpdated={vi.fn()}
+      onProjectDeleted={vi.fn()}
+      onAssetsChanged={() => setVersion(current => current + 1)}
+      theme="dark"
+    />
+  );
+}
+
+/** The notice region, found by its own attribute: it is a prompt, not a landmark. */
+function driftNotice(): HTMLElement | null {
+  return document.querySelector("[data-bundle-drift]");
+}
+
+const BUNDLE_MARKER = { key: "Hydra", groups: [{ name: "Hydra", model_count: 3 }] };
+
+describe("ProjectLanding bundle drift", () => {
+  it("asks nothing at all for a project with no _bundle marker", async () => {
+    renderLanding();
+    await screen.findByRole("img", { name: "Photo one" });
+
+    // A hand-made project has no folder identity, so there is no question to
+    // answer - not even a request that comes back not_applicable.
+    expect(getProjectBundleDriftMock).not.toHaveBeenCalled();
+    expect(driftNotice()).toBeNull();
+  });
+
+  it("shows the count and one Add them button for a grown folder", async () => {
+    getProjectBundleDriftMock.mockResolvedValue({
+      state: "known",
+      count: 3,
+      asset_ids: ["a", "b", "c"],
+    });
+    const onAssetsChanged = vi.fn();
+    renderLanding({
+      project: makeProject({ metadata_json: { _bundle: BUNDLE_MARKER } }),
+      onAssetsChanged,
+    });
+
+    expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Add them" }).length).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add them" }));
+
+    // The existing membership path, with exactly the ids the count counted.
+    await waitFor(() => expect(addProjectAssetsMock).toHaveBeenCalledWith("p1", ["a", "b", "c"]));
+    await waitFor(() => expect(onAssetsChanged).toHaveBeenCalled());
+  });
+
+  it("shows no notice at all for a fresh project, not a zero", async () => {
+    getProjectBundleDriftMock.mockResolvedValue({ state: "known", count: 0, asset_ids: [] });
+    renderLanding({ project: makeProject({ metadata_json: { _bundle: BUNDLE_MARKER } }) });
+
+    await waitFor(() => expect(getProjectBundleDriftMock).toHaveBeenCalled());
+    expect(driftNotice()).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add them" })).toBeNull();
+    expect(screen.queryByText(/parts in this folder/)).toBeNull();
+  });
+
+  it("renders an en dash when the server cannot tell, never a zero", async () => {
+    getProjectBundleDriftMock.mockResolvedValue({ state: "unknown", count: null, asset_ids: [] });
+    renderLanding({ project: makeProject({ metadata_json: { _bundle: BUNDLE_MARKER } }) });
+
+    const line = await screen.findByText("\u2013 parts in this folder are not in the project");
+    expect(line.textContent).not.toContain("0");
+    expect(line.textContent).toContain("\u2013");
+  });
+
+  it("clears the notice after Add them: the version bump refetches a known zero", async () => {
+    let answers = 0;
+    getProjectBundleDriftMock.mockImplementation(async () => {
+      answers += 1;
+      // The first read is before the click; every later one is the refetch the
+      // `assetsVersion` bump causes after the parts were added.
+      return answers === 1
+        ? { state: "known", count: 3, asset_ids: ["a", "b", "c"] }
+        : { state: "known", count: 0, asset_ids: [] };
+    });
+    render(<DriftHarness project={makeProject({ metadata_json: { _bundle: BUNDLE_MARKER } })} />);
+
+    expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add them" }));
+
+    await waitFor(() => expect(driftNotice()).toBeNull());
+    expect(getProjectBundleDriftMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("still shows the notice to a viewer, with no button to press", async () => {
+    getProjectBundleDriftMock.mockResolvedValue({
+      state: "known",
+      count: 3,
+      asset_ids: ["a", "b", "c"],
+    });
+    renderLanding({
+      project: makeProject({ metadata_json: { _bundle: BUNDLE_MARKER } }),
+      canContribute: false,
+    });
+
+    expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
+    // The fact stays readable; the write does not exist for this role.
+    expect(screen.queryByRole("button", { name: "Add them" })).toBeNull();
   });
 });

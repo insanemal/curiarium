@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlmodel import Session, select
 
 import audit
+import bundle_drift
 import project_service
 from auth import AuthContext
 from db import engine
@@ -16,6 +17,7 @@ from routers.presenters import project_to_out, to_out
 from schemas import (
     AssetOut,
     ProjectAssetsRequest,
+    ProjectDriftOut,
     ProjectIn,
     ProjectMembersOut,
     ProjectOut,
@@ -123,6 +125,26 @@ def list_project_assets(
         stmt = apply_asset_order(stmt, sort, order)
         assets = asset_page(s, stmt, response, limit, offset)
     return [to_out(a) for a in assets]
+
+
+@router.get("/project/{project_id}/bundle-drift", response_model=ProjectDriftOut)
+def project_bundle_drift(project_id: str, _: Optional[AuthContext] = Depends(require_read)):
+    """Whether this bundle project's folder has grown, and the parts it would add.
+
+    Deliberately NOT a field on `GET /projects`: that list is one statement for
+    many projects with its own statement pin, and App refetches it on every
+    `assetsVersion` bump - far more often than anyone opens one project. The
+    client asks this route only when the project carries a `_bundle` marker, so a
+    hand-made project costs no request at all.
+
+    A read, and only a read: it never attaches the parts it names. The one action
+    is the existing `POST /project/{id}/assets` with exactly `asset_ids`, which is
+    why `count` is that list's length whenever the state is `known`.
+    """
+    with Session(engine) as s:
+        project = project_service.get_project(s, project_id)
+        state, count, asset_ids = bundle_drift.project_drift(s, project)
+    return ProjectDriftOut(state=state, count=count, asset_ids=asset_ids)
 
 
 @router.post("/project/{project_id}/assets", response_model=ProjectMembersOut)

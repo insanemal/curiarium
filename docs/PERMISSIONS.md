@@ -237,7 +237,7 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 101 routes: 11 public, 36 read,
+Paths are FastAPI templates exactly as declared. 102 routes: 11 public, 37 read,
 23 contribute, 13 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
@@ -295,6 +295,7 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | GET    | `/folder/{folder_id}/download`          | download a folder as a zip |
 | GET    | `/projects`                             | list projects with their member counts |
 | GET    | `/project/{project_id}/assets`          | list one project's member assets |
+| GET    | `/project/{project_id}/bundle-drift`    | asks whether a bundle project's folder has grown; one prefix SELECT over registered rows, writes nothing |
 | GET    | `/trash`                                | list the trash |
 | GET    | `/storage/capabilities`                 | read-only filesystem capability report; creates nothing |
 | GET    | `/bundles/detect`                       | dry-run report computed from disk on every read: which directories are vendor bundles and what a create would make of each; writes nothing, resolves nothing, heals nothing |
