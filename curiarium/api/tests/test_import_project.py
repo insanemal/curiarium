@@ -18,6 +18,8 @@ time.
 import io
 import json
 import socket
+import struct
+import zlib
 from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError
@@ -31,6 +33,7 @@ from sqlmodel import Session, select
 import asset_file_service
 import asset_service
 import audit
+import bundle_service
 import db
 import import_resolvers
 import import_service
@@ -710,11 +713,11 @@ def test_a_title_does_not_name_the_project_for_a_single_file_import(monkeypatch:
 # --- zip selection ----------------------------------------------------------
 
 
-def make_zip(tmp_path: Path, names: list[str]) -> Path:
+def make_zip(tmp_path: Path, names: list[str], *, payloads: dict[str, bytes] | None = None) -> Path:
     path = tmp_path / "download.zip"
     with ZipFile(path, "w") as archive:
         for name in names:
-            archive.writestr(name, STL_BYTES)
+            archive.writestr(name, (payloads or {}).get(name, STL_BYTES))
     return path
 
 
@@ -841,6 +844,419 @@ def test_a_corrupt_zip_is_a_400_and_leaves_no_temp_file(monkeypatch: pytest.Monk
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "Invalid zip file"
     assert not not_a_zip.exists()
+
+
+# --- zip-as-project: cover and marker (Mf-qbji) ------------------------------
+
+
+def png_bytes(width: int, height: int) -> bytes:
+    """A real, decodable PNG: extraction thumbnails images, so bytes must decode."""
+    raw_row = b"\x00" + b"\xff\xff\xff" * width
+    raw = raw_row * height
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + tag
+            + payload
+            + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+        )
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def import_zip(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    names: list[str],
+    entries: list[str],
+    url: str,
+    payloads: dict[str, bytes] | None = None,
+    project_id: str | None = None,
+) -> project_import.ImportOutcome:
+    """Run one zip-as-project import through the stubbed attempt seam."""
+    zip_path = make_zip(tmp_path, names, payloads=payloads)
+    target = page(url, PRINTABLES_FREE_PAGE)
+    stub_attempt(monkeypatch, ZipAttempt(tmp_path=zip_path, filename="download.zip", mime="application/zip", page=target))
+    return project_import.import_into_project(
+        url, ImportProjectRequest(url=url, entries=entries, project_id=project_id)
+    )
+
+
+def test_a_zip_project_gets_a_cover_from_its_largest_registered_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The zip door asks the detection cover rule over the rows it just created."""
+    url = "https://www.printables.com/model/201-vase"
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["small.png", "large.png", "part1.stl", "part2.stl"],
+        entries=["small.png", "large.png", "part1.stl", "part2.stl"],
+        url=url,
+        payloads={"small.png": png_bytes(1, 1), "large.png": png_bytes(16, 16)},
+    )
+
+    images = {asset.filename: asset for asset in outcome.assets if asset.filename.endswith(".png")}
+    small, large = images["small.png"], images["large.png"]
+    assert large.size > small.size, "the fixture must make the 16x16 PNG the larger one"
+
+    row = project_row(outcome.project_id)
+    assert row.cover_asset_id == large.id
+    assert json.loads(row.metadata_json)["_bundle"]["cover"] == {
+        "asset_id": large.id,
+        "rel_path": large.storage_path,
+        "reason": "largest-image",
+        "group": None,
+    }
+
+
+def test_a_zip_with_no_image_gets_no_cover_rather_than_a_broken_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The images-only ruling: no image, no cover - not a fabricated one.
+
+    This deliberately does NOT use the model-preview leg the detection door would
+    use for the same files, so a models-only archive gets a blank card here.
+    """
+    url = "https://www.printables.com/model/202-nut"
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["PartC/nut.stl", "PartD/bolt.stl"],
+        entries=["PartC/nut.stl", "PartD/bolt.stl"],
+        url=url,
+    )
+
+    row = project_row(outcome.project_id)
+    assert row.cover_asset_id is None
+    assert json.loads(row.metadata_json)["_bundle"]["cover"] == {
+        "asset_id": None,
+        "rel_path": None,
+        "reason": "none",
+        "group": None,
+    }
+
+
+def test_the_two_doors_agree_on_the_image_leg_and_only_there(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Parity pin: the same rule answers both doors, except the model-preview leg."""
+    image_url = "https://www.printables.com/model/203-vase"
+    image_outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["small.png", "large.png", "part1.stl"],
+        entries=["small.png", "large.png", "part1.stl"],
+        url=image_url,
+        payloads={"small.png": png_bytes(1, 1), "large.png": png_bytes(16, 16)},
+    )
+    image_marker = json.loads(project_row(image_outcome.project_id).metadata_json)["_bundle"]["cover"]
+    detection = bundle_service.cover_for_registered(bundle_service.registered_from_rows(image_outcome.assets), None)
+
+    assert detection["asset_id"] == image_marker["asset_id"]
+    assert detection["rel_path"] == image_marker["rel_path"]
+    assert detection["reason"] == image_marker["reason"]
+
+    model_url = "https://www.printables.com/model/204-nut"
+    model_outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["PartC/nut.stl", "PartD/bolt.stl"],
+        entries=["PartC/nut.stl", "PartD/bolt.stl"],
+        url=model_url,
+    )
+    model_marker = json.loads(project_row(model_outcome.project_id).metadata_json)["_bundle"]["cover"]
+    detection = bundle_service.cover_for_registered(bundle_service.registered_from_rows(model_outcome.assets), None)
+
+    assert detection["reason"] == bundle_service.COVER_MODEL_PREVIEW
+    assert model_marker["reason"] == bundle_service.COVER_NONE
+
+
+def test_the_zip_project_marker_names_the_door_its_key_and_its_groups(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The marker is the detection shape with honest nulls and THIS door's name."""
+    # Group names are the archive's TOP folders because that is what
+    # `resolve_zip_folder_id` groups the project by, so the marker's groups and
+    # the project's own sections cannot disagree.
+    url = "https://www.printables.com/model/205-thing"
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["Thing/one.stl", "Thing/two.stl"],
+        entries=["Thing/one.stl", "Thing/two.stl"],
+        url=url,
+    )
+
+    expected_key = project_import.ZIP_PROJECT_KEY_PREFIX + canonical_url(url)
+    marker = json.loads(project_row(outcome.project_id).metadata_json)["_bundle"]
+    assert {k: v for k, v in marker.items() if k != "cover"} == {
+        "key": expected_key,
+        "source": project_import.ZIP_PROJECT_SOURCE,
+        "detector": None,
+        "confidence": None,
+        "rel_dir": "Thing",
+        "archive": None,
+        "twin_verified": None,
+        "shape": "compound",
+        "groups": [{"name": "Thing", "model_count": 2, "foreign": False, "included": True, "attached": 2}],
+    }
+    assert marker["cover"] == {"asset_id": None, "rel_path": None, "reason": bundle_service.COVER_NONE, "group": None}
+
+    mixed_url = "https://www.printables.com/model/206-mixed"
+    mixed = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["PartA/bracket.stl", "PartB/lid.stl", "previewA.png"],
+        entries=["PartA/bracket.stl", "PartB/lid.stl", "previewA.png"],
+        url=mixed_url,
+        payloads={"previewA.png": png_bytes(4, 4)},
+    )
+    mixed_marker = json.loads(project_row(mixed.project_id).metadata_json)["_bundle"]
+    assert mixed_marker["rel_dir"] is None, "a mixed-root archive has no honest walk root"
+    assert mixed_marker["shape"] == "compound"
+    assert mixed_marker["groups"] == [
+        {"name": "PartA", "model_count": 1, "foreign": False, "included": True, "attached": 1},
+        {"name": "PartB", "model_count": 1, "foreign": False, "included": True, "attached": 1},
+    ]
+    assert mixed_marker["cover"]["reason"] == bundle_service.COVER_LARGEST_IMAGE
+    assert mixed_marker["cover"]["group"] is None, "the root-level preview belongs to no group"
+
+
+def test_a_re_import_never_clobbers_a_human_cover_or_a_detection_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fill only what is empty: a user cover and a detection marker both survive."""
+    human_url = "https://www.printables.com/model/207-human"
+    human_cover = make_asset("human-cover.stl")
+    with Session(engine) as session:
+        seeded = project_service.create_project(session, "Human cover", None, human_cover.id, source_url=human_url)
+    human = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["human.png", "human-part.stl"],
+        entries=["human.png", "human-part.stl"],
+        url=human_url,
+        payloads={"human.png": png_bytes(8, 8)},
+    )
+    assert human.created is False
+    assert human.project_id == seeded.id
+    assert project_row(seeded.id).cover_asset_id == human_cover.id, "a human cover is never overwritten"
+
+    detection_url = "https://www.printables.com/model/208-detected"
+    seeded_metadata = json.dumps(
+        {"_bundle": {"key": "import/17_ClockworkMonster", "detector": "folder", "groups": [{"name": "a", "model_count": 1}]}}
+    )
+    with Session(engine) as session:
+        detected = project_service.create_project(
+            session,
+            "Detected project",
+            None,
+            None,
+            source_url=detection_url,
+            metadata={"_bundle": json.loads(seeded_metadata)["_bundle"]},
+        )
+    detected_outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["detected.png", "detected-part.stl"],
+        entries=["detected.png", "detected-part.stl"],
+        url=detection_url,
+        payloads={"detected.png": png_bytes(8, 8)},
+    )
+    detected_row = project_row(detected.id)
+    assert detected_outcome.created is False
+    assert detected_row.metadata_json == seeded_metadata, "a detection marker is someone else's record"
+    assert detected_row.cover_asset_id is not None, "an empty cover is still filled"
+
+    empty_url = "https://www.printables.com/model/209-empty"
+    with Session(engine) as session:
+        empty = project_service.create_project(session, "Empty project", None, None, source_url=empty_url)
+    empty_outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["empty.png", "empty-part.stl"],
+        entries=["empty.png", "empty-part.stl"],
+        url=empty_url,
+        payloads={"empty.png": png_bytes(8, 8)},
+    )
+    empty_row = project_row(empty.id)
+    assert empty_outcome.created is False
+    assert empty_row.cover_asset_id is not None
+    assert json.loads(empty_row.metadata_json)["_bundle"]["key"] == project_import.ZIP_PROJECT_KEY_PREFIX + canonical_url(empty_url)
+
+    # (d) This door's OWN marker is a free slot: a second import of the same page
+    # refreshes it rather than treating it as someone else's. What must never
+    # move is the identity - the key names the page, not the selection.
+    again = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["empty.png", "empty-part.stl", "extra.stl"],
+        entries=["empty.png", "empty-part.stl", "extra.stl"],
+        url=empty_url,
+        payloads={"empty.png": png_bytes(8, 8)},
+    )
+    again_row = project_row(again.project_id)
+    assert again.created is False
+    assert json.loads(again_row.metadata_json)["_bundle"]["source"] == project_import.ZIP_PROJECT_SOURCE
+    assert json.loads(again_row.metadata_json)["_bundle"]["key"] == project_import.ZIP_PROJECT_KEY_PREFIX + canonical_url(empty_url)
+
+
+def test_a_group_records_what_was_selected_and_what_was_attached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The two numbers are the scan-count/attach-set split, and nothing else.
+
+    `model_count` counts what the SELECTION named and `attached` counts what the
+    extractor actually wrote. Only an extraction failure can separate them on
+    this door, so the requested-but-absent third entry is what pins the split.
+    """
+    url = "https://www.printables.com/model/214-split"
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["Thing/one.stl", "Thing/two.stl"],
+        entries=["Thing/one.stl", "Thing/two.stl", "Thing/missing.stl"],
+        url=url,
+    )
+
+    marker = json.loads(project_row(outcome.project_id).metadata_json)["_bundle"]
+    assert marker["groups"] == [
+        {"name": "Thing", "model_count": 3, "foreign": False, "included": True, "attached": 2}
+    ]
+    assert outcome.failed == ["Thing/missing.stl"]
+
+
+def test_an_explicit_project_target_gains_an_empty_cover_and_the_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A chosen target with a stock `{}` slot is empty, so the import fills it."""
+    url = "https://www.printables.com/model/215-target"
+    with Session(engine) as session:
+        seeded = project_service.create_project(session, "Chosen target", None, None, source_url=url)
+    assert project_row(seeded.id).metadata_json == "{}"
+
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["preview.png", "part.stl"],
+        entries=["preview.png", "part.stl"],
+        url=url,
+        payloads={"preview.png": png_bytes(4, 4)},
+        project_id=seeded.id,
+    )
+
+    row = project_row(seeded.id)
+    image = next(asset for asset in outcome.assets if asset.filename == "preview.png")
+    assert outcome.created is False
+    assert outcome.project_id == seeded.id
+    assert row.name == "Chosen target"
+    assert row.cover_asset_id == image.id
+    assert json.loads(row.metadata_json)["_bundle"]["key"] == project_import.ZIP_PROJECT_KEY_PREFIX + canonical_url(url)
+
+
+def test_the_readers_still_read_the_new_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The marker is the shape every existing reader already parses."""
+    url = "https://www.printables.com/model/210-thing"
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["Thing/one.stl", "Thing/two.stl"],
+        entries=["Thing/one.stl", "Thing/two.stl"],
+        url=url,
+    )
+    raw = project_row(outcome.project_id).metadata_json
+    marker = json.loads(raw)["_bundle"]
+
+    assert bundle_service._bundle_marker(raw) == marker
+    with Session(engine) as session:
+        assert bundle_service._compound_splits(session).get(marker["key"]) is None
+        assert (
+            bundle_service.find_existing_project(
+                session, key="import/17_ClockworkMonster", source_url=None, name="", assets=()
+            )
+            is None
+        ), "an identity key is not a directory key, so no detection lookup false-matches it"
+
+    with TestClient(main.app) as client:
+        headers = auth_header(client)
+        response = client.get("/projects", headers=headers)
+
+    assert response.status_code == 200, response.text
+    listed = next(project for project in response.json() if project["id"] == outcome.project_id)
+    assert listed["metadata_json"]["_bundle"]["key"] == marker["key"]
+
+
+def test_the_whole_zip_as_one_asset_path_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The single-asset door records neither a cover nor a marker."""
+    url = "https://www.printables.com/model/211-bundle"
+    target = page(url, PRINTABLES_FREE_PAGE)
+    # The cover rule keys on the storage path SUFFIX, so the fixture must carry
+    # one the rule would pick - a `.zip` path could never fire it.
+    asset = make_asset("preview.png")
+    stub_attempt(monkeypatch, ImportAttempt(asset=asset, page=target))
+
+    outcome = project_import.import_into_project(url, ImportProjectRequest(url=url))
+
+    row = project_row(outcome.project_id)
+    assert member_ids(outcome.project_id) == {asset.id}
+    assert row.cover_asset_id is None
+    assert row.metadata_json == "{}"
+
+
+def test_a_gated_zip_import_records_no_cover_and_no_bundle_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gated zip stores no files, so it has nothing to cover and no marker to claim."""
+    url = "https://www.printables.com/model/212-paid"
+    target = page(url, PRINTABLES_PAID_PAGE)
+    stub_attempt(
+        monkeypatch,
+        ZipAttempt(
+            filename="download.zip",
+            mime="application/zip",
+            page=target,
+            error=HTTPException(status_code=403, detail="forbidden"),
+        ),
+    )
+
+    outcome = project_import.import_into_project(url, ImportProjectRequest(url=url, entries=["part.stl"]))
+
+    row = project_row(outcome.project_id)
+    assert outcome.gated is True
+    assert row.cover_asset_id is None
+    assert json.loads(row.metadata_json) == {"_files": "user-supplied"}
+
+
+def test_no_storage_path_can_contain_the_identity_keys_separator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The no-false-match claim rests on the renderer refusing `:` in every segment."""
+    url = "https://www.printables.com/model/213-colons"
+    outcome = import_zip(
+        monkeypatch,
+        tmp_path,
+        names=["Part: A/br:acket.stl", "prev:iew.png"],
+        entries=["Part: A/br:acket.stl", "prev:iew.png"],
+        url=url,
+        payloads={"prev:iew.png": png_bytes(2, 2)},
+    )
+
+    assert len(outcome.assets) == 2
+    for asset in outcome.assets:
+        assert ":" not in asset.storage_path
+    assert asset_service._INVALID_SEGMENT_RE.search(":") is not None
+    assert ":" not in asset_service.sanitize_path_segment("zip-project:x", "item")
+    with Session(engine) as session:
+        assert ":" not in asset_service.render_storage_path(outcome.assets[0], session)
 
 
 # --- collisions and totality ------------------------------------------------

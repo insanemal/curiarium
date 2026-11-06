@@ -1465,6 +1465,28 @@ class RegisteredAsset(NamedTuple):
     filename: str
 
 
+def registered_from_rows(rows: Sequence[Asset]) -> List[RegisteredAsset]:
+    """The shape a cover rule sorts, from rows the caller already holds.
+
+    A door that has just created its assets holds them, so re-reading the table
+    for bytes it was handed would be a second query for the same rows. A row with
+    no `storage_path` reads as the empty path rather than being dropped: the empty
+    path has no suffix, so the cover rule classifies it as neither an image nor a
+    model - the honest answer for a row with no location.
+    """
+    return [
+        RegisteredAsset(
+            id=asset.id,
+            path=asset.storage_path or "",
+            size=int(asset.size or 0),
+            mime=asset.mime or "",
+            thumb_version=int(asset.thumb_version or 0),
+            filename=asset.filename or "",
+        )
+        for asset in rows
+    ]
+
+
 def registered_assets(session: Session, rel_dir: str) -> List[RegisteredAsset]:
     """Every registered asset under ``rel_dir``, with what a report row needs.
 
@@ -1480,17 +1502,7 @@ def registered_assets(session: Session, rel_dir: str) -> List[RegisteredAsset]:
         )
         .order_by(Asset.storage_path)
     )
-    return [
-        RegisteredAsset(
-            id=asset.id,
-            path=asset.storage_path or "",
-            size=int(asset.size or 0),
-            mime=asset.mime or "",
-            thumb_version=int(asset.thumb_version or 0),
-            filename=asset.filename or "",
-        )
-        for asset in session.exec(statement)
-    ]
+    return registered_from_rows(list(session.exec(statement)))
 
 
 def _own_paths(key: str, candidate: BundleCandidate) -> set:
@@ -1637,15 +1649,13 @@ def _set_enrichments(records: Mapping[str, dict]) -> None:
 
 
 def _bundle_marker(metadata_json: Optional[str]) -> dict:
-    """The reserved ``_bundle`` marker of one project row, or ``{}``."""
-    try:
-        parsed = json.loads(metadata_json or "{}")
-    except (TypeError, ValueError):
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    marker = parsed.get("_bundle")
-    return marker if isinstance(marker, dict) else {}
+    """The reserved ``_bundle`` marker of one project row, or ``{}``.
+
+    Delegates to `project_service.bundle_marker_of`, the one implementation:
+    `bundle_service` already imports that module, so the arrow points this way and
+    no cycle can form.
+    """
+    return project_service.bundle_marker_of(metadata_json)
 
 
 def _compound_splits(session: Session) -> Dict[str, Tuple[str, ...]]:
@@ -1835,7 +1845,12 @@ def _candidate_facts(root: Path, candidate: BundleCandidate) -> Optional[bundle_
     return _detect_folder(Path(root), candidate.snapshot)
 
 
-def _cover(assets: Sequence[RegisteredAsset], facts: bundle_detect.BundleFacts) -> dict:
+def cover_for_registered(
+    assets: Sequence[RegisteredAsset],
+    cover_entry: Optional[str] = None,
+    *,
+    allow_model_preview: bool = True,
+) -> dict:
     """The cover a created project would get, and the reason it got it.
 
     The chain is ordered by source, never by size: a registered preview image
@@ -1847,6 +1862,12 @@ def _cover(assets: Sequence[RegisteredAsset], facts: bundle_detect.BundleFacts) 
 
     ``url``/``thumb_url`` are set exactly when ``asset_id`` is: the pair is the
     served paths for those bytes, so a row with no asset has nothing to serve.
+
+    This function IS the one rule both doors ask: the detection create path
+    through ``_cover``, and the zip-as-project door directly. ``allow_model_preview``
+    is the single knob a door may use to refuse the model leg; passing an empty
+    ``cover_entry`` is how a door that ran no walk kills the unregistered leg by
+    construction.
     """
     images = sorted(
         (asset for asset in assets if _suffix(asset.path) in bundle_detect.IMAGE_SUFFIXES),
@@ -1854,8 +1875,10 @@ def _cover(assets: Sequence[RegisteredAsset], facts: bundle_detect.BundleFacts) 
     )
     if images:
         return _cover_of(images[0], COVER_LARGEST_IMAGE)
-    if facts.cover_entry:
-        return _cover_none_fields(facts.cover_entry, COVER_LARGEST_IMAGE_UNREGISTERED)
+    if cover_entry:
+        return _cover_none_fields(cover_entry, COVER_LARGEST_IMAGE_UNREGISTERED)
+    if not allow_model_preview:
+        return _cover_none_fields(None, COVER_NONE)
     # The bundle has no image at all. Its own registered, client-renderable models
     # are still a face: prefer one that already has a thumbnail (a previous render),
     # then the largest, then path order - the pick is a function of the rows.
@@ -1866,6 +1889,16 @@ def _cover(assets: Sequence[RegisteredAsset], facts: bundle_detect.BundleFacts) 
     if models:
         return _cover_of(models[0], COVER_MODEL_PREVIEW)
     return _cover_none_fields(None, COVER_NONE)
+
+
+def _cover(assets: Sequence[RegisteredAsset], facts: bundle_detect.BundleFacts) -> dict:
+    """`cover_for_registered` with the walk's facts: the detection door's call.
+
+    A one-line delegate on purpose. `_create_one` names the anti-fix it must not
+    grow - "a second rule here would be free to disagree with the report's" - and
+    the same reasoning binds this module to one implementation of the preference.
+    """
+    return cover_for_registered(assets, facts.cover_entry)
 
 
 def _cover_of(asset: RegisteredAsset, reason: str) -> dict:
