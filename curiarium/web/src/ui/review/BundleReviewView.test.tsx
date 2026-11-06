@@ -3,11 +3,22 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within, type RenderResult } from "@testing-library/react";
 
-// `ArchiveExtractAction` is the only module here that reaches the API barrel,
-// so the mock carries just its two calls.
-vi.mock("../../lib/api", () => ({
+// Both surfaces must answer identically: `ArchiveExtractAction` reaches the
+// barrel and the one-step door reaches the domain module, and a test that mocks
+// them with two different pairs would pass while the app imported two
+// different functions.
+const archiveApi = vi.hoisted(() => ({
   listArchiveEntries: vi.fn(),
   extractArchive: vi.fn(),
+}));
+vi.mock("../../lib/api", () => ({
+  listArchiveEntries: archiveApi.listArchiveEntries,
+  extractArchive: archiveApi.extractArchive,
+}));
+vi.mock("../../lib/api/imports", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../lib/api/imports")>()),
+  listArchiveEntries: archiveApi.listArchiveEntries,
+  extractArchive: archiveApi.extractArchive,
 }));
 
 // The cover's derived half renders a snapshot. Hoisted so the props can be
@@ -31,6 +42,8 @@ vi.mock("../ModelViewer", () => ({
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
 import {
   ENRICH_MAX_KEYS,
+  type BundleCreateItemResult,
+  type BundleCreateResponse,
   type BundleDetectItem,
   type BundleDuplicateGroup,
   type BundleReport,
@@ -41,6 +54,8 @@ import Toaster from "../Toaster";
 import BundleReviewView from "./BundleReviewView";
 import {
   ENRICH_NONE_REASON,
+  EXTRACT_AND_CREATE_HINT,
+  EXTRACT_AND_CREATE_ROW_TITLE,
   NO_SOURCE_PAGE_REASON,
   bulkEnrichTitle,
   needsDecision,
@@ -421,6 +436,7 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
     setShowCreated: vi.fn(),
     refresh: vi.fn(async () => {}),
     create: vi.fn(async () => {}),
+    createReporting: vi.fn(async () => null),
     dismiss: vi.fn(async () => {}),
     enrich: vi.fn(async () => {}),
     notice: null,
@@ -2313,5 +2329,221 @@ describe("BundleReviewView scan fidelity", () => {
     expect(names.filter(name => /delete|remove|move|rename|prune|clean|purge/i.test(name))).toEqual(
       [],
     );
+  });
+});
+
+describe("BundleReviewView extract and create", () => {
+  /** One create result, shaped the way the server sends it. */
+  function makeCreateResponse(
+    result: Partial<BundleCreateItemResult> = {},
+    overrides: Partial<BundleCreateResponse> = {},
+  ): BundleCreateResponse {
+    return {
+      created: 0,
+      skipped: 0,
+      blocked: 0,
+      failed: 0,
+      results: [
+        {
+          key: "Moai_zip",
+          status: "created",
+          project_id: "p1",
+          name: "Moai zip",
+          assets_added: 2,
+          skipped_assets: 0,
+          failed_assets: [],
+          reason: null,
+          ...result,
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  /** The narration, found by the row key it belongs to. Its own attribute, so it
+   *  cannot be confused with the button's. */
+  function narration(key: string): HTMLElement | null {
+    return document.querySelector<HTMLElement>(`[data-extract-and-create-notice="${key}"]`);
+  }
+
+  function oneStepButton(): HTMLElement | null {
+    return within(detail()).queryByRole("button", { name: "Extract and create project" });
+  }
+
+  it("offers one action on a zip-only row, and only there", () => {
+    renderView(makeState({ report: makeReport([moaiZip]) }));
+    expect(oneStepButton()).toBeTruthy();
+    cleanup();
+
+    // A ready row needs no extraction, so the door is not offered.
+    renderView(makeState({ report: makeReport([moai]) }));
+    expect(oneStepButton()).toBeNull();
+    cleanup();
+
+    // A zip-only row that already became a project has nothing left to do.
+    const alreadyCreated = makeBundle({
+      ...moaiZip,
+      existing_project_id: "p1",
+      existing_project_name: "Moai zip",
+    });
+    renderView(makeState({ report: makeReport([alreadyCreated]), showCreated: true }));
+    expect(detailTitle()).toBe("Moai zip");
+    expect(oneStepButton()).toBeNull();
+    cleanup();
+
+    // A viewer never sees a write door.
+    renderView(makeState({ report: makeReport([moaiZip]) }), false);
+    expect(oneStepButton()).toBeNull();
+  });
+
+  it("runs listing, extracting, scanning and creating, then names the project", async () => {
+    const createReporting = vi.fn(async () => makeCreateResponse());
+    const state = makeState({ report: makeReport([moaiZip]), createReporting });
+    const view = renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+
+    // The first phase is painted before anything has answered, so the operator
+    // is never looking at a silent button.
+    expect(narration("Moai_zip")?.textContent).toBe("Reading the archive's file list…");
+
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+    );
+
+    expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip");
+    expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Moai.zip", entries: null });
+    expect(state.afterExtract).toHaveBeenCalledTimes(1);
+    expect(state.afterExtract).toHaveBeenCalledWith([EXTRACT_RESULT]);
+    expect(createReporting).toHaveBeenCalledTimes(1);
+    expect(createReporting).toHaveBeenCalledWith([{ key: "Moai_zip", name: "Moai zip" }]);
+    // The reporting door is a second call on the same hook, not a rewrite of
+    // the old one: every bulk create still goes through `create`.
+    expect(state.create).not.toHaveBeenCalled();
+
+    // The four dependencies are reached in the phase order, not merely at all.
+    const calls = [
+      listArchiveEntriesMock.mock.invocationCallOrder[0],
+      extractArchiveMock.mock.invocationCallOrder[0],
+      vi.mocked(state.afterExtract).mock.invocationCallOrder[0],
+      createReporting.mock.invocationCallOrder[0],
+    ];
+    expect(calls).toEqual([...calls].sort((a, b) => a - b));
+
+    // The create hides its own row (`showCreated` off), so the narration lives
+    // in the queue's notices and must survive that hiding: a one-way write
+    // leaves a sentence behind even when the row it was about is gone.
+    view.rerender(
+      <BundleReviewView
+        state={makeState({
+          report: makeReport([
+            moai,
+            { ...moaiZip, existing_project_id: "p1", existing_project_name: "Moai zip" },
+          ]),
+        })}
+        canContribute
+      />,
+    );
+    expect(rowKeys()).not.toContain("Moai_zip");
+    expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip.");
+    // Queue level, not aside level: the paragraph must not live in the panel
+    // whose row just vanished.
+    expect(detail().contains(narration("Moai_zip"))).toBe(false);
+  });
+
+  it("reports already-created rather than making a second project", async () => {
+    const createReporting = vi.fn(async () =>
+      makeCreateResponse({ status: "skipped", reason: "already_created" }),
+    );
+    const state = makeState({ report: makeReport([moaiZip]), createReporting });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toContain("Already created"),
+    );
+    expect(narration("Moai_zip")?.textContent).toContain("no second project");
+    expect(state.create).not.toHaveBeenCalled();
+  });
+
+  it("creates nothing when the scan refused to settle", async () => {
+    const createReporting = vi.fn(async () => makeCreateResponse());
+    const state = makeState({
+      report: makeReport([moaiZip]),
+      createReporting,
+      afterExtract: vi.fn(async (): Promise<SettleOutcome> => "timeout"),
+    });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toContain("did not settle"),
+    );
+    expect(createReporting).not.toHaveBeenCalled();
+  });
+
+  it("clears the verdict when the queue is refreshed, as its own sentence asks", async () => {
+    const state = makeState({
+      report: makeReport([moaiZip]),
+      afterExtract: vi.fn(async (): Promise<SettleOutcome> => "timeout"),
+    });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toContain("did not settle"),
+    );
+    // That sentence tells the operator to refresh once the scan finishes, so
+    // taking its advice has to clear it.
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(narration("Moai_zip")).toBeNull());
+    expect(state.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates nothing when the archive held no extractable files", async () => {
+    extractArchiveMock.mockResolvedValue({
+      path: "Moai.zip",
+      destination: "Moai",
+      files: 0,
+      bytes: 0,
+      already_present: false,
+      scan_started: false,
+    });
+    const createReporting = vi.fn(async () => makeCreateResponse());
+    const state = makeState({ report: makeReport([moaiZip]), createReporting });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+
+    await waitFor(() =>
+      expect(narration("Moai_zip")?.textContent).toContain("Nothing will register"),
+    );
+    expect(state.afterExtract).not.toHaveBeenCalled();
+    expect(createReporting).not.toHaveBeenCalled();
+  });
+
+  it("keeps plain Extract beside the one-step door, and the bulk label byte-identical", () => {
+    renderView(makeState({ report: makeReport([moaiZip]) }));
+
+    // Both doors in the aside at once: the one-step button is added, not
+    // swapped in for plain Extract, which runs the same extraction and wait.
+    expect(within(detail()).getByRole("button", { name: "Extract Moai zip" })).toBeTruthy();
+    const oneStep = within(detail()).getByRole("button", { name: "Extract and create project" });
+    expect(oneStep.getAttribute("title")).toBe(EXTRACT_AND_CREATE_HINT);
+
+    // The row's blocked-reason cell points at the whole job and keeps its click
+    // behaviour: it is a text edit, not a new control.
+    expect(statusCell("Moai_zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
+
+    // The bulk bar's own door and its words are untouched.
+    expect(
+      (screen.getByRole("button", { name: "Extract selected archives (0)" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    fireEvent.click(selectionCheck("Moai_zip"));
+    expect(screen.getByRole("button", { name: "Extract selected archives (1)" })).toBeTruthy();
   });
 });

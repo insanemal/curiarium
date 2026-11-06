@@ -9,6 +9,7 @@ import {
   getBundleReport,
   setBundleDismissed,
   type BundleCreateItem,
+  type BundleCreateResponse,
   type BundleEnrichItemResult,
   type BundleReport,
 } from "../../lib/api/bundles";
@@ -35,6 +36,11 @@ export type BundleDetectState = {
   setShowCreated: (value: boolean) => void;
   refresh: () => Promise<void>;
   create: (items: BundleCreateItem[]) => Promise<void>;
+  /** A create that reports the server's answer instead of only refetching.
+   *  `null` means no answer arrived: the queue was left, or the request failed
+   *  and `error` already speaks it. Optional in the type only because the
+   *  counts fixture builds this shape without it; the hook always returns one. */
+  createReporting?: (items: BundleCreateItem[]) => Promise<BundleCreateResponse | null>;
   dismiss: (keys: string[], dismissed: boolean) => Promise<void>;
   enrich: (keys: string[], options?: { refresh?: boolean }) => Promise<void>;
   /** A line about the last enrichment that is news rather than a failure. */
@@ -217,6 +223,35 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     [mutate],
   );
 
+  // Modelled on `enrich`, not on `mutate`: the one-step extract-and-create door
+  // needs the server's verdict, and `mutate` discards the response. It still
+  // clears `notice`, because a create is a new decision and the last
+  // enrichment's sentence no longer describes what the operator just did.
+  const createReporting = React.useCallback(
+    async (items: BundleCreateItem[]): Promise<BundleCreateResponse | null> => {
+      if (!enabled) return null;
+      setBusy(true);
+      setNotice(null);
+      try {
+        const response = await createBundles(items);
+        await refresh();
+        setError(null);
+        return response;
+      } catch (err) {
+        if (err instanceof UnauthorizedError) onUnauthorized?.();
+        setError(
+          err instanceof Error && err.message
+            ? err.message
+            : "Failed to create the selected bundles.",
+        );
+        return null;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [enabled, onUnauthorized, refresh],
+  );
+
   const dismiss = React.useCallback(
     async (keys: string[], dismissed: boolean) => {
       await mutate(
@@ -291,6 +326,7 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     setShowCreated,
     refresh,
     create,
+    createReporting,
     dismiss,
     enrich,
     notice,
