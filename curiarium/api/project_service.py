@@ -320,6 +320,9 @@ def _create_import_project(
     creator: Optional[str],
     licence: Optional[str],
     licence_url: Optional[str],
+    *,
+    cover_asset_id: Optional[str] = None,
+    bundle_marker: Optional[dict] = None,
 ) -> Project:
     """Create an imported project, suffixing the name past a NOCASE collision.
 
@@ -335,12 +338,13 @@ def _create_import_project(
                 session,
                 candidate,
                 None,
-                None,
+                cover_asset_id,
                 creator=creator,
                 source_url=source_url,
                 licence=licence,
                 licence_url=licence_url,
                 origin="imported",
+                metadata=bundle_marker,
             )
         except HTTPException as err:
             if err.status_code != 409:
@@ -351,13 +355,52 @@ def _create_import_project(
         session,
         f"{base} ({uuid4().hex[:8]})",
         None,
-        None,
+        cover_asset_id,
         creator=creator,
         source_url=source_url,
         licence=licence,
         licence_url=licence_url,
         origin="imported",
+        metadata=bundle_marker,
     )
+
+
+def _absorb_import_facts(
+    project: Project,
+    *,
+    cover_asset_id: Optional[str],
+    bundle_marker: Optional[dict],
+    creator: Optional[str],
+    licence: Optional[str],
+    licence_url: Optional[str],
+    source_url: Optional[str],
+) -> bool:
+    """Fill what an import knows into a project that already exists; report a change.
+
+    Three rules, because they protect three different things. Provenance and the
+    cover fill only what is EMPTY, so a value the user or a vendor supplied is
+    never overwritten; the `_bundle` marker is written only into a free slot or
+    over this door's own marker, and only when that merge changes the stored
+    bytes. Nothing here commits: the caller's session does, so the row and its
+    marker land together and a re-import that records nothing new costs no extra
+    statement.
+    """
+    changed = _fill_empty_provenance(
+        project, creator=creator, licence=licence, licence_url=licence_url, source_url=source_url
+    )
+    if cover_asset_id and not project.cover_asset_id:
+        project.cover_asset_id = cover_asset_id
+        changed = True
+    if bundle_marker and _may_write_bundle_marker(project.metadata_json, bundle_marker):
+        merged = merge_project_marker(project.metadata_json, bundle_marker)
+        # Only a merge that changes the stored bytes counts as a change: a repeat
+        # import of the same selection re-writes the same object, and a no-op
+        # UPDATE is exactly the `updated_at` churn this path refuses to add (the
+        # reason `set_project_metadata_marker` is not used here).
+        if merged != project.metadata_json:
+            project.metadata_json = merged
+            changed = True
+    return changed
 
 
 def find_or_create_import_project(
@@ -368,32 +411,57 @@ def find_or_create_import_project(
     creator: Optional[str] = None,
     licence: Optional[str] = None,
     licence_url: Optional[str] = None,
+    cover_asset_id: Optional[str] = None,
+    bundle_marker: Optional[dict] = None,
 ) -> Tuple[str, bool]:
     """The project an import belongs to: (id, created).
 
     An explicit `project_id` always wins over a canonical match - the user chose
     the target - and only its empty provenance fields are filled. Otherwise a
     project with the same `source_key` is reused, and the last resort creates an
-    `origin="imported"` row.
+    `origin="imported"` row. A created row carries the cover and the `_bundle`
+    marker when the caller supplies them; an existing project only receives what
+    it is missing.
     """
     with Session(engine) as session:
         if project_id:
             project = get_project(session, project_id)
-            if _fill_empty_provenance(
-                project, creator=creator, licence=licence, licence_url=licence_url, source_url=source_url
+            if _absorb_import_facts(
+                project,
+                cover_asset_id=cover_asset_id,
+                bundle_marker=bundle_marker,
+                creator=creator,
+                licence=licence,
+                licence_url=licence_url,
+                source_url=source_url,
             ):
                 session.add(project)
                 session.commit()
             return project.id, False
         existing = find_project_by_source(session, source_url)
         if existing is not None:
-            if _fill_empty_provenance(
-                existing, creator=creator, licence=licence, licence_url=licence_url, source_url=source_url
+            if _absorb_import_facts(
+                existing,
+                cover_asset_id=cover_asset_id,
+                bundle_marker=bundle_marker,
+                creator=creator,
+                licence=licence,
+                licence_url=licence_url,
+                source_url=source_url,
             ):
                 session.add(existing)
                 session.commit()
             return existing.id, False
-        project = _create_import_project(session, suggested_name, source_url, creator, licence, licence_url)
+        project = _create_import_project(
+            session,
+            suggested_name,
+            source_url,
+            creator,
+            licence,
+            licence_url,
+            cover_asset_id=cover_asset_id,
+            bundle_marker=bundle_marker,
+        )
         return project.id, True
 
 
@@ -414,6 +482,40 @@ def merge_project_marker(metadata_json: Optional[str], marker: dict) -> str:
         if key.startswith("_"):
             metadata[key] = value
     return json.dumps(metadata)
+
+
+def bundle_marker_of(metadata_json: Optional[str]) -> dict:
+    """The reserved `_bundle` object of one metadata column, or `{}`.
+
+    This is the one implementation. `bundle_service._bundle_marker` delegates
+    here, because `bundle_service` already imports THIS module - the arrow points
+    this way, so no cycle can form. The rule is the same one
+    `merge_project_marker` already applies to anything that is not a JSON object.
+    """
+    try:
+        parsed = json.loads(metadata_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    marker = parsed.get("_bundle")
+    return marker if isinstance(marker, dict) else {}
+
+
+def _may_write_bundle_marker(metadata_json: Optional[str], marker: dict) -> bool:
+    """Whether an import may write its `_bundle` over whatever is already there.
+
+    Only a free slot or this door's OWN previous marker is writable. A `_bundle`
+    naming a different key is someone else's record - detection wrote it, and its
+    detector, groups and cover describe the disk - so a re-import must not replace
+    it with an identity key. Pinned by
+    `test_a_re_import_never_clobbers_a_human_cover_or_a_detection_marker`.
+    """
+    existing = bundle_marker_of(metadata_json)
+    if not existing:
+        return True
+    incoming = (marker or {}).get("_bundle") or {}
+    return bool(incoming.get("key")) and existing.get("key") == incoming.get("key")
 
 
 def set_project_metadata_marker(project_id: str, marker: dict) -> None:

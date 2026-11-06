@@ -2013,6 +2013,159 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     as a listing), and a `.secret/x.stl` inside one is still counted - the
     `__MACOSX` residual above is the same door, not a second one.
 
+26. **The zip-as-project door records the cover it picked and a `_bundle`
+    IDENTITY, and it is the one door that narrows the cover rule to images.**
+    `Mf-qbji` closes two gaps one door along from this ADR's own create path.
+    `POST /import/project` with `entries` set (`project_import.import_into_project`,
+    `wants_zip = body.entries is not None`) extracts exactly those entries, finds
+    or creates the project and attaches every part - and used to leave
+    `cover_asset_id` NULL and `metadata_json` `{}` on every archive measured, so
+    the card was blank while the images sat in the extraction, and no project made
+    this way had a key for a later reader to diff against. Both are now recorded,
+    for this door only.
+
+    **The cover asks the ONE rule, over the rows already in hand.** `_cover` is
+    split into `cover_for_registered(assets, cover_entry=None, *,
+    allow_model_preview=True)`, which holds the ordered chain, and a one-line
+    `_cover(assets, facts)` that delegates with `facts.cover_entry` - so the report
+    and the zip door cannot drift apart, which is the anti-fix `_create_one` names
+    ("a second rule here would be free to disagree with the report's"). The door
+    calls it through `registered_from_rows`, the same mapping `registered_assets`
+    now uses, because `_zip_assets` hands the extracted rows back at the call
+    site: re-reading the table for bytes already in hand would be a second query
+    for the same rows. It passes `cover_entry=None`, which kills the unregistered
+    leg by construction - `largest-image-unregistered` names an entry a WALK
+    found, and no walk runs here. Live legs: registered image ->
+    `largest-image` (`-size, path`, the rule's own ordering, reused and not
+    re-invented); no image -> `none`.
+
+    **Images only, and the ticket clause that forces it.** The detection create
+    path also has a `model-preview` leg, and this door deliberately does NOT use
+    it. The ticket's acceptance says "gives it a cover when the archive contains a
+    registered image, and no cover (not a broken one) when it does not", and its
+    fix text says "pick a cover from the extracted images ... (largest registered
+    image)" - three textual signals for images-only, so an archive with no image
+    records `cover: {asset_id: None, rel_path: None, reason: "none", group: None}`
+    and the project's column stays NULL: never a broken cover, never a fabricated
+    one. **The honest consequence is named rather than hidden: a models-only
+    archive gets a BLANK CARD here, while a detection-created project from the
+    same files would get a rendered model, because `Mf-15xj` derived
+    `model-preview` instead of reporting none.** That is a decision, not an
+    oversight, and it is one line to reverse: `_zip_project_facts` calls
+    `cover_for_registered(..., allow_model_preview=False)`, so dropping that
+    keyword (or passing `True`) adopts the model leg for this door and needs no
+    other change. Both legs are pinned
+    (`test_a_zip_project_gets_a_cover_from_its_largest_registered_image`,
+    `test_a_zip_with_no_image_gets_no_cover_rather_than_a_broken_one`), and the
+    parity is pinned on the leg the doors share
+    (`test_the_two_doors_agree_on_the_image_leg_and_only_there`: the same rows
+    through `cover_for_registered` answer the same asset and reason on the image
+    leg, and `model-preview` against `none` on the models-only one).
+
+    **The key is an IDENTITY; `rel_dir` is the walk root. They are two different
+    facts and the marker keeps them apart.** `_bundle.key` is
+    `"zip-project:" + canonical source URL`: this door has no bundle directory,
+    so a path-shaped key would be a lie AND would collide with a detection key,
+    and `find_existing_project` compares marker keys by exact equality. It is
+    stable across restarts, one per page - the same identity
+    `find_project_by_source` already uses - and it is **provably disjoint from
+    every detection key, because no `Asset.storage_path` can contain `:`**:
+    `asset_service.render_storage_path` maps every composed segment through
+    `sanitize_path_segment`, whose invalid set `_INVALID_SEGMENT_RE` includes `:`,
+    so no storage path can carry the separator. That claim rests on an assertion
+    rather than on this sentence
+    (`test_no_storage_path_can_contain_the_identity_keys_separator` imports a zip
+    whose folder AND filename both carry a colon, asserts every resulting
+    `storage_path` is colon-free, and pins the sanitiser and the regex directly).
+    `rel_dir` is the other fact: the STORAGE-relative directory the parts share,
+    recorded **only** when every selected entry sits under one non-empty inner
+    root, else `None` - a mixed-root or flat archive has no honest walk root, and
+    a guessed one (the storage root, or the `Unassigned` bucket every unfiled
+    upload shares) would make the next unfiled upload look like drift. A ONE-part
+    selection records `None` as well: a single part shares a directory with
+    nothing, its own model directory is not a root anything spans, and recording
+    it would move the field on a re-import that extracted one new part (measured:
+    `"Thing"` -> `"Thing/three"` before the guard). **A later
+    reader must therefore walk `rel_dir` when it is present and fall back to
+    project membership when it is `None`; it must never prefix-query the key,
+    which is not a path** (`Mf-8i04`).
+
+    **The marker is the detection shape with honest nulls and `source` naming the
+    door.** Written through `project_service.create_project(metadata=...)`, i.e.
+    merged into the same INSERT as the project row, so row and marker land
+    together (Decision 3's reasoning). Fields: `key` as above; a NEW `source` =
+    `"zip-project-import"`; `detector`, `confidence`, `archive`, `twin_verified`
+    all `None`, because no detection ran; `rel_dir` as above; `groups` = one entry
+    per non-empty top folder of the SELECTED entries - the folder
+    `zip_service.resolve_zip_folder_id` groups the project's sections by, so the
+    marker and the visible sections name the same folders (they can still differ in
+    content: a group whose every entry failed to extract has no row in its section)
+    - each `{name, model_count,
+    foreign: false, included: true, attached}`, where `model_count` counts the
+    selection's model entries and `attached` the ones that produced a row (the
+    same scan-count/attach-set split `_create_one` records, and on this door the
+    two can differ only by a per-entry extraction failure - an absent member, an
+    oversize member, a directory member, a name conflict or an oversize budget;
+    `test_a_group_records_what_was_selected_and_what_was_attached` pins one);
+    `shape: "compound"` iff there are groups; and `cover: {asset_id, rel_path,
+    reason, group}`, written even when the reason is `none` because this door has
+    no walk to re-derive it, with `group` resolved by basename and `None` when
+    zero or several entries match. **The selection is filtered through
+    `entry_policy.is_junk_entry` first**, because junk (an OS-metadata directory, a
+    `._*` sidecar) is in `plan.requested` but never in `plan.writable`: it creates
+    no folder, no asset and no section, so a group named for it would point at a
+    section that does not exist and inflate `model_count` with a file no scan
+    counts - the Mf-94od bug class one door along. **The door name does not go into
+    `detector`**:
+    that field's vocabulary is detection-rule names, and a door there would
+    corrupt every later reader of it. Nothing reads the new `source` yet, and the
+    existing readers ignore what they do not know (`_bundle_marker` returns the
+    object, `_compound_splits` reads only `key` and `groups`), pinned by
+    `test_the_readers_still_read_the_new_marker`.
+
+    **A re-import fills only what is empty.** On an existing project
+    (`created == False`) the cover is filled only when `Project.cover_asset_id` is
+    empty, and the marker is merged only when there is no `_bundle` or its `key`
+    equals this door's - and then only when the merge changes the stored bytes, so
+    a re-import that records nothing new writes nothing. A human's cover and a
+    detection marker are never
+    overwritten - the marker is the ONLY justification `_compound_splits` accepts
+    for re-offering an excluded path, so clobbering it would silently change
+    report behaviour
+    (`test_a_re_import_never_clobbers_a_human_cover_or_a_detection_marker`, three
+    cases: seeded cover survives, a `_bundle` keyed to a bundle directory survives
+    byte-identically, an empty project gains both). Both writes land in
+    `find_or_create_import_project`'s own session, so the whole fill costs ONE
+    transaction (measured: 1 statement when nothing changes, 3 when something is
+    written - the SELECT the door already made, then the UPDATE and its commit);
+    `set_project_metadata_marker` is deliberately not used (measured 2 statements
+    of its own, its own session, `updated_at` churn, and it cannot fill a cover).
+    `project_service.bundle_marker_of` is the one implementation of the `_bundle`
+    read, and `bundle_service._bundle_marker` delegates to it, because
+    `bundle_service` already imports `project_service`: the arrow points this way,
+    so the layering is a DAG and no cycle can form.
+
+    **Two branches are untouched, and pinned.** The archive-as-single-asset door
+    (`entries is None`) and the gated branch pass no cover and no marker: neither
+    is the archive door, and a gated import stores no files, so claiming a cover
+    for it would describe files that do not exist
+    (`test_the_whole_zip_as_one_asset_path_is_unchanged`,
+    `test_a_gated_zip_import_records_no_cover_and_no_bundle_marker`). This door
+    still runs no detection and enriches nothing beyond page metadata - the honest
+    difference between "I have this archive, put it in a project" and "detect,
+    enrich, confirm".
+
+    **No migration, no wire change.** `_bundle` lives inside the existing
+    `metadata_json TEXT` column and already reaches the client through
+    `ProjectOut.metadata_json`, so no schema, serialiser, route or migration moves.
+    **Measured cost, not estimated:** one zip import through this door costs the
+    before-state count + 1 statement when a cover is picked (the `get_asset`
+    guard inside `create_project`); the marker is free because it rides the create
+    INSERT; an archive with no registered image now costs +0, because no cover is
+    written. The row-level before/after artifacts are
+    `.plans/measurements/2026-11-06-zip-project-mfqbji-{before,after}.json`, same
+    four synthetic zips and the same in-process harness on both sides.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -2825,6 +2978,42 @@ unchanged.
   `2026-11-05-bundles-mf8xrc-after.json` reports `comparable: YES`, 0 added, 0
   removed, 0 changed and the same stamp, because C2 changes what CREATING does,
   not what is DETECTED.
+- The zip-as-project door's cover and marker (Decision 26) are pinned in
+  `tests/test_import_project.py` against the door itself, not against the rule:
+  `test_a_zip_project_gets_a_cover_from_its_largest_registered_image` (the
+  created row's `cover_asset_id` is the LARGER of two real PNGs, and the marker's
+  `cover` is `{asset_id, rel_path, reason: largest-image, group: None}`);
+  `test_a_zip_with_no_image_gets_no_cover_rather_than_a_broken_one` (models-only
+  archive: `cover_asset_id` NULL and `reason: "none"` - the images-only ruling);
+  `test_the_two_doors_agree_on_the_image_leg_and_only_there` (the same rows
+  through `bundle_service.cover_for_registered` answer the same asset and reason
+  on the image leg, and `model-preview` against the marker's `none` on the
+  models-only one - the divergence asserted, not described);
+  `test_the_zip_project_marker_names_the_door_its_key_and_its_groups` (a
+  single-root zip answers `rel_dir: "Thing"` with one `Thing` group of two
+  attached models, a mixed-root zip answers `rel_dir: None` with `PartA` and
+  `PartB` groups and its root-level preview in none);
+  `test_a_re_import_never_clobbers_a_human_cover_or_a_detection_marker` (the
+  three fill-only-what-is-empty cases plus a fourth: this door's own marker is a
+  free slot, so the same page imported again refreshes it while the identity key
+  stays put);
+  `test_a_group_records_what_was_selected_and_what_was_attached` (a requested but
+  absent member is `failed`, so `model_count` 3 against `attached` 2 - the
+  scan-count/attach-set split with a real failure behind it);
+  `test_an_explicit_project_target_gains_an_empty_cover_and_the_marker` (the
+  `project_id` branch of the fill, which the other imports do not reach);
+  `test_the_readers_still_read_the_new_marker` (`_bundle_marker` returns it,
+  `_compound_splits` offers no split for it, `find_existing_project` cannot
+  false-match the identity key, and `GET /projects` serves it as a dict);
+  `test_the_whole_zip_as_one_asset_path_is_unchanged` and
+  `test_a_gated_zip_import_records_no_cover_and_no_bundle_marker` (the two
+  branches that must not widen); and
+  `test_no_storage_path_can_contain_the_identity_keys_separator` (a zip whose
+  folder and filename both carry a colon still registers colon-free storage
+  paths, with the sanitiser and `_INVALID_SEGMENT_RE` pinned directly). The
+  row-level before/after artifacts are
+  `.plans/measurements/2026-11-06-zip-project-mfqbji-{before,after}.json`; the
+  statement cost is measured in the same pair rather than quoted.
 
 ## Superseding conditions
 
@@ -2934,3 +3123,15 @@ This ADR is superseded if any of the following becomes true:
   guards are the whole of that promise;
 - repository metadata stops being checked on the ancestors inside the walk, so a
   payload directory of a checkout can be compounded on a shared word.
+- the zip-as-project door grows its own copy of the cover preference instead of
+  asking `bundle_service.cover_for_registered`, or it starts offering the
+  `model-preview` leg without the ticket clause that forbids it being withdrawn
+  (`allow_model_preview=False` in `_zip_project_facts`);
+- `_bundle.key` for this door stops being an identity - becomes a storage path,
+  drops the `zip-project:` prefix, or starts doing double duty as `rel_dir` - so a
+  detection key and an import key can be compared as if they were one space;
+- a re-import starts writing a cover onto a project that has one, or a `_bundle`
+  over a marker keyed to a bundle directory (the `_absorb_import_facts`
+  fill-only-what-is-empty rules);
+- the archive-as-single-asset door (`entries is None`) or the gated door starts
+  recording a cover or a `_bundle` marker.
