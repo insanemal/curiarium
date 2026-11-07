@@ -71,8 +71,8 @@ const ARCHIVE_ENTRIES = [
 ];
 
 const EXTRACT_RESULT: ArchiveExtractResult = {
-  path: "Moai.zip",
-  destination: "Moai",
+  path: "import/Moai.zip",
+  destination: "import/Moai",
   files: 2,
   bytes: 2560,
   already_present: false,
@@ -168,10 +168,14 @@ const legacyVase = makeBundle({
   status: "blocked",
   blocked_reason: "unresolved_directory",
 });
-/** A zip-only bundle: nothing but the archive is on disk to register. */
+/** A zip-only bundle: the row IS the archive, so the wire sends `archive: null`
+ *  and its own path ends `.zip`. The nested path is a shape the zip-only pass can
+ *  emit - an archive in `import/` whose extracted twin is not beside it - and the
+ *  parent split from the ready `Moai` row is what makes it a row of its own: a
+ *  zip a directory was paired with is consumed as that directory's twin. */
 const moaiZip = makeBundle({
-  key: "Moai_zip",
-  rel_path: "Moai_zip",
+  key: "import/Moai.zip",
+  rel_path: "import/Moai.zip",
   title: "Moai zip",
   name_suggestion: "Moai zip",
   creator: null,
@@ -196,14 +200,14 @@ const moaiZip = makeBundle({
   assets_total: 1,
   status: "blocked",
   blocked_reason: "archive_only",
-  archive: { rel_path: "Moai.zip", twin_verified: false },
+  archive: null,
 });
 
 /** Two zip-only rows, the same shape, so a row change swaps `path` and `label`
  *  without changing which children render: the extract action stays the same
  *  instance unless something keys it. */
-const ALPHA_KEY = "Alpha_zip";
-const BETA_KEY = "Beta_zip";
+const ALPHA_KEY = "Alpha.zip";
+const BETA_KEY = "Beta.zip";
 const ALPHA_ENTRIES = [
   { path: "alpha.stl", size: 1024 },
   { path: "alpha.txt", size: 256 },
@@ -240,7 +244,7 @@ const alphaZip = makeBundle({
   assets_total: 1,
   status: "blocked",
   blocked_reason: "archive_only",
-  archive: { rel_path: "Alpha.zip", twin_verified: false },
+  archive: null,
 });
 const betaZip = makeBundle({
   key: BETA_KEY,
@@ -269,7 +273,7 @@ const betaZip = makeBundle({
   assets_total: 1,
   status: "blocked",
   blocked_reason: "archive_only",
-  archive: { rel_path: "Beta.zip", twin_verified: false },
+  archive: null,
 });
 
 /** A medium row: the folder name carried a Thingiverse id, so the source URL is
@@ -581,7 +585,7 @@ describe("BundleReviewView states", () => {
     renderView(makeState({ error: "Failed to create the selected bundles." }));
 
     expect(screen.getByRole("alert").textContent).toContain("Failed to create the selected bundles.");
-    expect(rowKeys()).toEqual(["Moai", "Cable_clip", "Legacy_vase", "Moai_zip"]);
+    expect(rowKeys()).toEqual(["Moai", "Cable_clip", "Legacy_vase", "import/Moai.zip"]);
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
@@ -646,7 +650,7 @@ describe("BundleReviewView filters", () => {
   it("shows exactly the rows each filter names", () => {
     renderView(makeState());
 
-    expect(rowKeys()).toEqual(["Moai", "Cable_clip", "Legacy_vase", "Moai_zip"]);
+    expect(rowKeys()).toEqual(["Moai", "Cable_clip", "Legacy_vase", "import/Moai.zip"]);
     expect(screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed")).toBe("true");
 
     fireEvent.click(screen.getByRole("button", { name: "Ready" }));
@@ -654,10 +658,10 @@ describe("BundleReviewView filters", () => {
     expect(screen.getByRole("button", { name: "Ready" }).getAttribute("aria-pressed")).toBe("true");
 
     fireEvent.click(screen.getByRole("button", { name: "Blocked" }));
-    expect(rowKeys()).toEqual(["Legacy_vase", "Moai_zip"]);
+    expect(rowKeys()).toEqual(["Legacy_vase", "import/Moai.zip"]);
 
     fireEvent.click(screen.getByRole("button", { name: "Low confidence" }));
-    expect(rowKeys()).toEqual(["Cable_clip", "Moai_zip"]);
+    expect(rowKeys()).toEqual(["Cable_clip", "import/Moai.zip"]);
 
     expect(screen.getByText("Showing 2 of 4")).toBeTruthy();
   });
@@ -955,7 +959,7 @@ describe("BundleReviewView writes", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^Create low as name-only/ }));
 
-    // Blocked rows (Moai_zip) and already-created ones are not creatable, so
+    // Blocked rows (import/Moai.zip) and already-created ones are not creatable, so
     // the button's count and its payload are the same two rows.
     expect(state.create).toHaveBeenCalledWith([
       { key: "Cable_clip", name_only: true },
@@ -1015,7 +1019,7 @@ describe("BundleReviewView writes", () => {
     expect(state.dismiss).toHaveBeenCalledWith(["Moai"], false);
   });
 
-  it("offers archive extraction only for a zip-only bundle that has an archive", () => {
+  it("offers archive extraction only on the zip-only row", () => {
     renderView(makeState({ report: makeReport([moaiZip]) }));
     expect(within(detail()).getByRole("button", { name: "Extract Moai zip" })).toBeTruthy();
     cleanup();
@@ -1033,7 +1037,7 @@ describe("BundleReviewView writes", () => {
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
-    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip"));
+    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip"));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     await waitFor(() => expect(state.afterExtract).toHaveBeenCalledTimes(1));
@@ -1048,15 +1052,15 @@ describe("BundleReviewView writes", () => {
     // The hook owns the refetch: a refresh here would race the walk that has to
     // register the extracted files before the row can read `ready`.
     expect(state.refresh).not.toHaveBeenCalled();
-    expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Moai.zip", entries: null });
+    expect(extractArchiveMock).toHaveBeenCalledWith({ path: "import/Moai.zip", entries: null });
   });
 
   it("promises no scan and reports nothing when the extract wrote no files", async () => {
     // The server's junk-only early return: no bytes, no scan, and
     // `already_present: false` because no destination existed to be already there.
     extractArchiveMock.mockResolvedValue({
-      path: "Moai.zip",
-      destination: "Moai",
+      path: "import/Moai.zip",
+      destination: "import/Moai",
       files: 0,
       bytes: 0,
       already_present: false,
@@ -1066,7 +1070,7 @@ describe("BundleReviewView writes", () => {
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
-    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip"));
+    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip"));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     // The dialog's own done line is the anchor that says the round trip finished.
@@ -1080,7 +1084,7 @@ describe("BundleReviewView writes", () => {
   it("shows a read-only view with rows and details but no write control", () => {
     renderView(makeState({ report: makeReport([moai, moaiZip]) }), false);
 
-    expect(rowKeys()).toEqual(["Moai", "Moai_zip"]);
+    expect(rowKeys()).toEqual(["Moai", "import/Moai.zip"]);
     expect(within(detail()).getByRole("heading").textContent).toBe("Moai statue");
     expect(within(detail()).getByText("Creator sculpteo")).toBeTruthy();
 
@@ -1293,14 +1297,14 @@ describe("BundleReviewView source-page enrichment", () => {
   it("flips both the reason and the door when ArrowDown leaves a source-less row", () => {
     renderView(makeState({ report: makeReport([moaiZip, mediumDragon]) }));
 
-    // Moai_zip is the active row: it has no page, so the reason stands and the
+    // import/Moai.zip is the active row: it has no page, so the reason stands and the
     // door does not.
     expect(detail().querySelector("[data-bundle-enrich-reason]")?.textContent).toBe(
       NO_SOURCE_PAGE_REASON,
     );
     expect(within(detail()).queryByRole("button", { name: "Enrich from source page" })).toBeNull();
 
-    fireEvent.keyDown(rowElement("Moai_zip"), { key: "ArrowDown" });
+    fireEvent.keyDown(rowElement("import/Moai.zip"), { key: "ArrowDown" });
 
     // The dragon does name a page, so the sentence goes and the door appears:
     // the two claims are the same predicate read from both sides.
@@ -1377,14 +1381,132 @@ describe("BundleReviewView archive extraction", () => {
     renderView(makeState());
 
     // The detail target before the click: a click that reaches the row would
-    // move it to Moai_zip, so this is what proves `stopPropagation` works.
+    // move it to import/Moai.zip, so this is what proves `stopPropagation` works.
     const before = detailTitle();
     expect(before).toBe("Moai statue");
 
-    fireEvent.click(statusCell("Moai_zip"));
+    fireEvent.click(statusCell("import/Moai.zip"));
 
     expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
     expect(detailTitle()).toBe(before);
+  });
+
+  it("extracts the archive a real-shaped row IS, then waits for the scan", async () => {
+    // The wire shape for a zip-only row: `archive: null`, and the row's own path
+    // is the archive. Every door above is driven by this fixture; this one proves
+    // the bulk door hands the API that path rather than a twin that does not exist.
+    const state = makeState({ report: makeReport([moaiZip]) });
+    renderView(state);
+
+    fireEvent.click(selectionCheck(moaiZip.key));
+    const door = screen.getByRole("button", {
+      name: "Extract selected archives (1)",
+    }) as HTMLButtonElement;
+    expect(door.disabled).toBe(false);
+    fireEvent.click(door);
+
+    expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
+    // The dialog holds the same idle action the detail pane does: its trigger
+    // lists the archive, and the confirmation is the step that writes.
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Extract Moai zip" })).getByRole("button", {
+        name: "Extract Moai zip",
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
+
+    await waitFor(() =>
+      expect(extractArchiveMock).toHaveBeenCalledWith({
+        path: "import/Moai.zip",
+        entries: null,
+      }),
+    );
+    await waitFor(() => expect(state.afterExtract).toHaveBeenCalledWith([EXTRACT_RESULT]));
+  });
+
+  it("keeps the door on a refused pair, which names its archive as a twin", async () => {
+    // A directory the container rule refuses ships `blocked_reason: archive_only`
+    // WITH its twin zip in `archive`. Its key is a directory, so the twin is the
+    // only possible target.
+    const refusedPair = makeBundle({
+      key: "import/endorphin",
+      rel_path: "import/endorphin",
+      title: "Endorphin pile",
+      status: "blocked",
+      blocked_reason: "archive_only",
+      archive: { rel_path: "import/endorphin.zip", twin_verified: true },
+    });
+    renderView(makeState({ report: makeReport([refusedPair]) }));
+
+    expect(rowElement("import/endorphin").getAttribute("aria-keyshortcuts")).toBe("Enter");
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Endorphin pile" }));
+    await waitFor(() =>
+      expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/endorphin.zip"),
+    );
+  });
+
+  it("offers no extract door on a blocked row that is not an archive", () => {
+    // The twin is attached whatever the status, so an unresolved directory can
+    // name one; extracting it is not this row's remedy and must stay shut.
+    const unresolvedWithTwin = makeBundle({
+      ...legacyVase,
+      archive: { rel_path: "Legacy_vase.zip", twin_verified: true },
+    });
+    renderView(makeState({ report: makeReport([unresolvedWithTwin]) }));
+
+    const key = unresolvedWithTwin.key;
+    expect(rowElement(key).getAttribute("aria-keyshortcuts")).toBeNull();
+    expect(statusCell(key).getAttribute("title")).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: /^Extract / })).toBeNull();
+    fireEvent.click(statusCell(key));
+    expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
+    cleanup();
+
+    // A ready row names a twin too - as provenance for the folder. Same answer:
+    // the reason gate, not the mere presence of a path, decides the door.
+    const readyWithTwin = makeBundle({
+      archive: { rel_path: "Moai.zip", twin_verified: true },
+    });
+    renderView(makeState({ report: makeReport([readyWithTwin]) }));
+
+    expect(rowElement(readyWithTwin.key).getAttribute("aria-keyshortcuts")).toBeNull();
+    expect(statusCell(readyWithTwin.key).getAttribute("title")).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: /^Extract / })).toBeNull();
+  });
+
+  it("disables a zero-count primary action, and its click writes nothing", () => {
+    const state = makeState({ report: makeReport([moaiZip]) });
+    renderView(state);
+
+    const create = screen.getByRole("button", { name: "Create selected (0)" }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    // The primary constant carries a `disabled:` variant, so a zero-count action
+    // reads as shut rather than merely inert. Assert the variant's PRESENCE rather
+    // than copying the constant, and never the exact utility: the point is that
+    // dropping the styling fails a test.
+    expect(create.className.split(" ").some(name => name.startsWith("disabled:"))).toBe(true);
+    fireEvent.click(create);
+    expect(state.create).not.toHaveBeenCalled();
+
+    // The zero-count secondary action carries the same variant, so the bulk bar
+    // cannot ship one family styled and one merely inert.
+    const extractNone = screen.getByRole("button", {
+      name: "Extract selected archives (0)",
+    }) as HTMLButtonElement;
+    expect(extractNone.disabled).toBe(true);
+    expect(extractNone.className.split(" ").some(name => name.startsWith("disabled:"))).toBe(
+      true,
+    );
+
+    // The same selection proves the contrast: a blocked row can be dismissed, so
+    // the bar is not disabling everything it draws.
+    fireEvent.click(selectionCheck(moaiZip.key));
+    expect(
+      (screen.getByRole("button", { name: "Dismiss selected (1)" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(
+      (screen.getByRole("button", { name: "Create selected (0)" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("opens the extract flow from the keyboard with Enter on an archive-only row", () => {
@@ -1399,26 +1521,26 @@ describe("BundleReviewView archive extraction", () => {
     // existing arrow/Space tests drive the listbox.
     fireEvent.keyDown(rowElement("Moai"), { key: "End" });
     expect(detailTitle()).toBe("Moai zip");
-    fireEvent.keyDown(rowElement("Moai_zip"), { key: "Enter" });
+    fireEvent.keyDown(rowElement("import/Moai.zip"), { key: "Enter" });
 
     expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
     // Advertised without a tab stop: the option says Enter, and nothing else does.
-    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
+    expect(rowElement("import/Moai.zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
     expect(rowElement("Moai").getAttribute("aria-keyshortcuts")).toBeNull();
   });
 
   it("gives a viewer no affordance on the blocked reason", () => {
     renderView(makeState(), false);
 
-    fireEvent.click(rowElement("Moai_zip"));
+    fireEvent.click(rowElement("import/Moai.zip"));
     expect(detailTitle()).toBe("Moai zip");
 
-    const cell = statusCell("Moai_zip");
+    const cell = statusCell("import/Moai.zip");
     expect(cell.getAttribute("title")).toBeNull();
     fireEvent.click(cell);
 
     expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
-    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBeNull();
+    expect(rowElement("import/Moai.zip").getAttribute("aria-keyshortcuts")).toBeNull();
     expect(within(detail()).queryByRole("button", { name: /^Extract / })).toBeNull();
   });
 
@@ -1434,7 +1556,7 @@ describe("BundleReviewView archive extraction", () => {
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
-    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip"));
+    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip"));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     const notice = await screen.findByText(/waiting for the library scan to register/);
@@ -1458,7 +1580,7 @@ describe("BundleReviewView archive extraction", () => {
       }),
     );
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
-    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip"));
+    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip"));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     const timedOut = await screen.findByText(/taking longer than expected/);
@@ -1482,7 +1604,7 @@ describe("BundleReviewView archive extraction", () => {
     expect(none.disabled).toBe(true);
 
     // One archive-only row: the button opens the same dialog the row does.
-    fireEvent.click(selectionCheck("Moai_zip"));
+    fireEvent.click(selectionCheck("import/Moai.zip"));
     const one = screen.getByRole("button", {
       name: "Extract selected archives (1)",
     }) as HTMLButtonElement;
@@ -1493,7 +1615,7 @@ describe("BundleReviewView archive extraction", () => {
 
     // Mixed: two rows are selected, but only the zip-only one is extractable.
     renderView(makeState());
-    fireEvent.click(selectionCheck("Moai_zip"));
+    fireEvent.click(selectionCheck("import/Moai.zip"));
     fireEvent.click(selectionCheck("Moai"));
     expect(screen.getByText("2 bundles selected")).toBeTruthy();
     const mixed = screen.getByRole("button", {
@@ -1631,8 +1753,8 @@ describe("BundleReviewView archive extraction", () => {
   it("returns focus to the row that opened the extract dialog when it closes", () => {
     renderView(makeState());
 
-    fireEvent.click(rowElement("Moai_zip"));
-    fireEvent.click(statusCell("Moai_zip"));
+    fireEvent.click(rowElement("import/Moai.zip"));
+    fireEvent.click(statusCell("import/Moai.zip"));
     expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
 
     // The precondition: the dialog put the caret on a real control of its own.
@@ -1644,7 +1766,7 @@ describe("BundleReviewView archive extraction", () => {
     fireEvent.keyDown(close, { key: "Escape" });
 
     expect(screen.queryByRole("dialog", { name: "Extract Moai zip" })).toBeNull();
-    expect(document.activeElement).toBe(rowElement("Moai_zip"));
+    expect(document.activeElement).toBe(rowElement("import/Moai.zip"));
   });
 
   it("reports a failed extraction that landed after the row changed, naming the one that failed", async () => {
@@ -2345,7 +2467,7 @@ describe("BundleReviewView extract and create", () => {
       failed: 0,
       results: [
         {
-          key: "Moai_zip",
+          key: "import/Moai.zip",
           status: "created",
           project_id: "p1",
           name: "Moai zip",
@@ -2405,18 +2527,18 @@ describe("BundleReviewView extract and create", () => {
 
     // The first phase is painted before anything has answered, so the operator
     // is never looking at a silent button.
-    expect(narration("Moai_zip")?.textContent).toBe("Reading the archive's file list…");
+    expect(narration("import/Moai.zip")?.textContent).toBe("Reading the archive's file list…");
 
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
     );
 
-    expect(listArchiveEntriesMock).toHaveBeenCalledWith("Moai.zip");
-    expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Moai.zip", entries: null });
+    expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip");
+    expect(extractArchiveMock).toHaveBeenCalledWith({ path: "import/Moai.zip", entries: null });
     expect(state.afterExtract).toHaveBeenCalledTimes(1);
     expect(state.afterExtract).toHaveBeenCalledWith([EXTRACT_RESULT]);
     expect(createReporting).toHaveBeenCalledTimes(1);
-    expect(createReporting).toHaveBeenCalledWith([{ key: "Moai_zip", name: "Moai zip" }]);
+    expect(createReporting).toHaveBeenCalledWith([{ key: "import/Moai.zip", name: "Moai zip" }]);
     // The reporting door is a second call on the same hook, not a rewrite of
     // the old one: every bulk create still goes through `create`.
     expect(state.create).not.toHaveBeenCalled();
@@ -2444,11 +2566,11 @@ describe("BundleReviewView extract and create", () => {
         canContribute
       />,
     );
-    expect(rowKeys()).not.toContain("Moai_zip");
-    expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip.");
+    expect(rowKeys()).not.toContain("import/Moai.zip");
+    expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip.");
     // Queue level, not aside level: the paragraph must not live in the panel
     // whose row just vanished.
-    expect(detail().contains(narration("Moai_zip"))).toBe(false);
+    expect(detail().contains(narration("import/Moai.zip"))).toBe(false);
   });
 
   it("reports already-created rather than making a second project", async () => {
@@ -2461,9 +2583,9 @@ describe("BundleReviewView extract and create", () => {
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
 
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toContain("Already created"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("Already created"),
     );
-    expect(narration("Moai_zip")?.textContent).toContain("no second project");
+    expect(narration("import/Moai.zip")?.textContent).toContain("no second project");
     expect(state.create).not.toHaveBeenCalled();
   });
 
@@ -2479,7 +2601,7 @@ describe("BundleReviewView extract and create", () => {
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
 
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toContain("did not settle"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("did not settle"),
     );
     expect(createReporting).not.toHaveBeenCalled();
   });
@@ -2494,19 +2616,19 @@ describe("BundleReviewView extract and create", () => {
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
 
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toContain("did not settle"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("did not settle"),
     );
     // That sentence tells the operator to refresh once the scan finishes, so
     // taking its advice has to clear it.
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(narration("Moai_zip")).toBeNull());
+    await waitFor(() => expect(narration("import/Moai.zip")).toBeNull());
     expect(state.refresh).toHaveBeenCalledTimes(1);
   });
 
   it("creates nothing when the archive held no extractable files", async () => {
     extractArchiveMock.mockResolvedValue({
-      path: "Moai.zip",
-      destination: "Moai",
+      path: "import/Moai.zip",
+      destination: "import/Moai",
       files: 0,
       bytes: 0,
       already_present: false,
@@ -2519,7 +2641,7 @@ describe("BundleReviewView extract and create", () => {
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
 
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toContain("Nothing will register"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("Nothing will register"),
     );
     expect(state.afterExtract).not.toHaveBeenCalled();
     expect(createReporting).not.toHaveBeenCalled();
@@ -2536,14 +2658,14 @@ describe("BundleReviewView extract and create", () => {
 
     // The row's blocked-reason cell points at the whole job and keeps its click
     // behaviour: it is a text edit, not a new control.
-    expect(statusCell("Moai_zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
+    expect(statusCell("import/Moai.zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
 
     // The bulk bar's own door and its words are untouched.
     expect(
       (screen.getByRole("button", { name: "Extract selected archives (0)" }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
-    fireEvent.click(selectionCheck("Moai_zip"));
+    fireEvent.click(selectionCheck("import/Moai.zip"));
     expect(screen.getByRole("button", { name: "Extract selected archives (1)" })).toBeTruthy();
   });
 
@@ -2575,7 +2697,7 @@ describe("BundleReviewView extract and create", () => {
     // The ready row is selected first, so the bulk create door is live on its
     // own account and disabling it below can only be the run's doing.
     fireEvent.click(selectionCheck("Moai"));
-    fireEvent.click(rowElement("Moai_zip"));
+    fireEvent.click(rowElement("import/Moai.zip"));
     expect(detailTitle()).toBe("Moai zip");
     const bulkCreate = screen.getByRole("button", {
       name: "Create selected (1)",
@@ -2584,7 +2706,7 @@ describe("BundleReviewView extract and create", () => {
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
     );
 
     // `busy` is false here: this is the scan wait, not the final create, and
@@ -2613,7 +2735,7 @@ describe("BundleReviewView extract and create", () => {
 
     settle("settled");
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
     );
 
     // The run has answered, so every door it held comes back.
@@ -2621,7 +2743,7 @@ describe("BundleReviewView extract and create", () => {
       (within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     expect(bulkCreate.disabled).toBe(false);
-    fireEvent.click(rowElement("Moai_zip"));
+    fireEvent.click(rowElement("import/Moai.zip"));
     expect((oneStepButton() as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -2639,7 +2761,7 @@ describe("BundleReviewView extract and create", () => {
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
     );
 
     // The very row the run is processing: a dismissal written now would hide
@@ -2649,7 +2771,7 @@ describe("BundleReviewView extract and create", () => {
 
     settle("settled");
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
     );
     expect(createReporting).toHaveBeenCalledTimes(1);
   });
@@ -2679,12 +2801,12 @@ describe("BundleReviewView extract and create", () => {
     // Both plain doors are live before the run, so what the assertions below
     // see can only be the run's doing.
     expect(detailExtract().disabled).toBe(false);
-    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
-    expect(statusCell("Moai_zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
+    expect(rowElement("import/Moai.zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
+    expect(statusCell("import/Moai.zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
     );
 
     // (a) A second extract landing now would run a second settle and a second
@@ -2694,7 +2816,7 @@ describe("BundleReviewView extract and create", () => {
     // (b) The row's blocked-reason cell is the mouse's door. It keeps its
     // sentence but loses the door: a click on it opens nothing, and it no
     // longer reads as a control.
-    const cell = statusCell("Moai_zip");
+    const cell = statusCell("import/Moai.zip");
     expect(cell.getAttribute("title")).toBeNull();
     expect(cell.className).toBe("review-row-status");
     fireEvent.click(cell);
@@ -2702,21 +2824,21 @@ describe("BundleReviewView extract and create", () => {
 
     // (c) Enter on the option is that same door from the keyboard: it opens
     // nothing, and the option stops advertising the shortcut it cannot honour.
-    fireEvent.keyDown(rowElement("Moai_zip"), { key: "Enter" });
+    fireEvent.keyDown(rowElement("import/Moai.zip"), { key: "Enter" });
     expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
-    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBeNull();
+    expect(rowElement("import/Moai.zip").getAttribute("aria-keyshortcuts")).toBeNull();
 
     settle("settled");
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
     );
 
     // The run has answered, so the door comes back - and it is a door again,
     // not a cell that looks live while refusing.
     expect(detailExtract().disabled).toBe(false);
-    expect(rowElement("Moai_zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
-    expect(statusCell("Moai_zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
-    fireEvent.click(statusCell("Moai_zip"));
+    expect(rowElement("import/Moai.zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
+    expect(statusCell("import/Moai.zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
+    fireEvent.click(statusCell("import/Moai.zip"));
     expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
   });
 
@@ -2746,7 +2868,7 @@ describe("BundleReviewView extract and create", () => {
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
     );
 
     const extractsBefore = extractArchiveMock.mock.calls.length;
@@ -2761,7 +2883,7 @@ describe("BundleReviewView extract and create", () => {
 
     settle("settled");
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
     );
     // The panel is a door again once the run has answered.
     expect(confirmButton.disabled).toBe(false);
@@ -2783,10 +2905,10 @@ describe("BundleReviewView extract and create", () => {
       }),
     );
 
-    fireEvent.click(rowElement("Moai_zip"));
+    fireEvent.click(rowElement("import/Moai.zip"));
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toContain("Waiting for the library scan"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
     );
 
     fireEvent.click(rowElement("Moai"));
@@ -2794,14 +2916,14 @@ describe("BundleReviewView extract and create", () => {
 
     // The shut cell opens nothing, and the click still reaches the row: moving
     // the detail target is a read, so the lock must not swallow it.
-    fireEvent.click(statusCell("Moai_zip"));
+    fireEvent.click(statusCell("import/Moai.zip"));
 
     expect(detailTitle()).toBe("Moai zip");
     expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
 
     settle("settled");
     await waitFor(() =>
-      expect(narration("Moai_zip")?.textContent).toBe("Created project Moai zip."),
+      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
     );
   });
 });

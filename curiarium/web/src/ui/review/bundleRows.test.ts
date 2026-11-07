@@ -29,6 +29,7 @@ import {
   enrichSelectionLabel,
   enrichUnavailableLine,
   enrichmentLine,
+  extractPathFor,
   hasThingSource,
   headline,
   isArchiveOnly,
@@ -181,46 +182,106 @@ describe("isCreatable", () => {
   });
 });
 
-describe("isArchiveOnly", () => {
-  // `BundleArchive.rel_path` is non-nullable on the wire, so the "no path"
-  // quadrant is forced here rather than widening the API type for a defensive
-  // branch.
-  const noPath = { rel_path: null as unknown as string, twin_verified: false };
+describe("extractPathFor and isArchiveOnly", () => {
+  it("gives the ticket's live row its own path, because the row IS the archive", () => {
+    // The wire sends `archive: null` for a zip-only row; a predicate that demands
+    // a twin shuts every door on the one row that has one.
+    const live = makeBundle({
+      key: "import/01_Fates End - Wizard Tower.zip",
+      rel_path: "import/01_Fates End - Wizard Tower.zip",
+      status: "blocked",
+      blocked_reason: "archive_only",
+      archive: null,
+    });
+    expect(isArchiveOnly(live)).toBe(true);
+    expect(extractPathFor(live)).toBe("import/01_Fates End - Wizard Tower.zip");
+  });
 
-  it("treats only an archive-only row with an archive path as extractable", () => {
-    const archiveOnly = (archive: BundleDetectItem["archive"]) =>
-      makeBundle({ status: "blocked", blocked_reason: "archive_only", archive });
+  it("names the twin on a refused pair, whose own key is a directory", () => {
+    // A `pair_only` row: the container rule refused the directory, so its key
+    // cannot end `.zip` and the twin is the only possible source.
+    const pairOnly = makeBundle({
+      key: "import/endorphin",
+      rel_path: "import/endorphin",
+      status: "blocked",
+      blocked_reason: "archive_only",
+      archive: { rel_path: "import/endorphin.zip", twin_verified: true },
+    });
+    expect(isArchiveOnly(pairOnly)).toBe(true);
+    expect(extractPathFor(pairOnly)).toBe("import/endorphin.zip");
+  });
 
-    // The one quadrant that can be extracted: the label and the path agree.
-    expect(isArchiveOnly(archiveOnly({ rel_path: "Moai.zip", twin_verified: false }))).toBe(true);
-    // The label alone is not enough - there would be nothing to extract.
-    expect(isArchiveOnly(archiveOnly(null))).toBe(false);
-    expect(isArchiveOnly(archiveOnly(noPath))).toBe(false);
-    // A path on a row the scan already resolved is not an extraction to offer.
-    expect(
-      isArchiveOnly(
-        makeBundle({
-          status: "ready",
-          blocked_reason: null,
-          archive: { rel_path: "Moai.zip", twin_verified: true },
-        }),
-      ),
-    ).toBe(false);
+  it("reads the suffix case-insensitively, mirroring the server's walk", () => {
+    const upper = makeBundle({
+      key: "import/Moai.ZIP",
+      rel_path: "import/Moai.ZIP",
+      status: "blocked",
+      blocked_reason: "archive_only",
+      archive: null,
+    });
+    expect(isArchiveOnly(upper)).toBe(true);
+    expect(extractPathFor(upper)).toBe("import/Moai.ZIP");
+  });
+
+  it("refuses a blocked row whose twin is attached but whose reason is not the archive's", () => {
+    // The twin is attached whatever the status, so the reason gate is the only
+    // thing keeping an unresolved directory's provenance out of the door.
+    const unresolved = makeBundle({
+      key: "Legacy_vase",
+      rel_path: "Legacy_vase",
+      status: "blocked",
+      blocked_reason: "unresolved_directory",
+      archive: { rel_path: "Legacy_vase.zip", twin_verified: true },
+    });
+    expect(isArchiveOnly(unresolved)).toBe(false);
+    expect(extractPathFor(unresolved)).toBeNull();
+  });
+
+  it("refuses a ready row that names a twin", () => {
+    const ready = makeBundle({
+      status: "ready",
+      blocked_reason: null,
+      archive: { rel_path: "Moai.zip", twin_verified: true },
+    });
+    expect(isArchiveOnly(ready)).toBe(false);
+    expect(extractPathFor(ready)).toBeNull();
+  });
+
+  it("refuses an empty twin when the row's own path is not an archive", () => {
+    // The twin can no longer be the only source: a row that is not itself a zip
+    // still needs a real path behind the label.
+    const emptyTwin = makeBundle({
+      status: "blocked",
+      blocked_reason: "archive_only",
+      archive: { rel_path: "", twin_verified: false },
+    });
+    expect(isArchiveOnly(emptyTwin)).toBe(false);
+    expect(extractPathFor(emptyTwin)).toBeNull();
   });
 });
 
 describe("canExtractAndCreate", () => {
-  // `BundleArchive.rel_path` is non-nullable on the wire, so the "no path"
-  // quadrant is forced here rather than widening the API type for a branch.
-  const noPath = { rel_path: null as unknown as string, twin_verified: false };
   const zipOnly = makeBundle({
+    key: "import/Moai.zip",
+    rel_path: "import/Moai.zip",
     status: "blocked",
     blocked_reason: "archive_only",
-    archive: { rel_path: "Moai.zip", twin_verified: false },
+    archive: null,
+  });
+  const pairOnly = makeBundle({
+    key: "import/endorphin",
+    rel_path: "import/endorphin",
+    status: "blocked",
+    blocked_reason: "archive_only",
+    archive: { rel_path: "import/endorphin.zip", twin_verified: true },
   });
 
-  it("accepts the zip-only row that has a path and no project", () => {
+  it("accepts the zip-only row that is the archive and has no project", () => {
     expect(canExtractAndCreate(zipOnly)).toBe(true);
+  });
+
+  it("accepts a refused pair, whose twin is the archive", () => {
+    expect(canExtractAndCreate(pairOnly)).toBe(true);
   });
 
   it("refuses every row the one-step door could not serve", () => {
@@ -230,7 +291,7 @@ describe("canExtractAndCreate", () => {
     expect(canExtractAndCreate(makeBundle({ ...zipOnly, existing_project_id: PROJECT_ID }))).toBe(
       false,
     );
-    // Another blocked reason is not the archive door.
+    // Another blocked reason is not the archive door, even with a twin attached.
     expect(
       canExtractAndCreate(
         makeBundle({
@@ -240,17 +301,16 @@ describe("canExtractAndCreate", () => {
         }),
       ),
     ).toBe(false);
-    // No archive to extract, or a label with no path behind it.
-    expect(canExtractAndCreate(makeBundle({ ...zipOnly, archive: null }))).toBe(false);
-    expect(canExtractAndCreate(makeBundle({ ...zipOnly, archive: noPath }))).toBe(false);
   });
 });
 
 describe("archiveExtractTitle", () => {
   const zipOnly = makeBundle({
+    key: "import/Moai.zip",
+    rel_path: "import/Moai.zip",
     status: "blocked",
     blocked_reason: "archive_only",
-    archive: { rel_path: "Moai.zip", twin_verified: false },
+    archive: null,
   });
 
   it("points a one-step row at the detail panel's whole job", () => {
@@ -976,12 +1036,14 @@ describe("enrichUnavailableLine", () => {
       "an archive bundle",
       makeBundle({
         ...GAP,
+        key: "import/Moai.zip",
+        rel_path: "import/Moai.zip",
         source_url: null,
         detector: "archive-bundle",
         confidence: "low",
         status: "blocked",
         blocked_reason: "archive_only",
-        archive: { rel_path: "Moai.zip", twin_verified: false },
+        archive: null,
       }),
     ],
     [

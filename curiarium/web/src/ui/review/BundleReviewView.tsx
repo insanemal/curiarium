@@ -45,6 +45,7 @@ import {
   enrichSelectionLabel,
   enrichUnavailableLine,
   enrichmentLine,
+  extractPathFor,
   headline,
   isArchiveOnly,
   isCreatable,
@@ -155,11 +156,12 @@ function settlingLine(results: ArchiveExtractResult[]): string {
   return `Extracting ${label} - waiting for the library scan to register the files. This queue updates itself.`;
 }
 
-/** The archives the given rows name. One rule feeds the blocked-reason cell,
- *  the Enter key and the bulk bar, so all three doors extract the same set. */
+/** The archives the given rows can extract. `extractPathFor` is the one rule, so
+ *  the dialog is never handed a row that has no door: a ready row's twin zip is
+ *  provenance, not a target, and the helper answers null for it. */
 function extractTargets(rows: BundleDetectItem[]): ExtractTarget[] {
-  return rows.filter(isArchiveOnly).flatMap(row => {
-    const path = row.archive?.rel_path;
+  return rows.flatMap(row => {
+    const path = extractPathFor(row);
     return path ? [{ path, label: row.title }] : [];
   });
 }
@@ -429,6 +431,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const activeGroups = activeRow?.groups ?? [];
   const activeExcluded = activeRow === null ? [] : excludedGroups[activeRow.key] ?? [];
   const activeArchive = activeRow === null ? null : archiveLine(activeRow);
+  const activeExtractPath = activeRow === null ? null : extractPathFor(activeRow);
   const activeCreatedLine = activeRow === null ? null : createdProjectLine(activeRow);
   const activeNewPartsLine = activeRow === null ? null : newPartsLine(activeRow);
   const activeEnrichmentLine = activeRow === null ? null : enrichmentLine(activeRow);
@@ -602,7 +605,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   // the orchestration itself is `runExtractAndCreate` (React-free, unit-tested),
   // so this only supplies the real deps and paints what each phase said.
   const startExtractAndCreate = (row: BundleDetectItem) => {
-    const path = row.archive?.rel_path;
+    const path = extractPathFor(row);
     if (!canContribute || !path) return;
     const key = row.key;
     // Each update is a function of the current state so a run that was
@@ -738,9 +741,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
         // is the one way to say so without adding a tab stop. While the run
         // holds the queue's writes the door is shut, so the shortcut is not
         // advertised either.
-        aria-keyshortcuts={
-          canContribute && !actionsLocked && isArchiveOnly(row) ? "Enter" : undefined
-        }
+        aria-keyshortcuts={canContribute && archiveDoorLive ? "Enter" : undefined}
         data-bundle-row={row.key}
         tabIndex={isActive ? 0 : -1}
         className={rowClassName(isSelected, isActive)}
@@ -1186,16 +1187,16 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                     through, unlike the settings card, which sat behind an
                     editor-only gate; the component hides itself below
                     contributor and the route enforces `require_contribute`. */}
-                {activeRow.blocked_reason === "archive_only" && activeRow.archive?.rel_path && (
+                {activeExtractPath !== null && (
                   <ArchiveExtractAction
                     // React reuses this instance across a row change, so a
                     // mid-stage `stage`/`entries` would survive while `path`
                     // and `label` move on - the operator would confirm one
                     // archive and extract another. Keying remounts back to
                     // idle, and the mount-time focus skip keeps the caret.
-                    key={activeRow.archive.rel_path}
+                    key={activeExtractPath}
                     canContribute={canContribute}
-                    path={activeRow.archive.rel_path}
+                    path={activeExtractPath}
                     label={activeRow.title}
                     variant="detail"
                     // A second extract landing while the run's settle is

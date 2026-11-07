@@ -180,14 +180,50 @@ export function bulkEnrichTitle(enrichable: number, selected: number): string | 
   return `${enrichable} of the ${selected} selected can be enriched; the others either name no source page, already have a creator and a licence, were already read from their page, or are already a project.`;
 }
 
-/** A row the queue may extract in place: it is blocked as an archive the scan
- *  never saw, and it names the archive to extract. The path check is what makes
- *  the label insufficient - a row without an archive path cannot be extracted,
- *  so the blocked-reason cell, the Enter key and the bulk count all read this
- *  one predicate and stay honest together: one rule feeds all three, so they
- *  cannot drift apart. */
+/** The one blocked reason that names an extraction instead of a create. */
+const ARCHIVE_ONLY = "archive_only";
+
+/** Whether a row's path is an archive on disk. Case-insensitive on purpose: the
+ *  server's own walk lowercases the suffix before comparing it
+ *  (`bundle_service._suffix`), so `Foo.ZIP` is a zip row, and the extract door
+ *  accepts it case-insensitively too. Deliberately not `isZipFile` from
+ *  `lib/zipUtils`, which applies the same suffix to a picked File's NAME on the
+ *  upload path: a queue predicate should not take its vocabulary from the upload
+ *  path, and this one is judged against the server's rule rather than a local
+ *  picker's. The two residuals a suffix test cannot see - a DIRECTORY named
+ *  `Foo.zip`, and a file literally named `.zip` - are refused server-side. */
+function isArchivePath(path: string): boolean {
+  return path.toLowerCase().endsWith(".zip");
+}
+
+/** The archive this row can extract in place, or null when it offers no such
+ *  door. Two real wire shapes reach it, and only one of them has a twin:
+ *
+ *  - a row that IS an archive. The server builds a zip-only candidate with
+ *    `archive_path=None`, so such a row ships `archive: null` and its own
+ *    `rel_path` ends `.zip`;
+ *  - a `pair_only` row: a directory the container rule refuses, which ships its
+ *    twin zip in `archive` - the field's one meaning is "the twin of a DIRECTORY
+ *    bundle", and that row really is one.
+ *
+ *  So the twin is asked first and the row's own path is the fallback. The
+ *  blocked reason is asked before either, because the twin is attached whatever
+ *  the status: a ready row and an `unresolved_directory` row both name one, and
+ *  extracting it is no remedy for either. One rule feeds every affordance, so
+ *  the cell, the Enter key, the bulk count, the bulk dialog, the detail door and
+ *  the one-step door cannot disagree about which rows have a door. */
+export function extractPathFor(row: BundleDetectItem): string | null {
+  if (row.blocked_reason !== ARCHIVE_ONLY) return null;
+  const twin = row.archive?.rel_path;
+  if (twin) return twin;
+  return isArchivePath(row.rel_path) ? row.rel_path : null;
+}
+
+/** Whether the row offers the in-place extraction door. It reads `extractPathFor`
+ *  rather than repeating the shape, so a row with a door always has a target and
+ *  a row with a target always has a door. */
 export function isArchiveOnly(row: BundleDetectItem): boolean {
-  return row.blocked_reason === "archive_only" && Boolean(row.archive?.rel_path);
+  return extractPathFor(row) !== null;
 }
 
 export const EXTRACT_AND_CREATE_LABEL = "Extract and create project";

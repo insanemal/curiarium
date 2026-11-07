@@ -592,16 +592,20 @@ describe("useBundleDetect", () => {
   it("settles the library scan and then refetches, so an extracted bundle turns ready", async () => {
     const zipOnly = makeReport([
       makeBundle({
+        key: "import/Moai.zip",
+        rel_path: "import/Moai.zip",
         status: "blocked",
         blocked_reason: "archive_only",
-        archive: { rel_path: "Moai.zip", twin_verified: false },
+        archive: null,
       }),
     ]);
     const settled = makeReport([
       makeBundle({
+        key: "import/Moai",
+        rel_path: "import/Moai",
         status: "ready",
         blocked_reason: null,
-        archive: { rel_path: "Moai.zip", twin_verified: true },
+        archive: { rel_path: "import/Moai.zip", twin_verified: true },
       }),
     ]);
     getBundleReportMock.mockResolvedValueOnce(zipOnly).mockResolvedValueOnce(settled);
