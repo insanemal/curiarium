@@ -60,6 +60,7 @@ import snapshot_guard
 import snapshots
 import zip_service
 from db import engine
+from file_utils import is_model_path
 from models import Asset, Project
 
 # The marker namespace this door owns. `_bundle` is detection's (see
@@ -77,7 +78,6 @@ STATUS_PARTIAL = "partial"
 STATUS_NOTHING_RESOLVED = "nothing_resolved"
 
 ARCHIVE_SUFFIX = ".zip"
-MODEL_MIME_PREFIX = "model/"
 FINGERPRINT_CHARS = 16
 
 # How many expected paths go into one ``IN`` clause. SQLite caps the host
@@ -111,7 +111,6 @@ class ResolvedMember:
     asset_id: str
     entry: str
     rel_path: str
-    mime: str
 
 
 @dataclass(frozen=True)
@@ -418,7 +417,7 @@ def _resolve(planned: Sequence[PlannedEntry]) -> Dict[str, ResolvedMember]:
     with Session(engine) as session:
         for offset in range(0, len(keys), RESOLVE_QUERY_BATCH):
             rows = session.exec(
-                select(Asset.id, Asset.storage_path, Asset.mime).where(
+                select(Asset.id, Asset.storage_path).where(
                     Asset.storage_path.in_(keys[offset : offset + RESOLVE_QUERY_BATCH])
                 )
             ).all()
@@ -428,7 +427,6 @@ def _resolve(planned: Sequence[PlannedEntry]) -> Dict[str, ResolvedMember]:
                         asset_id=row.id,
                         entry=wanted[row.storage_path].entry,
                         rel_path=row.storage_path,
-                        mime=row.mime or "",
                     )
     return resolved
 
@@ -436,13 +434,27 @@ def _resolve(planned: Sequence[PlannedEntry]) -> Dict[str, ResolvedMember]:
 def _cover_asset_id(members: Sequence[ResolvedMember]) -> Optional[str]:
     """The first member the library calls a model, so the project has a face.
 
-    A ``mime`` prefix test, not a detector: which entry is the cover is a
-    courtesy, and the rules for what counts as a bundle's model are detection's
-    business on a path that consults none of them. ``None`` leaves the project
-    with no cover, which is what a project with only documents has always had.
+    An extension test, not a detector and not the stored ``mime``. That column is
+    written once at registration from ``mimetypes``, whose answer depends on
+    whether the host happens to ship ``/etc/mime.types`` — the published image is
+    ``python:3.12-slim`` and does not, so every model there is stored as
+    ``application/octet-stream`` and a prefix test finds no cover at all; and on a
+    host that does ship the file, ``.3mf`` and ``.step`` land on
+    ``application/vnd.ms-3mfdocument`` and ``application/p21``, which a ``model/``
+    prefix refuses just as hard. Rows written before the table existed keep the
+    value they were given, because a re-scan never rewrites ``mime``.
+    ``web/src/lib/assetKinds.ts`` reached the same conclusion and matches by
+    extension; this is that rule, and ``scripts/check_model_table.py`` pins the
+    copies together. Extension only, with no ``or mime`` leg, is also deliberate:
+    a document whose upload door was handed ``Content-Type: model/stl`` must not
+    hijack the face. ``None`` leaves the project with no cover, which is what a
+    project with only documents has always had.
+
+    First-in-listing-order is preserved, so the member order a caller sees is
+    unaffected by which member is chosen.
     """
     for member in members:
-        if member.mime.startswith(MODEL_MIME_PREFIX):
+        if is_model_path(member.rel_path):
             return member.asset_id
     return None
 

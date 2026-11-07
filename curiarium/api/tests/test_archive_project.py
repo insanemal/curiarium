@@ -24,8 +24,10 @@ drives the scan itself, which is synchronous.
 """
 
 import ast
+import dataclasses
 import hashlib
 import json
+import mimetypes
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, List
@@ -45,6 +47,7 @@ import audit
 import bundle_detect
 import bundle_service
 import db
+import file_utils
 import library_scan
 import main
 import project_service
@@ -344,6 +347,131 @@ def test_the_cover_is_the_first_member_the_library_calls_a_model(
         assert cover is not None
         assert cover.mime == "model/stl"
         assert cover.storage_path == f"{TWIN}/{ROOT}/01_Wizard/wizard_tower_base.stl"
+
+
+def test_the_cover_predicate_is_an_extension_decision_with_no_mime_anywhere() -> None:
+    """Which member gets a face is answered from the path, and from nothing else.
+
+    Three things are pinned here at once, none of which an end-to-end run can show:
+
+    * every suffix the library calls a model is chosen - all five, each with a
+      documents-only member sitting in front of it, and with no `mime` anywhere in
+      the room. A row's mime is a string some host wrote, so the door cannot hold
+      it as evidence;
+    * a project with only documents keeps having no face, which is what it has
+      always had - the extension rule must not start inventing one out of a
+      `.txt`;
+    * `ResolvedMember` carries no `mime` field at all. That is structural, not a
+      behavioural preference: with no column on the member, "a document whose
+      upload door was handed `Content-Type: model/stl` hijacks the face" is not
+      merely untested here, it is unrepresentable - there is nowhere to put the
+      value a client declared.
+
+    The exact-suffix-set assertion makes a silent widening or narrowing of
+    `file_utils.MODEL_SUFFIXES` visible in this test rather than in production:
+    the set is pinned against the web copies by `scripts/check_model_table.py`,
+    and the two assertions have to agree.
+    """
+    assert file_utils.MODEL_SUFFIXES == {".stl", ".3mf", ".step", ".stp", ".obj"}
+    assert "mime" not in {field.name for field in dataclasses.fields(archive_project_service.ResolvedMember)}
+
+    def member(name: str) -> archive_project_service.ResolvedMember:
+        """One planned entry that resolved - the only three columns it can carry."""
+        return archive_project_service.ResolvedMember(
+            asset_id=f"asset-{name}",
+            entry=f"{ROOT}/{name}",
+            rel_path=f"{TWIN}/{ROOT}/{name}",
+        )
+
+    documents = [member("README.txt"), member("box_art.png")]
+    for suffix in sorted(file_utils.MODEL_SUFFIXES):
+        chosen = archive_project_service._cover_asset_id([*documents, member(f"part{suffix}")])
+        assert chosen == f"asset-part{suffix}", f"{suffix} is a model the door must name without a mime"
+
+    # `.3mf` spelled out, because it is the member that fails on the *host* too:
+    # `/etc/mime.types` there answers `application/vnd.ms-3mfdocument`, which no
+    # `model/` prefix ever matched, so this case was broken before the container
+    # symptom was ever noticed.
+    assert archive_project_service._cover_asset_id([*documents, member("pack.3mf")]) == "asset-pack.3mf"
+
+    assert archive_project_service._cover_asset_id(documents) is None, "documents alone must not grow a face"
+    assert archive_project_service._cover_asset_id([]) is None
+    # Storage paths come off disk as written, so the rule cannot be case-sensitive.
+    assert archive_project_service._cover_asset_id([*documents, member("part.STL")]) == "asset-part.STL"
+
+
+def test_the_cover_survives_a_host_that_knows_no_model_mime(
+    client, isolated_storage, monkeypatch
+) -> None:
+    """The `python:3.12-slim` condition, reproduced in-repo. The regression test.
+
+    What shipped: every project created by *Extract and create* on the published
+    image got a blank card. The deployed base is `python:3.12-slim`, which carries
+    no `/etc/mime.types`, so `mimetypes.guess_type("x.stl")` answers `(None, None)`
+    and the scan stored every model as `application/octet-stream`; the cover test
+    was a `model/` prefix on that stored column, so it matched nothing.
+
+    This test is the reason it belongs on the host: the full container gate caught
+    it, and `verify-fast` structurally could not, because this host's
+    `/etc/mime.types` made the same suite green - the identical assertions pass or
+    fail on the accident of the machine reading them. Reproducing the condition is
+    therefore two patchings, and the asymmetry between them is the actual test:
+
+    * the scan-side table is emptied and `mimetypes.guess_type` is blinded, so the
+      row really is `application/octet-stream` - asserted below, because a test
+      that silently got a real mime would prove nothing at all;
+    * the door-side frozen `file_utils.MODEL_SUFFIXES` is left completely alone,
+      because the door's job is to answer without the mime column. Blinding that
+      too would test the wrong thing and would pass on a broken door.
+    """
+    headers = auth_header(client)
+    monkeypatch.setattr(file_utils, "MODEL_MIME_BY_SUFFIX", {})
+    monkeypatch.setattr(mimetypes, "guess_type", lambda *_args, **_kwargs: (None, None))
+
+    body = full_run(client, headers, monkeypatch, isolated_storage)
+
+    assert body["status"] == "created"
+    assert body["resolved"] == PLANNED, "mime-blindness must not cost a member"
+    with Session(engine) as session:
+        cover = session.get(Asset, body["project"]["cover_asset_id"])
+        assert cover is not None, "blank card — the python:3.12-slim symptom"
+        assert cover.mime == "application/octet-stream", "the row has to be mime-blind or nothing was reproduced"
+        assert cover.storage_path == f"{TWIN}/{ROOT}/01_Wizard/wizard_tower_base.stl"
+
+
+def test_the_scan_names_a_model_mime_whatever_the_host_thinks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The table wins over the environment, which is the point of having one.
+
+    Green here in *this* environment is the assertion, not a formality. Three of
+    the five values are not what this host's `/etc/mime.types` says - `.3mf` is
+    `application/vnd.ms-3mfdocument` there and `.step`/`.stp` are `application/p21`,
+    neither of which is a `model/*` value - and four are not what the 3.12 stdlib
+    table says at all, because the stdlib ships no `model/*` entries and the
+    published image has no `/etc/mime.types` to add them. So a pass means the
+    library's own table answered first on purpose; a green that only meant
+    "`mimetypes` agreed" would let this test stay green while the container broke.
+
+    The two non-model lines are the other half: a table consulted before
+    `mimetypes` must not swallow anything it does not own, or `.txt` stops being
+    `text/plain` and a file with no extension stops being `application/octet-stream`.
+    They run against a genuine stdlib guesser rather than whatever the module
+    attribute currently holds, because the container simulation some runs install
+    blinds `guess_type` wholesale - and a real `python:3.12-slim` still answers
+    `text/plain` for `.txt`, which is a stdlib built-in entry; it is only the model
+    types the stdlib lacks. Restoring the real one here is what the image does, not
+    a way of dodging the simulation.
+    """
+    monkeypatch.setattr(mimetypes, "guess_type", mimetypes.MimeTypes().guess_type)
+
+    for suffix, expected in file_utils.MODEL_MIME_BY_SUFFIX.items():
+        assert file_utils.guess_mime_from_path(f"parts/part{suffix}") == expected
+
+    # Last suffix wins, so a prepared bundle's report keeps its real type.
+    assert file_utils.guess_mime_from_path("parts/prepared.gcode.3mf") == "model/3mf"
+
+    # Not in the table: straight through to the stdlib, and to its own default.
+    assert file_utils.guess_mime_from_path("parts/notes.txt") == "text/plain"
+    assert file_utils.guess_mime_from_path("parts/no-extension") == "application/octet-stream"
 
 
 def test_a_plan_larger_than_one_query_batch_loses_no_member(
