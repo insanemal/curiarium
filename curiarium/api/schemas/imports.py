@@ -1,6 +1,6 @@
 """Web imports, zip inspection/entry selection and project imports (Mf-avo9 split)."""
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -11,6 +11,8 @@ __all__ = [
   "ArchiveEntriesOut",
   "ArchiveExtractOut",
   "ArchiveExtractRequest",
+  "ArchiveProjectOut",
+  "ArchiveProjectRequest",
   "ImportInspectOut",
   "ImportProjectOut",
   "ImportProjectRequest",
@@ -90,6 +92,42 @@ class ArchiveExtractOut(BaseModel):
   bytes: int
   already_present: bool
   scan_started: bool
+
+
+class ArchiveProjectRequest(BaseModel):
+  """The archive whose extraction the operator declared to be one project.
+
+  `entries=None` means every member the archive holds, exactly the selection
+  `POST /import/archive` takes when it is given `None`; a list is the subset the
+  operator extracted. The names are checked against the archive, so a pick the
+  archive does not hold is a 400 rather than a silently missing member.
+  """
+
+  path: str
+  name: Optional[str] = None
+  entries: Optional[List[str]] = None
+
+
+class ArchiveProjectOut(BaseModel):
+  """The verdict of the extract-and-create door, or the project it made.
+
+  Every verdict is a 200: this door has nothing to refuse on policy grounds, so
+  `status` is the whole verdict and a client never has to guess from a status
+  code. `partial` and `nothing_resolved` create no project and carry no `project`;
+  `planned`/`resolved` are the two set sizes the comparison was made over and
+  `failed` names every planned entry that never became a registered asset, so
+  "how many entries failed" is a fact from the server rather than an inference.
+  `twin` is library-relative and is named so the operator can go and look at
+  where the files live.
+  """
+
+  status: Literal["created", "already_created", "partial", "nothing_resolved"]
+  archive: str
+  twin: str
+  planned: int
+  resolved: int
+  failed: List[str] = []
+  project: Optional[ProjectOut] = None
 
 
 class ImportZipEntriesRequest(ImportRequest):

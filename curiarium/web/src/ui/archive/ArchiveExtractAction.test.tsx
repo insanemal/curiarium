@@ -499,3 +499,87 @@ describe("keyboard focus across stages", () => {
     expect(listArchiveEntriesMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("ArchiveExtractAction confirm narration", () => {
+  // The archive from the live report (Mf-0ck5): the operator pressed Extract
+  // expecting a tower and got a row named after the archive, because the models
+  // were packed inside a nested `.zip` that extraction leaves whole.
+  const TOWER_ROOT = "01_Fates End - Wizard Tower";
+
+  function towerListing(): typeof ENTRIES {
+    return [
+      { path: `${TOWER_ROOT}/README.txt`, size: 64 },
+      { path: `${TOWER_ROOT}/01_Wizard/wizard_tower_base.stl`, size: 2048 },
+      { path: `${TOWER_ROOT}/01_Wizard/wizard_tower_roof.stl`, size: 2048 },
+      { path: `${TOWER_ROOT}/images/preview.png`, size: 1024 },
+      { path: `${TOWER_ROOT}/nested/accessories.zip`, size: 8192 },
+      { path: "__MACOSX/._wizard_tower_base.stl", size: 4 },
+    ];
+  }
+
+  async function openConfirm(listing: { path: string; size: number }[]): Promise<void> {
+    listArchiveEntriesMock.mockResolvedValue({ path: "Moai.zip", entries: listing });
+    render(<ArchiveExtractAction canContribute path="Moai.zip" label="Moai.zip" />);
+    fireEvent.click(screen.getByRole("button", { name: "Extract Moai.zip" }));
+    await screen.findByText(/extract into a new folder beside the archive\?$/);
+  }
+
+  it("keeps the count-and-size sentence as the panel's first line, byte for byte", async () => {
+    await openConfirm(towerListing());
+
+    const lines = screen.getAllByText(/^(\S|\s)+$/).filter(node => node.tagName === "P");
+    expect(lines[0].textContent).toBe(
+      "6 files, 13.1 KB — extract into a new folder beside the archive?",
+    );
+    // The panel's own count includes the `__MACOSX` member, because that sentence
+    // counts the listing; the plan below counts what will be written, and says so.
+    expect(screen.getByText(/It also holds 1 system file/).textContent).toContain("is not written");
+  });
+
+  it("says what the archive holds and which directory the entries live under", async () => {
+    await openConfirm(towerListing());
+
+    const narration = screen.getAllByText(/It holds|lands under|nested archive/).map(node => node.textContent);
+    expect(narration).toContain("It holds 2 models, 1 image, 1 nested archive, 1 document.");
+    expect(narration).toContain(`Everything lands under "${TOWER_ROOT}/" inside the new folder.`);
+  });
+
+  it("says so out loud when the models are only inside a nested archive", async () => {
+    await openConfirm([
+      { path: `${TOWER_ROOT}/README.txt`, size: 64 },
+      { path: `${TOWER_ROOT}/wizard_v5.4_models.zip`, size: 90240 },
+    ]);
+
+    const warning = await screen.findByText(/No model is packed in this archive itself/);
+    expect(warning.textContent).toContain("wizard_v5.4_models.zip");
+    expect(warning.textContent).toContain("it does not unzip it");
+    // The operator can still choose differently: the buttons are the same ones.
+    expect(screen.getByRole("button", { name: "Extract 2 files" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+  });
+
+  it("says the nested archives stay packed when the archive has models of its own", async () => {
+    await openConfirm([
+      { path: "tower.stl", size: 2048 },
+      { path: "extras.zip", size: 512 },
+    ]);
+
+    const warning = await screen.findByText(/nested archive(s)? stays? packed/);
+    expect(warning.textContent).toContain("One nested archive stays packed");
+  });
+
+  it("says an archive of system files writes nothing, instead of offering a leap", async () => {
+    await openConfirm([{ path: ".DS_Store", size: 6148 }]);
+
+    expect((await screen.findByText(/extracting it writes nothing/)).textContent).toBe(
+      "This archive holds nothing but 1 system file - extracting it writes nothing.",
+    );
+  });
+
+  it("says nothing about models before the listing has been read", () => {
+    render(<ArchiveExtractAction canContribute path="Moai.zip" label="Moai.zip" />);
+
+    expect(screen.queryByText(/It holds/)).toBeNull();
+    expect(listArchiveEntriesMock).not.toHaveBeenCalled();
+  });
+});

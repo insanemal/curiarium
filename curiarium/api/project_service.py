@@ -135,11 +135,84 @@ def create_project(
     project that no caller can map back to what made it. `None` keeps the old
     behaviour, a fresh empty object.
     """
+    project = _new_project(
+        session,
+        name,
+        description,
+        cover_asset_id,
+        creator,
+        source_url,
+        licence,
+        licence_url,
+        origin,
+        metadata,
+    )
+    return _insert(session, project, [])
+
+
+def create_project_with_members(
+    session: Session,
+    name: str,
+    description: Optional[str],
+    cover_asset_id: Optional[str],
+    member_asset_ids: List[str],
+    creator: Optional[str] = None,
+    source_url: Optional[str] = None,
+    licence: Optional[str] = None,
+    licence_url: Optional[str] = None,
+    origin: str = "own",
+    *,
+    metadata: Optional[dict] = None,
+) -> Project:
+    """Insert one project **and every member in a single commit**.
+
+    This exists because `create_project` and `add_assets` each commit, in two
+    sessions: the pair can strand a project that holds nothing, which is the
+    state a door that promises "the project and its files, or neither" must never
+    leave behind. The membership edit doors can afford per-id failure because the
+    project they act on already exists and the operator can retry it; a creating
+    door cannot, so an unknown asset id refuses here — before the insert — as a
+    whole-request 404 naming every id it could not find.
+
+    Members join in the order given, with `role="member"` and a `position` that
+    preserves it, because the order is the listing's and the listing is the
+    evidence a door like `archive_project_service` is built on.
+    """
+    ids = bulk_service.unique_asset_ids(member_asset_ids)
+    _require_assets(session, ids)
+    project = _new_project(
+        session,
+        name,
+        description,
+        cover_asset_id,
+        creator,
+        source_url,
+        licence,
+        licence_url,
+        origin,
+        metadata,
+    )
+    return _insert(session, project, ids)
+
+
+def _new_project(
+    session: Session,
+    name: str,
+    description: Optional[str],
+    cover_asset_id: Optional[str],
+    creator: Optional[str] = None,
+    source_url: Optional[str] = None,
+    licence: Optional[str] = None,
+    licence_url: Optional[str] = None,
+    origin: str = "own",
+    metadata: Optional[dict] = None,
+) -> Project:
+    """Build one uncommitted project row: the column list both inserts share."""
     name = _clean_name(name)
     if cover_asset_id:
         get_asset(session, cover_asset_id)
     stamp = _now()
-    project = Project(
+    return Project(
         name=name,
         description=description,
         cover_asset_id=cover_asset_id or None,
@@ -152,8 +225,27 @@ def create_project(
         created_at=stamp,
         updated_at=stamp,
     )
+
+
+def _insert(session: Session, project: Project, member_asset_ids: List[str]) -> Project:
+    """Commit one project with its members: one commit, whatever the member count.
+
+    Every `session.add` here is an insert that can only be seen after the single
+    `commit`, so a name collision rolls the project *and* its members back
+    together and the caller is left exactly where it started.
+    """
     try:
         session.add(project)
+        for position, asset_id in enumerate(member_asset_ids):
+            session.add(
+                ProjectAsset(
+                    project_id=project.id,
+                    asset_id=asset_id,
+                    role="member",
+                    position=position,
+                    added_at=project.created_at,
+                )
+            )
         session.commit()
         session.refresh(project)
     except IntegrityError:
@@ -162,6 +254,42 @@ def create_project(
         session.rollback()
         raise HTTPException(status_code=409, detail="Project name already exists") from None
     return project
+
+
+# How many member ids go into one ``IN`` clause. The size is the one
+# `archive_project_service.RESOLVE_QUERY_BATCH` uses - the door that feeds this
+# function its member list, whose comment names the cap both of them guard: SQLite
+# limits how many host variables a statement may bind
+# (``SQLITE_MAX_VARIABLE_NUMBER``: 999 on older builds, 32766 since 3.32), and an
+# ``IN`` list binds one per element - so a single query over the whole member list
+# would raise, and 500 the create, for an archive with tens of thousands of
+# members. The number is repeated here rather than imported because
+# `archive_project_service` imports this module; sharing it would be an import
+# cycle. Batched, fixed size, and a batch is comfortably under the smallest limit
+# any build can carry; the per-batch rows are merged into one set, so the caller
+# cannot tell chunking happened at all.
+MEMBER_QUERY_BATCH = 500
+
+
+def _require_assets(session: Session, asset_ids: List[str]) -> None:
+    """Refuse a member that is not an asset, before a single row is inserted.
+
+    The ids are read in batches of `MEMBER_QUERY_BATCH` and the rows are unioned,
+    all inside the caller's session: chunking is invisible from here, because the
+    difference is still taken over the whole list at the end, so the 404 names
+    every id it could not find in the order the caller gave them - one missing in
+    the first batch or in the last. The check still runs before anything is added
+    to the session, so a refusal cannot strand an empty project.
+    """
+    if not asset_ids:
+        return
+    known: set[str] = set()
+    for offset in range(0, len(asset_ids), MEMBER_QUERY_BATCH):
+        batch = asset_ids[offset : offset + MEMBER_QUERY_BATCH]
+        known.update(session.exec(select(Asset.id).where(Asset.id.in_(batch))).all())
+    missing = [asset_id for asset_id in asset_ids if asset_id not in known]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Asset not found: {', '.join(missing)}")
 
 
 def update_project(

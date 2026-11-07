@@ -67,13 +67,14 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 54 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 55 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
 |---|---|---|---|---|
 | `asset.create` | `POST /upload`; `POST /import`; `POST /import/project`; `POST /import/zip` (one row per created asset) | the new asset id, so `GET /audit?target=<id>` finds it | `{"via", "name"}` | fail-closed: staged in the same transaction as the insert |
 | `archive.extract` | `POST /import/archive` | the library-relative archive path | `{"destination", "files", "bytes", "scan_started"}` | fail-loud: the files are already published when the row is written |
+| `archive.project.create` | `POST /import/archive/project` (Mf-0ck5) | the library-relative archive path | `{"twin", "status", "planned", "resolved", "project_id"}` — `status` is `created` / `already_created` / `partial` / `nothing_resolved`, and the two refusals carry `project_id: null` | fail-loud: the project is already committed when the row is written |
 | `asset.delete` | `DELETE /asset/{asset_id}`; `POST /assets/batch/delete` (one row per asset) | asset id | `{"filename"}` | fail-closed |
 | `asset.rename` | `POST /asset/{asset_id}/rename`; `POST /asset/{asset_id}/meta` (only when the name changes) | asset id | `{"from", "to"}` names | fail-closed |
 | `asset.move` | `POST /asset/{asset_id}/folder`; `POST /assets/batch/folder` (one row per asset) | asset id | `{"folder_id"}` (new folder, or `null` for the root) | fail-closed |
@@ -126,6 +127,22 @@ could honestly reconstruct.
 | `mfa.disable` | `DELETE /mfa` | the real username | `{"recovery_codes_deleted"}` | fail-closed |
 | `mfa.recovery_codes.regenerate` | `POST /mfa/recovery-codes` | the real username | `{"count": 10}` | fail-closed |
 | `settings.mfa_require_admin.update` | `POST /settings/mfa` | `"mfa_require_admin"` | `{"from", "to"}` booleans | fail-closed |
+
+One row per **verdict**, not per click: `archive.project.create` writes a row for
+each of the four statuses that door can answer - `created`, `already_created`,
+`partial` and `nothing_resolved` - so the two refusals that are verdicts are
+recorded alongside the creations, because the operator's decision that an
+archive's entries are one thing is the evidence that door acts on, and a history
+that kept only the successes would make a refused run indistinguishable from one
+that was never attempted. What is not a verdict writes no row, because
+`audit.record` is never reached: every refusal the door raises itself - among them
+the 400 naming entries the archive does not hold, the 400 for a member that would
+render outside the twin, the 400 for a stem no twin directory can be named from,
+the 404 for a library path that is not a file, the 404 for a member id that is no
+asset, the 415 for a file that is not a zip, the 413 for an entry over the
+per-file limit and the 409 on a project-name collision - leaves the request before
+any row is written, and each of them creates nothing. That is the rule the
+`archive.extract` row already keeps: a request that writes no files writes no row.
 
 The snapshot actions are route actions now that `POST /snapshots` and
 `DELETE /snapshots/{name}` exist. Those two routes hand the provider an audit
@@ -241,8 +258,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 102 routes, 41
-of them `GET`; the remaining 61 split into 47 audited keys and 14 exempt keys.
+out of scope by construction: they change nothing. The matrix has 103 routes, 41
+of them `GET`; the remaining 62 split into 48 audited keys and 14 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without

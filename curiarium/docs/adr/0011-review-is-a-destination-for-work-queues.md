@@ -21,6 +21,20 @@ stated as history, and each REVIEW role gate is pointed at the test that pins it
 today: `ui/review/ReviewQueueTabs.test.tsx` for the rows, one by one, and
 `ui/WorkspaceHeader.test.tsx` for the Review entry. No decision changes.
 
+**Amended:** 2026-11-07 - ticket `Mf-0ck5` changes decision 17's create door, and
+one of its sentences. The one-step *Extract and create* no longer creates through
+the bundle report: it calls `POST /import/archive/project`, which lists the
+archive itself, resolves each planned entry against `Asset.storage_path` under the
+twin directory, and inserts the project and every member in one transaction - no
+bundle rule is consulted on that path at all. `useBundleDetect.createReporting` is
+deleted as dead code; the hook's void `create` is unchanged and the bulk doors
+still use it. "A settle `timeout` or `cancelled` creates nothing at all" is half
+superseded: `cancelled` still creates nothing, while a `timeout` now calls the door
+anyway, which answers from its own comparison. The confirm step and the queue's
+notices slot also say what the archive holds before a byte is written
+(`ui/archive/archivePlan.ts`). No decision about the destination model, the count
+rule, the role threshold or the fetch policy changes.
+
 **Extended:** ADR 0010, whose report is the first tenant of this surface.
 
 ## Context
@@ -393,6 +407,35 @@ destination model, the count rule, the role threshold and the fetch policy.
     create hides its own row by default (`showCreated` off) and a one-way write
     must leave a sentence behind.
 
+    **Amended by `Mf-0ck5` (2026-11-07).** `createReporting` is gone. The door this
+    action calls reports one verdict for one archive, so there is no report left to
+    read an answer out of: `ui/review/extractAndCreate.ts` calls
+    `createProjectFromExtract` (`curiarium/web/src/lib/api/imports.ts`), which posts
+    `{path, name?}` to `POST /import/archive/project` and hands back the verdict.
+    `useBundleDetect.create` is untouched - still a void action that refetches -
+    because that is what the bulk create doors need, and they are unchanged. The
+    queue is re-walked only once a project exists: the view refreshes on the
+    `created` and `already-created` verdicts and on nothing else, because this door
+    writes no bundle report of its own.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** `ArchiveExtractAction` is no longer the
+    untouched neighbour this paragraph describes. Its first sentence survives
+    byte-for-byte - "N files, X — extract into a new folder beside the
+    archive?" - and beside it the confirm step now renders the plan lines of
+    `ui/archive/archivePlan.ts` (`planArchive` and `archivePlanLines`, React-free
+    and tested in `archivePlan.test.ts`): the kinds the archive holds (models,
+    images, nested archives, other documents), the common root the entries land
+    under, how many system members (`.DS_Store`, `__MACOSX`, `Thumbs.db`) are left
+    out, and - when the archive's only model bytes are inside a nested archive -
+    that fact said plainly, because it is the moment the operator can still choose
+    differently. The plan deliberately prints no byte total of its own: the pinned
+    sentence already prints the listing's, which counts the system members the plan
+    excludes, and two different sizes side by side read as disagreement rather than
+    as the difference. The one-step action has no confirm panel of its own, so it
+    renders the same `archivePlanLines` in the queue's notices slot beside its phase
+    narration, under `data-extract-and-create-plan="<key>"`, from the listing the
+    run read before it wrote anything.
+
     The run is not cancellable, and the queue's mutating doors are shut for its
     duration rather than left open: a dismissal written mid-run would either have
     to be undone or would still race the in-flight create. The doors are the five
@@ -447,10 +490,84 @@ destination model, the count rule, the role threshold and the fetch policy.
     the deps type carries no rollback member at all (a compile-time fact, not a
     runtime lookup).
 
+    **Amended by `Mf-0ck5` (2026-11-07).** The last sentence above is the one this
+    ticket supersedes, and only its first half. A `cancelled` settle still creates
+    nothing: leaving the queue remains the only way out of a run and the only
+    write-free one. A `timeout` no longer does - the run calls the door anyway,
+    because the settle is a courtesy to the operator and not the proof that makes a
+    create safe. The door's own comparison is the readiness authority now, and it
+    answers "none of the N entries the archive lists is a registered file - they
+    would be under `<twin>/`" from what it resolved, which says more than "the
+    library scan did not settle, refresh later" ever did. A settle that throws is
+    treated as a timeout, and the `settle-abandoned` outcome is gone.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** What is left of that paragraph -
+    `CREATE_BLOCKED` with the row's `blocked_reason` worded through
+    `BLOCKED_REASON_LABELS`, the `still-blocked` outcome's `wrote` flag, the one
+    `results` entry that must echo this row's key, and `find_existing_project`'s
+    `CREATE_SKIPPED`/`already_created` - is the account of the door this action used
+    to call, `POST /bundle/create`, and it stays here as that history. The action no
+    longer sends a bundle item, because that door cannot answer this question:
+    `bundle_service._create_one` refuses `archive_only` rows
+    (`CREATE_BLOCKED`/`archive_only`), and `find_existing_project` matches by
+    normalised directory, which a zip-only row has none of - so the old sequence
+    ended with a blocked row instructing the operator to do the thing they had just
+    done. Nor may one create commit twice: `project_service.create_project` commits
+    and `add_assets` commits again, which can strand an empty project - the owner
+    forbade that - so `project_service` gained `create_project_with_members`, which
+    inserts the `Project` row and every `ProjectAsset` row on one session and
+    commits once, members in the listing's order.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** The replacement is
+    `create_project_from_extract` in the new `curiarium/api/archive_project_service.py`,
+    routed at `POST /import/archive/project` by `curiarium/api/routers/imports.py`
+    under `require_contribute`. Its heart is a set comparison, not a rule: the door
+    lists the archive itself - `entry_policy.plan_selection` over the zip, the same
+    plan the extract door iterates - and resolves each planned entry against the
+    library as `Asset.storage_path == <twin>/<entry path>`, both sides compared as
+    normalised relative paths, where `<twin>` is the directory the extract door
+    writes into (`<parent>/<sanitised stem>`). A project is therefore only ever
+    created from asset ids that the lookup resolved, so a path the operator did not
+    extract can never join it - and nothing on this path consults `bundle_detect`,
+    `bundle_service`, `bundle_drift` or `archive_service`'s pairing rules: no
+    `archive_only` and no `pair_only` verdict, no unpaired-zip or loose-model
+    guess, no `find_existing_project`, and no key, normalised-directory or
+    `archive` group rule.
+    `curiarium/api/tests/test_archive_project.py` pins that two ways: it
+    monkeypatches the detector's and the bundle rules' functions to explode if
+    called, and it refuses the door when a bundle or archive-rule module appears in
+    the service module's import closure.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** Every verdict is an HTTP 200 with a
+    `status`, because the door has no policy to refuse on, and no count is
+    invented: `created`; `already_created`, the idempotent answer, keyed by the
+    archive path read out of the `_archive_project` marker written at create time
+    and looked up *before* the zip is opened, so a repeat click still answers
+    already-created after the extraction has left the archive deleted, renamed or
+    trashed (`metadata_json` carries no index, so that read scans the `project`
+    table in Python, the way `project_service` scans it for its own de-duplication);
+    `partial`, which creates nothing and reports how many of the M planned entries
+    never arrived, naming them in `failed[]`; and `nothing_resolved`, which creates
+    nothing and names the twin directory. The route is audited as
+    `archive.project.create` (`curiarium/api/audit.py`, documented in
+    `docs/AUDIT.md` and `docs/PERMISSIONS.md`) - one row per verdict, the two refusal
+    verdicts included, because the operator's decision is the evidence this door
+    acts on. A request the door refuses outright - the 400s, 404, 413, 415 and 409 it
+    raises itself - never reaches `audit.record`, so it writes no row and creates
+    nothing, which is the rule `archive.extract` already keeps.
+
     The compound case is the server's as well: ONE item is sent for the row, so
     the server's own compound branch makes one project with its groups; the
     client adds no grouping logic and never sends `exclude_groups` from this
     door.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** The compound branch this sentence leans
+    on is `bundle_service`'s, and this path no longer reaches it. The door is given
+    one archive path; the project's groups are read off the listing's own structure
+    - the common root's subdirectories, each with how many members it holds -
+    never off a detector, which is what
+    `test_groups_come_from_the_listing_even_when_the_scan_named_the_folders_differently`
+    pins.
 
 ## Consequences
 
@@ -756,6 +873,26 @@ no API, permission, audit, migration or schema change is involved.
   `settle-abandoned` sentence asks for, and plain Extract and the bulk label
   unchanged beside it.
 
+  **Amended by `Mf-0ck5` (2026-11-07).** That list is the state at landing, and the
+  cases written against the bundle door went with it. A settle `timeout` no longer
+  "creates nothing at all": the run calls the door and lets it judge - "creates
+  anyway when the scan does not settle, and lets the door judge", and the same for
+  a settle that throws - and the `blocked`/`not_scanned`, `blocked`/`archive_only`
+  and mismatched-`results` cases have no counterpart, because the door answers
+  `partial` (its own `planned` and `resolved`, with the failed names) or
+  `nothing_resolved` (the twin directory named). `already_present` is still pinned,
+  but as a run that skips the settle and creates. `createItem` became
+  `createPayload`: the archive path and the trimmed name, and no bundle key.
+  `ui/review/useBundleDetect.test.tsx` no longer pins `createReporting` - that
+  member is deleted together with the door that used it - and what the hook holds
+  today is the void `create` the bulk doors depend on, still returning nothing and
+  still refetching ("leaves the bulk create door returning nothing").
+  `ui/review/BundleReviewView.test.tsx` gained the run that calls the door when the
+  scan refuses to settle, the plan lines beside the phase narration while the run
+  is in flight, and the re-walk that follows a created or already-created verdict;
+  the narration is still cleared by the queue's Refresh, but the sentence asking
+  for it is one of the two refusals, not `settle-abandoned`.
+
 At the time of landing: web 1356 tests in 117 files became 1451 in 122; the API
 suite (2326 passed, 1 skipped), the route count (100) and the schema (14) are
 unchanged, because this is a web-only change with no migration.
@@ -828,6 +965,37 @@ closes, and autofocus lands on Cancel when confirming is refused - while
 read it, `ui/settings/StorageSection.test.tsx` proves no trash surface is left
 there, and `ui/Settings.test.tsx` is the removal proof by call: no request to
 `lib/api/trash` for a viewer, a contributor, an editor or an admin.
+
+Ticket `Mf-0ck5` adds its own proofs, on both sides of the new door. In the API
+suite, `test_archive_project.py` covers the comparison and the refusals: the
+planned entries become one project with every asset attached and the cover is the
+first member the library calls a model; no bundle rule is consulted on the path,
+pinned by exploding rule functions and by a forbidden import closure; a partial
+extraction creates no project and says how many entries failed, then creates once
+the rest arrives; a run whose planned paths resolve to nothing names the twin and
+creates nothing, as does an archive that was never extracted; a second run on the
+same archive is already-created and never a duplicate, and that repeat answer
+survives the archive being gone; junk, hidden and directory members cannot refuse
+the door forever; groups come from the listing even when the scan named the folders
+differently; and a name collision creates nothing rather than an empty project.
+On the web side,
+`src/lib/api.archiveProject.test.ts` pins the client (one create per archive, the
+whole archive when no entry list is given, a refusal verdict parsed as a 200
+answer, the twin carried through, the 409 name-collision detail, and `401` as
+`UnauthorizedError`), and `ui/archive/archivePlan.test.ts` pins the classifier and
+the lines it prints - the kinds, the root, the system files left out, the
+nested-archive case said twice over (models-only-inside, and packed-alongside) -
+and that the plan leaves the sizes to the panel's own first line.
+`ui/archive/ArchiveExtractAction.test.tsx` pins the confirm step's first line as
+byte-for-byte the sentence it was, with the plan rendered beside it.
+
+The ticket lands with the API suite at 2976 passed and 1 skipped (baseline 2940 and
+1) and the web suite at 2439 tests in 167 files (baseline 2405 in 165). The route
+count goes from 100 to 101 - one route, `POST /import/archive/project` - and
+`audit.ACTIONS` from 54 strings to 55; the OpenAPI fixtures gained that route and
+its two models, `ArchiveProjectRequest` and `ArchiveProjectOut`. There is no
+migration and no new column: the provenance marker lives in the `metadata_json`
+column the create doors already write.
 
 ## Superseding conditions
 

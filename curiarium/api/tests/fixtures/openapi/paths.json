@@ -2556,6 +2556,50 @@
       "summary": "List Import Archive Entries"
     }
   },
+  "/import/archive/project": {
+    "post": {
+      "description": "Create one project from the entries an archive was extracted into.\n\nThin on purpose, like the extract door beside it: the comparison, the four\nverdicts and the audit decision are ``archive_project_service``'s. Every\nverdict is a 200 with a ``status``, because this door has no bundle rule to\nrefuse on - the operator's click is the evidence, and asking detection to\nagree with it after the fact is the design this replaces.\n\nThe project row is serialised through ``project_service.project_with_stats``\nafter the write rather than from the row the service returned, so the response\ncarries the member count and cover the create actually produced.",
+      "operationId": "create_project_from_archive_extract_import_archive_project_post",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ArchiveProjectRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveProjectOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Create Project From Archive Extract"
+    }
+  },
   "/import/inspect": {
     "post": {
       "operationId": "inspect_import_link_import_inspect_post",

@@ -12,6 +12,7 @@ import {
 // with a fixed object (that is what `ArchiveExtractAction` reaches), so a named
 // runtime import from it would throw "No export is defined on the mock".
 import {
+  createProjectFromExtract,
   extractArchive,
   listArchiveEntries,
   type ArchiveExtractResult,
@@ -24,6 +25,7 @@ import { notifyError, notifyInfo } from "../../lib/toast";
 import { useFileGrants } from "../../lib/useFileGrants";
 import ArchiveExtractAction from "../archive/ArchiveExtractAction";
 import ArchiveExtractDialog, { type ExtractTarget } from "../archive/ArchiveExtractDialog";
+import { archivePlanLines } from "../archive/archivePlan";
 import ErrorBoundary from "../ErrorBoundary";
 import { ModelSnapshot } from "../ModelViewer";
 import {
@@ -371,6 +373,11 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
     line: string | null;
     running: boolean;
   } | null>(null);
+  // What the run is about to release, said while it runs rather than only after:
+  // the one-step door has no confirm step of its own, so this is where the
+  // operator learns the models were inside a nested archive (Mf-0ck5). Same
+  // classifier, and the same three lines, as `ArchiveExtractAction`'s panel.
+  const [extractPlan, setExtractPlan] = React.useState<{ key: string; lines: string[] } | null>(null);
   const extractAndCreateRunning = extractAndCreate?.running === true;
   // One gate on every MUTATING door in the queue: the five bulk buttons, the
   // detail pane's create/dismiss/enrich, the detail pane's own extract action,
@@ -590,8 +597,10 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   // complaint in a second place. Only the line goes: a run still in flight keeps
   // `running`, so refreshing cannot re-enable the button under it.
   const refreshNow = () => {
+    setSettling(null);
     setSettleTimedOut(false);
     setExtractAndCreate(current => (current ? { ...current, line: null } : null));
+    setExtractPlan(null);
     void state.refresh();
   };
 
@@ -616,24 +625,37 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
       );
     };
     setExtractAndCreate({ key, line: phaseLine("listing"), running: true });
+    setExtractPlan({ key, lines: [] });
     void runExtractAndCreate({
       archivePath: path,
-      item: { key, name: typedName(names, row) || null },
+      item: { name: typedName(names, row) || null },
       deps: {
         listEntries: listArchiveEntries,
         extract: extractArchive,
         settle: results => state.afterExtract(results),
-        // `?? Promise.resolve(null)`: the member is optional only because a
-        // fixture outside this ticket builds this shape without it.
-        create: items => state.createReporting?.(items) ?? Promise.resolve(null),
+        // The extract-and-create door, called straight: it answers one verdict
+        // for one archive, so there is no per-row key to match and no bundle
+        // report to consult. Its refusal sentences are built from the counts it
+        // measured, which is why nothing here infers a reason.
+        create: payload => createProjectFromExtract(payload),
         // The cover is cosmetic and must never block or fail the action, exactly
         // as the other create doors treat it.
         beforeCreate: () => {
           void primeModelCovers([row], { mediaUrl: fileUrl });
         },
         onPhase: phase => update(phaseLine(phase), true),
+        onPlan: plan => {
+          const lines = archivePlanLines(plan);
+          setExtractPlan(current => (current && current.key === key ? { key, lines } : current));
+        },
       },
-    }).then(outcome => update(outcomeLine(outcome), false));
+    }).then(outcome => {
+      update(outcomeLine(outcome), false);
+      // The door writes no bundle report of its own, so the queue is re-walked
+      // only once a project actually exists - including the already-created
+      // verdict, whose row is created too and should read that way.
+      if (outcome.kind === "created" || outcome.kind === "already-created") void state.refresh();
+    });
   };
 
   const dismissActive = () => {
@@ -834,6 +856,21 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
       {report && <ScanFidelityNotice report={report} />}
       {/* A one-way write must leave a sentence behind even when its own row is
           hidden by the create, so the verdict lives here rather than in the aside. */}
+      {extractPlan && extractPlan.lines.length > 0 && (
+        /* The listing was read back before anything was written, which is what
+           lets the one-step door - it has no confirm panel - say what the archive
+           holds at all. It says it mid-run: these lines appear after the
+           extraction has been dispatched, and the only exit left is leaving the
+           queue, which does not undo that write. What protects the operator here
+           is the door's own refusals, not the choice this sentence reads as. */
+        <div className="flex flex-col gap-1" data-extract-and-create-plan={extractPlan.key}>
+          {extractPlan.lines.map(line => (
+            <p key={line} className="review-notice">
+              {line}
+            </p>
+          ))}
+        </div>
+      )}
       {extractAndCreate?.line && (
         <p
           className="review-notice"

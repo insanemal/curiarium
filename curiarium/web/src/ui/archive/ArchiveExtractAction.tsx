@@ -8,6 +8,7 @@ import {
 import { tabbableIn } from "../../lib/focusTrap";
 import { formatBytes } from "../../lib/format";
 import { notifyError } from "../../lib/toast";
+import { archivePlanLines, planArchive } from "./archivePlan";
 
 type Props = {
   /** Contribute capability: extraction writes new bytes into the library. Required. */
@@ -215,12 +216,23 @@ export default function ArchiveExtractAction({
 
   if (stage === "confirm" || stage === "extracting") {
     const extracting = stage === "extracting";
+    // The listing was already read to write this sentence, so the operator can be
+    // told what the archive actually holds before committing: how many of the
+    // entries are models, and whether the models are only inside a nested archive
+    // (Mf-0ck5 - the surprise that started the ticket was an "Extract" that
+    // released a `.zip` and a row named after it, not the tower).
+    const plan = archivePlanLines(planArchive(entries));
     return (
       // tabindex="-1": programmatically focusable, never in a trap's Tab cycle.
       <div className="flex flex-col gap-2" ref={containerRef} tabIndex={-1}>
         <p className="text-sm text-muted">
           {`${countLabel(entries.length)}, ${formatBytes(totalBytes(entries))} — extract into a new folder beside the archive?`}
         </p>
+        {plan.map(line => (
+          <p key={line} className="text-sm text-muted" data-archive-plan="true">
+            {line}
+          </p>
+        ))}
         <div className="flex gap-2">
           <button
             type="button"

@@ -10,6 +10,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within, type RenderRe
 const archiveApi = vi.hoisted(() => ({
   listArchiveEntries: vi.fn(),
   extractArchive: vi.fn(),
+  createProjectFromExtract: vi.fn(),
 }));
 vi.mock("../../lib/api", () => ({
   listArchiveEntries: archiveApi.listArchiveEntries,
@@ -19,6 +20,7 @@ vi.mock("../../lib/api/imports", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/imports")>()),
   listArchiveEntries: archiveApi.listArchiveEntries,
   extractArchive: archiveApi.extractArchive,
+  createProjectFromExtract: archiveApi.createProjectFromExtract,
 }));
 
 // The cover's derived half renders a snapshot. Hoisted so the props can be
@@ -40,10 +42,9 @@ vi.mock("../ModelViewer", () => ({
 }));
 
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
+import { createProjectFromExtract, type ArchiveProjectResult } from "../../lib/api/imports";
 import {
   ENRICH_MAX_KEYS,
-  type BundleCreateItemResult,
-  type BundleCreateResponse,
   type BundleDetectItem,
   type BundleDuplicateGroup,
   type BundleReport,
@@ -64,6 +65,7 @@ import type { BundleDetectState } from "./useBundleDetect";
 
 const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
 const extractArchiveMock = vi.mocked(extractArchive);
+const createProjectFromExtractMock = vi.mocked(createProjectFromExtract);
 
 const ARCHIVE_ENTRIES = [
   { path: "Moai.stl", size: 2048 },
@@ -440,7 +442,6 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
     setShowCreated: vi.fn(),
     refresh: vi.fn(async () => {}),
     create: vi.fn(async () => {}),
-    createReporting: vi.fn(async () => null),
     dismiss: vi.fn(async () => {}),
     enrich: vi.fn(async () => {}),
     notice: null,
@@ -553,6 +554,32 @@ beforeEach(() => {
   listArchiveEntriesMock.mockResolvedValue({ path: "Moai.zip", entries: ARCHIVE_ENTRIES });
   extractArchiveMock.mockReset();
   extractArchiveMock.mockResolvedValue(EXTRACT_RESULT);
+  createProjectFromExtractMock.mockReset();
+  createProjectFromExtractMock.mockResolvedValue({
+    status: "created",
+    archive: "import/Moai.zip",
+    twin: "import/Moai",
+    planned: 2,
+    resolved: 2,
+    failed: [],
+    project: {
+      id: "p1",
+      name: "Moai zip",
+      description: null,
+      creator: null,
+      source_url: null,
+      licence: null,
+      licence_url: null,
+      origin: "own",
+      cover_asset_id: null,
+      cover_thumb_url: null,
+      asset_count: 2,
+      total_size: 2560,
+      metadata_json: {},
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  });
 });
 
 afterEach(() => {
@@ -2455,29 +2482,38 @@ describe("BundleReviewView scan fidelity", () => {
 });
 
 describe("BundleReviewView extract and create", () => {
-  /** One create result, shaped the way the server sends it. */
-  function makeCreateResponse(
-    result: Partial<BundleCreateItemResult> = {},
-    overrides: Partial<BundleCreateResponse> = {},
-  ): BundleCreateResponse {
+  /** One door verdict, shaped the way `ArchiveProjectOut` answers. The project is
+   *  only present on the two verdicts that have one, so a fixture cannot claim a
+   *  created project alongside `partial`. */
+  function makeVerdict(overrides: Partial<ArchiveProjectResult> = {}): ArchiveProjectResult {
+    const status = overrides.status ?? "created";
+    const hasProject = status === "created" || status === "already_created";
     return {
-      created: 0,
-      skipped: 0,
-      blocked: 0,
-      failed: 0,
-      results: [
-        {
-          key: "import/Moai.zip",
-          status: "created",
-          project_id: "p1",
-          name: "Moai zip",
-          assets_added: 2,
-          skipped_assets: 0,
-          failed_assets: [],
-          reason: null,
-          ...result,
-        },
-      ],
+      status,
+      archive: "import/Moai.zip",
+      twin: "import/Moai",
+      planned: 2,
+      resolved: hasProject ? 2 : 0,
+      failed: [],
+      project: hasProject
+        ? {
+            id: "p1",
+            name: "Moai zip",
+            description: null,
+            creator: null,
+            source_url: null,
+            licence: null,
+            licence_url: null,
+            origin: "own",
+            cover_asset_id: null,
+            cover_thumb_url: null,
+            asset_count: 2,
+            total_size: 2560,
+            metadata_json: {},
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          }
+        : null,
       ...overrides,
     };
   }
@@ -2519,8 +2555,7 @@ describe("BundleReviewView extract and create", () => {
   });
 
   it("runs listing, extracting, scanning and creating, then names the project", async () => {
-    const createReporting = vi.fn(async () => makeCreateResponse());
-    const state = makeState({ report: makeReport([moaiZip]), createReporting });
+    const state = makeState({ report: makeReport([moaiZip]) });
     const view = renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
@@ -2537,18 +2572,23 @@ describe("BundleReviewView extract and create", () => {
     expect(extractArchiveMock).toHaveBeenCalledWith({ path: "import/Moai.zip", entries: null });
     expect(state.afterExtract).toHaveBeenCalledTimes(1);
     expect(state.afterExtract).toHaveBeenCalledWith([EXTRACT_RESULT]);
-    expect(createReporting).toHaveBeenCalledTimes(1);
-    expect(createReporting).toHaveBeenCalledWith([{ key: "import/Moai.zip", name: "Moai zip" }]);
-    // The reporting door is a second call on the same hook, not a rewrite of
-    // the old one: every bulk create still goes through `create`.
+    expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1);
+    // One archive and the operator's typed name: no bundle key, because the door
+    // is keyed by the archive path and asks detection for nothing.
+    expect(createProjectFromExtractMock).toHaveBeenCalledWith({ path: "import/Moai.zip", name: "Moai zip" });
+    // The bulk doors are untouched by the one-step door: they still go through
+    // the hook's void `create`.
     expect(state.create).not.toHaveBeenCalled();
+    // A project now exists, so the queue is re-walked: the door writes no bundle
+    // report of its own, and the row should stop reading as zip-only.
+    await waitFor(() => expect(state.refresh).toHaveBeenCalledTimes(1));
 
     // The four dependencies are reached in the phase order, not merely at all.
     const calls = [
       listArchiveEntriesMock.mock.invocationCallOrder[0],
       extractArchiveMock.mock.invocationCallOrder[0],
       vi.mocked(state.afterExtract).mock.invocationCallOrder[0],
-      createReporting.mock.invocationCallOrder[0],
+      createProjectFromExtractMock.mock.invocationCallOrder[0],
     ];
     expect(calls).toEqual([...calls].sort((a, b) => a - b));
 
@@ -2574,10 +2614,8 @@ describe("BundleReviewView extract and create", () => {
   });
 
   it("reports already-created rather than making a second project", async () => {
-    const createReporting = vi.fn(async () =>
-      makeCreateResponse({ status: "skipped", reason: "already_created" }),
-    );
-    const state = makeState({ report: makeReport([moaiZip]), createReporting });
+    createProjectFromExtractMock.mockResolvedValue(makeVerdict({ status: "already_created" }));
+    const state = makeState({ report: makeReport([moaiZip]) });
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
@@ -2589,11 +2627,16 @@ describe("BundleReviewView extract and create", () => {
     expect(state.create).not.toHaveBeenCalled();
   });
 
-  it("creates nothing when the scan refused to settle", async () => {
-    const createReporting = vi.fn(async () => makeCreateResponse());
+  it("still calls the door when the scan refuses to settle, and says what it said", async () => {
+    // The settle is a courtesy, not the proof (Mf-0ck5): the door compares the
+    // planned entries against registered assets itself, so a walk that never
+    // proved itself answers "none of them is registered, look in import/Moai/"
+    // instead of the old "the scan did not settle, try later".
+    createProjectFromExtractMock.mockResolvedValue(
+      makeVerdict({ status: "nothing_resolved", planned: 2, resolved: 0, failed: ["Moai.stl", "readme.txt"] }),
+    );
     const state = makeState({
       report: makeReport([moaiZip]),
-      createReporting,
       afterExtract: vi.fn(async (): Promise<SettleOutcome> => "timeout"),
     });
     renderView(state);
@@ -2601,22 +2644,45 @@ describe("BundleReviewView extract and create", () => {
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
 
     await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("did not settle"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("none of the 2 entries"),
     );
-    expect(createReporting).not.toHaveBeenCalled();
+    expect(narration("import/Moai.zip")?.textContent).toContain("import/Moai/");
+    expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1);
+    expect(state.refresh).not.toHaveBeenCalled();
+  });
+
+  it("says what the archive holds while the one-step run is in flight", async () => {
+    // The door has no confirm panel of its own, so the listing it read is said
+    // aloud here - the same classifier the plain Extract panel renders.
+    let settle: (outcome: SettleOutcome) => void = () => {};
+    const state = makeState({
+      report: makeReport([moaiZip]),
+      afterExtract: () => new Promise<SettleOutcome>(resolve => { settle = resolve; }),
+    });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
+    await waitFor(() =>
+      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
+    );
+
+    const plan = document.querySelector('[data-extract-and-create-plan="import/Moai.zip"]');
+    expect(plan?.textContent).toContain("It holds 1 model, 1 document.");
+    expect(plan?.textContent).toContain("The entries sit loose at the top of the new folder.");
+    settle("settled");
   });
 
   it("clears the verdict when the queue is refreshed, as its own sentence asks", async () => {
-    const state = makeState({
-      report: makeReport([moaiZip]),
-      afterExtract: vi.fn(async (): Promise<SettleOutcome> => "timeout"),
-    });
+    createProjectFromExtractMock.mockResolvedValue(
+      makeVerdict({ status: "partial", planned: 2, resolved: 1, failed: ["readme.txt"] }),
+    );
+    const state = makeState({ report: makeReport([moaiZip]) });
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
 
     await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("did not settle"),
+      expect(narration("import/Moai.zip")?.textContent).toContain("1 entry never arrived"),
     );
     // That sentence tells the operator to refresh once the scan finishes, so
     // taking its advice has to clear it.
@@ -2634,8 +2700,7 @@ describe("BundleReviewView extract and create", () => {
       already_present: false,
       scan_started: false,
     });
-    const createReporting = vi.fn(async () => makeCreateResponse());
-    const state = makeState({ report: makeReport([moaiZip]), createReporting });
+    const state = makeState({ report: makeReport([moaiZip]) });
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
@@ -2644,7 +2709,7 @@ describe("BundleReviewView extract and create", () => {
       expect(narration("import/Moai.zip")?.textContent).toContain("Nothing will register"),
     );
     expect(state.afterExtract).not.toHaveBeenCalled();
-    expect(createReporting).not.toHaveBeenCalled();
+    expect(createProjectFromExtractMock).not.toHaveBeenCalled();
   });
 
   it("keeps plain Extract beside the one-step door, and the bulk label byte-identical", () => {
@@ -2690,7 +2755,6 @@ describe("BundleReviewView extract and create", () => {
     const state = makeState({
       report: makeReport([moai, enrichableZip()]),
       afterExtract,
-      createReporting: vi.fn(async () => makeCreateResponse()),
     });
     renderView(state);
 
@@ -2755,8 +2819,7 @@ describe("BundleReviewView extract and create", () => {
           settle = resolve;
         }),
     );
-    const createReporting = vi.fn(async () => makeCreateResponse());
-    const state = makeState({ report: makeReport([moaiZip]), afterExtract, createReporting });
+    const state = makeState({ report: makeReport([moaiZip]), afterExtract });
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
@@ -2773,7 +2836,7 @@ describe("BundleReviewView extract and create", () => {
     await waitFor(() =>
       expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
     );
-    expect(createReporting).toHaveBeenCalledTimes(1);
+    expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1);
   });
 
   it("shuts the plain extract door while the one-step run is in flight", async () => {
@@ -2787,7 +2850,6 @@ describe("BundleReviewView extract and create", () => {
     const state = makeState({
       report: makeReport([moaiZip]),
       afterExtract,
-      createReporting: vi.fn(async () => makeCreateResponse()),
     });
     renderView(state);
 
@@ -2853,7 +2915,6 @@ describe("BundleReviewView extract and create", () => {
     const state = makeState({
       report: makeReport([moaiZip]),
       afterExtract,
-      createReporting: vi.fn(async () => makeCreateResponse()),
     });
     renderView(state);
 
@@ -2901,7 +2962,6 @@ describe("BundleReviewView extract and create", () => {
       makeState({
         report: makeReport([moai, moaiZip]),
         afterExtract,
-        createReporting: vi.fn(async () => makeCreateResponse()),
       }),
     );
 

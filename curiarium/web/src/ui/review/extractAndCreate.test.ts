@@ -1,32 +1,32 @@
 import { describe, expect, it } from "vitest";
 
 import type {
-  BundleCreateItem,
-  BundleCreateItemResult,
-  BundleCreateResponse,
-} from "../../lib/api/bundles";
-import type { ArchiveEntry, ArchiveExtractResult } from "../../lib/api/imports";
+  ArchiveEntry,
+  ArchiveExtractResult,
+  ArchiveProjectResult,
+} from "../../lib/api/imports";
 import type { SettleOutcome } from "../../lib/scanSettle";
 import {
-  createItem,
+  createPayload,
   outcomeLine,
   phaseLine,
   runExtractAndCreate,
   type ExtractAndCreateDeps,
-  type ExtractAndCreateOutcome,
   type ExtractAndCreatePhase,
   type ExtractAndCreateTarget,
 } from "./extractAndCreate";
 
-const KEY = "Moai statue";
-const ARCHIVE = "Moai.zip";
+const ARCHIVE = "import/01_Fates End - Wizard Tower.zip";
+const TWIN = "import/01_Fates End - Wizard Tower";
 
-/** The row the action runs on; the operator's name arrives already trimmed. */
-const TARGET: ExtractAndCreateTarget = { key: KEY, name: "Moai" };
+/** The row the action runs on; the operator's name arrives already trimmed. There
+ *  is no bundle key any more: the archive path is the whole identity, which is
+ *  what makes a second run on the same archive idempotent. */
+const TARGET: ExtractAndCreateTarget = { name: "Wizard v5.4" };
 
 function archiveEntries(count: number): ArchiveEntry[] {
   return Array.from({ length: count }, (_unused, index) => ({
-    path: `part-${index}.stl`,
+    path: `01_Wizard/part-${index}.stl`,
     size: 1024,
   }));
 }
@@ -34,7 +34,7 @@ function archiveEntries(count: number): ArchiveEntry[] {
 function extractResult(overrides: Partial<ArchiveExtractResult> = {}): ArchiveExtractResult {
   return {
     path: ARCHIVE,
-    destination: "Moai statue",
+    destination: TWIN,
     files: 12,
     bytes: 4096,
     already_present: false,
@@ -43,30 +43,42 @@ function extractResult(overrides: Partial<ArchiveExtractResult> = {}): ArchiveEx
   };
 }
 
-function resultRow(overrides: Partial<BundleCreateItemResult> = {}): BundleCreateItemResult {
+/** One door verdict, in the shape `ArchiveProjectOut` serialises. The counts
+ *  derive from the overrides, so a fixture cannot claim a `resolved` that its own
+ *  `failed` list contradicts. */
+function verdict(overrides: Partial<ArchiveProjectResult> = {}): ArchiveProjectResult {
+  const status = overrides.status ?? "created";
+  const planned = overrides.planned ?? 21;
+  const resolved = overrides.resolved ?? (status === "created" || status === "already_created" ? planned : 0);
+  const failed = overrides.failed ?? (status === "partial" ? ["01_Wizard/missing.stl"] : []);
   return {
-    key: KEY,
-    status: "created",
-    project_id: "project-1",
-    name: "Moai",
-    assets_added: 12,
-    skipped_assets: 0,
-    failed_assets: [],
-    reason: null,
+    status,
+    archive: ARCHIVE,
+    twin: TWIN,
+    planned,
+    resolved,
+    failed,
+    project:
+      status === "created" || status === "already_created"
+        ? {
+            id: "project-1",
+            name: "Wizard v5.4",
+            description: null,
+            creator: null,
+            source_url: null,
+            licence: null,
+            licence_url: null,
+            origin: "own",
+            cover_asset_id: null,
+            cover_thumb_url: null,
+            asset_count: resolved,
+            total_size: 4096,
+            metadata_json: {},
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          }
+        : null,
     ...overrides,
-  };
-}
-
-/** The counts derive from the one row, so a fixture cannot claim a count its
- *  own `results` contradict. */
-function createResponse(overrides: Partial<BundleCreateItemResult> = {}): BundleCreateResponse {
-  const result = resultRow(overrides);
-  return {
-    created: result.status === "created" ? 1 : 0,
-    skipped: result.status === "skipped" ? 1 : 0,
-    blocked: result.status === "blocked" ? 1 : 0,
-    failed: result.status === "failed" ? 1 : 0,
-    results: [result],
   };
 }
 
@@ -74,7 +86,8 @@ type HarnessConfig = {
   listing?: () => Promise<{ path: string; entries: ArchiveEntry[] }>;
   extract?: () => Promise<ArchiveExtractResult>;
   settle?: () => Promise<SettleOutcome>;
-  create?: (items: BundleCreateItem[]) => Promise<BundleCreateResponse | null>;
+  create?: (payload: { path: string; name?: string }) => Promise<ArchiveProjectResult | null>;
+  onPlan?: (plan: unknown) => void;
 };
 
 type Harness = {
@@ -83,7 +96,8 @@ type Harness = {
   listCalls: string[];
   extractCalls: { path: string; entries?: string[] | null }[];
   settleCalls: ArchiveExtractResult[][];
-  createCalls: BundleCreateItem[][];
+  createCalls: { path: string; name?: string }[];
+  plans: { files: number; models: number }[];
   primed: () => number;
 };
 
@@ -94,7 +108,8 @@ function harness(config: HarnessConfig = {}): Harness {
   const listCalls: string[] = [];
   const extractCalls: { path: string; entries?: string[] | null }[] = [];
   const settleCalls: ArchiveExtractResult[][] = [];
-  const createCalls: BundleCreateItem[][] = [];
+  const createCalls: { path: string; name?: string }[] = [];
+  const plans: { files: number; models: number }[] = [];
   const cover = { primes: 0 };
 
   const deps: ExtractAndCreateDeps = {
@@ -113,16 +128,20 @@ function harness(config: HarnessConfig = {}): Harness {
       if (config.settle) return config.settle();
       return "settled";
     },
-    create: async items => {
-      createCalls.push(items);
-      if (config.create) return config.create(items);
-      return createResponse();
+    create: async payload => {
+      createCalls.push(payload);
+      if (config.create) return config.create(payload);
+      return verdict();
     },
     beforeCreate: () => {
       cover.primes += 1;
     },
     onPhase: phase => {
       phases.push(phase);
+    },
+    onPlan: plan => {
+      plans.push({ files: plan.files, models: plan.models });
+      config.onPlan?.(plan);
     },
   };
 
@@ -133,11 +152,12 @@ function harness(config: HarnessConfig = {}): Harness {
     extractCalls,
     settleCalls,
     createCalls,
+    plans,
     primed: () => cover.primes,
   };
 }
 
-function runWith(h: Harness, item: ExtractAndCreateTarget = TARGET): Promise<ExtractAndCreateOutcome> {
+function runWith(h: Harness, item: ExtractAndCreateTarget = TARGET) {
   return runExtractAndCreate({ archivePath: ARCHIVE, item, deps: h.deps });
 }
 
@@ -147,14 +167,34 @@ describe("runExtractAndCreate", () => {
 
     const outcome = await runWith(h);
 
+    expect(outcome).toEqual({ kind: "created", name: "Wizard v5.4" });
     expect(h.phases).toEqual(["listing", "extracting", "scanning", "creating"]);
     expect(h.listCalls).toEqual([ARCHIVE]);
     expect(h.extractCalls).toEqual([{ path: ARCHIVE, entries: null }]);
     expect(h.settleCalls).toEqual([[extractResult()]]);
-    expect(h.createCalls).toEqual([[{ key: KEY, name: "Moai" }]]);
+    expect(h.createCalls).toEqual([{ path: ARCHIVE, name: "Wizard v5.4" }]);
     expect(h.primed()).toBe(1);
-    expect(outcome).toEqual({ kind: "created", name: "Moai" });
-    expect(outcomeLine(outcome)).toContain("Created project Moai");
+    expect(outcomeLine(outcome)).toContain("Created project Wizard v5.4");
+  });
+
+  it("says what the archive holds as soon as the listing is read", async () => {
+    const h = harness();
+
+    await runWith(h);
+
+    // The one-step door has no confirm panel, so the plan is painted from here:
+    // two `.stl` entries, both models, and the classifier is the confirm step's.
+    expect(h.plans).toEqual([{ files: 2, models: 2 }]);
+  });
+
+  it("still runs when the plan callback throws", async () => {
+    const h = harness({
+      onPlan: () => {
+        throw new Error("the panel unmounted mid-run");
+      },
+    });
+
+    await expect(runWith(h)).resolves.toEqual({ kind: "created", name: "Wizard v5.4" });
   });
 
   it("claims no count and no create when the listing fails", async () => {
@@ -167,14 +207,12 @@ describe("runExtractAndCreate", () => {
     const outcome = await runWith(h);
 
     expect(outcome).toEqual({ kind: "listing-failed", detail: "Archive is not readable" });
-    expect(h.extractCalls).toEqual([]);
-    expect(h.createCalls).toEqual([]);
     expect(h.phases).toEqual(["listing"]);
+    expect(h.createCalls).toEqual([]);
   });
 
   it("reports the listing's length when the extraction fails, and never creates", async () => {
     const h = harness({
-      listing: async () => ({ path: ARCHIVE, entries: archiveEntries(2) }),
       extract: async () => {
         throw new Error("disk is full");
       },
@@ -188,270 +226,186 @@ describe("runExtractAndCreate", () => {
       entries: 2,
       detail: "disk is full",
     });
-    expect(h.createCalls).toEqual([]);
-    expect(h.settleCalls).toEqual([]);
-    const line = outcomeLine(outcome);
+    const line = outcomeLine(outcome) ?? "";
     expect(line).toContain("0 of 2 entries");
     expect(line).toContain("disk is full");
+    expect(h.createCalls).toEqual([]);
   });
 
   it("stops at an archive nothing could be extracted from", async () => {
     const h = harness({
-      extract: async () => extractResult({ files: 0, already_present: false }),
+      extract: async () => extractResult({ files: 0, bytes: 0, scan_started: false }),
     });
 
     const outcome = await runWith(h);
 
-    expect(outcome).toEqual({
-      kind: "nothing-written",
-      cause: "junk-only",
-      entries: 2,
-      detail: null,
-    });
-    expect(h.settleCalls).toEqual([]);
-    expect(h.createCalls).toEqual([]);
+    expect(outcome).toEqual({ kind: "nothing-written", cause: "junk-only", entries: 2, detail: null });
     expect(h.phases).toEqual(["listing", "extracting"]);
-    const line = outcomeLine(outcome);
-    expect(line).toContain("0 of 2 entries");
-    expect(line).toContain("Nothing will register");
+    expect(outcomeLine(outcome)).toContain("0 of 2 entries");
+    expect(outcomeLine(outcome)).toContain("Nothing will register");
+    expect(h.createCalls).toEqual([]);
   });
 
   it("skips the settle when every entry was already present, and still creates", async () => {
     const h = harness({
-      extract: async () => extractResult({ files: 0, already_present: true }),
+      extract: async () => extractResult({ files: 0, bytes: 0, already_present: true, scan_started: false }),
+    });
+
+    await runWith(h);
+
+    expect(h.phases).toEqual(["listing", "extracting", "creating"]);
+    expect(h.settleCalls).toEqual([]);
+    expect(h.createCalls).toEqual([{ path: ARCHIVE, name: "Wizard v5.4" }]);
+  });
+
+  it("creates anyway when the scan does not settle, and lets the door judge", async () => {
+    const h = harness({
+      settle: async () => "timeout",
+      // A scan that never proved itself leaves assets half-registered, which is
+      // the case the old flow refused to speak about.
+      create: async () => verdict({ status: "partial", planned: 21, resolved: 15 }),
     });
 
     const outcome = await runWith(h);
 
-    expect(h.phases).toEqual(["listing", "extracting", "creating"]);
-    expect(h.settleCalls).toEqual([]);
-    expect(h.createCalls).toHaveLength(1);
-    expect(outcome).toEqual({ kind: "created", name: "Moai" });
+    // The settle is a courtesy, not the proof. The door compared planned against
+    // registered paths and said "15 of 21", which is a truer sentence than the
+    // "the scan did not settle, try later" this flow used to answer with.
+    expect(outcome).toEqual({
+      kind: "partial",
+      planned: 21,
+      resolved: 15,
+      failed: ["01_Wizard/missing.stl"],
+    });
+    expect(h.phases).toEqual(["listing", "extracting", "scanning", "creating"]);
   });
 
-  it("abandons the create when the scan does not settle", async () => {
-    const h = harness({ settle: async () => "timeout" });
-
-    const outcome = await runWith(h);
-
-    expect(outcome).toEqual({ kind: "settle-abandoned", entries: 2 });
-    expect(h.createCalls).toEqual([]);
-    expect(outcomeLine(outcome)).toContain("did not settle");
-  });
-
-  it("stays silent when the settle is cancelled with the queue", async () => {
+  it("creates nothing when the run is cancelled with the queue", async () => {
     const h = harness({ settle: async () => "cancelled" });
 
     const outcome = await runWith(h);
 
+    // Leaving the queue stays the one way out that writes nothing.
     expect(outcome).toEqual({ kind: "cancelled" });
-    expect(h.createCalls).toEqual([]);
     expect(outcomeLine(outcome)).toBeNull();
+    expect(h.createCalls).toEqual([]);
   });
 
-  it("abandons rather than creating when the settle itself throws", async () => {
+  it("treats a settle that throws as a timeout, and still calls the door", async () => {
     const h = harness({
       settle: async () => {
         throw new Error("status read exploded");
       },
     });
 
+    await expect(runWith(h)).resolves.toEqual({ kind: "created", name: "Wizard v5.4" });
+  });
+
+  it("reports a partial extraction with the server's own counts", async () => {
+    const h = harness({
+      create: async () =>
+        verdict({ status: "partial", planned: 21, resolved: 15, failed: ["01_Wizard/missing.stl"] }),
+    });
+
     const outcome = await runWith(h);
 
-    // No proof the scan finished is not proof that it did.
-    expect(outcome).toEqual({ kind: "settle-abandoned", entries: 2 });
-    expect(h.createCalls).toEqual([]);
+    expect(outcome).toEqual({ kind: "partial", planned: 21, resolved: 15, failed: ["01_Wizard/missing.stl"] });
+    const line = outcomeLine(outcome) ?? "";
+    expect(line).toContain("promised 21 entries");
+    expect(line).toContain("15 entries are registered");
+    expect(line).toContain("6 entries never arrived");
+    expect(line).toContain('"01_Wizard/missing.stl"');
+    expect(line).toContain("nothing was rolled back");
+  });
+
+  it("names every failure beyond the third as a count, not a wall of names", async () => {
+    const failed = ["a.stl", "b.stl", "c.stl", "d.stl", "e.stl"];
+    const h = harness({
+      create: async () => verdict({ status: "partial", planned: 5, resolved: 0, failed }),
+    });
+
+    const line = outcomeLine(await runWith(h)) ?? "";
+
+    expect(line).toContain('"a.stl", "b.stl", "c.stl" and 2 more');
+  });
+
+  it("names the twin directory when none of the planned paths resolved", async () => {
+    const h = harness({
+      create: async () => verdict({ status: "nothing_resolved", planned: 21, resolved: 0, failed: ["x.stl"] }),
+    });
+
+    const outcome = await runWith(h);
+
+    expect(outcome).toEqual({ kind: "nothing-resolved", planned: 21, twin: TWIN });
+    const line = outcomeLine(outcome) ?? "";
+    expect(line).toContain("none of the 21 entries");
+    expect(line).toContain(`"${TWIN}/"`);
+    expect(line).toContain("No project was created");
+  });
+
+  it("says an archive with nothing to register has nothing to make a project from", async () => {
+    const line = outcomeLine({ kind: "nothing-resolved", planned: 0, twin: TWIN });
+
+    expect(line).toBe(
+      "No project was created: this archive holds no files the library can register, so there is nothing to make a project from.",
+    );
+  });
+
+  it("tells the operator to start a library scan rather than wait for one", async () => {
+    // The create door starts no scan: `create_project_from_extract` writes nothing
+    // at all, so a sentence telling the operator the scan has to finish sends them
+    // after a walk that was never started. Telling them where the scan lives is
+    // not an invented path: the "Rescan storage folder" button is mounted by
+    // `MissingFilesReviewView`, which is the Missing files queue of the same Review
+    // destination this line is spoken in.
+    const line = outcomeLine({ kind: "nothing-resolved", planned: 21, twin: TWIN }) ?? "";
+
+    expect(line).toContain("start a library scan");
+    expect(line).toContain("this run started none");
+    expect(line).toContain("Review's Missing files queue");
+    expect(line).toContain("the \"Rescan storage folder\" control");
+    expect(line).toContain("then this runs again");
+    // No wording that implies a walk is already running may survive here.
+    expect(line).not.toMatch(/scan (has finished|is running|is in progress)/);
+    expect(line).not.toContain("let the library scan finish");
   });
 
   it("names the project an identical second run already created", async () => {
-    // The id is not what the sentence speaks, so the fixture keeps names only.
-    const projects = new Map<string, string>();
-    const h = harness({
-      create: async items => {
-        const item = items[0];
-        const existing = projects.get(item.key);
-        if (existing) {
-          return createResponse({
-            status: "skipped",
-            reason: "already_created",
-            project_id: "project-1",
-            name: existing,
-          });
-        }
-        const name = item.name ?? "Moai statue";
-        projects.set(item.key, name);
-        return createResponse({ project_id: "project-1", name });
-      },
-    });
+    const h = harness({ create: async () => verdict({ status: "already_created" }) });
 
-    const first = await runWith(h);
-    expect(first).toEqual({ kind: "created", name: "Moai" });
-    expect(projects.size).toBe(1);
+    const outcome = await runWith(h);
 
-    const second = await runWith(h);
-    expect(second).toEqual({ kind: "already-created", name: "Moai" });
-    expect(projects.size).toBe(1);
-
-    const line = outcomeLine(second);
-    expect(line).toContain("Already created");
-    expect(line).toContain("no second project");
+    expect(outcome).toEqual({ kind: "already-created", name: "Wizard v5.4" });
+    expect(outcomeLine(outcome)).toContain("Already created as project Wizard v5.4");
+    expect(outcomeLine(outcome)).toContain("no second project");
   });
 
   it("reports a failed create without pretending anything rolled back", async () => {
     const h = harness({
-      create: async () =>
-        createResponse({
-          status: "failed",
-          project_id: null,
-          name: null,
-          reason: "A project with that name already exists",
-        }),
-    });
-
-    const outcome = await runWith(h);
-
-    expect(outcome).toEqual({
-      kind: "create-failed",
-      detail: "A project with that name already exists",
-    });
-    const line = outcomeLine(outcome);
-    expect(line).toContain("files are in the library");
-    expect(line).toContain("nothing was rolled back");
-    expect(line).toContain("A project with that name already exists");
-    // The extract is all-or-nothing on the server, so there is no partial write
-    // for a rollback door to undo - a fact the deps TYPE carries, not one this
-    // test's own object can prove.
-  });
-
-  it("does not read a skip with an unknown reason as a creation", async () => {
-    // `already_created` is the only skip that means "the project is there". Any
-    // other skip reason says nothing was created, so claiming otherwise would
-    // be the one lie this door exists to avoid.
-    const h = harness({
-      create: async () =>
-        createResponse({ status: "skipped", reason: "exclusion_changed", name: null }),
-    });
-
-    const outcome = await runWith(h);
-
-    expect(outcome).toEqual({ kind: "create-failed", detail: "exclusion_changed" });
-    expect(outcomeLine(outcome)).toContain("exclusion_changed");
-  });
-
-  it("renders the run's verdict even when the cover prime throws", async () => {
-    const h = harness();
-    h.deps.beforeCreate = () => {
-      throw new Error("cover prime exploded");
-    };
-
-    const outcome = await runWith(h);
-
-    expect(outcome).toEqual({ kind: "created", name: "Moai" });
-    expect(h.createCalls).toHaveLength(1);
-  });
-
-  it("keeps the server's reason when the row is still blocked", async () => {
-    const h = harness({
-      create: async () =>
-        createResponse({ status: "blocked", project_id: null, name: null, reason: "not_scanned" }),
-    });
-
-    const outcome = await runWith(h);
-
-    expect(outcome).toEqual({ kind: "still-blocked", reason: "not_scanned", wrote: true });
-    const line = outcomeLine(outcome);
-    expect(line).toContain("no model file registered by a scan");
-    expect(line).toContain("The extraction stands");
-    expect(line).not.toContain("zip only - extract");
-  });
-
-  it("answers archive_only with the pairing it still lacks, not a re-extract", async () => {
-    const h = harness({
-      create: async () =>
-        createResponse({ status: "blocked", project_id: null, name: null, reason: "archive_only" }),
-    });
-
-    const outcome = await runWith(h);
-
-    expect(outcome).toEqual({ kind: "still-blocked", reason: "archive_only", wrote: true });
-    const line = outcomeLine(outcome);
-    expect(line).toContain("has not paired the extracted folder with the archive");
-    expect(line).not.toContain("extract the archive in place");
-    expect(line).toContain("The extraction stands");
-  });
-
-  it("does not claim a write on the already-present route", async () => {
-    const h = harness({
-      extract: async () => extractResult({ files: 0, already_present: true }),
-      create: async () =>
-        createResponse({ status: "blocked", project_id: null, name: null, reason: "not_scanned" }),
-    });
-
-    const outcome = await runWith(h);
-
-    expect(h.settleCalls).toEqual([]);
-    expect(outcome).toEqual({ kind: "still-blocked", reason: "not_scanned", wrote: false });
-    const line = outcomeLine(outcome);
-    expect(line).toContain("wrote nothing to the library");
-    expect(line).not.toContain("The extraction stands");
-  });
-
-  it("never claims a create for a status it does not know", async () => {
-    const h = harness({
-      create: async () =>
-        createResponse({ status: "exploded", project_id: null, name: null, reason: "something new" }),
-    });
-
-    const outcome = await runWith(h);
-
-    expect(outcome).toEqual({ kind: "create-failed", detail: "something new" });
-  });
-
-  it("refuses a response that names another row's project", async () => {
-    const h = harness({
-      create: async () => ({
-        created: 1,
-        skipped: 0,
-        blocked: 0,
-        failed: 0,
-        results: [resultRow({ key: "Another row" })],
-      }),
-    });
-
-    const outcome = await runWith(h);
-
-    // The server echoes the request's key, so a result for another key answers
-    // nothing about this row and must not be borrowed as its verdict.
-    expect(outcome).toEqual({
-      kind: "create-failed",
-      detail: "The server returned no result for this bundle.",
-    });
-  });
-
-  it("refuses a response with no results at all", async () => {
-    const h = harness({
-      create: async () => ({ created: 0, skipped: 0, blocked: 0, failed: 0, results: [] }),
-    });
-
-    const outcome = await runWith(h);
-
-    expect(outcome).toEqual({
-      kind: "create-failed",
-      detail: "The server returned no result for this bundle.",
-    });
-  });
-
-  it("turns a throwing create into a failure that carries the message", async () => {
-    const h = harness({
       create: async () => {
-        throw new Error("Network is down");
+        throw new Error("A project with that name already exists");
       },
     });
 
     const outcome = await runWith(h);
 
-    expect(outcome).toEqual({ kind: "create-failed", detail: "Network is down" });
-    expect(outcomeLine(outcome)).toContain("Network is down");
+    expect(outcome).toEqual({ kind: "create-failed", detail: "A project with that name already exists" });
+    const line = outcomeLine(outcome) ?? "";
+    expect(line).toContain("files are in the library");
+    expect(line).toContain("nothing was rolled back");
+    // No bundle rule was consulted, so none can be the reason; the sentence must
+    // not claim the queue's row is ready, which is a detection claim.
+    expect(line).not.toContain("the row is ready");
+  });
+
+  it("never claims a create for a status it does not know", async () => {
+    const h = harness({
+      create: async () => ({ ...(verdict() as ArchiveProjectResult), status: "exploded" as never }),
+    });
+
+    const outcome = await runWith(h);
+
+    expect(outcome).toEqual({ kind: "create-failed", detail: null });
   });
 
   it("stays silent when no create response arrives at all", async () => {
@@ -463,115 +417,90 @@ describe("runExtractAndCreate", () => {
     expect(outcomeLine(outcome)).toBeNull();
   });
 
-  it("sends one item for a compound-shaped row, and nothing else", async () => {
-    const h = harness();
-
-    await runWith(h, { key: "Compound kit", name: "Compound kit" });
-
-    expect(h.createCalls).toHaveLength(1);
-    const [items] = h.createCalls;
-    expect(items).toHaveLength(1);
-    const [item] = items;
-    expect(item).toEqual({ key: "Compound kit", name: "Compound kit" });
-    // No group exclusions, no per-group items and no `name_only`: the server
-    // builds the groups from the row itself.
-    expect(Object.keys(item)).toEqual(["key", "name"]);
-  });
-
-  it("omits the name key when the operator typed only whitespace", async () => {
-    const h = harness();
-
-    await runWith(h, { key: "Compound kit", name: "   " });
-
-    const [item] = h.createCalls[0];
-    expect(item).toEqual({ key: "Compound kit" });
-    expect("name" in item).toBe(false);
-  });
-
   it("resolves even when every dependency throws", async () => {
-    const boom = (): never => {
+    const boom = async (): Promise<never> => {
       throw new Error("boom");
     };
     const deps: ExtractAndCreateDeps = {
-      listEntries: async () => boom(),
-      extract: async () => boom(),
-      settle: async () => boom(),
-      create: async () => boom(),
-      beforeCreate: boom,
-      onPhase: boom,
+      listEntries: boom,
+      extract: boom,
+      settle: boom,
+      create: boom,
+      beforeCreate: () => {
+        throw new Error("boom");
+      },
+      onPhase: () => {
+        throw new Error("boom");
+      },
+      onPlan: () => {
+        throw new Error("boom");
+      },
     };
 
-    await expect(
-      runExtractAndCreate({ archivePath: ARCHIVE, item: TARGET, deps }),
-    ).resolves.toEqual({ kind: "listing-failed", detail: "boom" });
+    await expect(runExtractAndCreate({ archivePath: ARCHIVE, item: TARGET, deps })).resolves.toEqual({
+      kind: "listing-failed",
+      detail: "boom",
+    });
   });
 });
 
-describe("createItem", () => {
-  it("carries the trimmed name when there is one", () => {
-    expect(createItem({ key: KEY, name: "  Moai  " })).toEqual({ key: KEY, name: "Moai" });
+describe("createPayload", () => {
+  it("sends the archive path and the trimmed name, and nothing else", () => {
+    const payload = createPayload(ARCHIVE, { name: "  Wizard v5.4  " });
+
+    expect(Object.keys(payload).sort()).toEqual(["name", "path"]);
+    expect(payload).toEqual({ path: ARCHIVE, name: "Wizard v5.4" });
   });
 
-  it("omits the name key for a null or blank name", () => {
-    expect(createItem({ key: KEY, name: null })).toEqual({ key: KEY });
-    expect(createItem({ key: KEY })).toEqual({ key: KEY });
-    expect(createItem({ key: KEY, name: " " })).toEqual({ key: KEY });
+  it("omits the name key when the operator typed only whitespace", () => {
+    const payload = createPayload(ARCHIVE, { name: "   " });
+
+    expect("name" in payload).toBe(false);
+    expect(payload).toEqual({ path: ARCHIVE });
+  });
+
+  it("sends no bundle key: the archive path is the identity", () => {
+    expect(createPayload(ARCHIVE, {})).toEqual({ path: ARCHIVE });
   });
 });
 
 describe("phaseLine", () => {
-  const lines: [ExtractAndCreatePhase, string][] = [
+  it.each([
     ["listing", "Reading the archive's file list…"],
     ["extracting", "Extracting the archive…"],
     ["scanning", "Waiting for the library scan to register the extracted files…"],
     ["creating", "Creating the project…"],
-  ];
-
-  it.each(lines)("says what %s is doing", (phase, line) => {
+  ] as [ExtractAndCreatePhase, string][])("says the %s phase in one sentence", (phase, line) => {
     expect(phaseLine(phase)).toBe(line);
   });
 });
 
 describe("outcomeLine", () => {
-  it("ends a detail-less listing failure with a single full stop", () => {
+  it("keeps the sentences that outlived the bundle door byte-for-byte", () => {
     expect(outcomeLine({ kind: "listing-failed", detail: null })).toBe(
       "Could not read this archive's file list. Nothing was extracted, so no project was created.",
     );
-  });
-
-  it("speaks an empty archive as empty rather than as zero of zero", () => {
     expect(
       outcomeLine({ kind: "nothing-written", cause: "junk-only", entries: 0, detail: null }),
     ).toBe(
       "Nothing was written: the archive holds no entries at all, so nothing will register and no project was created.",
     );
-  });
-
-  it("names the project when it has a name, and says so plainly when it does not", () => {
     expect(outcomeLine({ kind: "created", name: "Moai" })).toBe("Created project Moai.");
-    expect(outcomeLine({ kind: "created", name: null })).toBe(
-      "Created the project from this archive.",
-    );
-  });
-
-  it("says whose project an already-created row is, or admits the name is gone", () => {
+    expect(outcomeLine({ kind: "created", name: null })).toBe("Created the project from this archive.");
     expect(outcomeLine({ kind: "already-created", name: "Moai" })).toBe(
       "Already created as project Moai - this run created no second project.",
     );
     expect(outcomeLine({ kind: "already-created", name: null })).toBe(
-      "This bundle already has a project (its name is unavailable) - this run created no second project.",
+      "This archive already has a project (its name is unavailable) - this run created no second project.",
     );
-  });
-
-  it("falls back to the server's own reason for an unknown blocked label", () => {
-    expect(
-      outcomeLine({ kind: "still-blocked", reason: "a_reason_from_the_future", wrote: true }),
-    ).toBe(
-      "No project was created: a_reason_from_the_future. The extraction stands - the files are in the library.",
-    );
-  });
-
-  it("says nothing for a cancelled run", () => {
     expect(outcomeLine({ kind: "cancelled" })).toBeNull();
+  });
+
+  it("never ends a sentence with two punctuation marks", () => {
+    const withDetail = outcomeLine({ kind: "create-failed", detail: "no reason given" }) ?? "";
+    const without = outcomeLine({ kind: "create-failed", detail: null }) ?? "";
+
+    expect(withDetail).toContain(": no reason given.");
+    expect(without).not.toContain(": .");
   });
 });

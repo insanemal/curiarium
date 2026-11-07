@@ -237,8 +237,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 102 routes: 11 public, 37 read,
-23 contribute, 13 write, 18 admin.
+Paths are FastAPI templates exactly as declared. 103 routes: 11 public, 37 read,
+24 contribute, 13 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -319,6 +319,7 @@ on.
 | POST   | `/import/zip/entries`                       | same: outbound fetch, no mutation, and the zip-import dialog calls it to list entries before `/import/zip` |
 | POST   | `/import/zip`                               | creates assets from a zip |
 | POST   | `/import/archive`                           | extracts an archive already in the library into its twin directory; a collision is a 409 before a byte is written, so nothing existing is overwritten |
+| POST   | `/import/archive/project`                   | creates one project from the assets an extraction of that archive was supposed to produce (Mf-0ck5); the same power as `POST /projects`, no bundle rule consulted, and nothing is deleted — a refusal creates no project |
 | POST   | `/asset/{asset_id}/files`                   | uploads a supporting file next to an asset; removes nothing |
 | PATCH  | `/asset/{asset_id}/files/{file_id}`         | renames a supporting file (display only; the bytes never move) |
 | PUT    | `/asset/{asset_id}/files/order`             | rewrites the supporting-file display order (display only; the bytes never move) |

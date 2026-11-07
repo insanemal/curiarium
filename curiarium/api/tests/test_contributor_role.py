@@ -469,9 +469,10 @@ def test_a_contributor_action_is_audited_with_the_contributor_role(client: TestC
     # first-run setup route to the audited half (41 -> 42), Mf-rnrn the
     # account retirement route (42 -> 43) and Mf-vwqf the bundle create and
     # dismiss pair (43 -> 45) and Mf-1zmd the archive extract route (45 -> 46)
-    # and Mf-nivh the enrich route (46 -> 47), which is why the number here is not
-    # the contributor ticket's.
+    # and Mf-nivh the enrich route (46 -> 47) and Mf-0ck5 the archive project
+    # create route (47 -> 48), which is why the number here is not the
+    # contributor ticket's.
     assert audit.ROUTE_ACTIONS[("POST", "/upload")] == (audit.ASSET_CREATE,)
     assert audit.assert_audit_coverage() is audit.ROUTE_ACTIONS
-    assert len(audit.ROUTE_ACTIONS) == 47
+    assert len(audit.ROUTE_ACTIONS) == 48
     assert len(audit.EXEMPT_ROUTES) == 14

@@ -945,9 +945,11 @@ def test_audit_the_snapshot_actions_are_declared_and_carried_by_their_routes() -
     # 43 = 42 + 1. Mf-vwqf adds the bundle create and dismiss pair and their two
     # routes, so 52 = 50 + 2 and 45 = 43 + 2. Mf-1zmd adds the archive extract
     # action and its one route, so 53 = 52 + 1 and 46 = 45 + 1. Mf-nivh adds the
-    # bundle enrich action and its one route, so 54 = 53 + 1 and 47 = 46 + 1.
-    assert len(audit.ACTIONS) == 54
-    assert len(audit.ROUTE_ACTIONS) == 47
+    # bundle enrich action and its one route, so 54 = 53 + 1 and 47 = 46 + 1. Mf-0ck5
+    # adds the archive project create and its one route, so 55 = 54 + 1 and
+    # 48 = 47 + 1.
+    assert len(audit.ACTIONS) == 55
+    assert len(audit.ROUTE_ACTIONS) == 48
     assert audit.assert_audit_coverage() == audit.ROUTE_ACTIONS
 
 
@@ -982,13 +984,13 @@ def test_audit_docs_describe_the_snapshot_actions() -> None:
     path = _repo_path("docs", "AUDIT.md")
 
     text = path.read_text(encoding="utf-8")
-    assert "exactly these 54 strings" in text
+    assert "exactly these 55 strings" in text
     for needle in ("snapshot.create", "snapshot.prune", "snapshot.delete", "snapshot.restore", "snapshot.schedule.skipped", "snapshot.schedule.failed"):
         assert needle in text
     # The prose is hard-wrapped, so the sentence is pinned with its whitespace
     # normalised: the words are byte-for-byte, the wrap points are not.
     assert (
-        "The matrix has 102 routes, 41 of them `GET`; the remaining 61 split into 47 audited keys and 14 exempt keys."
+        "The matrix has 103 routes, 41 of them `GET`; the remaining 62 split into 48 audited keys and 14 exempt keys."
         in " ".join(text.split())
     )
     assert "fail-loud" in text

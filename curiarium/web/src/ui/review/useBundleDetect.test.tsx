@@ -21,7 +21,6 @@ import {
   enrichBundles,
   getBundleReport,
   setBundleDismissed,
-  type BundleCreateResponse,
   type BundleDetectItem,
   type BundleEnrichItemResult,
   type BundleEnrichResponse,
@@ -713,119 +712,21 @@ describe("useBundleDetect", () => {
   });
 });
 
-describe("useBundleDetect createReporting", () => {
-  const created: BundleCreateResponse = {
-    created: 1,
-    skipped: 0,
-    blocked: 0,
-    failed: 0,
-    results: [
-      {
-        key: "Moai statue",
-        status: "created",
-        project_id: "project-1",
-        name: "Moai",
-        assets_added: 12,
-        skipped_assets: 0,
-        failed_assets: [],
-        reason: null,
-      },
-    ],
-  };
-
-  it("returns the server's answer unchanged and refetches the report", async () => {
-    createBundlesMock.mockResolvedValueOnce(created);
+describe("useBundleDetect create", () => {
+  it("leaves the bulk create door returning nothing", async () => {
     const { result } = renderHook(() => useBundleDetect({ enabled: true }));
     await waitFor(() => expect(result.current.report).toEqual(report));
 
-    let answer!: BundleCreateResponse | null | undefined;
-    await act(async () => {
-      answer = await result.current.createReporting?.([{ key: "Moai statue", name: "Moai" }]);
-    });
-
-    expect(answer).toBe(created);
-    expect(createBundlesMock).toHaveBeenCalledWith([{ key: "Moai statue", name: "Moai" }]);
-    expect(getBundleReportMock).toHaveBeenCalledTimes(2);
-    expect(result.current.error).toBeNull();
-    expect(result.current.busy).toBe(false);
-  });
-
-  it("returns null and reports a revoked session to the caller", async () => {
-    createBundlesMock.mockRejectedValue(new UnauthorizedError());
-    const onUnauthorized = vi.fn();
-    const { result } = renderHook(() => useBundleDetect({ enabled: true, onUnauthorized }));
-    await waitFor(() => expect(result.current.report).toEqual(report));
-
-    let answer!: BundleCreateResponse | null | undefined;
-    await act(async () => {
-      answer = await result.current.createReporting?.([{ key: "Moai statue" }]);
-    });
-
-    expect(answer).toBeNull();
-    expect(onUnauthorized).toHaveBeenCalledTimes(1);
-    expect(result.current.error).toBe("Unauthorized");
-    expect(result.current.busy).toBe(false);
-  });
-
-  it("keeps a failed create's own message on the hook", async () => {
-    createBundlesMock.mockRejectedValue(new Error("A project with that name already exists"));
-    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
-    await waitFor(() => expect(result.current.report).toEqual(report));
-
-    let answer!: BundleCreateResponse | null | undefined;
-    await act(async () => {
-      answer = await result.current.createReporting?.([{ key: "Moai statue" }]);
-    });
-
-    expect(answer).toBeNull();
-    expect(result.current.error).toBe("A project with that name already exists");
-    // A failed create must not refetch over the error it just recorded.
-    expect(getBundleReportMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("makes no call at all while the queue is closed", async () => {
-    const { result } = renderHook(() => useBundleDetect({ enabled: false }));
-    await waitFor(() => expect(result.current.loading).toBe(false));
-
-    let answer!: BundleCreateResponse | null | undefined;
-    await act(async () => {
-      answer = await result.current.createReporting?.([{ key: "Moai statue" }]);
-    });
-
-    expect(answer).toBeNull();
-    expect(createBundlesMock).not.toHaveBeenCalled();
-    expect(result.current.error).toBeNull();
-  });
-
-  it("clears the last enrichment's notice, like every other create", async () => {
-    enrichBundlesMock.mockResolvedValueOnce(enrichResponse([enrichResult({ status: "cached" })]));
-    createBundlesMock.mockResolvedValueOnce(created);
-    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
-    await waitFor(() => expect(result.current.report).toEqual(report));
-
-    await act(async () => {
-      await result.current.enrich(["Moai statue"]);
-    });
-    expect(result.current.notice).toBe("Already checked from the source page");
-
-    await act(async () => {
-      await result.current.createReporting?.([{ key: "Moai statue" }]);
-    });
-
-    expect(result.current.notice).toBeNull();
-  });
-
-  it("leaves the old create door returning nothing", async () => {
-    createBundlesMock.mockResolvedValueOnce(created);
-    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
-    await waitFor(() => expect(result.current.report).toEqual(report));
-
-    let answer: unknown = created;
+    let answer: unknown = "not called";
     await act(async () => {
       answer = await result.current.create([{ key: "Moai statue" }]);
     });
 
     // The bulk doors and `createActive` depend on this staying a void action.
+    // The one-step door no longer has a reporting create on the hook at all
+    // (Mf-0ck5): it calls the archive-project door itself, whose verdict is one
+    // object for one archive rather than a per-key result to match.
     expect(answer).toBeUndefined();
+    expect(createBundlesMock).toHaveBeenCalledWith([{ key: "Moai statue" }]);
   });
 });

@@ -6,20 +6,24 @@ from zipfile import BadZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+import archive_project_service
 import archive_service
 import asset_service
 import audit
+import project_service
 import seams
 from auth import AuthContext
 from file_utils import build_import_filename, mime_from_content_type
 from import_policy import refuse_paid_or_gated
 from permissions import require_contribute, require_read
 from project_import import import_into_project
-from routers.presenters import import_project_to_out, to_out
+from routers.presenters import import_project_to_out, project_to_out, to_out
 from schemas import (
     ArchiveEntriesOut,
     ArchiveExtractOut,
     ArchiveExtractRequest,
+    ArchiveProjectOut,
+    ArchiveProjectRequest,
     AssetOut,
     ImportInspectOut,
     ImportProjectOut,
@@ -95,6 +99,42 @@ def import_archive_entries(
     ``snapshot_guard.status_for`` itself.
     """
     return archive_service.extract_out(body.path, body.entries, audit.context_for(request, context))
+
+
+@router.post("/import/archive/project", response_model=ArchiveProjectOut)
+def create_project_from_archive_extract(
+    request: Request,
+    body: ArchiveProjectRequest,
+    context: Optional[AuthContext] = Depends(require_contribute),
+):
+    """Create one project from the entries an archive was extracted into.
+
+    Thin on purpose, like the extract door beside it: the comparison, the four
+    verdicts and the audit decision are ``archive_project_service``'s. Every
+    verdict is a 200 with a ``status``, because this door has no bundle rule to
+    refuse on - the operator's click is the evidence, and asking detection to
+    agree with it after the fact is the design this replaces.
+
+    The project row is serialised through ``project_service.project_with_stats``
+    after the write rather than from the row the service returned, so the response
+    carries the member count and cover the create actually produced.
+    """
+    result = archive_project_service.create_project_from_extract(
+        body.path, body.entries, body.name, audit.context_for(request, context)
+    )
+    project = None
+    if result.project is not None:
+        row, asset_count, total_size, cover_thumb_version = project_service.project_with_stats(result.project.id)
+        project = project_to_out(row, asset_count, total_size, cover_thumb_version)
+    return ArchiveProjectOut(
+        status=result.status,
+        archive=result.archive,
+        twin=result.twin,
+        planned=result.planned,
+        resolved=result.resolved,
+        failed=list(result.failed),
+        project=project,
+    )
 
 
 @router.post("/import/zip/entries", response_model=ImportZipEntriesOut)

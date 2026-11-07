@@ -62,6 +62,10 @@ ASSET_PREPARED_PRINT_DELETE = "asset.prepared_print.delete"
 # An archive already in the library extracted in place into its twin directory
 # (Mf-1zmd). One row per successful extract; an idempotent no-op writes none.
 ARCHIVE_EXTRACT = "archive.extract"
+# The operator's click that said "these entries are one project" (Mf-0ck5). One
+# row per click, refusals included: the click is the evidence this door runs on,
+# so the history carries it whether or not a project came of it.
+ARCHIVE_PROJECT_CREATE = "archive.project.create"
 FOLDER_DELETE = "folder.delete"
 FOLDER_RENAME = "folder.rename"
 FOLDER_MOVE = "folder.move"
@@ -146,6 +150,7 @@ ACTIONS: frozenset[str] = frozenset({
     ASSET_FILE_REORDER,
     ASSET_PREPARED_PRINT_DELETE,
     ARCHIVE_EXTRACT,
+    ARCHIVE_PROJECT_CREATE,
     FOLDER_DELETE,
     FOLDER_RENAME,
     FOLDER_MOVE,
@@ -383,6 +388,11 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     # An in-library extract writes files but no asset rows: the next scan is what
     # registers them, so this is the operator's record of the extraction itself.
     ("POST", "/import/archive"): (ARCHIVE_EXTRACT,),
+    # The create itself is audited even though `POST /projects` is exempt, as
+    # `bundle.create` is: this row is the operator's history of a project made
+    # from an archive without detection's say-so, and it is what a repeat run
+    # reads back as already-created.
+    ("POST", "/import/archive/project"): (ARCHIVE_PROJECT_CREATE,),
     # An asset delete that empties a folder's directory also retires that
     # folder's row (Mf-sdnj), so both routes below may write `folder.delete`
     # alongside their own `asset.delete`.

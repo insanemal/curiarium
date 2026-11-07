@@ -88,6 +88,103 @@
     "title": "ArchiveExtractRequest",
     "type": "object"
   },
+  "ArchiveProjectOut": {
+    "description": "The verdict of the extract-and-create door, or the project it made.\n\nEvery verdict is a 200: this door has nothing to refuse on policy grounds, so\n`status` is the whole verdict and a client never has to guess from a status\ncode. `partial` and `nothing_resolved` create no project and carry no `project`;\n`planned`/`resolved` are the two set sizes the comparison was made over and\n`failed` names every planned entry that never became a registered asset, so\n\"how many entries failed\" is a fact from the server rather than an inference.\n`twin` is library-relative and is named so the operator can go and look at\nwhere the files live.",
+    "properties": {
+      "archive": {
+        "title": "Archive",
+        "type": "string"
+      },
+      "failed": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Failed",
+        "type": "array"
+      },
+      "planned": {
+        "title": "Planned",
+        "type": "integer"
+      },
+      "project": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ProjectOut"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "resolved": {
+        "title": "Resolved",
+        "type": "integer"
+      },
+      "status": {
+        "enum": [
+          "created",
+          "already_created",
+          "partial",
+          "nothing_resolved"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "twin": {
+        "title": "Twin",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "archive",
+      "twin",
+      "planned",
+      "resolved"
+    ],
+    "title": "ArchiveProjectOut",
+    "type": "object"
+  },
+  "ArchiveProjectRequest": {
+    "description": "The archive whose extraction the operator declared to be one project.\n\n`entries=None` means every member the archive holds, exactly the selection\n`POST /import/archive` takes when it is given `None`; a list is the subset the\noperator extracted. The names are checked against the archive, so a pick the\narchive does not hold is a 400 rather than a silently missing member.",
+    "properties": {
+      "entries": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Entries"
+      },
+      "name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Name"
+      },
+      "path": {
+        "title": "Path",
+        "type": "string"
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "title": "ArchiveProjectRequest",
+    "type": "object"
+  },
   "ImportInspectOut": {
     "properties": {
       "filename": {

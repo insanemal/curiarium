@@ -486,6 +486,18 @@ def call_import_archive(client, headers, ids, monkeypatch) -> Response:
     return client.post("/import/archive", json={"path": "sweep.zip"}, headers=headers)
 
 
+def call_import_archive_project(client, headers, ids, monkeypatch) -> Response:
+    # Mf-0ck5: the archive is staged as above, but nothing is extracted or scanned,
+    # so the door answers `nothing_resolved` - a 200 that still records the click.
+    # That is the verdict this sweep needs: the row is the point, not the create.
+    storage = Path(db.STORAGE)
+    storage.mkdir(parents=True, exist_ok=True)
+    with ZipFile(storage / "sweep.zip", "w") as archive:
+        archive.writestr("sweep.stl", STL_BYTES)
+    monkeypatch.setattr(main, "start_scan", lambda: True)
+    return client.post("/import/archive/project", json={"path": "sweep.zip"}, headers=headers)
+
+
 def call_rename_asset(client, headers, ids, monkeypatch) -> Response:
     return client.post(f"/asset/{ids.asset_id}/rename", json={"filename": "renamed.stl"}, headers=headers)
 
@@ -810,6 +822,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/import/project"): call_import_project,
     ("POST", "/import/zip"): call_import_zip,
     ("POST", "/import/archive"): call_import_archive,
+    ("POST", "/import/archive/project"): call_import_archive_project,
     ("DELETE", "/asset/{asset_id}"): call_delete_asset,
     ("POST", "/assets/batch/delete"): call_batch_delete,
     ("POST", "/asset/{asset_id}/rename"): call_rename_asset,

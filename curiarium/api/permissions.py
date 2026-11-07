@@ -299,6 +299,9 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     # Extraction writes files into the library; nothing existing is overwritten
     # (a collision is a 409 before a byte is written), so it is not a WRITE.
     ("POST", "/import/archive"): CONTRIBUTE,
+    # One project over the assets an extraction was supposed to produce: the same
+    # power as `POST /projects`, and it deletes nothing (Mf-0ck5).
+    ("POST", "/import/archive/project"): CONTRIBUTE,
     ("POST", "/asset/{asset_id}/files"): CONTRIBUTE,
     ("PATCH", "/asset/{asset_id}/files/{file_id}"): CONTRIBUTE,
     ("PUT", "/asset/{asset_id}/files/order"): CONTRIBUTE,
