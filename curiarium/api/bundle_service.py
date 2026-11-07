@@ -832,7 +832,18 @@ def _build_candidates(
                 # provenance, and a second row from the same bytes is a duplicate.
                 _refuse(refusals, rel_path, REFUSAL_TWIN_CONSUMED)
                 continue
-            if _stem_pair_verified(root / rel_path, work.get(twin, ())):
+            # **Why ``folded`` and not ``work``.** ``work[twin]`` has already had its
+            # claimed children stripped by ``_forget_claimed_subtree``, so an extraction
+            # whose payload directory is itself a bundle reads as an EMPTY listing here
+            # - and an empty listing contains nothing, so the archive that IS its own
+            # twin is refused ``twin-unverified``. The pairing question is "does the
+            # archive's payload sit in this directory on disk", and the on-disk answer
+            # is the unclaimed full-subtree listing: ``folded`` (same trap, same file,
+            # see ``_compound_pass``). Containment still decides, still shared with the
+            # entry-root route via ``archive_payload_contained``, and the entry-root
+            # pass keeps ``work`` on purpose: that route must not disagree with the
+            # claim tree, this one only has to recognise its own payload.
+            if _stem_pair_verified(root / rel_path, folded.get(twin, ())):
                 pairs.setdefault(twin, []).append((rel_path, None))
                 paired_zips.add(rel_path)
             else:
@@ -909,7 +920,25 @@ def _build_candidates(
             # The directory is offered on its own; the archive stays attached to it
             # as provenance, and its `twin-consumed` reason is what the ledger says.
             continue
-        entries = work.get(folder) or []
+        # **Why ``folded`` and not ``work``.** ``work[folder]`` is the post-claim
+        # view, and a verified twin whose payload directory was claimed by the folder
+        # pass has had every one of its files stripped from it: the extraction
+        # ``import/01_Fates End - Wizard Tower`` holds nothing of its own because all
+        # twenty of its files sit in ``01_Wizard``, which the walk already offered.
+        # Reading `work` here therefore asks the shape question of an EMPTY listing,
+        # and every shape guard refuses - so a verified pair with real models behind
+        # it is refused ``twin-unverified``, the no-facts reason, which is a lie: the
+        # facts are on disk. The listing that describes what the directory HOLDS is
+        # the unclaimed subtree, exactly as in ``_compound_pass``.
+        #
+        # The fallback cannot turn an ancestor into a bundle. An emptied own view is
+        # only ever produced by ``_forget_claimed_subtree``, which runs together with
+        # the ``claimed_ancestors`` marking below, so a directory that reaches this
+        # line with nothing left in its own view is a claimed ancestor and answers as
+        # a pair-only container - it never joins ``found`` on its child's models. What
+        # the fallback changes is only WHICH reason it answers with: the honest
+        # container answer rather than "this archive verified nothing".
+        entries = work.get(folder) or folded.get(folder) or []
         if not entries:
             for zip_rel in pair_zips:
                 _refuse(refusals, zip_rel, REFUSAL_TWIN_UNVERIFIED, override=True)

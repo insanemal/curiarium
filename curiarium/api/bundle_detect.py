@@ -202,7 +202,11 @@ SHAPE_ARCHIVE_ROOT = "archive-root"
 # The rule-set version, bumped by hand whenever a row-deciding table changes.
 # It is a human-readable companion to the derived stamp below: the version says
 # *which* revision a report was taken at, the stamp proves *what* the tables were.
-RULE_SET_VERSION = "2026-11-05.2"
+# The two move together only when a table moves. `2026-11-07.0` is the case where
+# they do not: Mf-wd3v changed WHICH listing the archive-owned promotion is judged
+# on, so a report taken at it offers a different row, while every table below is
+# byte-identical to `2026-11-05.2` and the stamp must NOT move.
+RULE_SET_VERSION = "2026-11-07.0"
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"

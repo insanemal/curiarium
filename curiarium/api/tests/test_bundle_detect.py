@@ -25,7 +25,9 @@ The heuristics pinned here:
   tie-break.
 """
 
+import ast
 import re
+from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
 import pytest
@@ -1904,7 +1906,7 @@ RULE_SET_TABLE_HOMES = {
     "HIDDEN_NAME_PREFIX": (library_scan, "HIDDEN_NAME_PREFIX"),
 }
 
-RULE_SET_VERSION = "2026-11-05.2"
+RULE_SET_VERSION = "2026-11-07.0"
 RULE_SET_STAMP = "0f317ee0fa2ff200a703a8c10be1c6f565d50d4263b3629a1004dffee7c0c911"
 
 # Every constant `rule_set_tables` captures, with a replacement that differs from
@@ -1982,10 +1984,16 @@ def test_the_rule_set_stamp_is_pinned_so_a_table_edit_cannot_go_unnoticed() -> N
 
     Mutation: change one constant any row-deciding path reads and the pinned hash
     stops matching - which is exactly the audit trail Mf-9ygi's 114 -> 112
-    investigation lacked. This bump is Mf-94od's rule table change: the model
-    count asks the library scan's own basename predicate, so `SKIPPED_FILENAMES`
-    and `HIDDEN_NAME_PREFIX` join the stamp and the version moves with them. The
-    previous bump was Mf-8xrc's ten `COMPOUND_*` tables.
+    investigation lacked. The bump before this one was Mf-94od's rule table change:
+    the model count asks the library scan's own basename predicate, so
+    `SKIPPED_FILENAMES` and `HIDDEN_NAME_PREFIX` joined the stamp and the version
+    moved with them; before that, Mf-8xrc's ten `COMPOUND_*` tables.
+
+    `2026-11-07.0` is the case the two fields exist separately for. Mf-wd3v changed
+    WHICH listing the archive-owned promotion is judged on, so a report taken at it
+    offers a row it did not offer before, while every table below stayed
+    byte-identical - the version moves and the stamp must not. A stamp that moved
+    here would be a table edit nobody made.
     """
     assert bundle_detect.RULE_SET_VERSION == RULE_SET_VERSION
     assert bundle_detect.RULE_SET_STAMP == RULE_SET_STAMP
@@ -2742,3 +2750,69 @@ def test_compound_facts_is_none_when_the_switch_is_off(monkeypatch: pytest.Monke
     assert all(group.model_count == 6 for group in facts.groups)
     assert bundle_detect._compound_family_token(facts.groups) == "mount"
     assert bundle_detect.rule_set_stamp() == RULE_SET_STAMP, "the context restores the flag"
+
+
+# --- bounded model evidence has ONE definition (Mf-wd3v) ---------------------
+
+# What a second definition of bounded model evidence would have to be called. The
+# names are the search and the search is the point: a re-implementation under any of
+# them is the drift Mf-snd8's cardinality bound and Mf-h0p8's container bound exist
+# to prevent. ``root_model_count`` is deliberately NOT in here - it answers R7's
+# different question (strict depth 0, the leg split) - but it is asserted absent from
+# the promotion below, so it cannot be quietly substituted for this one.
+MODEL_EVIDENCE_NAME = re.compile(r"_own_depth|model_evidence|_model_bearing")
+
+
+def top_level_functions(tree: ast.Module) -> List[str]:
+    """Every top-level ``def`` of a parsed module, in source order."""
+    return [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+
+
+def function_body(tree: ast.Module, name: str) -> ast.FunctionDef:
+    """The ONE top-level definition of ``name``, so a duplicate reds rather than hides."""
+    definitions = [
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
+    ]
+    assert len(definitions) == 1, f"{name} must be defined exactly once, found {len(definitions)}"
+    return definitions[0]
+
+
+def called_names(function: ast.FunctionDef) -> set:
+    """Every plain ``name(...)`` call inside one function, nested calls included."""
+    return {
+        node.func.id
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+
+def test_bounded_model_evidence_is_defined_exactly_once() -> None:
+    """One definition of "how many models may this listing prove", and the promotion asks it.
+
+    ``_own_depth_model_count`` is the bound every shape question asks: R3's own-depth
+    reading, R5's, and - since Mf-wd3v - the archive-owned promotion's too, through
+    ``archive_owned_facts``. The ticket deliberately did NOT add a second definition:
+    the moment two helpers answer that question they can disagree, and the whole value
+    of the promotion's guard is that it INHERITS Mf-snd8's cardinality bound and
+    Mf-h0p8's container bound instead of restating them in the service.
+
+    Mutation: copy ``_own_depth_model_count`` under a second name, or hand
+    ``archive_owned_facts`` a fresh counting helper of its own, and the first
+    assertion below reds on the second definition while the second reds on a guard
+    that is no longer THE one.
+    """
+    tree = ast.parse(Path(bundle_detect.__file__).read_text(encoding="utf-8"))
+
+    definitions = sorted({name for name in top_level_functions(tree) if MODEL_EVIDENCE_NAME.search(name)})
+
+    assert definitions == ["_own_depth_model_count"], (
+        "no second top-level helper may answer the bounded-model-evidence question"
+    )
+
+    promotion = function_body(tree, "archive_owned_facts")
+    guards = sorted(name for name in called_names(promotion) if MODEL_EVIDENCE_NAME.search(name))
+
+    assert guards == ["_own_depth_model_count"], "the promotion's only shape guard is that same helper"
+    assert "root_model_count" not in called_names(promotion), (
+        "and it is not R7's depth-0 reading doing the job instead"
+    )
