@@ -248,7 +248,7 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 
 | Method | Path       | Why |
 |--------|------------|-----|
-| GET    | `/health`  | liveness; reports `auth_required` |
+| GET    | `/health`  | liveness; reports `auth_required`, `version` and `build` |
 | POST   | `/login`   | issues tokens (503 when auth is disabled) |
 | POST   | `/refresh` | rotates tokens (503 when auth is disabled) |
 | POST   | `/logout`  | revokes by refresh token (503 when auth is disabled) |

@@ -14,7 +14,7 @@ describe("SettingsRootMenu", () => {
 
     // __APP_VERSION__ is the vite define fed from package.json, so the expected
     // text comes from the same literal the build uses, not a second copy.
-    expect(screen.getByTestId("app-version").textContent).toBe(`Curiarium ${__APP_VERSION__}`);
+    expect(screen.getByTestId("app-version").textContent).toBe(`Curiarium ${__APP_VERSION__} (${__APP_BUILD__})`);
   });
 
   it("offers the storage section to an admin", () => {

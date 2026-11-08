@@ -3,11 +3,11 @@
 from fastapi import APIRouter
 
 import auth
-from version import __version__
+from version import BUILD, __version__
 
 router = APIRouter()
 
 
 @router.get("/health")
 def health():
-    return {"ok": True, "auth_required": auth.AUTH_ENABLED, "version": __version__}
+    return {"ok": True, "auth_required": auth.AUTH_ENABLED, "version": __version__, "build": BUILD}

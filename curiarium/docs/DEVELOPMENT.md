@@ -163,6 +163,23 @@ compose manifest. Only the manifest half is guarded: a forwarded key that nothin
 reads fails `tests/test_deploy_manifest_env.py`. An extra `.env.example` key
 fails nothing, so that half is documentation discipline, not a gate.
 
+## Version and build identity
+
+`curiarium/api/version.py` holds the product version. Floating tags such as
+`edge` and `edge-zfs` all report the same version, so each image also carries
+the commit it was built from:
+
+- `GET /health` returns `{"ok", "auth_required", "version", "build"}`. `build`
+  is the first 7 characters of the `BUILD_SHA` environment variable, or `dev`
+  when it is unset (a plain `docker build` or a dev checkout).
+- The Settings footer shows `Curiarium <version> (<build>)`; the web bundle
+  bakes the same `BUILD_SHA` at build time.
+- `publish.yml` passes `github.sha` as the `BUILD_SHA` build arg to every image.
+- On a `v*` tag the `check-tag` job runs
+  `python3 curiarium/scripts/check_version.py --tag "$GITHUB_REF_NAME"` and the
+  images are not built if the tag differs from `version.py`. To release: bump
+  `version.py` and its mirrors, then tag with the same number.
+
 ## Build warnings in the web bundle
 
 `npm run build` in `curiarium/web` is expected to emit exactly the warnings below,

@@ -37,7 +37,19 @@ permissions:
   packages: write
 
 jobs:
+  # A v* tag must name the version the API reports (curiarium/api/version.py),
+  # or the published image would claim a release it is not.
+  check-tag:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 curiarium/scripts/check_version.py --tag "$GITHUB_REF_NAME"
+
   images:
+    needs: check-tag
+    # check-tag is skipped on branch pushes; that must not skip the build.
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -101,7 +113,9 @@ jobs:
           context: ${{ matrix.context }}
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: ${{ matrix.build-args }}
+          build-args: |
+            ${{ matrix.build-args }}
+            BUILD_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.name }}

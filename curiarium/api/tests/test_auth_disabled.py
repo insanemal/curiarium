@@ -12,7 +12,7 @@ import auth
 import config
 import main
 import oidc
-from version import __version__
+from version import BUILD, __version__
 
 NOT_CONFIGURED = "Authentication is not configured on the server"
 
@@ -25,7 +25,7 @@ def disabled_client(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_health_reports_auth_is_off(disabled_client: TestClient) -> None:
-    assert disabled_client.get("/health").json() == {"ok": True, "auth_required": False, "version": __version__}
+    assert disabled_client.get("/health").json() == {"ok": True, "auth_required": False, "version": __version__, "build": BUILD}
 
 
 @pytest.mark.parametrize("path", ["/login", "/refresh", "/logout"])

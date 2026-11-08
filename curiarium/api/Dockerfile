@@ -51,6 +51,10 @@ RUN if [ "$INSTALL_ZFS" = "1" ]; then \
       rm -rf /var/lib/apt/lists/*; \
     fi
 
+# Short commit sha stamped by the publish workflow; surfaced as `build` in /health.
+ARG BUILD_SHA=""
+ENV BUILD_SHA=$BUILD_SHA
+
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

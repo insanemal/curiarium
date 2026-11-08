@@ -13,6 +13,8 @@ RUN npm run verify
 CMD ["npm", "run", "verify"]
 
 FROM dependencies AS build
+ARG BUILD_SHA=""
+ENV BUILD_SHA=$BUILD_SHA
 COPY . .
 RUN npm run build
 

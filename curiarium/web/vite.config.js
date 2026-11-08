@@ -78,7 +78,10 @@ function isAcceptedOcctExternalization(warning) {
 }
 
 export default defineConfig({
-  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_BUILD__: JSON.stringify(process.env.BUILD_SHA || "dev"),
+  },
   build: {
     // Entry chunk composition at the time of writing: react-dom 129.8 kB +
     // app shell ~262 kB + markdown stack 178.9 kB + lucide 22 kB. Three.js and

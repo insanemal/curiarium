@@ -7,6 +7,11 @@ copies silently rot the moment someone bumps one and forgets the other - the
 UI then reports a version the API never served.
 
     python3 curiarium/scripts/check_version.py
+    python3 curiarium/scripts/check_version.py --tag v5.2.0
+
+With `--tag` it also requires the git tag (a leading `v` is ignored) to equal
+the canonical version, so the publish workflow cannot ship an image that
+`/health` reports under another number.
 
 Prints every copy it read, then exits 0 when they all agree and 1 with the
 offending path and value on stderr otherwise. To fix a mismatch, edit the
@@ -51,8 +56,11 @@ def read_copies() -> list[tuple[str, str]]:
 
 
 def main(argv: Sequence[str]) -> int:
-    if argv:
-        raise SystemExit("check_version.py takes no arguments")
+    tag = None
+    if len(argv) == 2 and argv[0] == "--tag":
+        tag = argv[1].removeprefix("v")
+    elif argv:
+        raise SystemExit("usage: check_version.py [--tag vX.Y.Z]")
     canonical = read_source_version()
     copies = read_copies()
     print(f"{label(SOURCE)}: {canonical}")
@@ -66,6 +74,10 @@ def main(argv: Sequence[str]) -> int:
         for name, value in drifted:
             print(f"  {name} says {value}", file=sys.stderr)
         print(f"Edit the mirrors to match {label(SOURCE)}.", file=sys.stderr)
+        return 1
+    if tag is not None and tag != canonical:
+        print(f"tag drift: tag says {tag} but {label(SOURCE)} says {canonical}", file=sys.stderr)
+        print(f"Bump {label(SOURCE)} and its mirrors, or retag.", file=sys.stderr)
         return 1
     return 0
 
