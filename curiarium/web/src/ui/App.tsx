@@ -8,6 +8,7 @@ import FolderDrawer from "./FolderDrawer";
 import Login from "./Login";
 import AuditLog from "./AuditLog";
 import NotPermitted from "./NotPermitted";
+import ErrorBoundary from "./ErrorBoundary";
 import UploadQueuePanel from "./UploadQueuePanel";
 import {
   UnauthorizedError,
@@ -124,9 +125,17 @@ type AppProps = {
    * which case the stored mode is read on mount.
    */
   initialMode?: LibraryMode;
+  /**
+   * The boot probe's project list, already fetched by `lib/modeBootstrap.ts`,
+   * so seeding the grid from it costs no second request. It must be read as a
+   * prop, never consumed (no take-once read in a `useState` initialiser): that
+   * initialiser is impure under StrictMode. `null`/omitted means "no list", and
+   * the project-list effect fetches one.
+   */
+  initialProjects?: Project[] | null;
 };
 
-export default function App({ initialMode }: AppProps = {}) {
+export default function App({ initialMode, initialProjects }: AppProps = {}) {
   const [token, setToken] = React.useState<string | null>(() => readToken());
   // Generation counter for "assets changed". The grid consumes it to refetch in
   // place; it no longer remounts the grid, so view state (search, sort,
@@ -154,7 +163,21 @@ export default function App({ initialMode }: AppProps = {}) {
     projects: mode === "projects",
   }));
   const [openProjectId, setOpenProjectId] = React.useState<string | null>(null);
-  const [projects, setProjects] = React.useState<Project[] | null>(null);
+  const [projects, setProjects] = React.useState<Project[] | null>(() => initialProjects ?? null);
+  // The `assetsVersion` the seeded list is valid for; `null` when there is no
+  // seed. A boot list is current as of version 0, which is what keeps the list
+  // effect below from re-fetching it - while a later mutation bump still
+  // refetches.
+  //
+  // Captured once, like the seed itself, and never updated: it describes the
+  // list `projects` started with, so reading it from a later prop (or stamping
+  // it after a fetch) would make the guard describe a list App no longer holds.
+  // Never moving off the seed's version is deliberate - past it the effect
+  // behaves exactly as it did before the seed existed, which is how a re-login
+  // still refreshes the list.
+  const [projectsAsOf] = React.useState<number | null>(() =>
+    initialProjects != null ? 0 : null,
+  );
   const [health, setHealth] = React.useState<HealthInfo | null>(null);
   const [tokenTtl, setTokenTtl] = React.useState<number | null>(null);
   const [sessionExpired, setSessionExpired] = React.useState(false);
@@ -499,6 +522,11 @@ export default function App({ initialMode }: AppProps = {}) {
   // from it, and a mutation elsewhere (`assetsVersion`) can change its counts.
   React.useEffect(() => {
     if (!visitedModes.projects) return;
+    // The boot list is current as of this version -> no second request. A
+    // mutation bump changes `assetsVersion` past it, so the list refetches from
+    // then on - as does anything else that re-runs this effect (a re-login, via
+    // `handleUnauthorized`), because the seed's stamp never moves.
+    if (projectsAsOf === assetsVersion) return;
     let cancelled = false;
     (async () => {
       try {
@@ -517,7 +545,7 @@ export default function App({ initialMode }: AppProps = {}) {
     return () => {
       cancelled = true;
     };
-  }, [visitedModes.projects, assetsVersion, handleUnauthorized]);
+  }, [visitedModes.projects, assetsVersion, projectsAsOf, handleUnauthorized]);
 
   const handleLogout = () => {
     const refresh = readRefreshToken();
@@ -736,135 +764,143 @@ export default function App({ initialMode }: AppProps = {}) {
               </button>
             </div>
           </header>
-          {/* Same lazy-mount rule as the rail: each mode's grid is created on
-              first visit and then stays mounted (only hidden), so search, sort,
-              selection and loaded pages survive a mode switch. */}
-          {activeView === "library" && visitedModes.files && (
-            <div hidden={mode !== "files"}>
-              <AssetGrid
-                canContribute={canContribute}
-                canDelete={canDelete}
-                folderId={folderId}
-                unfiled={unfiled}
-                foldersVersion={folderVersion}
-                assetsVersion={assetsVersion}
-                countsVersion={countsVersion}
-                onAssetsFiled={handleAssetsFiled}
-                onUnauthorized={handleUnauthorized}
-                slicerSettings={settings.slicer}
-                engravingSettings={settings.engraving}
-                previewSettings={settings.previews}
-                theme={resolvedTheme}
-                scrollElementRef={mainScrollRef}
-                onNavigateFolder={handleSelectFolder}
-                onProjectsChanged={handleAssetsChanged}
-              />
-            </div>
-          )}
-          {activeView === "library" && visitedModes.projects && (
-            <div hidden={mode !== "projects"}>
-              <ProjectView
-                canContribute={canContribute}
-                canDelete={canDelete}
-                projects={projects}
-                selectedProjectId={openProjectId}
-                onOpenProject={handleOpenProject}
-                onCloseProject={handleCloseProject}
-                onProjectCreated={handleProjectCreated}
-                onProjectUpdated={handleProjectUpdated}
-                onProjectDeleted={handleProjectDeleted}
-                onAssetsChanged={handleAssetsChanged}
-                assetsVersion={assetsVersion}
-                onUnauthorized={handleUnauthorized}
-                slicerSettings={settings.slicer}
-                engravingSettings={settings.engraving}
-                previewSettings={settings.previews}
-                theme={resolvedTheme}
-                scrollElementRef={mainScrollRef}
-              />
-            </div>
-          )}
-          {activeView === "settings" && (
-            <React.Suspense fallback={<SettingsLoading />}>
-              <Settings
-                settings={settings}
-                onChange={setSettings}
-                onUnauthorized={handleUnauthorized}
-                role={role}
-                username={identity.username}
-                kind={identity.kind}
-              />
-            </React.Suspense>
-          )}
-          {activeView === "review" && (
-            <>
-              <ReviewQueueTabs
-                activeQueue={resolvedQueue}
-                counts={reviewCounts}
-                onSelect={handleOpenReview}
-                role={role}
-              />
-              {/* One tabpanel for whichever queue the role may actually open: a
-                  stored key the role cannot see is resolved away, so the panel
-                  and the selected tab always name the same queue - the row reads
-                  the resolved key too, because a tablist with no selected tab
-                  would leave the panel labelled by an unselected one. */}
-              {resolvedQueue !== null && (
-                <div
-                  role="tabpanel"
-                  id={`review-tabpanel-${resolvedQueue}`}
-                  aria-labelledby={`review-tab-${resolvedQueue}`}
-                >
-                  {resolvedQueue === "bundles" && (
-                    <BundleReviewView state={bundleReview} canContribute={canContribute} />
-                  )}
-                  {resolvedQueue === "imports" && (
-                    <ImportsReviewView
-                      state={importsReview}
-                      canWrite={canDelete}
-                      onAssetsChanged={handleAssetsChanged}
-                      onFoldersChanged={handleFoldersChanged}
-                      onUnauthorized={handleUnauthorized}
-                      onSelectFolder={handleSelectFolder}
-                    />
-                  )}
-                  {resolvedQueue === "missing" && (
-                    <MissingFilesReviewView
-                      state={missingReview}
-                      canWrite={canDelete}
-                      canContribute={canContribute}
-                      canDelete={canDelete}
-                      missingCount={counts ? counts.missing : null}
-                      assetsVersion={assetsVersion}
-                      onRefresh={handleAssetsChanged}
-                      onAssetsFiled={handleAssetsFiled}
-                      onUnauthorized={handleUnauthorized}
-                      slicerSettings={settings.slicer}
-                      engravingSettings={settings.engraving}
-                      previewSettings={settings.previews}
-                      theme={resolvedTheme}
-                      scrollElementRef={mainScrollRef}
-                    />
-                  )}
-                  {resolvedQueue === "trash" && (
-                    <TrashQueueView state={trashReview} canPurge={canPurgeTrash} />
-                  )}
-                </div>
-              )}
-            </>
-          )}
-          {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}
-          {activeView === "audit" && roleAtLeast(role, "admin") && (
-            <AuditLog onUnauthorized={handleUnauthorized} />
-          )}
+          {/* A rejected lazy chunk throws during render and React unwinds to
+              the nearest boundary. Keying by `activeView` means navigating to
+              another view (or back) recovers without a reload, and the shell
+              (rail, header, log out) sits outside the boundary so the screen is
+              never blank. */}
+          <ErrorBoundary key={activeView}>
+            {/* Same lazy-mount rule as the rail: each mode's grid is created on
+                first visit and then stays mounted (only hidden), so search, sort,
+                selection and loaded pages survive a mode switch. */}
+            {activeView === "library" && visitedModes.files && (
+              <div hidden={mode !== "files"}>
+                <AssetGrid
+                  canContribute={canContribute}
+                  canDelete={canDelete}
+                  folderId={folderId}
+                  unfiled={unfiled}
+                  foldersVersion={folderVersion}
+                  assetsVersion={assetsVersion}
+                  countsVersion={countsVersion}
+                  onAssetsFiled={handleAssetsFiled}
+                  onUnauthorized={handleUnauthorized}
+                  slicerSettings={settings.slicer}
+                  engravingSettings={settings.engraving}
+                  previewSettings={settings.previews}
+                  theme={resolvedTheme}
+                  scrollElementRef={mainScrollRef}
+                  onNavigateFolder={handleSelectFolder}
+                  onProjectsChanged={handleAssetsChanged}
+                />
+              </div>
+            )}
+            {activeView === "library" && visitedModes.projects && (
+              <div hidden={mode !== "projects"}>
+                <ProjectView
+                  canContribute={canContribute}
+                  canDelete={canDelete}
+                  projects={projects}
+                  selectedProjectId={openProjectId}
+                  onOpenProject={handleOpenProject}
+                  onCloseProject={handleCloseProject}
+                  onProjectCreated={handleProjectCreated}
+                  onProjectUpdated={handleProjectUpdated}
+                  onProjectDeleted={handleProjectDeleted}
+                  onAssetsChanged={handleAssetsChanged}
+                  assetsVersion={assetsVersion}
+                  onUnauthorized={handleUnauthorized}
+                  slicerSettings={settings.slicer}
+                  engravingSettings={settings.engraving}
+                  previewSettings={settings.previews}
+                  theme={resolvedTheme}
+                  scrollElementRef={mainScrollRef}
+                />
+              </div>
+            )}
+            {activeView === "settings" && (
+              <React.Suspense fallback={<SettingsLoading />}>
+                <Settings
+                  settings={settings}
+                  onChange={setSettings}
+                  onUnauthorized={handleUnauthorized}
+                  role={role}
+                  username={identity.username}
+                  kind={identity.kind}
+                />
+              </React.Suspense>
+            )}
+            {activeView === "review" && (
+              <>
+                <ReviewQueueTabs
+                  activeQueue={resolvedQueue}
+                  counts={reviewCounts}
+                  onSelect={handleOpenReview}
+                  role={role}
+                />
+                {/* One tabpanel for whichever queue the role may actually open: a
+                    stored key the role cannot see is resolved away, so the panel
+                    and the selected tab always name the same queue - the row reads
+                    the resolved key too, because a tablist with no selected tab
+                    would leave the panel labelled by an unselected one. */}
+                {resolvedQueue !== null && (
+                  <div
+                    role="tabpanel"
+                    id={`review-tabpanel-${resolvedQueue}`}
+                    aria-labelledby={`review-tab-${resolvedQueue}`}
+                  >
+                    {resolvedQueue === "bundles" && (
+                      <BundleReviewView state={bundleReview} canContribute={canContribute} />
+                    )}
+                    {resolvedQueue === "imports" && (
+                      <ImportsReviewView
+                        state={importsReview}
+                        canWrite={canDelete}
+                        onAssetsChanged={handleAssetsChanged}
+                        onFoldersChanged={handleFoldersChanged}
+                        onUnauthorized={handleUnauthorized}
+                        onSelectFolder={handleSelectFolder}
+                      />
+                    )}
+                    {resolvedQueue === "missing" && (
+                      <MissingFilesReviewView
+                        state={missingReview}
+                        canWrite={canDelete}
+                        canContribute={canContribute}
+                        canDelete={canDelete}
+                        missingCount={counts ? counts.missing : null}
+                        assetsVersion={assetsVersion}
+                        onRefresh={handleAssetsChanged}
+                        onAssetsFiled={handleAssetsFiled}
+                        onUnauthorized={handleUnauthorized}
+                        slicerSettings={settings.slicer}
+                        engravingSettings={settings.engraving}
+                        previewSettings={settings.previews}
+                        theme={resolvedTheme}
+                        scrollElementRef={mainScrollRef}
+                      />
+                    )}
+                    {resolvedQueue === "trash" && (
+                      <TrashQueueView state={trashReview} canPurge={canPurgeTrash} />
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+            {activeView === "audit" && !roleAtLeast(role, "admin") && <NotPermitted />}
+            {activeView === "audit" && roleAtLeast(role, "admin") && (
+              <AuditLog onUnauthorized={handleUnauthorized} />
+            )}
+          </ErrorBoundary>
         </main>
         {/* App's conditional children are only ever APPENDED after <main> in
             this array. React reconciles an unkeyed children array by index, so a
             child inserted before <main> (a scrim between the rail and it) takes
-            a slot in front of it and can remount <main>; `useVirtualRows`'
-            scroll listener is keyed on the stable ref object and would never
-            re-subscribe to the new node, so virtualisation would die silently
-            with every test still green. */}
+            a slot in front of it and remounts <main>. `useVirtualRows` now
+            observes element scrolls through a `document` capture listener and
+            reads the ref fresh, so it survives a late-attached or replaced
+            scroller; a remount is still a real loss, because it throws away the
+            grid's search, selection and loaded pages. */}
         {narrow && drawerOpen && <div className="folder-drawer-scrim" aria-hidden="true" />}
       </div>
       {confirmingLogout && (

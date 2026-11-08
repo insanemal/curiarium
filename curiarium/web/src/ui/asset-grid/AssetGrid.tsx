@@ -14,6 +14,7 @@ import BulkMetaDialog from "../BulkMetaDialog";
 import ConfirmDialog from "../ConfirmDialog";
 import FolderBreadcrumbs, { FolderTiles } from "../FolderNav";
 import ProjectPickerDialog from "../ProjectPickerDialog";
+import ArchiveExtractDialog, { type ExtractTarget } from "../archive/ArchiveExtractDialog";
 import { filesScope } from "../filesScope";
 import { useUpload } from "../useUpload";
 import { useVirtualRows } from "../useVirtualRows";
@@ -126,6 +127,10 @@ export default function AssetGrid({
   const canDeleteAssets = canDelete && !isProject;
   const [previewItem, setPreviewItem] = useState<Asset | null>(null);
   const [previewSection, setPreviewSection] = useState<DetailSection | null>(null);
+  // The one archive the card kebab asked to extract, or null when its dialog is
+  // closed. Holding the path+label pair keeps `storage_path` narrowing where it
+  // happened, so the dialog never needs a non-null assertion.
+  const [extractTarget, setExtractTarget] = useState<ExtractTarget | null>(null);
   // The assets the user asked to delete, or null when the dialog is closed. The
   // parent stays the only owner of the request so the grid's optimistic update
   // and selection retention keep a single path.
@@ -198,6 +203,7 @@ export default function AssetGrid({
     toggleSelected,
     clearSelection,
     selectAllLoaded,
+    selectIds,
     bulkBusy,
     bulkFailures,
     bulkRequestError,
@@ -245,6 +251,7 @@ export default function AssetGrid({
     addToProject,
     forgetMissingAsset,
     rescanMissing,
+    refreshAfterExtract,
     pendingConfirm,
     confirmBusy,
     setPendingConfirm,
@@ -308,6 +315,14 @@ export default function AssetGrid({
       );
       setItems(remaining);
       setOffset(Math.max(0, startOffset - (before.length - remaining.length)));
+      // Failed rows stay selected so the bar's per-asset lines have something to
+      // retry. This must run after `setItems(remaining)` and never from
+      // `finally`: selection is pruned against `items` by an effect, so adding
+      // an id while the optimistic drop still hides that row would let the
+      // prune delete it again.
+      selectIds(
+        remaining.filter(item => failedIds.has(item.id)).map(item => item.id),
+      );
       if (result.failed.length) {
         if (targets.length > 1) {
           setUnlinkFailures(result.failed);
@@ -452,6 +467,14 @@ export default function AssetGrid({
     setPreviewSection(null);
   });
 
+  // The card menu and the dialog are the same door as the preview footer's: one
+  // `ArchiveExtractAction`, one `{path, entries: null}` request. A `.zip` without
+  // a storage path has no library copy to extract, so it opens nothing.
+  const requestExtract = useStableCallback((asset: Asset) => {
+    if (!asset.storage_path) return;
+    setExtractTarget({ path: asset.storage_path, label: asset.filename });
+  });
+
   const openMetaDialog = useStableCallback(() => {
     if (!selectedIds.size) return;
     setMetaRequestError(null);
@@ -576,6 +599,7 @@ export default function AssetGrid({
       onAssetChanged={replaceAsset}
       onForgetMissing={forgetMissingAsset}
       onRescanMissing={rescanMissing}
+      onExtractArchive={requestExtract}
       rescanning={rescanning}
       onClearPreparedPrint={clearPreparedPrint}
       preparedClearing={preparedClearingId === item.id}
@@ -707,6 +731,14 @@ export default function AssetGrid({
         />
       )}
       </div>
+      {extractTarget && (
+        <ArchiveExtractDialog
+          targets={[extractTarget]}
+          canContribute={canContribute}
+          onExtracted={results => { void refreshAfterExtract(results); }}
+          onClose={() => setExtractTarget(null)}
+        />
+      )}
       {pendingConfirm && (
         <ConfirmDialog
           title={pendingConfirm.title}

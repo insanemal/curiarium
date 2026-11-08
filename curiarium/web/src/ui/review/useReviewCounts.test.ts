@@ -81,7 +81,13 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     image_count: 5,
     text_count: 2,
     other_count: 0,
-    cover: { asset_id: "asset-1", rel_path: "images/hero.jpg", reason: "largest-image" },
+    cover: {
+      asset_id: "asset-1",
+      rel_path: "images/hero.jpg",
+      reason: "largest-image",
+      url: "/file/asset-1/hero.jpg",
+      thumb_url: "/thumb/asset-1.jpg?v=1",
+    },
     assets_total: 8,
     status: "ready",
     blocked_reason: null,
@@ -137,6 +143,13 @@ function makeState(report: BundleReport | null): BundleDetectState {
     refresh: async () => undefined,
     create: async () => undefined,
     dismiss: async () => undefined,
+    // Source-page enrichment is the queue view's concern; these fixtures never
+    // call it and never show a notice.
+    enrich: async () => undefined,
+    notice: null,
+    // Extraction settling is the queue view's concern; this hook's fixtures
+    // report a settled scan so no timer is ever armed here.
+    afterExtract: async () => "settled" as const,
   };
 }
 

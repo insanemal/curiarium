@@ -13,10 +13,12 @@ Containment is S2's, not a second implementation: ``snapshots.assert_library_pat
 confines the request's path and every target, and its ``SnapshotPathError`` is
 mapped with ``snapshot_guard.status_for``, so a bad path means the same status
 here as it does on every snapshot route. Entry names come from
-``zip_service``'s normaliser, each path segment is rendered by
-``file_utils.sanitize_filename`` (per segment, so the tree keeps its shape),
-folder names come from ``zip_service``'s sanitiser, and the budget from the
-shared preflight plus stream - one accounting rule for both extractors.
+``entry_policy``'s normaliser, each path segment is rendered by the same module
+(per segment, so the tree keeps its shape), folder names come from
+``zip_service``'s sanitiser, and the budget from ``entry_policy``'s shared
+preflight plus stream - one accounting rule for both extractors. Junk is
+classified first, so this door writes only payload: a junk-only selection is a
+200 that writes nothing at all.
 
 Three properties make this safe to run over a live library:
 
@@ -54,7 +56,7 @@ from fastapi import HTTPException
 
 import audit
 import bundle_detect
-import file_utils
+import entry_policy
 import seams
 import snapshot_guard
 import snapshots
@@ -102,13 +104,11 @@ def extract_out(
     twin_rel = _twin_rel(normalized)
     try:
         with ZipFile(source) as zf:
-            selection = entries if entries is not None else zip_service.all_zip_entry_names(zf)
-            plan = zip_service.plan_zip_selection(zf, selection)
-            missing = [name for name in plan.ordered if name not in plan.entries]
-            if missing:
+            plan = entry_policy.plan_selection(zf, entries)
+            if plan.missing:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Selection names entries that are not in the archive: {', '.join(sorted(missing))}",
+                    detail=f"Selection names entries that are not in the archive: {', '.join(sorted(plan.missing))}",
                 )
             if plan.oversized:
                 # All-or-nothing means an entry already declared over the per-file
@@ -118,11 +118,25 @@ def extract_out(
                     status_code=413,
                     detail=(
                         "Selected zip entries declare more than the per-file limit of "
-                        f"{zip_service.IMPORT_MAX_BYTES} bytes (IMPORT_MAX_MB): "
+                        f"{entry_policy.IMPORT_MAX_BYTES} bytes (IMPORT_MAX_MB): "
                         + ", ".join(sorted(plan.oversized))
                     ),
                 )
-            target_rels = [_member_rel(twin_rel, name) for name in plan.ordered]
+            if not plan.writable:
+                # The other nothing-written outcome: no twin directory, no scan
+                # kick and no audit row. Every member was junk or directory-like,
+                # so no destination existed and `already_present` stays False;
+                # `already_present is False` with `files == 0` is this signature,
+                # where the every-destination-exists no-op below answers True.
+                return ArchiveExtractOut(
+                    path=normalized,
+                    destination=twin_rel,
+                    files=0,
+                    bytes=0,
+                    already_present=False,
+                    scan_started=False,
+                )
+            target_rels = [_member_rel(twin_rel, name) for name in plan.writable]
             targets = [_assert_library_path(rel) for rel in target_rels]
             if _already_present(targets):
                 # Every destination exists: this request would change nothing, so
@@ -143,35 +157,35 @@ def extract_out(
             written = 0
             published: List[Path] = []
             try:
-                for name in plan.ordered:
+                for name in plan.writable:
                     staged = staging / name
                     staged.parent.mkdir(parents=True, exist_ok=True)
                     try:
-                        written += zip_service.stream_zip_entry(
+                        written = entry_policy.stream_entry(
                             zf,
-                            plan.entries[name],
+                            plan.members[name],
                             staged,
-                            remaining_bytes=zip_service.IMPORT_ZIP_MAX_BYTES - written,
+                            spent_bytes=written,
                         )
-                    except zip_service.ZipEntryTooLarge as error:
+                    except entry_policy.EntryTooLarge as error:
                         raise HTTPException(
                             status_code=413,
                             detail=(
                                 f"{name!r} expands beyond the per-file limit of "
-                                f"{zip_service.IMPORT_MAX_BYTES} bytes (IMPORT_MAX_MB)"
+                                f"{entry_policy.IMPORT_MAX_BYTES} bytes (IMPORT_MAX_MB)"
                             ),
                         ) from error
-                    except zip_service.ZipBudgetExceeded as error:
+                    except entry_policy.BudgetExceeded as error:
                         raise HTTPException(
                             status_code=413,
                             detail=(
-                                f"Selected zip entries expand beyond {written + error.total_written} bytes; "
-                                f"the limit is {zip_service.IMPORT_ZIP_MAX_BYTES} bytes (IMPORT_ZIP_MAX_MB)"
+                                f"Selected zip entries expand beyond {error.total_written} bytes; "
+                                f"the limit is {entry_policy.IMPORT_ZIP_MAX_BYTES} bytes (IMPORT_ZIP_MAX_MB)"
                             ),
                         ) from error
 
                 try:
-                    for name, target_rel, target in zip(plan.ordered, target_rels, targets, strict=True):
+                    for name, target_rel, target in zip(plan.writable, target_rels, targets, strict=True):
                         created_dirs.extend(_make_directories(target.parent, twin_rel))
                         if not _move_without_clobber(staging / name, target):
                             # Something claimed the name after the preflight; the
@@ -210,7 +224,8 @@ def extract_out(
     scan_started = bool(seams.start_scan())
 
     # One row per successful extract, fail-loud. An idempotent request wrote
-    # nothing, so it records nothing. The guard is defensive only: the route's
+    # nothing, so it records nothing, and a selection with nothing writable
+    # returned before this point. The guard is defensive only: the route's
     # `audit.context_for` always returns a context and the plan guarantees at
     # least one target, so neither branch is reachable from the route.
     if ctx is not None and target_rels:
@@ -308,36 +323,23 @@ def _twin_rel(normalized: str) -> str:
 
 
 def _member_rel(twin_rel: str, name: str) -> str:
-    """One member's destination: the twin, then its normalised segments rendered.
+    """One member's destination: the twin, then its rendered segments.
 
-    ``file_utils.sanitize_filename`` is the library's one filename renderer, so a
-    member lands exactly as it renders it. Per segment on purpose: applied to the
-    whole member name it would basename the separators away and flatten the
-    archive's tree into one directory, so each segment keeps its own place.
-
-    Rendering is also the step that can create a ``.`` or ``..`` segment, and one
-    of those is refused here, before the rels are resolved and before staging
-    exists. ``sanitize_filename`` strips whitespace and NULs before taking the
-    basename, so ``".. "``, ``" .."``, ``"\t.."`` and ``"..\x00"`` all render to
-    ``".."`` while ``" . "`` renders to ``"."``. The shared
-    ``zip_service.normalize_zip_entry_path`` rejects an *exact* ``".."`` part, which
-    is a different set: these spellings survive it, and joined here they would walk
-    out of the twin (``twin/../evil.stl``) or collapse the twin itself into the
-    member's file. Refusing keeps this module's promise that a member lands exactly
-    where its segments render - ``sanitize_path_segment``'s dot-stripping fallback
-    would silently rename the member instead, leaving a file whose name the
-    archive does not have.
+    The rendering, and the refusal of a segment that renders to ``.`` or ``..``,
+    is ``entry_policy.entry_member_segments``'s: one filename rule for both
+    extractors. It refuses here, before the rels are resolved and before staging
+    exists, so nothing is written for a member that would escape the twin.
     """
-    segments = [file_utils.sanitize_filename(part) for part in name.split("/")]
-    for segment in segments:
-        if segment in (".", ".."):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"{name!r} has a path segment that renders to {segment!r}, which would escape {twin_rel!r}; "
-                    "rename the member inside the archive, or select other entries"
-                ),
-            )
+    try:
+        segments = entry_policy.entry_member_segments(name)
+    except entry_policy.EntryPathRefused as error:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{error.name!r} has a path segment that renders to {error.segment!r}, which would escape {twin_rel!r}; "
+                "rename the member inside the archive, or select other entries"
+            ),
+        ) from error
     return posixpath.join(twin_rel, *segments)
 
 

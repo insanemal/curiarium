@@ -34,6 +34,7 @@ import asset_service
 import audit
 import bundle_service
 import db
+import entry_policy
 import library_scan
 import main
 import settings_service
@@ -89,6 +90,7 @@ def isolated_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         assets_before = {asset.id for asset in session.exec(select(Asset))}
     yield storage
     settings_service.set_setting(settings_service.BUNDLE_DISMISSALS_KEY, "")
+    settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, "")
     with Session(engine) as session:
         # Projects first: `idx_project_name_unique` is case-insensitive, so a
         # leaked row would 409 the next test's project.
@@ -619,13 +621,18 @@ def test_ordinary_dotted_member_names_still_extract(
 # --- AC-4: the two budget gates --------------------------------------------
 
 
+# Both caps are read by `entry_policy`, which owns the budget: patching
+# `zip_service` here would now be an AttributeError, which is the dynamic proof
+# that the module, not the door, holds the number.
+
+
 def test_a_declared_budget_overshoot_refuses_before_any_write(
     client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     storage = isolated_storage
     write_zip(storage / "Big.zip", {"a.stl": b"a" * 10, "b.stl": b"b" * 10})
-    monkeypatch.setattr(zip_service, "IMPORT_MAX_BYTES", 1000)
-    monkeypatch.setattr(zip_service, "IMPORT_ZIP_MAX_BYTES", 15)
+    monkeypatch.setattr(entry_policy, "IMPORT_MAX_BYTES", 1000)
+    monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 15)
     headers = auth_header(client)
     stub_scan(monkeypatch)
     before = tree(storage)
@@ -644,8 +651,8 @@ def test_an_understated_entry_is_refused_after_streaming(
 ) -> None:
     storage = isolated_storage
     write_zip(storage / "Lies.zip", {"a.stl": b"a" * 10, "b.stl": b"b" * 10})
-    monkeypatch.setattr(zip_service, "IMPORT_MAX_BYTES", 1000)
-    monkeypatch.setattr(zip_service, "IMPORT_ZIP_MAX_BYTES", 15)
+    monkeypatch.setattr(entry_policy, "IMPORT_MAX_BYTES", 1000)
+    monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 15)
     # Every member declares one byte and serves ten: the preflight passes and the
     # running total is what refuses the request, after the bytes have been read.
     monkeypatch.setattr(archive_service, "ZipFile", ShrunkSizeZipFile)
@@ -667,8 +674,8 @@ def test_a_declared_entry_over_the_per_file_cap_is_refused_before_staging(
 ) -> None:
     storage = isolated_storage
     write_zip(storage / "Giant.zip", {"big.stl": b"x" * 10})
-    monkeypatch.setattr(zip_service, "IMPORT_MAX_BYTES", 5)
-    monkeypatch.setattr(zip_service, "IMPORT_ZIP_MAX_BYTES", 1000)
+    monkeypatch.setattr(entry_policy, "IMPORT_MAX_BYTES", 5)
+    monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 1000)
     headers = auth_header(client)
     stub_scan(monkeypatch)
     before = tree(storage)
@@ -689,8 +696,8 @@ def test_an_entry_that_outgrows_the_per_file_cap_while_streaming_is_refused(
     """The declaration is metadata: the bytes are still re-checked while streaming."""
     storage = isolated_storage
     write_zip(storage / "Giant.zip", {"big.stl": b"x" * 10})
-    monkeypatch.setattr(zip_service, "IMPORT_MAX_BYTES", 5)
-    monkeypatch.setattr(zip_service, "IMPORT_ZIP_MAX_BYTES", 1000)
+    monkeypatch.setattr(entry_policy, "IMPORT_MAX_BYTES", 5)
+    monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 1000)
     # Declares one byte and serves ten: only the streamed size can refuse it.
     monkeypatch.setattr(archive_service, "ZipFile", ShrunkSizeZipFile)
     headers = auth_header(client)

@@ -22,7 +22,7 @@
     "type": "object"
   },
   "ArchiveExtractOut": {
-    "description": "What an in-library extract did, or that it had nothing left to do.\n\n`already_present` is the idempotent outcome: every destination existed, so the\nrequest wrote nothing, started no scan and wrote no audit row. `destination`\nis library-relative, the twin directory beside the zip.",
+    "description": "What an in-library extract did, or that it had nothing left to do.\n\nTwo outcomes write nothing, and `(files, already_present)` tells them apart.\n`already_present=True` is the idempotent one: every destination already\nexisted. `already_present=False` with `files=0` is the junk-only one: the\nselection had nothing writable, every member being OS metadata or\ndirectory-like. Neither wrote a file, started a scan or wrote an audit row.\n`destination` is library-relative, the twin directory beside the zip.",
     "properties": {
       "already_present": {
         "title": "Already Present",
@@ -86,6 +86,103 @@
       "path"
     ],
     "title": "ArchiveExtractRequest",
+    "type": "object"
+  },
+  "ArchiveProjectOut": {
+    "description": "The verdict of the extract-and-create door, or the project it made.\n\nEvery verdict is a 200: this door has nothing to refuse on policy grounds, so\n`status` is the whole verdict and a client never has to guess from a status\ncode. `partial` and `nothing_resolved` create no project and carry no `project`;\n`planned`/`resolved` are the two set sizes the comparison was made over and\n`failed` names every planned entry that never became a registered asset, so\n\"how many entries failed\" is a fact from the server rather than an inference.\n`twin` is library-relative and is named so the operator can go and look at\nwhere the files live.",
+    "properties": {
+      "archive": {
+        "title": "Archive",
+        "type": "string"
+      },
+      "failed": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Failed",
+        "type": "array"
+      },
+      "planned": {
+        "title": "Planned",
+        "type": "integer"
+      },
+      "project": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ProjectOut"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "resolved": {
+        "title": "Resolved",
+        "type": "integer"
+      },
+      "status": {
+        "enum": [
+          "created",
+          "already_created",
+          "partial",
+          "nothing_resolved"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "twin": {
+        "title": "Twin",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "archive",
+      "twin",
+      "planned",
+      "resolved"
+    ],
+    "title": "ArchiveProjectOut",
+    "type": "object"
+  },
+  "ArchiveProjectRequest": {
+    "description": "The archive whose extraction the operator declared to be one project.\n\n`entries=None` means every member the archive holds, exactly the selection\n`POST /import/archive` takes when it is given `None`; a list is the subset the\noperator extracted. The names are checked against the archive, so a pick the\narchive does not hold is a 400 rather than a silently missing member.",
+    "properties": {
+      "entries": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Entries"
+      },
+      "name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Name"
+      },
+      "path": {
+        "title": "Path",
+        "type": "string"
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "title": "ArchiveProjectRequest",
     "type": "object"
   },
   "ImportInspectOut": {
@@ -610,7 +707,12 @@
     "type": "object"
   },
   "ZipEntryOut": {
+    "description": "One zip member as an entries listing reports it.\n\n`junk` is the server's verdict (`entry_policy.is_junk_entry`) that the member\nis OS metadata - `__MACOSX/`, `.DS_Store`, `Thumbs.db`, an AppleDouble `._*` -\nand both server extract doors refuse it: `/import/zip` reports it in `failed`,\n`/import/archive` leaves it out of the extraction. The server decides it; the\nbrowser only uses it to choose the modal's default ticks.",
     "properties": {
+      "junk": {
+        "title": "Junk",
+        "type": "boolean"
+      },
       "path": {
         "title": "Path",
         "type": "string"
@@ -622,7 +724,8 @@
     },
     "required": [
       "path",
-      "size"
+      "size",
+      "junk"
     ],
     "title": "ZipEntryOut",
     "type": "object"

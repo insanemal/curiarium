@@ -105,7 +105,7 @@ export default function SettingsRootMenu({ onOpen, role = null, username = null,
       >
         <div className="text-xs uppercase tracking-wide text-muted">Imports</div>
         <div className="text-lg font-semibold">Import sources</div>
-        <div className="text-sm opacity-70">Set the mounted import path and the optional import-cookie workarounds.</div>
+        <div className="text-sm opacity-70">Set the mount-import options and the optional import-cookie workarounds.</div>
       </button>
       <p className="col-span-full text-xs text-muted" data-testid="app-version">
         Curiarium {__APP_VERSION__} ({__APP_BUILD__})

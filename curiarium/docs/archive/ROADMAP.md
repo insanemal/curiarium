@@ -9,7 +9,7 @@
 This roadmap expresses sequencing, not promised dates. Reliability and migration
 safety take priority over reaching a named architectural milestone quickly.
 
-Execution is governed by [ARCHITECTURE_RUNBOOK.md](ARCHITECTURE_RUNBOOK.md). A
+Execution is governed by [ARCHITECTURE_RUNBOOK.md](../ARCHITECTURE_RUNBOOK.md). A
 roadmap item is complete only after its gate evidence is accepted and the
 architecture is re-baselined.
 

@@ -573,7 +573,7 @@ html, body, #root { height: 100%; }
 
   .review-row {
     @apply grid items-center gap-3 rounded-lg border border-transparent px-2.5 py-1.5 text-[12px] transition-colors;
-    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.4fr) 7.5rem minmax(0, 1fr) 6rem;
+    grid-template-columns: 2.5rem minmax(0, 1.6fr) minmax(0, 1.4fr) 7.5rem minmax(0, 1fr) 6rem;
     color: var(--mv-text-muted);
     cursor: default;
   }
@@ -598,6 +598,20 @@ html, body, #root { height: 100%; }
   .review-row-confidence { @apply text-[11px] font-semibold; }
   .review-row-status { @apply truncate text-[11px]; color: var(--mv-text-muted); }
   .review-row-state { @apply text-[11px] font-semibold; color: var(--mv-text-subtle); }
+
+  /* The row's leading cell: a served thumbnail or a rendered frame in a fixed
+     square, so every row keeps the same columns. The panel background and border
+     make the square read as a slot rather than a hole. Every row always renders
+     this span - an empty square for a `none` cover, or for one whose grants are
+     not settled yet - precisely so the six-track grid on `.review-row` never
+     shifts, rather than offering a broken image. */
+  .review-thumb {
+    @apply grid h-10 w-10 place-items-center overflow-hidden rounded-md border;
+    border-color: var(--mv-border-strong);
+    background: var(--mv-panel-soft);
+  }
+
+  .review-thumb img { @apply h-full w-full object-cover; }
 
   .review-detail {
     @apply flex flex-col gap-2 rounded-lg border p-3;
@@ -630,6 +644,10 @@ html, body, #root { height: 100%; }
   }
 
   .review-detail-actions { @apply flex flex-wrap items-center gap-2; }
+
+  /* The sentence that stands where an absent enrichment door would: it reads as
+     an aside, not as a control, so it takes the muted token and no border. */
+  .review-detail-reason { @apply text-[11px]; color: var(--mv-text-muted); }
 
   .review-loading { @apply text-[13px]; color: var(--mv-text-muted); }
 

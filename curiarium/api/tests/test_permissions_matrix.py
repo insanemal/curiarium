@@ -1,7 +1,7 @@
 """Per-route permission sweeps driven by `permissions.ROUTE_PERMISSIONS`.
 
 Why this file exists: Mf-2nbc enforces a level with a *per-route dependency*, and
-the only thing that keeps 100 hand-written declarations honest is a test that
+the only thing that keeps 102 hand-written declarations honest is a test that
 visits every route at every role. The sweeps below are parametrised from
 `permissions.ROUTE_PERMISSIONS`, so that table is both the documentation and the
 test plan: add a route without classifying it and
@@ -52,6 +52,7 @@ import asset_service
 import auth
 import bundle_service
 import db
+import import_resolvers
 import import_runs
 import library_scan
 import login_throttle as login_throttle_module
@@ -669,6 +670,12 @@ def call_import_archive(client: TestClient, headers: dict[str, str], ids: Ids, m
     return client.post("/import/archive", json={"path": "missing.zip"}, headers=headers)
 
 
+def call_import_archive_project(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    # Mf-0ck5: no project carries this archive path and the archive is not in the
+    # library, so the door answers the honest 404 having read and written nothing.
+    return client.post("/import/archive/project", json={"path": "missing.zip"}, headers=headers)
+
+
 def call_upload_supporting_file(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     return client.post(
         f"/asset/{ids.asset_id}/files",
@@ -944,6 +951,13 @@ def call_project_assets(client: TestClient, headers: dict[str, str], ids: Ids, m
     return client.get(f"/project/{ids.project_id}/assets", headers=headers)
 
 
+def call_project_bundle_drift(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    # The seeded project carries no `_bundle` marker, so this is the
+    # `not_applicable` read: no question, and no prefix query at all (pinned as a
+    # statement count in `test_a_hand_made_project_reports_no_drift_question`).
+    return client.get(f"/project/{ids.project_id}/bundle-drift", headers=headers)
+
+
 def call_add_project_assets(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     # Idempotent either way: the first pass adds, a repeat skips, both are a 200.
     return client.post(
@@ -978,6 +992,31 @@ def call_create_bundles(client: TestClient, headers: dict[str, str], ids: Ids, m
 
 def call_dismiss_bundles(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     return client.post("/bundles/dismiss", json={"keys": ["no/such/bundle"], "dismissed": True}, headers=headers)
+
+
+def call_enrich_bundles(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    """An unknown key short-circuits before any fetch, so this stays hermetic.
+
+    The tripwire and the cache-write assertion make the sweep hermetic on its own
+    merits: the suite's empty storage root is an accident of the current fixture,
+    not a guarantee that no row wants a page.
+    """
+
+    def refuse_fetch(*args, **kwargs):
+        raise AssertionError("the permission sweep must not fetch a vendor page")
+
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", refuse_fetch)
+    writes: list[str] = []
+    real_set_setting = settings_service.set_setting
+
+    def spy(key: str, value: str, **kwargs) -> None:
+        writes.append(key)
+        real_set_setting(key, value, **kwargs)
+
+    monkeypatch.setattr(settings_service, "set_setting", spy)
+    response = client.post("/bundles/enrich", json={"keys": ["no/such/bundle"]}, headers=headers)
+    assert settings_service.BUNDLE_ENRICHMENTS_KEY not in writes, "an unknown key must not write the enrich cache"
+    return response
 
 
 # SSO is off in this module (the matrix tests never configure a provider), so
@@ -1155,6 +1194,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/import/zip"): call_import_zip,
     ("GET", "/import/archive/entries"): call_import_archive_entries,
     ("POST", "/import/archive"): call_import_archive,
+    ("POST", "/import/archive/project"): call_import_archive_project,
     ("GET", "/imports/runs"): call_list_import_runs,
     ("GET", "/imports/runs/{run_id}"): call_import_run_detail,
     ("POST", "/asset/{asset_id}/files"): call_upload_supporting_file,
@@ -1203,11 +1243,13 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("PATCH", "/project/{project_id}"): call_update_project,
     ("DELETE", "/project/{project_id}"): call_delete_project,
     ("GET", "/project/{project_id}/assets"): call_project_assets,
+    ("GET", "/project/{project_id}/bundle-drift"): call_project_bundle_drift,
     ("POST", "/project/{project_id}/assets"): call_add_project_assets,
     ("DELETE", "/project/{project_id}/assets"): call_remove_project_assets,
     ("GET", "/bundles/detect"): call_bundle_report,
     ("POST", "/bundles/create"): call_create_bundles,
     ("POST", "/bundles/dismiss"): call_dismiss_bundles,
+    ("POST", "/bundles/enrich"): call_enrich_bundles,
 }
 
 # What a permitted caller must get back. The five `/import*` routes are absent on
@@ -1242,6 +1284,7 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     # 404 without reading or writing anything.
     ("GET", "/import/archive/entries"): 404,
     ("POST", "/import/archive"): 404,
+    ("POST", "/import/archive/project"): 404,
     ("GET", "/file/{asset_id}/{name}"): 200,
     ("GET", "/asset/{asset_id}/files"): 200,
     ("GET", "/asset/{asset_id}/files/{file_id}"): 200,
@@ -1321,11 +1364,13 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("PATCH", "/project/{project_id}"): 200,
     ("DELETE", "/project/{project_id}"): 200,
     ("GET", "/project/{project_id}/assets"): 200,
+    ("GET", "/project/{project_id}/bundle-drift"): 200,
     ("POST", "/project/{project_id}/assets"): 200,
     ("DELETE", "/project/{project_id}/assets"): 200,
     ("GET", "/bundles/detect"): 200,
     ("POST", "/bundles/create"): 200,
     ("POST", "/bundles/dismiss"): 200,
+    ("POST", "/bundles/enrich"): 200,
 }
 
 
@@ -1451,7 +1496,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 100 routes - 11 public / 36 read / 22 contribute / 13 write / 18 admin.
+    """The matrix is pinned at 103 routes - 11 public / 37 read / 24 contribute / 13 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1461,11 +1506,11 @@ def test_the_matrix_is_the_documented_size() -> None:
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 100, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 103, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 36,
-        permissions.CONTRIBUTE: 22,
+        permissions.READ: 37,
+        permissions.CONTRIBUTE: 24,
         permissions.WRITE: 13,
         permissions.ADMIN: 18,
     }, counts

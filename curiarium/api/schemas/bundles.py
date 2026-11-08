@@ -23,7 +23,15 @@ __all__ = [
   "BundleDetectItemOut",
   "BundleDismissRequest",
   "BundleDismissResponse",
+  "BundleDuplicateGroupOut",
+  "BundleEnrichItemOut",
+  "BundleEnrichRequest",
+  "BundleEnrichResponse",
+  "BundleEnrichmentOut",
+  "BundleGroupOut",
+  "BundleRefusalOut",
   "BundleReportOut",
+  "BundleRuleSetOut",
 ]
 
 
@@ -32,8 +40,11 @@ class BundleCoverOut(BaseModel):
 
   asset_id: Optional[str] = None
   rel_path: Optional[str] = None
-  # largest-image | largest-image-unregistered | none
+  # largest-image | largest-image-unregistered | model-preview | none
   reason: str
+  # Set exactly when asset_id is: the served paths for the cover's bytes.
+  url: Optional[str] = None
+  thumb_url: Optional[str] = None
 
 
 class BundleArchiveOut(BaseModel):
@@ -41,6 +52,37 @@ class BundleArchiveOut(BaseModel):
 
   rel_path: str
   twin_verified: bool
+
+
+class BundleGroupOut(BaseModel):
+  """One model-bearing group inside a compound folder, and whether it is somebody else's thing."""
+
+  name: str
+  model_count: int
+  foreign: bool
+  # REQUIRED, never defaulted: a defaulted False would silently switch every
+  # checkbox off. This is a SERVICE fact - was this directory a row of its own
+  # before R7 absorbed it, i.e. can excluding it leave a creatable row behind -
+  # which the pure detector cannot know, so `BundleFacts.groups`/`BundleGroup`
+  # deliberately stay three-field and the rule-set stamp is untouched.
+  separable: bool
+
+
+class BundleDuplicateGroupOut(BaseModel):
+  """Byte-identical archives: one bundle, the rest reclaimable bytes."""
+
+  sha256: str
+  size: int
+  paths: List[str]
+  reclaimable_bytes: int
+
+
+class BundleEnrichmentOut(BaseModel):
+  """Which of the row's fields came from the vendor page, and when."""
+
+  source_url: Optional[str] = None
+  fetched_at: Optional[str] = None
+  fields: List[str] = []
 
 
 class BundleDetectItemOut(BaseModel):
@@ -55,7 +97,7 @@ class BundleDetectItemOut(BaseModel):
   licence_url: Optional[str] = None
   source_url: Optional[str] = None
   detector: str
-  # high | low, orthogonal to `status`: a legacy bundle is high confidence and blocked.
+  # high | medium | low, orthogonal to `status`: a legacy bundle is high confidence and blocked.
   confidence: str
   metadata_shape: str
   description_excerpt: Optional[str] = None
@@ -63,6 +105,10 @@ class BundleDetectItemOut(BaseModel):
   image_count: int = 0
   text_count: int = 0
   other_count: int = 0
+  # Only a compound row fills this (`compound-bundle` / low: one product in
+  # several parts). Additive and defaulted, so every pre-existing payload still
+  # validates.
+  groups: List[BundleGroupOut] = []
   cover: BundleCoverOut
   assets_total: int = 0
   # ready | blocked
@@ -75,7 +121,25 @@ class BundleDetectItemOut(BaseModel):
   # id - the client owns the honest nameless line.
   existing_project_id: Optional[str] = None
   existing_project_name: Optional[str] = None
+  # Which identity found it: marker | source_url | name | assets. On the wire
+  # because the four are not equally certain - a marker is proof the app made
+  # the project from this bundle, a source URL is strong, a name is a guess, and
+  # asset containment proves the FILES are the same but nothing about intent.
+  existing_project_match: Optional[str] = None
+  # Drift on an already-created row (Mf-8i04): `not_applicable` | `known` |
+  # `unknown`, and the honest count only when `known`. Defaulted, so every row
+  # that is not marker-matched says nothing extra and every pre-existing payload
+  # still validates. Declared HERE or the response model silently drops both -
+  # the same trap `rule_set` and `refused` fell into. The server never formats a
+  # number and the state is its word for which of the three cases it is: the
+  # client renders `known`-0 as no notice at all and `unknown` as an en dash.
+  bundle_drift_state: str = "not_applicable"
+  bundle_drift_count: Optional[int] = None
   dismissed: bool = False
+  # A None means nothing on this row came from a page. Declared HERE or the
+  # response model silently drops it - the way `rule_set` and `refused` were
+  # lost before.
+  enrichment: Optional[BundleEnrichmentOut] = None
 
 
 class BundleDetectCountsOut(BaseModel):
@@ -83,11 +147,29 @@ class BundleDetectCountsOut(BaseModel):
 
   total: int = 0
   high: int = 0
+  medium: int = 0
   low: int = 0
   ready: int = 0
   blocked: int = 0
   dismissed: int = 0
   already_created: int = 0
+
+
+class BundleRuleSetOut(BaseModel):
+  """The rule set one report was decided against: its revision, and what its tables were."""
+
+  version: str
+  stamp: str
+
+
+class BundleRefusalOut(BaseModel):
+  """One path the walk saw and did not offer, with the rule that refused it."""
+
+  rel_path: str
+  rule: str
+  # archive | directory - what the path IS on disk, so a consumer can tell a
+  # missing row from a missing folder without a second walk.
+  kind: str
 
 
 class BundleReportOut(BaseModel):
@@ -97,8 +179,19 @@ class BundleReportOut(BaseModel):
   truncated: bool = False
   counts: BundleDetectCountsOut
   bundles: List[BundleDetectItemOut] = []
+  # Byte-identical archives are one bundle: this list is the copies, never rows.
+  duplicates: List[BundleDuplicateGroupOut] = []
+  duplicates_total_bytes: int = 0
+  duplicates_text: str = ""
   # Dismissal keys that match no live bundle: a renamed directory un-dismisses.
   stale_dismissals: List[str] = []
+  # The rule set this whole report was decided against. REQUIRED, not defaulted:
+  # every producer always emits it, so a default would only mask a producer that
+  # forgot. Declared HERE or the response model silently drops it.
+  rule_set: BundleRuleSetOut
+  # Every path the walk refused to offer, one reason each. An empty list is a
+  # legitimate answer ("nothing was refused"), never an omission.
+  refused: List[BundleRefusalOut] = []
 
 
 class BundleCreateItemIn(BaseModel):
@@ -108,6 +201,10 @@ class BundleCreateItemIn(BaseModel):
   key: str
   name: Optional[str] = None
   name_only: bool = False
+  # The compound row's foreign groups the operator says are NOT this product.
+  # Additive and defaulted, so a pre-existing payload still validates; each name
+  # must be a group the report marked `separable`, else the item fails.
+  exclude_groups: List[str] = []
 
 
 class BundleCreateRequest(BaseModel):
@@ -154,3 +251,42 @@ class BundleDismissResponse(BaseModel):
 
   dismissed: List[str] = []
   stale_dismissals: List[str] = []
+
+
+class BundleEnrichRequest(BaseModel):
+  """The bundles whose vendor pages to read.
+
+  `refresh` re-reads a page the cache already answered. The cookie is the same
+  plumbing the import door uses and is never stored or audited.
+  """
+
+  model_config = ConfigDict(extra="forbid")
+  keys: List[str] = []
+  thingiverse_cookie: Optional[str] = None
+  refresh: bool = False
+
+
+class BundleEnrichItemOut(BaseModel):
+  """What happened to one bundle: its status, its values and the reason for any refusal."""
+
+  key: str
+  # fetched | cached | refused | unavailable | unknown
+  status: str
+  source_url: Optional[str] = None
+  creator: Optional[str] = None
+  licence: Optional[str] = None
+  licence_url: Optional[str] = None
+  filled: List[str] = []
+  fetched_at: Optional[str] = None
+  reason: Optional[str] = None
+
+
+class BundleEnrichResponse(BaseModel):
+  """Per-status counters plus one result per requested bundle."""
+
+  fetched: int = 0
+  cached: int = 0
+  refused: int = 0
+  unavailable: int = 0
+  unknown: int = 0
+  results: List[BundleEnrichItemOut] = []

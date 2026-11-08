@@ -2,7 +2,7 @@ import json
 import os
 import re
 from html.parser import HTMLParser
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request
@@ -21,6 +21,52 @@ from config import (
 from file_utils import is_json_content_type
 from safe_http import safe_urlopen
 from schemas import ImportRequest
+
+
+class CredentialRefusal(HTTPException):
+    """A refusal whose cause is the credential this server sent, not the site's answer.
+
+    The detail is exactly what the same branch answered before this class
+    existed, so a client that pinned the string keeps working; the status is
+    the vendor's own except for a 401, which the paragraph below explains. The
+    class is what lets a caller tell "the cookie this server sent is dead" from
+    "the site refused an anonymous request" without parsing English.
+    ``project_import._is_gated`` matches it with ``isinstance``, the same way
+    ``entry_policy.is_entry_failure`` matches ``AssetFilenameError``.
+
+    Every detail a subclass path raises composes one site's remedy through that
+    site's composer (``_thingiverse_cookie_detail`` or
+    ``_makerworld_cookie_detail``), so each remedy is written once.
+
+    The vendor's status is carried through unchanged except for 401, which is
+    reported as 403 on purpose: the web client throws ``UnauthorizedError`` on a
+    401 before it reads ``detail``, so a 401 would hide the remedy. The remap
+    lives here, in the one place every refusal passes through, so no site that
+    raises this class can forget it.
+    """
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(status_code=403 if status_code == 401 else status_code, detail=detail)
+
+
+# One remedy, formatted twice. The paste lives under Settings > Import sources and
+# wins over the environment variable (see resolve_thingiverse_cookie and
+# resolve_makerworld_cookie), so naming only one of them sends half the operators
+# to a control they cannot use. MakerWorld's remedy is this sentence with the one
+# variable renamed, which is what the tests pin: the two cannot drift apart.
+_COOKIE_REMEDY_TEMPLATE = (
+    "Paste the Cookie header from a signed-in browser session under Settings > Import sources, "
+    "or set the {variable} environment variable on the server and restart the API. "
+    "Nothing was changed."
+)
+
+# The bound on every piece of vendor-controlled text that lands in a detail: a
+# chatty or hostile body must not push the remedy off the screen. Both sites'
+# composers take it, so neither can bury the remedy the other one names.
+_VENDOR_TEXT_BOUND = 300
+
+THINGIVERSE_COOKIE_REMEDY = _COOKIE_REMEDY_TEMPLATE.format(variable="THINGIVERSE_COOKIE")
+MAKERWORLD_COOKIE_REMEDY = _COOKIE_REMEDY_TEMPLATE.format(variable="MAKERWORLD_COOKIE")
 
 
 def makerworld_html_headers(referer: Optional[str] = None, cookie: Optional[str] = None) -> dict:
@@ -80,7 +126,17 @@ def resolve_makerworld_cookie(body: ImportRequest) -> Optional[str]:
     return value or None
 
 
-def resolve_thingiverse_cookie(body: ImportRequest) -> Optional[str]:
+class _ThingiverseCookieBody(Protocol):
+    """The one attribute ``resolve_thingiverse_cookie`` reads off a request body.
+
+    Structural on purpose: ``ImportRequest`` and the enrich request model both
+    carry the field, and neither should be a type lie just to share the resolver.
+    """
+
+    thingiverse_cookie: Optional[str]
+
+
+def resolve_thingiverse_cookie(body: _ThingiverseCookieBody) -> Optional[str]:
     raw = (body.thingiverse_cookie or os.getenv("THINGIVERSE_COOKIE", "")).strip()
     if not raw:
         return None
@@ -341,11 +397,75 @@ def extract_download_url_from_response(data: Any, base_url: str) -> Optional[str
     return find_download_url_in_json(data, base_url)
 
 
+def _makerworld_bounded_message(message: Optional[str], fallback: str = "MakerWorld blocked the request") -> str:
+    """The vendor's own words, bounded, carrying no period of their own.
+
+    The bound is taken FIRST, on the raw vendor string, and periods are stripped
+    from that bounded result only. The vendor controls the punctuation, so
+    stripping first would let a run of periods survive a truncation that lands
+    inside it and the composed sentence would read "Forbidden..". The fallback
+    carries no period either, so the lead ends with exactly one either way.
+    """
+    text = (message or "").strip()
+    if not text:
+        return fallback
+    bounded = text[:_VENDOR_TEXT_BOUND].rstrip(".")
+    return bounded or fallback
+
+
+def _makerworld_bounded_id(value: str) -> str:
+    """A page-supplied id quoted in a message is bounded; the request keeps the raw one."""
+    return value[:64]
+
+
+def _makerworld_cookie_detail(lead: str) -> str:
+    """The one MakerWorld composer: a lead sentence, then the remedy both surfaces share."""
+    return f"{lead} {MAKERWORLD_COOKIE_REMEDY}"
+
+
+# The Settings card's own promise, said once here so a refusal cannot contradict
+# it: MakerWorld's cookie is a rate-limit workaround for FREE models, and paid or
+# account-gated files are never fetched (see ImportsSection.tsx). It belongs in
+# the lead, before the remedy, because a paid model whose ``gated`` flag failed to
+# parse reaches this refusal and must not be told a cookie would have helped.
+_MAKERWORLD_PAID_HEDGE = (
+    "The cookie is only a rate-limit workaround for free models: paid or account-gated files are never fetched."
+)
+
+
+def _refuse_makerworld_credential(err: HTTPError, makerworld_cookie: Optional[str], subject: str) -> None:
+    """Refuse a download-API answer that blames the cookie, or answer ``None`` otherwise.
+
+    Two things about the order here are load-bearing. Without a cookie this
+    returns before ``err.read()`` is called at all, so the caller's
+    ``find_download_url`` rescue and the generic 400 are byte-identical by
+    construction rather than by assertion. And the vendor's own code stays in the
+    lead, because the status a client sees is not always the vendor's: a 401
+    arrives as 403 (see ``CredentialRefusal``), so the lead is the one place the
+    vendor's own code still shows.
+    """
+    if not makerworld_cookie or err.code not in {401, 403, 429}:
+        return None
+    try:
+        message = parse_json_error_message(err.read())
+    except Exception:
+        message = None
+    vendor = _makerworld_bounded_message(message)
+    lead = f"MakerWorld refused the download API for {subject} (HTTP {err.code}): {vendor}. {_MAKERWORLD_PAID_HEDGE}"
+    raise CredentialRefusal(status_code=err.code, detail=_makerworld_cookie_detail(lead))
+
+
 def fetch_makerworld_instance_download_url(
     instance_id: str,
     page_url: str,
     makerworld_cookie: Optional[str],
 ) -> Optional[str]:
+    """One download-API answer for the design's default instance, or ``None``.
+
+    A 401/403/429 while a cookie was sent is the dead-credential answer
+    ``_refuse_makerworld_credential`` turns into a refusal; without a cookie the
+    caller's rescue still runs exactly as before.
+    """
     api_url = (
         "https://makerworld.com/api/v1/design-service/instance/"
         f"{instance_id}/f3mf?type=download&fileType=3mfstl"
@@ -353,7 +473,10 @@ def fetch_makerworld_instance_download_url(
     req = Request(api_url, headers=makerworld_api_headers(referer=page_url, cookie=makerworld_cookie))
     try:
         resp = safe_urlopen(req, timeout=IMPORT_TIMEOUT_SECONDS)
-    except HTTPError:
+    except HTTPError as err:
+        _refuse_makerworld_credential(
+            err, makerworld_cookie, f"the design's default instance {_makerworld_bounded_id(instance_id)}"
+        )
         return None
     except URLError:
         return None
@@ -380,11 +503,18 @@ def fetch_makerworld_model_download_url(
     nonce: Optional[str],
     makerworld_cookie: Optional[str],
 ) -> Optional[str]:
+    """One download-API answer for ``model_id``, or ``None`` when it carries no URL.
+
+    A 401/403/429 while a cookie was sent is the dead-credential answer
+    ``_refuse_makerworld_credential`` turns into a refusal; without a cookie the
+    four anonymous candidates and the caller's rescue still run exactly as before.
+    """
     api_url = f"https://makerworld.com/api/v1/models/{model_id}/download"
     req = Request(api_url, headers=makerworld_api_headers(referer=page_url, nonce=nonce, cookie=makerworld_cookie))
     try:
         resp = safe_urlopen(req, timeout=IMPORT_TIMEOUT_SECONDS)
-    except HTTPError:
+    except HTTPError as err:
+        _refuse_makerworld_credential(err, makerworld_cookie, f"design {_makerworld_bounded_id(model_id)}")
         return None
     except URLError:
         return None
@@ -652,6 +782,14 @@ def resolve_printables_download_url(page_url: str) -> Optional[str]:
     return None
 
 
+# A thing page is one HTML document, not a file: 10 s is generous for it while a
+# hung vendor still fails a human's click quickly.
+ENRICH_TIMEOUT_SECONDS = 10
+# The canonical thing URL answers 200 directly (measured), so a redirect is a site
+# change we do not follow: refusing it keeps this call to one request.
+ENRICH_MAX_REDIRECTS = 0
+
+
 def is_thingiverse_page_host(host: str) -> bool:
     host = (host or "").lower()
     return host in {"thingiverse.com", "www.thingiverse.com"}
@@ -702,12 +840,73 @@ def thingiverse_thing_id_from_url(url: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+# --- the cookie refusals ---------------------------------------------------
+#
+# One lead per observed shape, and every one of them is joined to
+# THINGIVERSE_COOKIE_REMEDY by _thingiverse_cookie_detail, so no sentence here
+# restates the remedy. Only the no-token lead may diagnose the credential: a
+# body this server could not read is not evidence that the cookie is dead, only
+# that it went unchecked.
+
+_VIEW_TOKEN_ABSENT = (
+    "Thingiverse answered the view-token request with an empty body, so this server could not check the cookie it sent."
+)
+_VIEW_TOKEN_UNVERIFIABLE = (
+    "Thingiverse answered the view-token request with a body this server cannot read, which is what a Cloudflare "
+    "challenge looks like, so the cookie it sent went unchecked."
+)
+_VIEW_TOKEN_TOO_LARGE = (
+    f"Thingiverse's view-token answer was larger than the import cap ({IMPORT_HTML_MAX_BYTES} bytes), so this "
+    "server did not read it and the cookie it sent went unchecked."
+)
+_VIEW_TOKEN_NO_TOKEN = (
+    "Thingiverse answered the view-token request without a token, so the cookie it was sent is signed-out or expired."
+)
+
+
+def _thingiverse_cookie_detail(lead: str) -> str:
+    """The one composer: a lead sentence, then the remedy both surfaces share."""
+    return f"{lead} {THINGIVERSE_COOKIE_REMEDY}"
+
+
+def _vendor_prefix(message: Optional[str], fallback: str = "Thingiverse blocked the request.") -> str:
+    """The vendor's own words, bounded, or ``fallback`` when it gave none.
+
+    ``parse_json_error_message`` already stripped the vendor text, so the only
+    thing it needs is a bound: a JSON body must not bury the remedy that follows
+    it. Both callers take the bound, so the files step cannot push the remedy off
+    the screen any more than the view-token step can.
+    """
+    return message[:_VENDOR_TEXT_BOUND] if message else fallback
+
+
+def _refuse_credential(cookie_sent: bool, lead: str) -> None:
+    """Refuse, or answer ``None`` when no cookie was implicated.
+
+    Every shape this guards is evidence about the credential only if one was
+    actually sent; without one the caller's ``find_download_url`` rescue stays
+    exactly as it was, which is what keeps a public page importable.
+    """
+    if not cookie_sent:
+        return None
+    raise CredentialRefusal(status_code=403, detail=_thingiverse_cookie_detail(lead))
+
+
 def fetch_thingiverse_json(
     url: str,
     page_url: str,
     thingiverse_cookie: Optional[str],
     token: Optional[str],
+    thing_id: str,
 ) -> Optional[Any]:
+    """One download-API answer for ``thing_id``, or ``None`` when it carries no URL.
+
+    ``thing_id`` is here only to name the thing in a refusal: a 401/403/429 from
+    the API while a cookie was sent is the same dead-credential answer the
+    view-token step gives, and it is useless to the operator without the thing it
+    was reading. Without a cookie the vendor's word stands unchanged.
+    """
+    cookie_sent = bool(thingiverse_cookie)
     req = Request(url, headers=thingiverse_api_headers(referer=page_url, cookie=thingiverse_cookie, token=token))
     try:
         resp = safe_urlopen(req, timeout=IMPORT_TIMEOUT_SECONDS)
@@ -718,7 +917,15 @@ def fetch_thingiverse_json(
         except Exception:
             message = None
         if err.code in {401, 403, 429}:
-            raise HTTPException(status_code=err.code or 400, detail=message or "Thingiverse request failed") from err
+            vendor = _vendor_prefix(message, "Thingiverse request failed")
+            if not cookie_sent:
+                raise HTTPException(status_code=err.code or 400, detail=vendor) from err
+            raise CredentialRefusal(
+                status_code=err.code or 400,
+                detail=_thingiverse_cookie_detail(
+                    f"Thingiverse refused the download API for thing {thing_id} (HTTP {err.code}): {vendor}"
+                ),
+            ) from err
         return None
     except URLError:
         return None
@@ -734,12 +941,23 @@ def fetch_thingiverse_json(
                 return None
         try:
             return json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return None
 
 
 def fetch_thingiverse_view_token(page_url: str, thingiverse_cookie: Optional[str]) -> Optional[str]:
+    """The download-API view token, or ``None`` when no cookie was implicated.
+
+    With a cookie, every answer this cannot use becomes a refusal carrying the
+    shared remedy, because the operator's next step is the same for all of them:
+    re-paste the cookie. Without one they still answer ``None``, so the caller's
+    ``find_download_url`` rescue survives - these shapes are evidence about a
+    credential that was actually sent. A transport failure is NOT one of them: it
+    answers a 502 that carries no remedy, because a server that could not be
+    reached says nothing about the cookie.
+    """
     api_url = "https://www.thingiverse.com/api/v2/auth/view"
+    cookie_sent = bool(thingiverse_cookie)
     req = Request(api_url, headers=thingiverse_api_headers(referer=page_url, cookie=thingiverse_cookie))
     try:
         resp = safe_urlopen(req, timeout=IMPORT_TIMEOUT_SECONDS)
@@ -750,38 +968,155 @@ def fetch_thingiverse_view_token(page_url: str, thingiverse_cookie: Optional[str
         except Exception:
             message = None
         if err.code in {401, 403, 429}:
-            detail = message or (
-                "Thingiverse blocked the request. Paste the Cookie header from your browser session "
-                "in Settings to import."
-            )
-            raise HTTPException(status_code=err.code or 400, detail=detail) from err
-        return None
-    except URLError:
-        return None
+            detail = _thingiverse_cookie_detail(_vendor_prefix(message))
+            if not cookie_sent:
+                raise HTTPException(status_code=err.code or 400, detail=detail) from err
+            raise CredentialRefusal(status_code=err.code or 400, detail=detail) from err
+        if not cookie_sent:
+            return None
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Thingiverse answered HTTP {err.code} for the view-token request, which this import does not "
+                "read. Nothing was changed."
+            ),
+        ) from err
+    except URLError as err:
+        if not cookie_sent:
+            return None
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Thingiverse did not answer in time or could not be reached for the view-token request. Check "
+                "this server's network access and try again; nothing was changed."
+            ),
+        ) from err
 
     with resp:
         raw = resp.read(IMPORT_HTML_MAX_BYTES + 1)
         if len(raw) > IMPORT_HTML_MAX_BYTES:
-            return None
+            return _refuse_credential(cookie_sent, _VIEW_TOKEN_TOO_LARGE)
         content_type = resp.headers.get("Content-Type", "")
         if not is_json_content_type(content_type):
             trimmed = raw.lstrip()
             if not trimmed.startswith((b"{", b"[")):
-                return None
+                return _refuse_credential(cookie_sent, _VIEW_TOKEN_UNVERIFIABLE)
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-    if isinstance(data, dict):
-        token = data.get("access") or data.get("token") or data.get("access_token")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            lead = _VIEW_TOKEN_ABSENT if not raw.strip() else _VIEW_TOKEN_UNVERIFIABLE
+            return _refuse_credential(cookie_sent, lead)
+    if not isinstance(data, dict):
+        return _refuse_credential(cookie_sent, _VIEW_TOKEN_UNVERIFIABLE)
+    token = data.get("access") or data.get("token") or data.get("access_token")
+    if isinstance(token, str) and token.strip():
+        return token.strip()
+    inner = data.get("data")
+    if isinstance(inner, dict):
+        token = inner.get("access") or inner.get("token") or inner.get("access_token")
         if isinstance(token, str) and token.strip():
             return token.strip()
-        inner = data.get("data")
-        if isinstance(inner, dict):
-            token = inner.get("access") or inner.get("token") or inner.get("access_token")
-            if isinstance(token, str) and token.strip():
-                return token.strip()
-    return None
+    return _refuse_credential(cookie_sent, _VIEW_TOKEN_NO_TOKEN)
+
+
+def fetch_thingiverse_thing_page(thing_id: str, thingiverse_cookie: Optional[str]) -> str:
+    """GET the public thing page; the ONLY outbound call the enrich action makes.
+
+    It never retries: a rate limit is a refusal a human acts on, not a loop, and
+    this function is reached only from ``bundle_service.enrich_bundles``, never
+    from the report. Every status this call can meet becomes ONE
+    ``HTTPException`` written for an operator, and its cookie refusals reuse
+    ``THINGIVERSE_COOKIE_REMEDY``, so they name the Settings paste and the
+    environment variable alike. A status with no mapping of its own is
+    reported as a 502 rather than escaping as a raw ``HTTPError``, because the
+    batch must keep its other answers and its single cache write.
+    """
+    url = f"https://www.thingiverse.com/thing:{thing_id}"
+    req = Request(url, headers=thingiverse_html_headers(referer=None, cookie=thingiverse_cookie))
+    try:
+        resp = safe_urlopen(req, timeout=ENRICH_TIMEOUT_SECONDS, max_redirects=ENRICH_MAX_REDIRECTS)
+    except HTTPError as err:
+        if err.code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Thingiverse is rate limiting this server (HTTP 429) for thing {thing_id}. "
+                    f"{THINGIVERSE_COOKIE_REMEDY}"
+                ),
+            ) from err
+        if err.code in {401, 403}:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Thingiverse refused the page (HTTP {err.code}) for thing {thing_id}; a Cloudflare challenge "
+                    f"looks like this. {THINGIVERSE_COOKIE_REMEDY}"
+                ),
+            ) from err
+        if err.code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Thingiverse has no such thing: it answered HTTP 404 for thing {thing_id}.",
+            ) from err
+        # Any other status - a 5xx, or a 4xx this action has no reading for - is
+        # the vendor failing the request, not a bug here: report it as one so the
+        # batch keeps the pages that answered.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Thingiverse answered HTTP {err.code} for thing {thing_id}, which this action does not read. "
+                "Nothing was changed."
+            ),
+        ) from err
+    except HTTPException as err:
+        if err.status_code != 400:
+            raise
+        # `safe_urlopen(max_redirects=0)` reports a redirect as a 400; say what it
+        # means here rather than leaving the operator with a generic message.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The Thingiverse page for thing {thing_id} redirected, and this action does not follow "
+                "redirects. Nothing was changed."
+            ),
+        ) from err
+    except (URLError, TimeoutError, OSError) as err:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Thingiverse did not answer in time or could not be reached for thing {thing_id}. Check this "
+                "server's network access and try again; nothing was changed."
+            ),
+        ) from err
+
+    with resp:
+        raw = resp.read(IMPORT_HTML_MAX_BYTES + 1)
+        if len(raw) > IMPORT_HTML_MAX_BYTES:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"The Thingiverse page for thing {thing_id} was larger than the import cap "
+                    f"({IMPORT_HTML_MAX_BYTES} bytes), so it was not read. Nothing was changed."
+                ),
+            )
+        charset = resp.headers.get_content_charset() or "utf-8"
+        return raw.decode(charset, errors="replace")
+
+
+def thingiverse_no_metadata_detail(thing_id: str) -> str:
+    """Why a 200 page with no thing metadata is a refusal, and what to do next.
+
+    Thingiverse answers a nonexistent id with a generic 200 page (measured), so
+    absent metadata is the only signal there is: the id may name a deleted or
+    private thing, or the site may have served a challenge page instead. The
+    remedy is ``THINGIVERSE_COOKIE_REMEDY``, the same one the import path and
+    the fetch refusals use, so it names the Settings paste as well as the
+    environment variable.
+    """
+    return (
+        f"Thingiverse answered thing {thing_id} with a page that carried no creator or licence. The thing may "
+        "not exist any more (deleted or private), or Thingiverse may have answered a challenge page instead. "
+        f"{THINGIVERSE_COOKIE_REMEDY}"
+    )
 
 
 def resolve_thingiverse_download_url(page_url: str, thingiverse_cookie: Optional[str]) -> Optional[str]:
@@ -790,18 +1125,22 @@ def resolve_thingiverse_download_url(page_url: str, thingiverse_cookie: Optional
         return None
     token = fetch_thingiverse_view_token(page_url, thingiverse_cookie)
     if not token:
-        if not thingiverse_cookie:
-            raise HTTPException(
-                status_code=403,
-                detail="Thingiverse requires a session cookie to fetch download links.",
-            )
-        return None
+        # Reachable only without a cookie: with one, fetch_thingiverse_view_token
+        # answers a refusal or a 502 instead of None, so this sentence can never
+        # be the answer to a live credential.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Thingiverse requires a session cookie to fetch download links. "
+                f"{THINGIVERSE_COOKIE_REMEDY}"
+            ),
+        )
     api_candidates = [
         f"https://www.thingiverse.com/api/v2/things/{thing_id}/files",
         f"https://www.thingiverse.com/api/v2/things/{thing_id}",
     ]
     for api_url in api_candidates:
-        data = fetch_thingiverse_json(api_url, page_url, thingiverse_cookie, token)
+        data = fetch_thingiverse_json(api_url, page_url, thingiverse_cookie, token, thing_id)
         if not data:
             continue
         url = find_download_url_in_json(data, api_url)

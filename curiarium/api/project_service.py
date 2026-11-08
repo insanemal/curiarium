@@ -135,11 +135,84 @@ def create_project(
     project that no caller can map back to what made it. `None` keeps the old
     behaviour, a fresh empty object.
     """
+    project = _new_project(
+        session,
+        name,
+        description,
+        cover_asset_id,
+        creator,
+        source_url,
+        licence,
+        licence_url,
+        origin,
+        metadata,
+    )
+    return _insert(session, project, [])
+
+
+def create_project_with_members(
+    session: Session,
+    name: str,
+    description: Optional[str],
+    cover_asset_id: Optional[str],
+    member_asset_ids: List[str],
+    creator: Optional[str] = None,
+    source_url: Optional[str] = None,
+    licence: Optional[str] = None,
+    licence_url: Optional[str] = None,
+    origin: str = "own",
+    *,
+    metadata: Optional[dict] = None,
+) -> Project:
+    """Insert one project **and every member in a single commit**.
+
+    This exists because `create_project` and `add_assets` each commit, in two
+    sessions: the pair can strand a project that holds nothing, which is the
+    state a door that promises "the project and its files, or neither" must never
+    leave behind. The membership edit doors can afford per-id failure because the
+    project they act on already exists and the operator can retry it; a creating
+    door cannot, so an unknown asset id refuses here — before the insert — as a
+    whole-request 404 naming every id it could not find.
+
+    Members join in the order given, with `role="member"` and a `position` that
+    preserves it, because the order is the listing's and the listing is the
+    evidence a door like `archive_project_service` is built on.
+    """
+    ids = bulk_service.unique_asset_ids(member_asset_ids)
+    _require_assets(session, ids)
+    project = _new_project(
+        session,
+        name,
+        description,
+        cover_asset_id,
+        creator,
+        source_url,
+        licence,
+        licence_url,
+        origin,
+        metadata,
+    )
+    return _insert(session, project, ids)
+
+
+def _new_project(
+    session: Session,
+    name: str,
+    description: Optional[str],
+    cover_asset_id: Optional[str],
+    creator: Optional[str] = None,
+    source_url: Optional[str] = None,
+    licence: Optional[str] = None,
+    licence_url: Optional[str] = None,
+    origin: str = "own",
+    metadata: Optional[dict] = None,
+) -> Project:
+    """Build one uncommitted project row: the column list both inserts share."""
     name = _clean_name(name)
     if cover_asset_id:
         get_asset(session, cover_asset_id)
     stamp = _now()
-    project = Project(
+    return Project(
         name=name,
         description=description,
         cover_asset_id=cover_asset_id or None,
@@ -152,8 +225,27 @@ def create_project(
         created_at=stamp,
         updated_at=stamp,
     )
+
+
+def _insert(session: Session, project: Project, member_asset_ids: List[str]) -> Project:
+    """Commit one project with its members: one commit, whatever the member count.
+
+    Every `session.add` here is an insert that can only be seen after the single
+    `commit`, so a name collision rolls the project *and* its members back
+    together and the caller is left exactly where it started.
+    """
     try:
         session.add(project)
+        for position, asset_id in enumerate(member_asset_ids):
+            session.add(
+                ProjectAsset(
+                    project_id=project.id,
+                    asset_id=asset_id,
+                    role="member",
+                    position=position,
+                    added_at=project.created_at,
+                )
+            )
         session.commit()
         session.refresh(project)
     except IntegrityError:
@@ -162,6 +254,42 @@ def create_project(
         session.rollback()
         raise HTTPException(status_code=409, detail="Project name already exists") from None
     return project
+
+
+# How many member ids go into one ``IN`` clause. The size is the one
+# `archive_project_service.RESOLVE_QUERY_BATCH` uses - the door that feeds this
+# function its member list, whose comment names the cap both of them guard: SQLite
+# limits how many host variables a statement may bind
+# (``SQLITE_MAX_VARIABLE_NUMBER``: 999 on older builds, 32766 since 3.32), and an
+# ``IN`` list binds one per element - so a single query over the whole member list
+# would raise, and 500 the create, for an archive with tens of thousands of
+# members. The number is repeated here rather than imported because
+# `archive_project_service` imports this module; sharing it would be an import
+# cycle. Batched, fixed size, and a batch is comfortably under the smallest limit
+# any build can carry; the per-batch rows are merged into one set, so the caller
+# cannot tell chunking happened at all.
+MEMBER_QUERY_BATCH = 500
+
+
+def _require_assets(session: Session, asset_ids: List[str]) -> None:
+    """Refuse a member that is not an asset, before a single row is inserted.
+
+    The ids are read in batches of `MEMBER_QUERY_BATCH` and the rows are unioned,
+    all inside the caller's session: chunking is invisible from here, because the
+    difference is still taken over the whole list at the end, so the 404 names
+    every id it could not find in the order the caller gave them - one missing in
+    the first batch or in the last. The check still runs before anything is added
+    to the session, so a refusal cannot strand an empty project.
+    """
+    if not asset_ids:
+        return
+    known: set[str] = set()
+    for offset in range(0, len(asset_ids), MEMBER_QUERY_BATCH):
+        batch = asset_ids[offset : offset + MEMBER_QUERY_BATCH]
+        known.update(session.exec(select(Asset.id).where(Asset.id.in_(batch))).all())
+    missing = [asset_id for asset_id in asset_ids if asset_id not in known]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Asset not found: {', '.join(missing)}")
 
 
 def update_project(
@@ -320,6 +448,9 @@ def _create_import_project(
     creator: Optional[str],
     licence: Optional[str],
     licence_url: Optional[str],
+    *,
+    cover_asset_id: Optional[str] = None,
+    bundle_marker: Optional[dict] = None,
 ) -> Project:
     """Create an imported project, suffixing the name past a NOCASE collision.
 
@@ -335,12 +466,13 @@ def _create_import_project(
                 session,
                 candidate,
                 None,
-                None,
+                cover_asset_id,
                 creator=creator,
                 source_url=source_url,
                 licence=licence,
                 licence_url=licence_url,
                 origin="imported",
+                metadata=bundle_marker,
             )
         except HTTPException as err:
             if err.status_code != 409:
@@ -351,13 +483,52 @@ def _create_import_project(
         session,
         f"{base} ({uuid4().hex[:8]})",
         None,
-        None,
+        cover_asset_id,
         creator=creator,
         source_url=source_url,
         licence=licence,
         licence_url=licence_url,
         origin="imported",
+        metadata=bundle_marker,
     )
+
+
+def _absorb_import_facts(
+    project: Project,
+    *,
+    cover_asset_id: Optional[str],
+    bundle_marker: Optional[dict],
+    creator: Optional[str],
+    licence: Optional[str],
+    licence_url: Optional[str],
+    source_url: Optional[str],
+) -> bool:
+    """Fill what an import knows into a project that already exists; report a change.
+
+    Three rules, because they protect three different things. Provenance and the
+    cover fill only what is EMPTY, so a value the user or a vendor supplied is
+    never overwritten; the `_bundle` marker is written only into a free slot or
+    over this door's own marker, and only when that merge changes the stored
+    bytes. Nothing here commits: the caller's session does, so the row and its
+    marker land together and a re-import that records nothing new costs no extra
+    statement.
+    """
+    changed = _fill_empty_provenance(
+        project, creator=creator, licence=licence, licence_url=licence_url, source_url=source_url
+    )
+    if cover_asset_id and not project.cover_asset_id:
+        project.cover_asset_id = cover_asset_id
+        changed = True
+    if bundle_marker and _may_write_bundle_marker(project.metadata_json, bundle_marker):
+        merged = merge_project_marker(project.metadata_json, bundle_marker)
+        # Only a merge that changes the stored bytes counts as a change: a repeat
+        # import of the same selection re-writes the same object, and a no-op
+        # UPDATE is exactly the `updated_at` churn this path refuses to add (the
+        # reason `set_project_metadata_marker` is not used here).
+        if merged != project.metadata_json:
+            project.metadata_json = merged
+            changed = True
+    return changed
 
 
 def find_or_create_import_project(
@@ -368,32 +539,57 @@ def find_or_create_import_project(
     creator: Optional[str] = None,
     licence: Optional[str] = None,
     licence_url: Optional[str] = None,
+    cover_asset_id: Optional[str] = None,
+    bundle_marker: Optional[dict] = None,
 ) -> Tuple[str, bool]:
     """The project an import belongs to: (id, created).
 
     An explicit `project_id` always wins over a canonical match - the user chose
     the target - and only its empty provenance fields are filled. Otherwise a
     project with the same `source_key` is reused, and the last resort creates an
-    `origin="imported"` row.
+    `origin="imported"` row. A created row carries the cover and the `_bundle`
+    marker when the caller supplies them; an existing project only receives what
+    it is missing.
     """
     with Session(engine) as session:
         if project_id:
             project = get_project(session, project_id)
-            if _fill_empty_provenance(
-                project, creator=creator, licence=licence, licence_url=licence_url, source_url=source_url
+            if _absorb_import_facts(
+                project,
+                cover_asset_id=cover_asset_id,
+                bundle_marker=bundle_marker,
+                creator=creator,
+                licence=licence,
+                licence_url=licence_url,
+                source_url=source_url,
             ):
                 session.add(project)
                 session.commit()
             return project.id, False
         existing = find_project_by_source(session, source_url)
         if existing is not None:
-            if _fill_empty_provenance(
-                existing, creator=creator, licence=licence, licence_url=licence_url, source_url=source_url
+            if _absorb_import_facts(
+                existing,
+                cover_asset_id=cover_asset_id,
+                bundle_marker=bundle_marker,
+                creator=creator,
+                licence=licence,
+                licence_url=licence_url,
+                source_url=source_url,
             ):
                 session.add(existing)
                 session.commit()
             return existing.id, False
-        project = _create_import_project(session, suggested_name, source_url, creator, licence, licence_url)
+        project = _create_import_project(
+            session,
+            suggested_name,
+            source_url,
+            creator,
+            licence,
+            licence_url,
+            cover_asset_id=cover_asset_id,
+            bundle_marker=bundle_marker,
+        )
         return project.id, True
 
 
@@ -414,6 +610,40 @@ def merge_project_marker(metadata_json: Optional[str], marker: dict) -> str:
         if key.startswith("_"):
             metadata[key] = value
     return json.dumps(metadata)
+
+
+def bundle_marker_of(metadata_json: Optional[str]) -> dict:
+    """The reserved `_bundle` object of one metadata column, or `{}`.
+
+    This is the one implementation. `bundle_service._bundle_marker` delegates
+    here, because `bundle_service` already imports THIS module - the arrow points
+    this way, so no cycle can form. The rule is the same one
+    `merge_project_marker` already applies to anything that is not a JSON object.
+    """
+    try:
+        parsed = json.loads(metadata_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    marker = parsed.get("_bundle")
+    return marker if isinstance(marker, dict) else {}
+
+
+def _may_write_bundle_marker(metadata_json: Optional[str], marker: dict) -> bool:
+    """Whether an import may write its `_bundle` over whatever is already there.
+
+    Only a free slot or this door's OWN previous marker is writable. A `_bundle`
+    naming a different key is someone else's record - detection wrote it, and its
+    detector, groups and cover describe the disk - so a re-import must not replace
+    it with an identity key. Pinned by
+    `test_a_re_import_never_clobbers_a_human_cover_or_a_detection_marker`.
+    """
+    existing = bundle_marker_of(metadata_json)
+    if not existing:
+        return True
+    incoming = (marker or {}).get("_bundle") or {}
+    return bool(incoming.get("key")) and existing.get("key") == incoming.get("key")
 
 
 def set_project_metadata_marker(project_id: str, marker: dict) -> None:

@@ -101,8 +101,8 @@ export default function ImportsSection({
 
       <ImportCookiesCard
         label="Thingiverse"
-        summary="Optional rate-limit workaround for free Thingiverse models."
-        description="Paste your Thingiverse Cookie header only to get past the anonymous rate limit when importing free models. Never used for paid content - paid or account-gated files are yours to supply, not ours to fetch."
+        summary="Optional rate-limit workaround for free Thingiverse models, on import and enrich."
+        description="Paste your Thingiverse Cookie header only to get past the anonymous rate limit when importing or enriching free models. Never used for paid content - paid or account-gated files are yours to supply, not ours to fetch."
         placeholder="example: cf_clearance=...; PHPSESSID=...;"
         draft={thingiverse.draft}
         editing={thingiverse.editing}

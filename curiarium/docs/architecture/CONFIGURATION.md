@@ -41,7 +41,7 @@ that keeps these forwards and fallbacks honest is
 | `AUTH_MODE` | `auto` | Which login paths exist: `auto` (legacy: on iff the `AUTH_USERNAME`/`AUTH_PASSWORD` pair is set), `local` (password only, SSO refused), `both`, `oidc` (SSO required, local passwords refused), `off`. Empty means `auto`; an unknown value refuses the boot. |
 | `AUTH_USERNAME` | `admin` | Username of the break-glass admin, accepted only while the users table is empty, so a real user account always disables it. |
 | `AUTH_PASSWORD` | `super-secret` | Single-admin bootstrap secret; the API refuses to start while this published sample value is still active. |
-| `AUTH_SECRET` | `changeme-secret` | JWT signing secret; the API refuses to start while this published sample value is still active. At least 32 bytes is needed for a warning-free HMAC key - PyJWT logs `InsecureKeyLengthWarning` for anything shorter. |
+| `AUTH_SECRET` | `changeme-secret` | JWT signing secret; the API refuses to start while this published sample value is still active. PyJWT only warns below 32 bytes, but the startup guard refuses a shorter secret unless `AUTH_ALLOW_INSECURE_DEFAULTS` is set, and refuses a PEM/SSH/JWK-shaped secret outright because it cannot sign. |
 | `AUTH_ALLOW_INSECURE_DEFAULTS` | unset (false) | Opts out of the startup guard that refuses the published sample credentials while auth is enabled. |
 | `AUTH_ACCESS_TOKEN_TTL` | `900` | Access-token (JWT) lifetime in seconds; the token also stops working as soon as its session row stops being live. |
 | `AUTH_REFRESH_TTL_SECONDS` | `2592000` | Refresh-token lifetime in seconds (30 days). Only the sha256 of the opaque token is stored, and rotation is single-use. |
@@ -94,7 +94,9 @@ Owned by `api/auth.py` and `api/sessions.py`.
   credentials and a blank pair is never a login, in any mode.
 - At startup, `validate_auth_configuration()` refuses to run while
   `AUTH_PASSWORD` or `AUTH_SECRET` are still the published sample values, unless
-  `AUTH_ALLOW_INSECURE_DEFAULTS` is set. `AUTH_TOKEN_TTL` is deprecated and
+  `AUTH_ALLOW_INSECURE_DEFAULTS` is set. It also refuses a secret PyJWT cannot
+  use as an HMAC key (PEM/SSH/JWK-shaped) even under that opt-out, and a secret
+  under 32 bytes whenever the opt-out is off. `AUTH_TOKEN_TTL` is deprecated and
   ignored; it is read only so an existing environment keeps starting.
 - SSO is opt-in and off by default. Enabling it adds an OIDC login next to the
   password form and changes nothing about the local path: password accounts,
@@ -170,10 +172,13 @@ To move a pair-only deployment to a mode, in order:
 PyJWT 2.15 warns `InsecureKeyLengthWarning` on every mint and every verify while
 the HMAC key is under 32 bytes. The shipped default `changeme-secret` is 15
 bytes, so a development deployment logs that warning on every token operation;
-it is a warning, not a failure, and nothing here suppresses it. The operator
-action is to set `AUTH_SECRET` to at least 32 bytes, for example
-`openssl rand -hex 32`. A secret shaped like a PEM, SSH, or JWK key is not a
-usable HMAC secret: PyJWT rejects it with `InvalidKeyError`.
+it is a warning, not a failure, and nothing here suppresses it. The startup
+guard now refuses a key under 32 bytes unless `AUTH_ALLOW_INSECURE_DEFAULTS` is
+set, so a short secret stops the boot instead of only warning; set `AUTH_SECRET`
+to at least 32 bytes, for example `openssl rand -hex 32`. A secret shaped like a
+PEM, SSH, or JWK key is not a usable HMAC secret: PyJWT rejects it with
+`InvalidKeyError`, and the startup guard refuses that at boot with an error
+naming `AUTH_SECRET` instead of surfacing as a 500 on `/login`.
 
 One caveat about attribution: `asset.created_by` exists only when Curiarium's own
 auth is enabled - local users or OIDC - because it is a snapshot of the
@@ -308,7 +313,10 @@ not a follow-up. The design and its residual risks are in
 These are Cosmos Cloud's own figures, taken from its published discovery document
 and its source. They are recorded because the operator-facing advice for
 self-hosted OIDC and what Cosmos actually emits disagree in three places, and each
-disagreement shows up here as a boot refusal or a login that stalls.
+disagreement shows up here as a boot refusal or a login that stalls. The
+step-by-step deployment walkthrough is
+[the Cosmos guide](../guides/cosmos.md); this section is the configuration
+reference behind it.
 
 - **`OIDC_ISSUER` is the bare origin, not the discovery URL.** Set
   `https://<cosmos-host>` — no path, no trailing slash. The API fetches discovery
@@ -325,39 +333,49 @@ disagreement shows up here as a boot refusal or a login that stalls.
 - **Cosmos emits no `groups` claim in any version, and there is no UI, API or
   Terraform field that adds one.** Its discovery advertises `claims_supported` =
   `aud, email, email_verified, exp, iat, iss, locale, name, sub` and
-  `scopes_supported` = `openid, offline, profile, email, address, phone`. With
-  the default `OIDC_GROUPS_CLAIM=groups`, **`OIDC_EDITOR_GROUPS` is inert on
-  Cosmos**, so `OIDC_DEFAULT_ROLE` is the only reliable lever: a household whose
-  Cosmos users should be able to upload sets `OIDC_DEFAULT_ROLE=contributor` (or
-  `editor`) and every provisioned account lands at that level.
-- **Do not set `OIDC_ALLOWED_GROUPS` against Cosmos.** The claim is absent, so
-  every login would be refused by the group axis. Use `OIDC_ALLOWED_DOMAINS`.
-- **A caveat, to be verified rather than assumed.** Cosmos does emit a singular
-  `role` claim with the values `admin` / `user`, which its discovery document does
-  not advertise. That makes a coarse, two-bucket mapping possible —
-  `OIDC_GROUPS_CLAIM=role` with `OIDC_EDITOR_GROUPS=admin` lands Cosmos
-  administrators as `editor` and everybody else at `OIDC_DEFAULT_ROLE` — but it is
-  coarse, it is **not** the Pro "groups" feature, and it must be confirmed from a
-  decoded `id_token` of the operator's own realm before anything depends on it.
-  How to confirm it: decode an `id_token` (`jwt decode`, or jwt.io) and/or call
-  `/oauth2/userinfo`, and trust the decoded token over the discovery document —
-  that document both advertises claims Cosmos never emits (`email_verified`,
-  `locale`) and hides claims it does emit (`role`, `preferred_username`).
+  `scopes_supported` = `openid, offline, profile, email, address, phone`. It does
+  emit a **singular `role` claim** with the values `admin` / `user` — a claim that
+  same discovery document does not advertise — so the setting is
+  `OIDC_GROUPS_CLAIM=role`. The mapping is coarse, two buckets rather than the Pro
+  "groups" feature, but it is the only group-shaped signal Cosmos sends.
+- **The levers are `OIDC_ALLOWED_GROUPS` and `OIDC_EDITOR_GROUPS`, and each
+  carries both encodings.** List `admin` and `user` **and** `1` and `2`, because
+  Cosmos versions differ in which they emit. Matching is exact and
+  case-sensitive: `allowed_domains()` and `email_from()` lowercase before
+  comparing, but `allowed_groups()` and `groups_from()` do not, so `Admin` does
+  not match `admin`.
+- **The mechanism decides whether the group axis works at all.** `groups_from()`
+  reads the configured claim and accepts only a `str` (split on commas) or a
+  `list`; anything else — an integer, an object, a boolean, an absent claim —
+  falls through to an empty tuple. On a version that emits `role` as a **bare
+  numeric**, nothing matches: no principal is admitted by group, and none
+  escalates to `editor`. The axis is dead on that version, so
+  `OIDC_ALLOWED_GROUPS` must be left **empty** — a non-empty list against a dead
+  axis admits nobody, because `evaluate_allow_list()` checks the group axis first
+  and ANDs it with the domain axis — and the fallback is `OIDC_ALLOWED_DOMAINS`
+  plus `OIDC_DEFAULT_ROLE`. That default is applied at provisioning only, and
+  `editor` is the highest a claim set can reach: a non-empty `OIDC_ADMIN_GROUPS`
+  and `OIDC_DEFAULT_ROLE=admin` are both boot refusals.
+- **Decode your own `id_token`; the token is the authority, not the discovery
+  document.** Use `jwt decode` or jwt.io, and/or call `/oauth2/userinfo`. The
+  discovery document both advertises claims Cosmos never emits
+  (`email_verified`, `locale`) and hides claims it does emit (`role`,
+  `preferred_username`), so it cannot tell you which encoding your realm sends.
+  Confirm the shape — string or number — before either list depends on it.
 - **The redirect URI is matched literally.** The code derives
   `${PUBLIC_URL}/auth/oidc/callback`, and `PUBLIC_URL` is the origin browsers
   reach this deployment at - on the household install that is the Cosmos host -
   so register exactly `${PUBLIC_URL}/auth/oidc/callback` with Cosmos. Cosmos
   compares redirect URIs by literal string, comma-separated with no spaces.
   `${PUBLIC_URL}/api/auth/oidc/callback` is **not** what the code sends.
-- **Operational caveat: nothing in front may hide the callback path.** The bundled
-  web Nginx proxies only `/api/` (`curiarium/web/nginx.conf:81-84`), so
-  `/auth/oidc/callback` would be served by the SPA and the login would stall
-  silently. The front proxy must forward `/auth/` to the API, or `PUBLIC_URL`
-  must be an origin that does. That gap is **deferred** to the existing deployment
-  tickets `Mf-lh1z` / `Mf-60nl` and is not fixed here, because changing the
-  callback path or the proxy is a route-shape decision that amends
-  [ADR 0006](../adr/0006-oidc-sso-flow-and-role-policy.md) decision 13 and can
-  invalidate IdP clients operators have already registered.
+- **The callback path must reach the API.** The bundled web container serves both
+  prefixes: `location /api/` rewrites the prefix away, and `location /auth/`
+  passes through untouched to `http://api:8000`, so
+  `<PUBLIC_URL>/auth/oidc/callback` reaches FastAPI through the shipped container
+  with nothing extra configured. A **replacement** front proxy must forward
+  `/auth/` as well: one that routes only `/api/` to the API serves the callback
+  from the SPA and the login stalls silently. The same holds for `PUBLIC_URL` — it
+  must be an origin whose proxy forwards `/auth/`.
 
 ### Bootstrap sequence
 
@@ -423,8 +441,8 @@ fall back to the defaults below.
 |---|---|---|
 | `IMPORT_TIMEOUT_SECONDS` | `30` | Remote request time budget. |
 | `IMPORT_MAX_REDIRECTS` | `5` | Maximum redirect hops followed while fetching a remote import; each hop is validated before connecting. |
-| `IMPORT_MAX_MB` | `512` | Maximum remote response size for link imports, and the per-entry cap for each entry extracted from a zip - whether imported over HTTP or already in the library (`POST /import/archive`). |
-| `IMPORT_ZIP_MAX_MB` | `2048` | Cumulative expanded-size budget for the entries selected from one zip import or one in-library extraction (`POST /import/archive`). A selection whose declared sizes exceed it is rejected with 413 before anything is written; if an entry understates its size, the whole request is rolled back and rejected once the streamed bytes cross the budget. |
+| `IMPORT_MAX_MB` | `512` | Maximum remote response size for link imports, and the per-entry cap for each entry extracted from a zip - whether imported over HTTP or already in the library (`POST /import/archive`). An OS-metadata member never consults this per-file cap either. |
+| `IMPORT_ZIP_MAX_MB` | `2048` | Cumulative expanded-size budget for the entries selected from one zip import or one in-library extraction (`POST /import/archive`). OS-metadata members (`__MACOSX/`, `.DS_Store`, `Thumbs.db`, `desktop.ini`, an AppleDouble `._*`, `.Spotlight-*`, `$RECYCLE.BIN/`) are classified by `entry_policy` before either cap is consulted: neither extractor reads a byte of one, so a junk member counts toward neither the declared total nor the streamed total and can never 413 the extraction. Both doors write the same `writable` entries from one selection, though they refuse differently: a named member the archive lacks is 400 on `POST /import/archive` versus a `failed` entry on `/import/zip`, and an oversized member is 413 on the archive door versus a `failed` entry on the zip door. A selection whose declared payload sizes exceed the budget is rejected with 413 before anything is written; if an entry understates its size, the whole request is rolled back and rejected once the streamed bytes cross the budget, and that streamed total counts every byte actually written. A selection that turns out to be entirely OS metadata on `POST /import/archive` answers 200 with `files: 0` and `bytes: 0` and writes nothing at all: no twin directory, no scan, no audit row. |
 | `MAX_UPLOAD_MB` | `4096` | Direct upload cap enforced by the API; the reverse proxy needs a matching `client_max_body_size`. |
 | `ASSET_FILE_MAX_MB` | `IMPORT_MAX_MB` (`512`) | Per-supporting-file cap. The cap in force is the smaller of this and `IMPORT_MAX_MB`, so an existing deployment keeps refusing what it refused before. `0` removes this cap, but `IMPORT_MAX_MB` still applies. |
 | `ASSET_FILE_TOTAL_MAX_MB` | `2048` | Total bytes across one model's supporting files. An upload that would cross it is rejected with 413 inside the write transaction, leaving no row and no bytes. `0` disables it. |
@@ -621,7 +639,7 @@ that one header.
 | `SECURITY_HEADERS_FRAME_OPTIONS` | `DENY` | `X-Frame-Options` value. The default CSP also sets `frame-ancestors 'none'`. |
 | `SECURITY_HEADERS_PERMISSIONS_POLICY` | `camera=(), microphone=(), geolocation=()` | `Permissions-Policy` value. |
 | `SECURITY_HEADERS_HSTS` | `max-age=31536000` | `Strict-Transport-Security` value. No `includeSubDomains`, no `preload` by default. |
-| `SECURITY_HEADERS_CSP` | built-in policy | `Content-Security-Policy` value. The built-in policy allows `'self'` plus the origin of an absolute `VITE_API_URL` (or `<PUBLIC_URL>/api`) in `connect-src`. |
+| `SECURITY_HEADERS_CSP` | built-in policy | `Content-Security-Policy` value. The built-in policy allows `'self'` plus the origin of an absolute `VITE_API_URL` (or `<PUBLIC_URL>/api`) in `connect-src` and `img-src`. |
 
 Values are validated before they are written into Nginx configuration: a value
 containing a double quote, `$`, a backslash, or control characters is rejected
@@ -938,7 +956,7 @@ exactly as it ignores CephFS's `.snap` store.
 
 The helper is a separate build (`curiarium/snapshot-sidecar`) carrying only
 `btrfs-progs` and the two stdlib modules `guard.py` and `server.py`; it has its
-own [README](../snapshot-sidecar/README.md) for the short version and the
+own [README](../../snapshot-sidecar/README.md) for the short version and the
 security posture. A clearly marked example override, opt-in and not part of any
 shipped manifest:
 

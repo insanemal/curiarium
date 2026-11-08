@@ -183,6 +183,66 @@ describe("wrapTab", () => {
     expect(event.prevented).toBe(true);
   });
 
+  it("leaves an unlisted focus home alone unless the caller opts in", () => {
+    // The historic behaviour: `FolderDrawer`'s own root is `tabindex="-1"` and
+    // sits outside the member list, so wrapping from an unlisted home has to
+    // stay off unless a caller asks for it.
+    const root = mount('<button id="first">1</button><div id="home" tabindex="-1"></div>');
+    const home = root.querySelector<HTMLElement>("#home")!;
+    home.focus();
+    const event = tabEvent();
+
+    wrapTab(root, "button", event);
+
+    expect(event.prevented).toBe(false);
+    expect(document.activeElement).toBe(home);
+  });
+
+  it("wraps forward from an unlisted home to the first member when nothing follows it", () => {
+    const root = mount('<button id="first">1</button><div id="home" tabindex="-1"></div>');
+    const first = root.querySelector<HTMLElement>("#first")!;
+    const home = root.querySelector<HTMLElement>("#home")!;
+    home.focus();
+    const event = tabEvent();
+
+    wrapTab(root, "button", event, { wrapFromUnlistedFocus: true });
+
+    expect(document.activeElement).toBe(first);
+    expect(event.prevented).toBe(true);
+  });
+
+  it("wraps backward from an unlisted home to the member before it", () => {
+    const root = mount(
+      '<button id="first">1</button><button id="second">2</button><div id="home" tabindex="-1"></div>',
+    );
+    const second = root.querySelector<HTMLElement>("#second")!;
+    const home = root.querySelector<HTMLElement>("#home")!;
+    home.focus();
+    const event = tabEvent({ shiftKey: true });
+
+    wrapTab(root, "button", event, { wrapFromUnlistedFocus: true });
+
+    expect(document.activeElement).toBe(second);
+    expect(event.prevented).toBe(true);
+  });
+
+  it("moves forward from an unlisted home to the member after it, not the ring start", () => {
+    const root = mount(
+      '<button id="first">1</button><div id="home" tabindex="-1"></div><button id="second">2</button>',
+    );
+    const first = root.querySelector<HTMLElement>("#first")!;
+    const second = root.querySelector<HTMLElement>("#second")!;
+    const home = root.querySelector<HTMLElement>("#home")!;
+    home.focus();
+    const event = tabEvent();
+
+    wrapTab(root, "button", event, { wrapFromUnlistedFocus: true });
+
+    expect(document.activeElement).toBe(second);
+    expect(document.activeElement).not.toBe(first);
+    expect(event.prevented).toBe(true);
+  });
+
   it("does nothing when a nested surface already claimed Tab", () => {
     const root = mount('<button id="first">1</button><button id="second">2</button>');
     const second = root.querySelector<HTMLElement>("#second")!;

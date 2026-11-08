@@ -177,3 +177,29 @@ export async function removeProjectAssets(
   }
   return res.json();
 }
+
+/** What the server says about a bundle folder that may have grown since its
+ *  project was created. `state` is the server's word for which of the three
+ *  cases this is; `count` is null unless `state` is "known", and
+ *  `count === asset_ids.length` whenever it is - the number and the action
+ *  cannot disagree. */
+export type ProjectBundleDrift = {
+  state: string; // known | unknown | not_applicable
+  count: number | null;
+  asset_ids: string[];
+};
+
+/**
+ * Reads the drift for one project. Deliberately a per-project route rather than
+ * a field on `GET /projects`: that list is one statement for many projects and
+ * App refetches it on every assets change, while this question is only asked
+ * when one project is open and only when it carries a `_bundle` marker.
+ */
+export async function getProjectBundleDrift(projectId: string): Promise<ProjectBundleDrift> {
+  const res = await fetch(
+    `${apiBase()}/project/${encodeURIComponent(projectId)}/bundle-drift`,
+    { headers: authHeaders() },
+  );
+  assertOk(res, "Failed to read the project's bundle drift");
+  return res.json();
+}

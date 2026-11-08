@@ -71,13 +71,16 @@ configuration, and the proxied `/api/*` route):
 | `X-Frame-Options` | `DENY` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` |
 
-The default CSP allows `connect-src 'self'` plus the origin of the configured
-absolute API URL. In the recommended single-host topology that origin is the same
-host, so nothing extra is needed; with a split-host `VITE_API_URL` (for example
-`https://curiariumapi.example`) the API origin is added automatically. The
-browser-side network override stored in local storage is not known to the
-container, so pointing the UI at a different origin from the browser requires
-overriding `SECURITY_HEADERS_CSP` with an explicit `connect-src`.
+The default CSP allows `'self'` plus the origin of the configured absolute API
+URL in both `connect-src` (fetch/XHR) and `img-src` (thumbnails and project
+covers served by the API). In the recommended single-host topology that origin is
+the same host, so nothing extra is needed; with a split-host `VITE_API_URL` (for
+example `https://curiariumapi.example`) the API origin is added to both
+directives automatically, so images render. An origin chosen in the browser-side
+network override stored in local storage is not known to the container, so
+pointing the UI at a third origin from the browser requires overriding
+`SECURITY_HEADERS_CSP` with an explicit policy carrying both `connect-src` and
+`img-src`.
 
 ### Overriding or disabling
 

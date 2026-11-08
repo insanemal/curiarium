@@ -237,8 +237,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 100 routes: 11 public, 36 read,
-22 contribute, 13 write, 18 admin.
+Paths are FastAPI templates exactly as declared. 103 routes: 11 public, 37 read,
+24 contribute, 13 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -295,6 +295,7 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | GET    | `/folder/{folder_id}/download`          | download a folder as a zip |
 | GET    | `/projects`                             | list projects with their member counts |
 | GET    | `/project/{project_id}/assets`          | list one project's member assets |
+| GET    | `/project/{project_id}/bundle-drift`    | asks whether a bundle project's folder has grown; one prefix SELECT over registered rows, writes nothing |
 | GET    | `/trash`                                | list the trash |
 | GET    | `/storage/capabilities`                 | read-only filesystem capability report; creates nothing |
 | GET    | `/bundles/detect`                       | dry-run report computed from disk on every read: which directories are vendor bundles and what a create would make of each; writes nothing, resolves nothing, heals nothing |
@@ -318,6 +319,7 @@ on.
 | POST   | `/import/zip/entries`                       | same: outbound fetch, no mutation, and the zip-import dialog calls it to list entries before `/import/zip` |
 | POST   | `/import/zip`                               | creates assets from a zip |
 | POST   | `/import/archive`                           | extracts an archive already in the library into its twin directory; a collision is a 409 before a byte is written, so nothing existing is overwritten |
+| POST   | `/import/archive/project`                   | creates one project from the assets an extraction of that archive was supposed to produce (Mf-0ck5); the same power as `POST /projects`, no bundle rule consulted, and nothing is deleted — a refusal creates no project |
 | POST   | `/asset/{asset_id}/files`                   | uploads a supporting file next to an asset; removes nothing |
 | PATCH  | `/asset/{asset_id}/files/{file_id}`         | renames a supporting file (display only; the bytes never move) |
 | PUT    | `/asset/{asset_id}/files/order`             | rewrites the supporting-file display order (display only; the bytes never move) |
@@ -333,6 +335,7 @@ on.
 | DELETE | `/project/{project_id}/assets`              | removes a membership row, not an asset; the bytes stay (the one DELETE with a JSON body) |
 | POST   | `/bundles/create`                           | creates one project per confirmed bundle from that report; idempotent, and a blocked bundle creates nothing |
 | POST   | `/bundles/dismiss`                          | hides bundles from the report, or undoes a dismissal: one appconfig value, and it removes nothing from the library |
+| POST   | `/bundles/enrich`                           | asks the vendor page a bundle already names for its missing creator/licence, filling **only empty fields**: an outbound fetch, but the report itself never fetches and a page that states no licence leaves it null |
 
 ### write (editor or admin)
 

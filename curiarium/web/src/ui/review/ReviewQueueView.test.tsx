@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
@@ -203,5 +204,45 @@ describe("ReviewQueueView body", () => {
     if (!queue) throw new Error("No review queue region");
     expect(queue.contains(screen.getByText("Detection stopped early."))).toBe(true);
     expect(screen.getByText("bundle row")).toBeTruthy();
+  });
+
+  it("hands its own landmark to a caller that has to focus it", () => {
+    const rootRef = React.createRef<HTMLElement>();
+    render(
+      <ReviewQueueView
+        title="Bundles to confirm"
+        explanation="Bundles."
+        count={0}
+        countTitle={describeQueueCount("bundles", 0)}
+        rootRef={rootRef}
+      >
+        <p>rows</p>
+      </ReviewQueueView>,
+    );
+
+    const queue = screen.getByRole("region", { name: "Bundles to confirm" });
+    expect(rootRef.current).toBe(queue);
+    // Programmatically focusable, never in the Tab cycle; the section keeps its
+    // region role because it already carries the queue's accessible name.
+    expect(queue.tabIndex).toBe(-1);
+  });
+
+  it("keeps the landmark focusable without a caller-supplied ref", () => {
+    render(
+      <ReviewQueueView
+        title="Bundles to confirm"
+        explanation="Bundles."
+        count={0}
+        countTitle={describeQueueCount("bundles", 0)}
+      >
+        <p>rows</p>
+      </ReviewQueueView>,
+    );
+
+    // The `tabIndex` sits on the shared shell, not behind the prop: a queue that
+    // passes no ref is still one landmark, still out of the Tab cycle.
+    const regions = screen.getAllByRole("region", { name: "Bundles to confirm" });
+    expect(regions.length).toBe(1);
+    expect(regions[0].tabIndex).toBe(-1);
   });
 });

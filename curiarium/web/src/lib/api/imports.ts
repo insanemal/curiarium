@@ -16,6 +16,7 @@ export type ImportInspectInfo = {
 export type ZipEntryInfo = {
   path: string;
   size: number;
+  junk: boolean;
 };
 
 export type ImportZipResult = {
@@ -195,6 +196,8 @@ export async function importToProject(payload: {
 // take a library-relative path instead of an upload or a link, so an archive
 // that arrived by upload, import or a library scan needs no re-import to unzip.
 
+// The archive payload also carries `junk`, but no client reads it there, so it
+// stays off the type.
 export type ArchiveEntry = { path: string; size: number };
 
 export type ArchiveExtractResult = {
@@ -244,6 +247,53 @@ export async function extractArchive(payload: {
   }
   if (!res.ok) {
     const message = await readErrorMessage(res, "Extraction failed");
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+/**
+ * The extract-and-create door's verdict (Mf-0ck5).
+ *
+ * `partial` and `nothing_resolved` created no project and carry no `project`;
+ * `planned`/`resolved` are the two set sizes the server compared and `failed`
+ * names every listed entry that never became a registered asset, so "how many
+ * entries failed" is a fact the server measured rather than a number the client
+ * inferred. `twin` is the library-relative directory to point the operator at.
+ */
+export type ArchiveProjectResult = {
+  status: "created" | "already_created" | "partial" | "nothing_resolved";
+  archive: string;
+  twin: string;
+  planned: number;
+  resolved: number;
+  failed: string[];
+  project: Project | null;
+};
+
+/**
+ * Declares an archive's entries to be one project: `POST /import/archive/project`.
+ *
+ * The server matches the entries it listed against the assets the extraction
+ * registered and creates the project from those ids in one transaction, so
+ * neither the queue nor detection is asked whether the folder is a bundle. Every
+ * verdict answers 200; `status` is the verdict.
+ */
+export async function createProjectFromExtract(payload: {
+  path: string;
+  name?: string | null;
+  entries?: string[] | null;
+}): Promise<ArchiveProjectResult> {
+  const res = await fetch(`${apiBase()}/import/archive/project`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 401) {
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    const message = await readErrorMessage(res, "Project creation failed");
     throw new Error(message);
   }
   return res.json();

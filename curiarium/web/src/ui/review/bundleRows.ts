@@ -2,14 +2,30 @@
 // lets the render stay declarative and the wording stay unit-testable without
 // mounting a component.
 
-import type { BundleDetectCounts, BundleDetectItem } from "../../lib/api/bundles";
+import {
+  ENRICH_MAX_KEYS,
+  type BundleDetectCounts,
+  type BundleDetectItem,
+} from "../../lib/api/bundles";
+import { DRIFT_KNOWN, DRIFT_NOT_APPLICABLE } from "../projectBundleDrift";
+// Declaration-only import cycles, proved green by these suites: this module
+// imports the count formatter from `useReviewCounts`, which imports
+// `needsDecision` back from here, and `projectBundleDrift` imports the same
+// formatter. Every module involved only declares functions and constants, none
+// reads another's value at module-evaluation time, and the repo's eslint config
+// has no `import/no-cycle` - so the en dash stays the ONE formatter instead of a
+// copy per module.
+import { formatReviewCount } from "./useReviewCounts";
 
-export type BundleFilter = "all" | "ready" | "blocked" | "low";
+export type BundleFilter = "all" | "ready" | "blocked" | "medium" | "low";
 
 export const BUNDLE_FILTERS: { id: BundleFilter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "ready", label: "Ready" },
   { id: "blocked", label: "Blocked" },
+  // Ordered as the confidences read, high to low, so the chips are a ladder an
+  // operator can walk down rather than a set in arrival order.
+  { id: "medium", label: "Medium confidence" },
   { id: "low", label: "Low confidence" },
 ];
 
@@ -22,12 +38,17 @@ export const BLOCKED_REASON_LABELS: Record<string, string> = {
 
 export function headline(counts: BundleDetectCounts): string {
   const bundles = counts.total === 1 ? "1 bundle" : `${counts.total} bundles`;
-  return `${bundles} found - ${counts.high} high confidence, ${counts.low} low`;
+  // The `?? 0` is what makes an older payload safe: a report written before the
+  // medium confidence omits the field, and this shows `0 medium` rather than
+  // `undefined medium`.
+  const medium = counts.medium ?? 0;
+  return `${bundles} found - ${counts.high} high confidence, ${medium} medium, ${counts.low} low`;
 }
 
 export function matchesFilter(row: BundleDetectItem, filter: BundleFilter): boolean {
   if (filter === "ready") return row.status === "ready";
   if (filter === "blocked") return row.status !== "ready";
+  if (filter === "medium") return row.confidence === "medium";
   if (filter === "low") return row.confidence === "low";
   return true;
 }
@@ -42,6 +63,199 @@ export function isBlocked(row: BundleDetectItem): boolean {
  *  the identity, so a nameless project is still settled. */
 export function isCreatable(row: BundleDetectItem): boolean {
   return !isBlocked(row) && !row.existing_project_id;
+}
+
+/** Whether the row names a vendor page an enrichment could read. The server
+ *  only issues an enrichable key when the row names a vendor id, so a LOW
+ *  hash-named row carries no source at all. */
+export function hasThingSource(row: BundleDetectItem): boolean {
+  return Boolean(row.source_url);
+}
+
+/** Whether the row still has a field the source page could supply. Either gap
+ *  is enough: the action fills only what is empty, so a known creator does not
+ *  make a missing licence unreachable. */
+export function needsEnrichment(row: BundleDetectItem): boolean {
+  return !row.creator || !row.licence;
+}
+
+/** A row the bulk bar may send: a source to read, a gap to fill, no page record
+ *  yet, and not already a project. A row the page already answered is not
+ *  re-fetched by a second bulk pass, and an already-created row's values are
+ *  never used again, so both are excluded here rather than at the call site. */
+export function canEnrich(row: BundleDetectItem): boolean {
+  return (
+    hasThingSource(row) && needsEnrichment(row) && !row.enrichment && !row.existing_project_id
+  );
+}
+
+/** Why a row offers no enrichment door. It is a fact about the row - it names no
+ *  vendor page to read - and it is said exactly where `canEnrich` refuses for
+ *  that reason: the same four gates, with the one that failed pulled out. Every
+ *  other absent door stays silent, because another line already speaks it (a
+ *  filled Creator or Licence for `needsEnrichment`, `enrichmentLine` for an
+ *  answered page, `createdProjectLine` for a settled project), so this sentence
+ *  never decays into "something is missing". */
+export const NO_SOURCE_PAGE_REASON =
+  "No source page: this bundle was matched from its files, not from a vendor page.";
+
+export function enrichUnavailableLine(row: BundleDetectItem): string | null {
+  if (hasThingSource(row)) return null;
+  if (!needsEnrichment(row)) return null;
+  if (row.enrichment) return null;
+  if (row.existing_project_id) return null;
+  return NO_SOURCE_PAGE_REASON;
+}
+
+/** The detail pane's re-check door: the page answered before and the row is
+ *  still live, so asking again (with `refresh: true`) is a real action. A row
+ *  that took nothing yet belongs to `canEnrich` instead, not both. */
+export function canRecheck(row: BundleDetectItem): boolean {
+  return hasThingSource(row) && !row.existing_project_id && Boolean(row.enrichment);
+}
+
+/** How each supplied field reads inside the provenance sentence. An unknown
+ *  field from a newer server falls back to its own name rather than vanishing:
+ *  the sentence still has to say what the page supplied. */
+const ENRICHMENT_FIELD_LABELS: Record<string, string> = {
+  creator: "creator",
+  licence: "licence",
+  licence_url: "licence URL",
+};
+
+/** The provenance sentence for the detail pane, or null for a row the page
+ *  never answered. `fields` names only what THIS row took, so the sentence says
+ *  exactly that and nothing about the other rows in the same request. A record
+ *  without a stamp still speaks its fields, with the date said to be unknown
+ *  rather than dropped or invented. */
+export function enrichmentLine(row: BundleDetectItem): string | null {
+  const enrichment = row.enrichment;
+  if (!enrichment) return null;
+  const stamp = enrichment.fetched_at ? enrichment.fetched_at.slice(0, 10) : null;
+  const when = stamp ? `fetched ${stamp}` : "fetched date unknown";
+  const fields = enrichment.fields
+    .map(field => ENRICHMENT_FIELD_LABELS[field] ?? field)
+    .join(", ");
+  if (!fields) return `From the source page (${when})`;
+  return `From the source page: ${fields} (${when})`;
+}
+
+/** The bulk bar's words. Two different shortfalls share one form - `(N of M)` -
+ *  because they answer the same question: how much of what I selected will this
+ *  send?
+ *
+ *  The order below is load-bearing. The cap branch comes first: at (30, 30) the
+ *  cap alone decides the sentence, and a shortfall branch ahead of it would say
+ *  `(30)`, a claim the request cannot keep and a byte-pinned expectation in two
+ *  suites. The only cell where the two shortfalls collide is (25, 30) - 25 rows
+ *  are sendable and 25 is also the cap - and it reads `(25 of 30)`, true under
+ *  either cause. Every other collision is `(0 of M)`, where nothing is sent and
+ *  the cause is always the same one. */
+export function enrichSelectionLabel(enrichable: number, selected: number): string {
+  if (enrichable > ENRICH_MAX_KEYS) return `Enrich selected (${ENRICH_MAX_KEYS} of ${selected})`;
+  if (enrichable < selected) return `Enrich selected (${enrichable} of ${selected})`;
+  return `Enrich selected (${enrichable})`;
+}
+
+/** What the bulk bar says when none of the selected rows can be enriched. It is
+ *  the disabled button's `title`, but a disabled control's title is not reliably
+ *  surfaced as a tooltip, and the control is not focusable, so the same sentence
+ *  is also rendered as visible text - and the count form `(0 of 3)` has to be
+ *  honest on its own. */
+export const ENRICH_NONE_REASON =
+  "None of the selected bundles can be enriched: each either names no source page, already has a creator and a licence, was already read from its page, or is already a project. A bundle that was already read from its page, and is not already a project, can be re-checked one at a time with 'Re-check source page'.";
+
+/** The bulk button's hover sentence, or undefined when the label already says
+ *  everything. It names all four `canEnrich` gates rather than the missing
+ *  source alone, so it can never accuse an already-enriched row of having no
+ *  page - the tooltip must not contradict the count it hangs on. */
+export function bulkEnrichTitle(enrichable: number, selected: number): string | undefined {
+  const sent = Math.min(enrichable, ENRICH_MAX_KEYS);
+  if (sent === selected) return undefined;
+  if (enrichable > ENRICH_MAX_KEYS) {
+    // The cap outranks the shortfall, exactly as the label's branches do.
+    return `The server takes at most ${ENRICH_MAX_KEYS} bundles per request, so it sends ${ENRICH_MAX_KEYS} of the ${enrichable} that can be enriched, leaving ${enrichable - ENRICH_MAX_KEYS} for a later pass.`;
+  }
+  if (enrichable === 0) return ENRICH_NONE_REASON;
+  return `${enrichable} of the ${selected} selected can be enriched; the others either name no source page, already have a creator and a licence, were already read from their page, or are already a project.`;
+}
+
+/** The one blocked reason that names an extraction instead of a create. */
+const ARCHIVE_ONLY = "archive_only";
+
+/** Whether a row's path is an archive on disk. Case-insensitive on purpose: the
+ *  server's own walk lowercases the suffix before comparing it
+ *  (`bundle_service._suffix`), so `Foo.ZIP` is a zip row, and the extract door
+ *  accepts it case-insensitively too. Deliberately not `isZipFile` from
+ *  `lib/zipUtils`, which applies the same suffix to a picked File's NAME on the
+ *  upload path: a queue predicate should not take its vocabulary from the upload
+ *  path, and this one is judged against the server's rule rather than a local
+ *  picker's. The two residuals a suffix test cannot see - a DIRECTORY named
+ *  `Foo.zip`, and a file literally named `.zip` - are refused server-side. */
+function isArchivePath(path: string): boolean {
+  return path.toLowerCase().endsWith(".zip");
+}
+
+/** The archive this row can extract in place, or null when it offers no such
+ *  door. Two real wire shapes reach it, and only one of them has a twin:
+ *
+ *  - a row that IS an archive. The server builds a zip-only candidate with
+ *    `archive_path=None`, so such a row ships `archive: null` and its own
+ *    `rel_path` ends `.zip`;
+ *  - a `pair_only` row: a directory the container rule refuses, which ships its
+ *    twin zip in `archive` - the field's one meaning is "the twin of a DIRECTORY
+ *    bundle", and that row really is one.
+ *
+ *  So the twin is asked first and the row's own path is the fallback. The
+ *  blocked reason is asked before either, because the twin is attached whatever
+ *  the status: a ready row and an `unresolved_directory` row both name one, and
+ *  extracting it is no remedy for either. One rule feeds every affordance, so
+ *  the cell, the Enter key, the bulk count, the bulk dialog, the detail door and
+ *  the one-step door cannot disagree about which rows have a door. */
+export function extractPathFor(row: BundleDetectItem): string | null {
+  if (row.blocked_reason !== ARCHIVE_ONLY) return null;
+  const twin = row.archive?.rel_path;
+  if (twin) return twin;
+  return isArchivePath(row.rel_path) ? row.rel_path : null;
+}
+
+/** Whether the row offers the in-place extraction door. It reads `extractPathFor`
+ *  rather than repeating the shape, so a row with a door always has a target and
+ *  a row with a target always has a door. */
+export function isArchiveOnly(row: BundleDetectItem): boolean {
+  return extractPathFor(row) !== null;
+}
+
+export const EXTRACT_AND_CREATE_LABEL = "Extract and create project";
+
+/** The new door's hover sentence: what it does that plain Extract does not.
+ *  Plain Extract runs the same extraction and the same settle wait
+ *  (`BundleReviewView.handleExtracted` -> `state.afterExtract`); the only step
+ *  it omits is the project, so the hint must not claim otherwise. Plain Extract
+ *  is named by what it does rather than by a quoted label: its visible text is
+ *  "Extract archive" while its accessible name is `Extract <title>`, so a quote
+ *  would be a name neither the operator nor a screen reader hears. */
+export const EXTRACT_AND_CREATE_HINT =
+  "Extracts the archive in place, waits for the library scan to register the files, then creates one project from the result. The plain Extract button does the extraction and the wait, and stops before the project.";
+
+/** The cell's title for a row both doors can serve. It quotes the new button's
+ *  own accessible name, which is a label the detail panel really carries. */
+export const EXTRACT_AND_CREATE_ROW_TITLE =
+  "Extract this archive in place (Enter). The detail panel's 'Extract and create project' does the whole job: extract, wait for the scan, then create the project.";
+
+/** A row the one-step door may run on: the zip-only row, and not one that
+ *  already became a project. The server's `already_created` is the real belt;
+ *  this is the pre-flight that keeps the button off a finished row. */
+export function canExtractAndCreate(row: BundleDetectItem): boolean {
+  return isArchiveOnly(row) && !row.existing_project_id;
+}
+
+/** The blocked-reason cell's hover sentence. It is a text edit only: the cell
+ *  keeps its click and Enter behaviour. A row the one-step door can serve gets
+ *  the pointer to it; every other row keeps the sentence it had, byte for byte. */
+export function archiveExtractTitle(row: BundleDetectItem): string {
+  if (canExtractAndCreate(row)) return EXTRACT_AND_CREATE_ROW_TITLE;
+  return "Extract this archive in place (Enter)";
 }
 
 /** The two reveal toggles that widen what the queue shows. */
@@ -67,7 +281,11 @@ export function needsDecision(row: BundleDetectItem): boolean {
 }
 
 export function confidenceLabel(confidence: string): string {
-  return confidence === "high" ? "High confidence" : "Low confidence";
+  if (confidence === "high") return "High confidence";
+  if (confidence === "medium") return "Medium confidence";
+  // The fallback stays: an unknown value from a newer server still reads as the
+  // lowest confidence we know, rather than printing nothing.
+  return "Low confidence";
 }
 
 export function statusLine(row: BundleDetectItem): string {
@@ -78,14 +296,88 @@ export function statusLine(row: BundleDetectItem): string {
   return `Blocked - ${reason}`;
 }
 
+/** The bucket a row falls in for the queue's reveal toggles. This is the
+ *  reporter's verdict on whether the row is settled, not the row's words: an
+ *  existing project outranks a dismissal, because creating is the stronger
+ *  settlement of the two. */
+export type RowBucket = "created" | "dismissed" | null;
+
+export function rowBucket(row: BundleDetectItem): RowBucket {
+  if (row.existing_project_id) return "created";
+  if (row.dismissed) return "dismissed";
+  return null;
+}
+
 /** The detail line for a row that already became a project, or null when it did
  *  not. The id is the identity and is never spoken: a name we have is named, a
- *  name we do not have says so honestly rather than printing a uuid or nothing. */
+ *  name we do not have says so honestly rather than printing a uuid or nothing.
+ *
+ *  The asset identity is spoken differently on purpose. It is a claim about the
+ *  FILES, not about intent: the project holds the bundle's files, but the app
+ *  did not necessarily make it from this bundle, so the line says "Already in"
+ *  and names the evidence. The marker, source URL and name identities keep the
+ *  flat "Already created as project" line - the first two are the app's own
+ *  record, and a name match is already a guess about the same project. */
 export function createdProjectLine(row: BundleDetectItem): string | null {
   if (!row.existing_project_id) return null;
   const name = (row.existing_project_name ?? "").trim();
+  if (row.existing_project_match === "assets") {
+    if (name) return `Already in ${name} (matched by shared files)`;
+    return "Already in a project (matched by shared files) - its name is unavailable.";
+  }
   if (name) return `Already created as project ${name}`;
   return "Already created as a project - its name is unavailable.";
+}
+
+/** The already-created row's second sentence: does this folder still hold parts
+ *  the project does not? null for every row the question does not apply to -
+ *  no existing project, a payload from before the field existed, or a project
+ *  whose folder has not grown - so a quiet queue stays quiet. */
+export function newPartsLine(row: BundleDetectItem): string | null {
+  if (!row.existing_project_id) return null;
+  // An absent field predates the drift contract, which is `not_applicable`
+  // (nothing new to say) rather than a zero.
+  const state = row.bundle_drift_state ?? DRIFT_NOT_APPLICABLE;
+  if (state === DRIFT_NOT_APPLICABLE) return null;
+  if (state === DRIFT_KNOWN) {
+    const count = row.bundle_drift_count;
+    // A known state's count is its own evidence; a missing or zero count means
+    // this folder has not grown, and the queue says nothing.
+    if (count === null || count === undefined || count <= 0) return null;
+    return `${countLabel(count, "new part", "new parts")} since this was created`;
+  }
+  // `unknown`, and any state this client does not know: the dash comes from the
+  // one formatter, never a zero.
+  return `${formatReviewCount(null)} new parts since this was created`;
+}
+
+/** The row chip's words, kept apart from `rowBucket` on purpose. The bucket is
+ *  the reporter's verdict on whether the row is settled; the chip is the
+ *  narrower claim "who made this project?". A project the queue only found by
+ *  shared files is settled - hidden with the created rows - yet the app may not
+ *  have made it, so its chip must not say "Created". */
+export const ROW_STATE_CREATED = "Created";
+export const ROW_STATE_IN_PROJECT = "In project";
+export const ROW_STATE_DISMISSED = "Dismissed";
+
+/** A chip's words and, when the words abbreviate a longer sentence, that
+ *  sentence as the hover `title`. The non-interactive spans in the row use the
+ *  same idiom (`review-row-path`, `review-row-confidence`). */
+export type RowStateChip = { label: string; title: string | null };
+
+export function rowStateChip(row: BundleDetectItem): RowStateChip {
+  if (row.existing_project_id) {
+    // Only the asset identity is a claim about the files rather than the app's
+    // own record, so only it needs the weaker words. Its title is the same
+    // sentence the detail line speaks, so the chip and the panel cannot
+    // disagree.
+    if (row.existing_project_match === "assets") {
+      return { label: ROW_STATE_IN_PROJECT, title: createdProjectLine(row) };
+    }
+    return { label: ROW_STATE_CREATED, title: null };
+  }
+  if (row.dismissed) return { label: ROW_STATE_DISMISSED, title: null };
+  return { label: "", title: null };
 }
 
 export function countLabel(value: number, one: string, many: string): string {
@@ -103,11 +395,14 @@ export function countsLine(row: BundleDetectItem): string {
 }
 
 export function coverLine(row: BundleDetectItem): string {
-  if (!row.cover.rel_path) return "Cover: none";
-  if (row.cover.reason === "largest-image-unregistered") {
-    return `Cover ${row.cover.rel_path} (not registered)`;
-  }
-  return `Cover ${row.cover.rel_path}`;
+  // One branch per reason rather than a nested ternary: each reason's suffix is
+  // an independent fact, and a reader must be able to add a fourth without
+  // untangling the others.
+  const { reason, rel_path: relPath } = row.cover;
+  if (!relPath) return "Cover: none";
+  if (reason === "largest-image-unregistered") return `Cover ${relPath} (not registered)`;
+  if (reason === "model-preview") return `Cover ${relPath} (model preview)`;
+  return `Cover ${relPath}`;
 }
 
 export function archiveLine(row: BundleDetectItem): string | null {

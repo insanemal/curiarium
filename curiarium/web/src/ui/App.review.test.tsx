@@ -26,6 +26,9 @@ vi.mock("../lib/api", () => ({
 }));
 
 vi.mock("../lib/api/bundles", () => ({
+  // A value, not a type: `BundleReviewView` reads the cap to slice the bulk
+  // request, so the mock has to answer it or the render throws.
+  ENRICH_MAX_KEYS: 25,
   getBundleReport: vi.fn(),
   createBundles: vi.fn(),
   setBundleDismissed: vi.fn(),
@@ -141,7 +144,13 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     image_count: 1,
     text_count: 0,
     other_count: 0,
-    cover: { asset_id: null, rel_path: null, reason: "largest-image-unregistered" },
+    cover: {
+      asset_id: null,
+      rel_path: null,
+      reason: "largest-image-unregistered",
+      url: null,
+      thumb_url: null,
+    },
     assets_total: 2,
     status: "ready",
     blocked_reason: null,

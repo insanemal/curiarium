@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 
-import pkg from "./package.json";
+import pkg from "./package.json" with { type: "json" };
 
 function normalizeHostEntry(entry) {
   // Accept full URLs or bare hostnames and strip protocol/port when present.
@@ -83,12 +83,13 @@ export default defineConfig({
     __APP_BUILD__: JSON.stringify(process.env.BUILD_SHA || "dev"),
   },
   build: {
-    // Entry chunk composition at the time of writing: react-dom 129.8 kB +
-    // app shell ~262 kB + markdown stack 178.9 kB + lucide 22 kB. Three.js and
-    // the settings page are dynamic imports, so they are not part of it. See
+    // The entry measures 628.03 kB under Rolldown (670.57 kB under the Rollup
+    // build it replaced), so the limit is already exceeded and the warning is
+    // expected until the entry is split. Three.js and the settings page are
+    // dynamic imports, so they are not part of it. See
     // curiarium/docs/DEVELOPMENT.md for the full list of accepted warnings.
     chunkSizeWarningLimit: 600,
-    rollupOptions: {
+    rolldownOptions: {
       onwarn(warning, defaultHandler) {
         if (isAcceptedOcctExternalization(warning)) return;
         defaultHandler(warning);

@@ -24,6 +24,7 @@ import json
 import re
 from io import BytesIO
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 import pytest
@@ -180,6 +181,62 @@ def png_bytes() -> bytes:
     buffer = BytesIO()
     Image.new("RGB", (2, 2), (30, 120, 200)).save(buffer, "PNG")
     return buffer.getvalue()
+
+
+def write_file(path: Path, payload: bytes = STL_BYTES) -> None:
+    """One file on disk under the temp storage root, as a rescan would find it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
+def scan() -> None:
+    """Register every file on disk, exactly as the live box does."""
+    state = library_scan.scan_storage_root()
+    assert state.failed == 0, state.errors
+
+
+def registered_asset_id(storage_path: str) -> str:
+    """The id of the registered row for one storage path, read from the DB, never guessed."""
+    with Session(engine) as session:
+        return session.exec(select(Asset).where(Asset.storage_path == storage_path)).one().id
+
+
+def registered_rows_under(prefix: str) -> list[tuple[str, str]]:
+    """``(asset id, storage path)`` for every registered asset under ``prefix``."""
+    with Session(engine) as session:
+        rows = session.exec(
+            select(Asset.id, Asset.storage_path)
+            .where(Asset.storage_path.startswith(prefix))
+            .order_by(Asset.storage_path, Asset.id)
+        )
+        return [(row[0], row[1]) for row in rows]
+
+
+def set_bundle_marker(project_id: str, marker: dict) -> None:
+    """Write the reserved ``_bundle`` object the create door would have written."""
+    project_service.set_project_metadata_marker(project_id, {"_bundle": marker})
+
+
+def bundle_drift(client: TestClient, headers: dict, project_id: str) -> dict:
+    """Read the drift route and return its body."""
+    response = client.get(f"/project/{project_id}/bundle-drift", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def statements_for(call: Callable[[], None]) -> int:
+    """Every SQL statement one call runs, counted on ``before_cursor_execute``."""
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        call()
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    return len(statements)
 
 
 # --- POST /projects ---------------------------------------------------------
@@ -1205,3 +1262,227 @@ def test_a_delete_writes_project_delete_with_the_name() -> None:
         assert [row.action for row in rows] == [audit.PROJECT_DELETE]
         assert rows[0].target == project["id"]
         assert json.loads(rows[0].detail_json) == {"name": project["name"]}
+
+
+# --- bundle drift (Mf-8i04) ------------------------------------------------
+
+
+def test_a_grown_bundle_folder_reports_the_parts_that_are_not_in_the_project(isolated_storage: Path) -> None:
+    """AC-1: a folder that grew after its project existed names exactly the new parts.
+
+    Two models are scanned, the project holds both, and its ``_bundle`` marker
+    names ``import/Alpha``; then a third model is written by hand and rescanned,
+    and it is a registered, unattached row. The route answers ``known`` with that
+    one id - and ``count`` IS the id list's length, so the number and the
+    ``POST /project/{id}/assets`` action cannot disagree. Adding exactly those ids
+    clears both.
+
+    Mutation: return the registered set without subtracting membership and the
+    grown read answers 3 while the clearing assertion reds.
+    """
+    with TestClient(main.app) as client:
+        headers = auth_header(client)
+        folder = isolated_storage / "import" / "Alpha"
+        write_file(folder / "part-a.stl")
+        write_file(folder / "part-b.stl")
+        scan()
+        project = create_project(client, headers, unique("Grown bundle"))
+        members = [registered_asset_id("import/Alpha/part-a.stl"), registered_asset_id("import/Alpha/part-b.stl")]
+        add_members(client, headers, project["id"], members)
+        set_bundle_marker(project["id"], {"key": "import/Alpha", "rel_dir": "import/Alpha"})
+
+        assert bundle_drift(client, headers, project["id"]) == {"state": "known", "count": 0, "asset_ids": []}
+
+        write_file(folder / "part-c.stl")
+        scan()
+        new_id = registered_asset_id("import/Alpha/part-c.stl")
+
+        grown = bundle_drift(client, headers, project["id"])
+
+        assert grown == {"state": "known", "count": 1, "asset_ids": [new_id]}
+        assert grown["count"] == len(grown["asset_ids"]), "the count and the action are one set"
+
+        added = add_members(client, headers, project["id"], grown["asset_ids"])
+
+        assert added == {"added": [new_id], "skipped": [], "failed": []}
+        assert bundle_drift(client, headers, project["id"]) == {"state": "known", "count": 0, "asset_ids": []}
+        # The plan's cost, measured: the caller's auth lookup, the project
+        # row and one prefix read - nothing per part, nothing per project
+        # beyond the two the route needs.
+        assert statements_for(lambda: bundle_drift(client, headers, project["id"])) == 3
+
+
+def test_a_fresh_bundle_project_has_nothing_to_report(isolated_storage: Path) -> None:
+    """AC-4: creation is the honest zero, so nothing prompts on a fresh project.
+
+    The measured compound shape at a smaller size: two editions, each with two
+    part folders, and every part folder holds two models PLUS the ``cover.jpg``
+    and ``notes.txt`` a create never attaches. Every model is a member and every
+    support file is registered and unattached, so the naive all-asset difference
+    reads 8 while the route answers ``known``/0 - the honest zero that renders no
+    notice at all.
+
+    Mutation: count every registered asset and the route answers 8, prompting on
+    support files the create door never attaches.
+    """
+    with TestClient(main.app) as client:
+        headers = auth_header(client)
+        root = isolated_storage / "import" / "Compound"
+        for edition in ("Edition One", "Edition Two"):
+            for part in ("Part 0", "Part 1"):
+                part_dir = root / edition / part
+                write_file(part_dir / "model-a.stl")
+                write_file(part_dir / "model-b.stl")
+                write_file(part_dir / "cover.jpg", b"j" * 40)
+                write_file(part_dir / "notes.txt", b"n" * 40)
+        scan()
+        registered = registered_rows_under("import/Compound/")
+        model_ids = [
+            asset_id
+            for asset_id, path in registered
+            if path.lower().endswith(".stl")
+        ]
+        assert len(registered) == 16, "eight models and eight support files are registered"
+        assert len(model_ids) == 8
+
+        project = create_project(client, headers, unique("Fresh compound"))
+        add_members(client, headers, project["id"], model_ids)
+        set_bundle_marker(
+            project["id"],
+            {
+                "key": "import/Compound",
+                "rel_dir": "import/Compound",
+                "detector": "compound-bundle",
+                "shape": "compound",
+                "groups": [
+                    {"name": "Edition One", "model_count": 4, "included": True, "attached": 4},
+                    {"name": "Edition Two", "model_count": 4, "included": True, "attached": 4},
+                ],
+            },
+        )
+
+        members = set(project_asset_ids(client, headers, project["id"]))
+        naive = [path for asset_id, path in registered if asset_id not in members]
+
+        # The over-count the ticket measured: every support file the create door
+        # never attaches reads as drift under the naive difference (26 against 0
+        # on the owner's tree; 8 == the model count here).
+        assert len(naive) == 8 == len(model_ids)
+        assert not any(path.endswith(".stl") for path in naive)
+
+        assert bundle_drift(client, headers, project["id"]) == {"state": "known", "count": 0, "asset_ids": []}
+
+
+def test_a_hand_made_project_reports_no_drift_question() -> None:
+    """AC-6: no marker means no question - and no question is not the answer zero.
+
+    A project a human typed in carries ``metadata_json {}``; the route answers
+    ``not_applicable`` with a null count, so the client renders nothing and never
+    asks a bundle it has no record of.
+
+    Mutation: map the no-marker case to ``known``/0 and the not_applicable
+    assertion reds.
+    """
+    with TestClient(main.app) as client:
+        headers = auth_header(client)
+        project = create_project(client, headers, unique("Hand made"))
+
+        assert project["metadata_json"] == {}
+
+        assert bundle_drift(client, headers, project["id"]) == {
+            "state": "not_applicable",
+            "count": None,
+            "asset_ids": [],
+        }
+        # The honest-zero-of-another-kind: no marker means the route never builds
+        # a prefix, so it runs the caller's auth lookup and the project row and
+        # nothing else. Mutation: fall through to the prefix read and this is 3.
+        assert statements_for(lambda: bundle_drift(client, headers, project["id"])) == 2
+
+
+def test_a_zip_identity_marker_reports_unknown_rather_than_zero() -> None:
+    """AC-2: a ``zip-project:`` identity with no ``rel_dir`` is unknown, never a false zero.
+
+    The zip-project door writes ``key = "zip-project:<canonical url>"`` and may
+    legitimately record no ``rel_dir`` (a mixed-root, flat or one-part
+    selection). There is no path to prefix-query, so a zero would be a claim the
+    server cannot support.
+
+    Mutation: prefix-query the identity key and the route answers ``known``/0 -
+    silently reporting "nothing new" for a folder it never looked at.
+    """
+    with TestClient(main.app) as client:
+        headers = auth_header(client)
+        project = create_project(client, headers, unique("Zip identity"))
+        set_bundle_marker(
+            project["id"],
+            {
+                "key": "zip-project:https://example.invalid/thing",
+                "source": "zip-project-import",
+                "rel_dir": None,
+            },
+        )
+
+        assert bundle_drift(client, headers, project["id"]) == {
+            "state": "unknown",
+            "count": None,
+            "asset_ids": [],
+        }
+        # `unknown` must cost the same as `not_applicable`: the identity key is
+        # never prefix-queried, so there is no third statement to run.
+        assert statements_for(lambda: bundle_drift(client, headers, project["id"])) == 2
+
+
+def test_a_renamed_bundle_folder_reports_unknown_rather_than_a_false_zero(isolated_storage: Path) -> None:
+    """A folder renamed after creation leaves the marker's ``rel_dir`` stale.
+
+    ``rel_dir`` is a creation-time path that nothing rewrites when the folder is
+    renamed. End to end: two parts are registered under ``import/Alpha`` and
+    held by a fresh project whose marker names that root, so the read is
+    ``known``/0; ``PATCH /folder/{id}`` renames the folder to ``AlphaTwo`` (the
+    folder service rewrites every ``Asset.storage_path`` under it) and a rescan
+    finds the parts at the new path. The old prefix is now a directory nothing is
+    registered under, so a zero there would be a claim the server cannot support:
+    the route answers ``unknown``/``null``, the new path holds the parts and the
+    old one holds none.
+
+    Mutation: drop the presence probe and a renamed folder answers ``known``/0
+    forever. The cost of a stale root is the same three statements ``known``
+    runs - the one prefix SELECT answers presence too - while ``unknown`` with no
+    root stays 2 (`test_a_zip_identity_marker_reports_unknown_rather_than_zero`
+    pins that half).
+    """
+    with TestClient(main.app) as client:
+        headers = auth_header(client)
+        folder = isolated_storage / "import" / "Alpha"
+        write_file(folder / "part-a.stl")
+        write_file(folder / "part-b.stl")
+        scan()
+        project = create_project(client, headers, unique("Renamed bundle"))
+        members = [registered_asset_id("import/Alpha/part-a.stl"), registered_asset_id("import/Alpha/part-b.stl")]
+        add_members(client, headers, project["id"], members)
+        set_bundle_marker(project["id"], {"key": "import/Alpha", "rel_dir": "import/Alpha"})
+
+        assert bundle_drift(client, headers, project["id"]) == {"state": "known", "count": 0, "asset_ids": []}
+
+        with Session(engine) as session:
+            folder_row = session.exec(select(Folder).where(Folder.storage_path == "import/Alpha")).one()
+        # `FolderIn.parent_id` defaults to None and `move_folder` reparents on it,
+        # so the rename sends the row's own parent (as the folder panel does) to
+        # keep the folder under `import/`.
+        renamed = client.patch(
+            f"/folder/{folder_row.id}",
+            json={"name": "AlphaTwo", "parent_id": folder_row.parent_id},
+            headers=headers,
+        )
+        assert renamed.status_code == 200, renamed.text
+        scan()
+
+        stale = bundle_drift(client, headers, project["id"])
+
+        assert stale == {"state": "unknown", "count": None, "asset_ids": []}
+        assert registered_rows_under("import/AlphaTwo/"), "the parts moved with the folder"
+        assert registered_rows_under("import/Alpha/") == [], "nothing is registered under the old prefix"
+        # The stale root costs the same three statements `known` does: the one
+        # prefix SELECT is what the presence probe reads.
+        assert statements_for(lambda: bundle_drift(client, headers, project["id"])) == 3

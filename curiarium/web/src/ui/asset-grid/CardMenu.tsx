@@ -33,7 +33,12 @@ const MENU_GAP = 4;
 const VIEWPORT_MARGIN = 8;
 const TYPEAHEAD_RESET_MS = 500;
 
-type MenuPosition = { top: number; left: number };
+/** The trigger edges the placement is computed against. */
+type MenuAnchor = { top: number; bottom: number; right: number };
+
+type MenuPlacement = { top: number; left: number; maxHeight?: number };
+
+type Viewport = { width: number; height: number };
 
 /** First enabled item, or the first item when every item is disabled. */
 function firstEnabledIndex(items: CardMenuItem[]): number {
@@ -74,10 +79,76 @@ function nextMatchAfter(items: CardMenuItem[], prefix: string, from: number): nu
   return -1;
 }
 
+/** Clamp a vertical offset so the menu, or its cap, stays inside the margins. */
+function clampTop(top: number, menuHeight: number, maxHeight: number | undefined, viewport: Viewport): number {
+  const visibleHeight = Math.min(menuHeight, maxHeight ?? menuHeight);
+  const limit = Math.max(VIEWPORT_MARGIN, viewport.height - VIEWPORT_MARGIN - visibleHeight);
+  return Math.min(Math.max(VIEWPORT_MARGIN, top), limit);
+}
+
+/**
+ * Where to put a `position: fixed` menu for a trigger with edges `anchor`.
+ *
+ * Horizontal: right-align to the trigger, then clamp into the viewport, so a
+ * card at the right edge cannot push the menu off-screen. The width is always
+ * `MENU_WIDTH`; measuring it would buy nothing but a reflow.
+ *
+ * Vertical: below the trigger when the menu fits there, else above, and when
+ * neither side fits whole, the larger ONE-SIDED gap with the menu capped to it.
+ * The cap is deliberately never the whole viewport outside the degenerate guard
+ * below: the menu has to sit wholly on one side of its trigger. A menu allowed
+ * to cover the trigger would fall inside the outside-mousedown exemption (the
+ * `handlePointerDown` effect lets a mousedown inside the menu or on the trigger
+ * through), so clicking the trigger would no longer close the menu.
+ */
+function placeMenu(anchor: MenuAnchor, menuHeight: number, viewport: Viewport): MenuPlacement {
+  const left = Math.min(
+    Math.max(VIEWPORT_MARGIN, anchor.right - MENU_WIDTH),
+    Math.max(VIEWPORT_MARGIN, viewport.width - VIEWPORT_MARGIN - MENU_WIDTH),
+  );
+
+  const belowTop = anchor.bottom + MENU_GAP;
+  const aboveTop = anchor.top - MENU_GAP - menuHeight;
+  const bottomLimit = viewport.height - VIEWPORT_MARGIN;
+
+  if (belowTop + menuHeight <= bottomLimit) {
+    return { top: clampTop(belowTop, menuHeight, undefined, viewport), left };
+  }
+  if (aboveTop >= VIEWPORT_MARGIN) {
+    return { top: clampTop(aboveTop, menuHeight, undefined, viewport), left };
+  }
+
+  const gapBelow = bottomLimit - belowTop;
+  const gapAbove = anchor.top - MENU_GAP - VIEWPORT_MARGIN;
+
+  // Degenerate: the trigger itself sits outside the margins, so neither side
+  // offers a gap to cap to. Use the whole viewport and let the clamp place it.
+  if (Math.max(gapBelow, gapAbove) <= 0) {
+    const maxHeight = viewport.height - 2 * VIEWPORT_MARGIN;
+    return { top: clampTop(VIEWPORT_MARGIN, menuHeight, maxHeight, viewport), left, maxHeight };
+  }
+
+  // Below wins ties: the menu opens the way the trigger points.
+  const placeBelow = gapBelow >= gapAbove;
+  const maxHeight = placeBelow ? gapBelow : gapAbove;
+  const top = placeBelow ? belowTop : anchor.top - MENU_GAP - maxHeight;
+  return { top: clampTop(top, menuHeight, maxHeight, viewport), left, maxHeight };
+}
+
+/** The viewport the placement is computed against. */
+function viewportOf(): Viewport {
+  return { width: window.innerWidth, height: window.innerHeight };
+}
+
+/** Whether two placements put the menu in the same place. */
+function samePlacement(a: MenuPlacement, b: MenuPlacement): boolean {
+  return a.top === b.top && a.left === b.left && a.maxHeight === b.maxHeight;
+}
+
 type CardMenuPanelProps = {
   label: string;
   sections: CardMenuSection[];
-  position: MenuPosition;
+  anchor: MenuAnchor;
   triggerRef: RefObject<HTMLButtonElement | null>;
   onClose: () => void;
 };
@@ -85,11 +156,16 @@ type CardMenuPanelProps = {
 function CardMenuPanel({
   label,
   sections,
-  position,
+  anchor,
   triggerRef,
   onClose,
 }: CardMenuPanelProps): ReactElement {
   const menuRef = useRef<HTMLDivElement | null>(null);
+  // The placement for a menu that has not been measured yet (height 0). The
+  // layout effect below corrects it before the browser paints, so it is never
+  // visible; it exists so a menu that fits costs no extra commit, and so the
+  // positioning arithmetic has one home.
+  const [placement, setPlacement] = useState<MenuPlacement>(() => placeMenu(anchor, 0, viewportOf()));
   const flatItems = sections.flatMap(section => section.items);
   const [activeIndex, setActiveIndex] = useState(() => firstEnabledIndex(flatItems));
   const typeaheadRef = useRef({ buffer: "", lastAt: 0, timer: null as ReturnType<typeof setTimeout> | null });
@@ -115,6 +191,24 @@ function CardMenuPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The menu is measured exactly once, on mount, and the seed is corrected here:
+  // a layout effect's setState is flushed before paint, so the seed is never
+  // visible. Deliberately NOT re-measured on scroll or resize, because both close
+  // the menu (the virtualiser would otherwise recycle the card under a live menu)
+  // and the sections are static for the life of one open.
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+    const measured = placeMenu(anchor, menu.getBoundingClientRect().height, viewportOf());
+    // Same place: no state update, so opening a menu that fits below the trigger
+    // stays one commit (jsdom reports a zero-height menu, and `AssetGrid.test.tsx`
+    // counts commits). A menu that does not fit commits once more, before paint.
+    // The closure's `placement` is the seed because this effect runs once, at mount.
+    if (!samePlacement(placement, measured)) setPlacement(measured);
+    // The anchor is fixed for the life of one open, like the item list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Both a click inside the menu and the trigger itself are handled locally.
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -133,12 +227,23 @@ function CardMenuPanel({
     if (timer) clearTimeout(timer);
   }, []);
 
-  // The position is measured once at open. A scroll or a resize moves the
-  // trigger out from under a `position: fixed` menu, so the menu closes rather
-  // than floating away from its card (a scroll listener in the capture phase
-  // catches the grid's own scroll container too).
+  // The position is measured once, on mount, and deliberately never
+  // re-measured: a scroll or a resize moves the trigger out from under a
+  // `position: fixed` menu, so the menu closes instead of floating away from its
+  // card (the virtualiser would otherwise recycle the card under a live menu).
+  // The capture-phase listener catches the grid's own scroll container too.
+  // The menu's own internal scroll is exempt, because it moves nothing the menu
+  // is anchored to.
   useEffect(() => {
-    const close = () => onCloseRef.current();
+    const close = (event: Event) => {
+      // A scroll INSIDE the capped menu is the menu's own: it moves nothing the
+      // menu is anchored to, so it must not close the menu (the same exemption the
+      // mousedown handler above makes for clicks inside it). A scroll that moves
+      // the trigger, and any resize, still closes.
+      const target = event.target;
+      if (target instanceof Node && menuRef.current?.contains(target)) return;
+      onCloseRef.current();
+    };
     window.addEventListener("scroll", close, true);
     window.addEventListener("resize", close);
     return () => {
@@ -251,13 +356,22 @@ function CardMenuPanel({
     return start;
   });
 
+  // The cap is applied only in the capped case, so the uncapped render stays
+  // exactly what it was before the menu could be measured.
+  const capped = placement.maxHeight !== undefined;
+
   return createPortal(
     <div
       ref={menuRef}
       role="menu"
       aria-label={label}
       tabIndex={-1}
-      style={{ top: position.top, left: position.left, width: MENU_WIDTH }}
+      style={{
+        top: placement.top,
+        left: placement.left,
+        width: MENU_WIDTH,
+        ...(capped ? { maxHeight: placement.maxHeight, overflowY: "auto" as const } : {}),
+      }}
       className="fixed rounded-md border border-panel-strong bg-panel shadow-lg py-1 text-sm z-50"
       onKeyDown={handleKeyDown}
     >
@@ -290,15 +404,12 @@ function CardMenuPanel({
 export default function CardMenu({ label, sections }: CardMenuProps): ReactElement {
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<MenuPosition | null>(null);
+  const [anchor, setAnchor] = useState<MenuAnchor | null>(null);
 
   const openMenu = () => {
     const rect = triggerRef.current?.getBoundingClientRect();
     if (!rect) return;
-    setPosition({
-      top: rect.bottom + MENU_GAP,
-      left: Math.max(VIEWPORT_MARGIN, rect.right - MENU_WIDTH),
-    });
+    setAnchor({ top: rect.top, bottom: rect.bottom, right: rect.right });
     setOpen(true);
   };
 
@@ -330,11 +441,11 @@ export default function CardMenu({ label, sections }: CardMenuProps): ReactEleme
       >
         <span aria-hidden="true">⋮</span>
       </button>
-      {open && position && (
+      {open && anchor && (
         <CardMenuPanel
           label={label}
           sections={sections}
-          position={position}
+          anchor={anchor}
           triggerRef={triggerRef}
           onClose={closeMenu}
         />

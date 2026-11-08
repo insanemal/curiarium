@@ -11,13 +11,14 @@ What is authoritative, what is historical, and what to read when.
 | [architecture/REVERSE_PROXY.md](architecture/REVERSE_PROXY.md) | Exposing one hostname, header and body-size requirements |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Local toolchains, the gates, migration rules |
 | [guides/truenas.md](guides/truenas.md) | Installing on TrueNAS as a Docker Compose custom app: datasets, permissions, `.env`, ZFS snapshots |
+| [guides/cosmos.md](guides/cosmos.md) | Installing on Cosmos Cloud: template, env, route to web:5173, OIDC client, first admin |
 | [adr/](adr/) | Decisions with their rationale — read these before changing a design |
-| [../docs/PERMISSIONS.md](../docs/PERMISSIONS.md) | The role matrix, per route |
-| [../docs/AUDIT.md](../docs/AUDIT.md) | Which actions are audited and why some are exempt |
-| [../docs/TICKET_WORKFLOW.md](../docs/TICKET_WORKFLOW.md) | How work is gated and landed |
-| [../CONTRIBUTING.md](../CONTRIBUTING.md) | For a new contributor: where documents and figures go, ADR rules, the gates — start here |
-| [../AGENTS.md](../AGENTS.md) | Repo map, commands, guardrails |
-| [../README.md](../README.md) | What the product is, quick start, configuration highlights |
+| [../../docs/PERMISSIONS.md](../../docs/PERMISSIONS.md) | The role matrix, per route |
+| [../../docs/AUDIT.md](../../docs/AUDIT.md) | Which actions are audited and why some are exempt |
+| [../../docs/TICKET_WORKFLOW.md](../../docs/TICKET_WORKFLOW.md) | How work is gated and landed |
+| [../../CONTRIBUTING.md](../../CONTRIBUTING.md) | For a new contributor: where documents and figures go, ADR rules, the gates — start here |
+| [../../AGENTS.md](../../AGENTS.md) | Repo map, commands, guardrails |
+| [../../README.md](../../README.md) | What the product is, quick start, configuration highlights |
 
 ### Architecture decision records
 
@@ -50,18 +51,19 @@ of the current system, and their counts, schemas and roadmap are stale.
 | [archive/Curiarium_v5.1_Competitive_Strategy(1).md](archive/Curiarium_v5.1_Competitive_Strategy(1).md) | Competitor survey |
 | [archive/Curiarium_v5.1_Security_Analysis.md](archive/Curiarium_v5.1_Security_Analysis.md) | The long-form security analysis that seeded the hardening work |
 | [archive/security/GATE_0_REVALIDATION.md](archive/security/GATE_0_REVALIDATION.md) | Security findings ledger from Gate 0 |
-| [archive/evidence/gate-0/](archive/evidence/gate-0/) | Gate 0 baseline and results records |
+| [archive/evidence/gate-0/BASELINE.md](archive/evidence/gate-0/BASELINE.md) | Gate 0 baseline record |
+| [archive/evidence/gate-0/RESULTS.md](archive/evidence/gate-0/RESULTS.md) | Gate 0 results record |
 | [archive/Curiarium_GitIgnore_Audit.md](archive/Curiarium_GitIgnore_Audit.md) | The repository-ownership audit that removed 8,311 generated paths from git |
 
 ## Other
 
 | Path | Contents |
 |---|---|
-| [../docs/images/](../docs/images/README.md) | Documentation figures, by topic — naming, sizes and the redaction rules a public repository requires |
-| [../docs/brand/](file://../docs/brand/) | Brand sources: the AI reference, the originally supplied SVG, generated SVGs, and `build.py` which regenerates every asset |
-| [../curiarium/api/tests/fixtures/prepared/](file://../curiarium/api/tests/fixtures/prepared/) | Fixtures for the prepared-print parser tests |
-| [../curiarium/slicer-bridge/README.md](../curiarium/slicer-bridge/README.md) | Bridge installation and protocol |
-| [../curiarium/snapshot-sidecar/README.md](../curiarium/snapshot-sidecar/README.md) | The opt-in BTRFS snapshot helper: when you need it, and the invariant that makes it work |
+| [../../docs/images/](../../docs/images/README.md) | Documentation figures, by topic — naming, sizes and the redaction rules a public repository requires |
+| [../../docs/brand/](../../docs/brand/) | Brand sources: the AI reference, the originally supplied SVG, generated SVGs, and `build.py` which regenerates every asset |
+| [../api/tests/fixtures/prepared/](../api/tests/fixtures/prepared/) | Fixtures for the prepared-print parser tests |
+| [../slicer-bridge/README.md](../slicer-bridge/README.md) | Bridge installation and protocol |
+| [../snapshot-sidecar/README.md](../snapshot-sidecar/README.md) | The opt-in BTRFS snapshot helper: when you need it, and the invariant that makes it work |
 
 ## Keeping this honest
 

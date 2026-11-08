@@ -58,7 +58,10 @@ describe("resolveInitialMode", () => {
     window.localStorage.setItem(MODE_STORAGE_KEY, "projects");
     listProjectsMock.mockResolvedValue([]);
 
-    await expect(resolveInitialMode()).resolves.toBe("projects");
+    await expect(resolveInitialMode()).resolves.toMatchObject({
+      mode: "projects",
+      projects: null,
+    });
     expect(listProjectsMock).not.toHaveBeenCalled();
   });
 
@@ -66,7 +69,10 @@ describe("resolveInitialMode", () => {
     window.localStorage.setItem(MODE_STORAGE_KEY, "files");
     listProjectsMock.mockResolvedValue([{ id: "p1" }] as never);
 
-    await expect(resolveInitialMode()).resolves.toBe("files");
+    await expect(resolveInitialMode()).resolves.toMatchObject({
+      mode: "files",
+      projects: null,
+    });
     expect(listProjectsMock).not.toHaveBeenCalled();
   });
 
@@ -74,21 +80,24 @@ describe("resolveInitialMode", () => {
     window.localStorage.setItem(MODE_STORAGE_KEY, "grid");
     listProjectsMock.mockResolvedValue([{ id: "p1" }] as never);
 
-    await expect(resolveInitialMode()).resolves.toBe("files");
+    await expect(resolveInitialMode()).resolves.toMatchObject({
+      mode: "files",
+      projects: null,
+    });
     expect(listProjectsMock).not.toHaveBeenCalled();
   });
 
   it("starts in files when nothing is stored and the library is empty", async () => {
     listProjectsMock.mockResolvedValue([]);
 
-    await expect(resolveInitialMode()).resolves.toBe("files");
+    await expect(resolveInitialMode()).resolves.toMatchObject({ mode: "files" });
     expect(listProjectsMock).toHaveBeenCalledTimes(1);
   });
 
   it("starts in projects when nothing is stored and the library has one", async () => {
     listProjectsMock.mockResolvedValue([{ id: "p1" }] as never);
 
-    await expect(resolveInitialMode()).resolves.toBe("projects");
+    await expect(resolveInitialMode()).resolves.toMatchObject({ mode: "projects" });
     expect(listProjectsMock).toHaveBeenCalledTimes(1);
   });
 
@@ -97,16 +106,16 @@ describe("resolveInitialMode", () => {
 
     // The acceptance is the settled promise: a rejection here would blank the
     // page, because main.tsx awaits it in front of the first render.
-    await expect(resolveInitialMode()).resolves.toBe("files");
+    await expect(resolveInitialMode()).resolves.toMatchObject({ mode: "files" });
   });
 
-  it("treats a 401 as an unknown count instead of a fatal error", async () => {
+  it("treats a 401 as an unknown library instead of a fatal error", async () => {
     listProjectsMock.mockRejectedValue(new UnauthorizedError());
 
     // Nothing is imported from `../lib/toast` or `../lib/auth`: a 401 during
     // boot must not toast, log, or clear the token (that kills the
-    // reload-refresh revival). It is simply "unknown count" -> files.
-    await expect(resolveInitialMode()).resolves.toBe("files");
+    // reload-refresh revival). It is simply "no list" -> files, no seed.
+    await expect(resolveInitialMode()).resolves.toMatchObject({ mode: "files" });
   });
 
   it("gives up on a hung probe at the decision timeout", async () => {
@@ -116,7 +125,7 @@ describe("resolveInitialMode", () => {
     const decision = resolveInitialMode();
     await vi.advanceTimersByTimeAsync(MODE_DECISION_TIMEOUT_MS);
 
-    await expect(decision).resolves.toBe("files");
+    await expect(decision).resolves.toMatchObject({ mode: "files" });
   });
 
   it("memoises the decision: the probe runs once for repeated calls", async () => {
@@ -125,8 +134,55 @@ describe("resolveInitialMode", () => {
     const first = await resolveInitialMode();
     const second = await resolveInitialMode();
 
-    expect(first).toBe("projects");
-    expect(second).toBe("projects");
+    expect(first).toBe(second);
+    expect(first.mode).toBe("projects");
     expect(listProjectsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands back the list it decided from", async () => {
+    const projects = [{ id: "p1" }, { id: "p2" }] as never;
+    listProjectsMock.mockResolvedValue(projects);
+
+    const decision = await resolveInitialMode();
+
+    // The same array instance, so App seeds its state with what the probe
+    // already paid for instead of fetching it again.
+    expect(decision.mode).toBe("projects");
+    expect(decision.projects).toBe(projects);
+    expect(listProjectsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands back [] for an empty library", async () => {
+    listProjectsMock.mockResolvedValue([]);
+
+    const decision = await resolveInitialMode();
+
+    // `[]`, not `null`: an empty library is a real answer, so App must not read
+    // the list a second time.
+    expect(decision.mode).toBe("files");
+    expect(decision.projects).toEqual([]);
+    expect(listProjectsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands back null on failure", async () => {
+    listProjectsMock.mockRejectedValue(new Error("network down"));
+
+    await expect(resolveInitialMode()).resolves.toMatchObject({ projects: null });
+  });
+
+  it("hands back null on 401", async () => {
+    listProjectsMock.mockRejectedValue(new UnauthorizedError());
+
+    await expect(resolveInitialMode()).resolves.toMatchObject({ projects: null });
+  });
+
+  it("hands back null on timeout", async () => {
+    vi.useFakeTimers();
+    listProjectsMock.mockReturnValue(new Promise(() => {}));
+
+    const decision = resolveInitialMode();
+    await vi.advanceTimersByTimeAsync(MODE_DECISION_TIMEOUT_MS);
+
+    await expect(decision).resolves.toMatchObject({ mode: "files", projects: null });
   });
 });

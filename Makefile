@@ -61,6 +61,7 @@ lint-web:
 # Version drift guard (Mf-cvoo). `python3` on CI runners, repo .venv locally.
 verify-version:
 	$(PYTHON) curiarium/scripts/check_version.py
+	$(PYTHON) curiarium/scripts/check_model_table.py
 
 verify-api: verify-version
 	docker build --target test -t $(API_TEST_IMAGE) curiarium/api

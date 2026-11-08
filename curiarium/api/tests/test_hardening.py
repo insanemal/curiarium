@@ -41,7 +41,7 @@ def test_startup_accepts_real_credentials(monkeypatch):
     monkeypatch.setattr(auth, "AUTH_ENABLED", True)
     monkeypatch.setattr(auth, "AUTH_ALLOW_INSECURE_DEFAULTS", False)
     monkeypatch.setattr(auth, "AUTH_PASSWORD", "a-real-password")
-    monkeypatch.setattr(auth, "AUTH_SECRET", "a-properly-random-secret")
+    monkeypatch.setattr(auth, "AUTH_SECRET", "a-properly-random-secret-at-least-32-bytes")
     auth.validate_auth_configuration()
 
 
@@ -57,6 +57,82 @@ def test_startup_allows_disabled_auth_and_explicit_opt_out(monkeypatch):
     monkeypatch.setattr(auth, "AUTH_ALLOW_INSECURE_DEFAULTS", True)
     monkeypatch.setattr(auth, "AUTH_PASSWORD", auth.INSECURE_DEFAULT_PASSWORD)
     auth.validate_auth_configuration()
+
+
+# --- C1b: a secret PyJWT cannot sign with must refuse the boot ----------------
+
+# An HMAC secret is raw random bytes, never a key file, so PyJWT's `prepare_key`
+# rejects these shapes and `jwt.encode` then raises `InvalidKeyError` on every
+# mint. They are the realistic copy-paste mistakes a key generator produces.
+UNUSABLE_SECRETS = {
+    "pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt1Vu\n-----END PUBLIC KEY-----",
+    "ssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExample user@host",
+    "jwk": '{"kty":"oct","k":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}',
+}
+
+
+def startup_refusal(monkeypatch, secret, *, allow_insecure):
+    """Run the startup guard with these credentials and return its message."""
+    monkeypatch.setattr(auth, "AUTH_ENABLED", True)
+    monkeypatch.setattr(auth, "AUTH_PASSWORD", "a-real-password")
+    monkeypatch.setattr(auth, "AUTH_ALLOW_INSECURE_DEFAULTS", allow_insecure)
+    monkeypatch.setattr(auth, "AUTH_SECRET", secret)
+    with pytest.raises(RuntimeError) as excinfo:
+        auth.validate_auth_configuration()
+    return str(excinfo.value)
+
+
+@pytest.mark.parametrize("shape", sorted(UNUSABLE_SECRETS))
+def test_startup_refuses_a_secret_pyjwt_cannot_sign_with(monkeypatch, shape):
+    message = startup_refusal(monkeypatch, UNUSABLE_SECRETS[shape], allow_insecure=False)
+    assert "AUTH_SECRET" in message
+    assert "32" in message
+
+
+@pytest.mark.parametrize("shape", sorted(UNUSABLE_SECRETS))
+def test_a_secret_pyjwt_cannot_sign_with_is_refused_even_under_the_opt_out(monkeypatch, shape):
+    # the opt-out accepts a publicly-known secret, but it cannot make a key file sign
+    message = startup_refusal(monkeypatch, UNUSABLE_SECRETS[shape], allow_insecure=True)
+    assert "AUTH_SECRET" in message
+
+
+def test_startup_refuses_a_secret_below_the_hmac_minimum(monkeypatch):
+    message = startup_refusal(monkeypatch, "x" * 31, allow_insecure=False)
+    assert "AUTH_SECRET" in message
+    assert "32" in message
+    assert "RFC 7518" in message
+
+
+@pytest.mark.parametrize("length", [32, 64])
+def test_startup_accepts_a_secret_at_or_above_the_hmac_minimum(monkeypatch, length):
+    monkeypatch.setattr(auth, "AUTH_ENABLED", True)
+    monkeypatch.setattr(auth, "AUTH_PASSWORD", "a-real-password")
+    monkeypatch.setattr(auth, "AUTH_ALLOW_INSECURE_DEFAULTS", False)
+    monkeypatch.setattr(auth, "AUTH_SECRET", "x" * length)
+    auth.validate_auth_configuration()
+
+
+def test_a_malformed_secret_refuses_the_boot_instead_of_500ing_the_login(monkeypatch):
+    """A PEM-shaped AUTH_SECRET must fail at startup, not at the first login.
+
+    Without the lifespan the POST below reaches `create_access_token`, whose
+    real `jwt.encode` raises `InvalidKeyError` - no mock stands in for it - so
+    the ticket's 500 stays reproducible and this regression is documented.
+    With the lifespan the boot refuses before any request exists at all.
+    """
+    monkeypatch.setattr(auth, "AUTH_ENABLED", True)
+    monkeypatch.setattr(auth, "AUTH_ALLOW_INSECURE_DEFAULTS", False)
+    monkeypatch.setattr(auth, "AUTH_PASSWORD", "a-real-password")
+    monkeypatch.setattr(auth, "AUTH_SECRET", UNUSABLE_SECRETS["pem"])
+
+    bare = TestClient(main.app, raise_server_exceptions=False)
+    res = bare.post("/login", json={"username": "admin", "password": "a-real-password"})
+    assert res.status_code == 500, res.text
+
+    with pytest.raises(RuntimeError) as boot:
+        with TestClient(main.app):
+            pass
+    assert "AUTH_SECRET" in str(boot.value)
 
 
 # --- C2: a failed upload must not leave an orphan row or partial file --------

@@ -67,13 +67,14 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 53 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 55 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
 |---|---|---|---|---|
 | `asset.create` | `POST /upload`; `POST /import`; `POST /import/project`; `POST /import/zip` (one row per created asset) | the new asset id, so `GET /audit?target=<id>` finds it | `{"via", "name"}` | fail-closed: staged in the same transaction as the insert |
 | `archive.extract` | `POST /import/archive` | the library-relative archive path | `{"destination", "files", "bytes", "scan_started"}` | fail-loud: the files are already published when the row is written |
+| `archive.project.create` | `POST /import/archive/project` (Mf-0ck5) | the library-relative archive path | `{"twin", "status", "planned", "resolved", "project_id"}` — `status` is `created` / `already_created` / `partial` / `nothing_resolved`, and the two refusals carry `project_id: null` | fail-loud: the project is already committed when the row is written |
 | `asset.delete` | `DELETE /asset/{asset_id}`; `POST /assets/batch/delete` (one row per asset) | asset id | `{"filename"}` | fail-closed |
 | `asset.rename` | `POST /asset/{asset_id}/rename`; `POST /asset/{asset_id}/meta` (only when the name changes) | asset id | `{"from", "to"}` names | fail-closed |
 | `asset.move` | `POST /asset/{asset_id}/folder`; `POST /assets/batch/folder` (one row per asset) | asset id | `{"folder_id"}` (new folder, or `null` for the root) | fail-closed |
@@ -88,6 +89,7 @@ could honestly reconstruct.
 | `project.rename` | `PATCH /project/{project_id}` (only when the name changes) | project id | `{"from", "to"}` names | fail-closed |
 | `bundle.create` | `POST /bundles/create` (one row per created bundle) | the bundle key: the storage-root-relative directory, or the zip's relative path | `{"project_id", "created", "assets_added", "assets_failed", "detector", "confidence", "name_only"}` - which rule matched and how sure it was, never the parsed documents | fail-loud: the project and its memberships are committed by shared services that own their sessions |
 | `bundle.dismiss` | `POST /bundles/dismiss` (one row per key that actually changed) | the bundle key | `{"dismissed"}` - `true` for a dismissal, `false` for its undo | fail-loud: the map lives in the appconfig store, which commits in its own session |
+| `bundle.enrich` | `POST /bundles/enrich` (one row per bundle whose page answered) | the bundle key | `{"thing_id", "source_url", "fields"}` - which fields the page supplied, never the page body or the cookie | fail-loud: the record lives in the appconfig store, which commits in its own session; a refusal writes no row |
 | `trash.purge` | `POST /trash/purge` | `"trash"` | `{"purged", "bytes", "failed"}` from `trash_service.purge()` | fail-loud |
 | `settings.storage.update` | `POST /settings/storage` | `"storage_path_template"` | `{"from", "to"}` templates | fail-closed |
 | `settings.mount_import.update` | `POST /settings/mount-import` | `"mount_import"` | `{"enabled", "copy_files"}` | fail-closed |
@@ -125,6 +127,22 @@ could honestly reconstruct.
 | `mfa.disable` | `DELETE /mfa` | the real username | `{"recovery_codes_deleted"}` | fail-closed |
 | `mfa.recovery_codes.regenerate` | `POST /mfa/recovery-codes` | the real username | `{"count": 10}` | fail-closed |
 | `settings.mfa_require_admin.update` | `POST /settings/mfa` | `"mfa_require_admin"` | `{"from", "to"}` booleans | fail-closed |
+
+One row per **verdict**, not per click: `archive.project.create` writes a row for
+each of the four statuses that door can answer - `created`, `already_created`,
+`partial` and `nothing_resolved` - so the two refusals that are verdicts are
+recorded alongside the creations, because the operator's decision that an
+archive's entries are one thing is the evidence that door acts on, and a history
+that kept only the successes would make a refused run indistinguishable from one
+that was never attempted. What is not a verdict writes no row, because
+`audit.record` is never reached: every refusal the door raises itself - among them
+the 400 naming entries the archive does not hold, the 400 for a member that would
+render outside the twin, the 400 for a stem no twin directory can be named from,
+the 404 for a library path that is not a file, the 404 for a member id that is no
+asset, the 415 for a file that is not a zip, the 413 for an entry over the
+per-file limit and the 409 on a project-name collision - leaves the request before
+any row is written, and each of them creates nothing. That is the rule the
+`archive.extract` row already keeps: a request that writes no files writes no row.
 
 The snapshot actions are route actions now that `POST /snapshots` and
 `DELETE /snapshots/{name}` exist. Those two routes hand the provider an audit
@@ -183,7 +201,23 @@ change more than one fact or act on more than one target:
   with detail `{"name", "folders": 1, "assets": 0, "bytes": 0}` when the
   delete empties the folder's directory and so retires that folder's row.
 * `POST /assets/batch/folder` - one `asset.move` per moved asset.
-* `POST /import/zip` - one `asset.create` per extracted entry.
+* `POST /import/zip` - one `asset.create` per extracted entry. An entry that
+  never becomes an asset writes nothing at all: OS metadata (`__MACOSX/`,
+  `.DS_Store`, `Thumbs.db`, `desktop.ini`, an AppleDouble `._*`,
+  `.Spotlight-*`, `$RECYCLE.BIN/`) is refused before the insert, and an entry
+  whose filename has no extension fails the same way (Mf-ls9v). Both come back
+  in the response's `failed` list on a 200, not as an error, so there is no row
+  and no `folder.*` row for a directory that only junk would have created. The
+  in-library door (`POST /import/archive`) applies the same OS-metadata
+  predicate through `entry_policy`: a selected member it refuses is never
+  written, and a selection that is entirely OS metadata writes no files at all,
+  so it records no `archive.extract` row - the same rule as a request whose
+  every destination already existed: a request that changes nothing writes
+  nothing. That door returns no `failed` list: it skips a member by
+  classification and aborts the whole request (400/409/413) on everything else,
+  so it never partially fails an entry.
+  The predicate governs extracted archive members only: an ordinary file upload
+  and a file already on disk (registered by the storage scan) are outside it.
 * `PATCH /users/{user_id}` - one row per changed field. Changing role and
   disabling in the same request writes `user.role_change` and `user.disable`.
 * `PATCH /folder/{folder_id}` - renaming and reparenting in the same request
@@ -224,8 +258,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 100 routes, 40
-of them `GET`; the remaining 60 split into 46 audited keys and 14 exempt keys.
+out of scope by construction: they change nothing. The matrix has 103 routes, 41
+of them `GET`; the remaining 62 split into 48 audited keys and 14 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without
@@ -288,6 +322,19 @@ row and its marker, the memberships, the audit row) are accepted for the same
 reason; what makes the window safe is idempotency, not atomicity, because a
 re-run reports `already_created` and never duplicates, so a crash between them
 leaves a project that is visible and repairable rather than one that is missing.
+
+**A bundle enrich is audited even though it mutates only a cache key (Mf-nivh).**
+The map it writes (`bundle.enrichments`) is a working set, and losing an entry
+costs one extra fetch; on that reading it would be exempt like a thumbnail. It is
+audited for two other reasons. First, the act is an outbound fetch plus a stored
+claim about a model's licence: the row is the only record of "we asked the vendor
+and it said this", which is what makes a filled creator or licence reviewable
+rather than a value that merely appeared. Second, the row names the URL and the
+fields the page supplied, so the provenance placed on the project is traceable
+back to the request that fetched it. A refusal changes nothing and is reported
+per item in the response, so it writes no row. Like `bundle.create`, the event is
+written with `audit.record` because the cache lives in the appconfig store, which
+commits in its own session.
 
 **Scan and mount import write no per-asset rows.** They are background work with no
 route and no actor - the same reason the scheduler's `snapshot.schedule.skipped` and

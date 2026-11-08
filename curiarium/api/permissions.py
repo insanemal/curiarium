@@ -272,6 +272,8 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     # A report computed from disk on demand; it writes nothing, so a viewer reads it.
     ("GET", "/bundles/detect"): READ,
     ("GET", "/project/{project_id}/assets"): READ,
+    # A drift read: one prefix query over rows already registered, writing nothing.
+    ("GET", "/project/{project_id}/bundle-drift"): READ,
     # A pure SELECT that counts what a delete would remove.
     ("GET", "/folder/{folder_id}/delete-preview"): READ,
     ("GET", "/folder/{folder_id}/download"): READ,
@@ -297,6 +299,9 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     # Extraction writes files into the library; nothing existing is overwritten
     # (a collision is a 409 before a byte is written), so it is not a WRITE.
     ("POST", "/import/archive"): CONTRIBUTE,
+    # One project over the assets an extraction was supposed to produce: the same
+    # power as `POST /projects`, and it deletes nothing (Mf-0ck5).
+    ("POST", "/import/archive/project"): CONTRIBUTE,
     ("POST", "/asset/{asset_id}/files"): CONTRIBUTE,
     ("PATCH", "/asset/{asset_id}/files/{file_id}"): CONTRIBUTE,
     ("PUT", "/asset/{asset_id}/files/order"): CONTRIBUTE,
@@ -314,6 +319,9 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("POST", "/bundles/create"): CONTRIBUTE,
     # A dismissal is a reversible report filter, not a library edit.
     ("POST", "/bundles/dismiss"): CONTRIBUTE,
+    # A contributor may ask the vendor for a bundle's missing metadata; it fills
+    # empty fields only and the report itself never fetches.
+    ("POST", "/bundles/enrich"): CONTRIBUTE,
     ("PATCH", "/project/{project_id}"): CONTRIBUTE,
     ("POST", "/project/{project_id}/assets"): CONTRIBUTE,
     # Removes membership, not the asset: the join row goes, the bytes stay.

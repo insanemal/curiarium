@@ -14,6 +14,27 @@ header).
 group is no longer rendered by both sidebars, it is a tablist inside the Review
 destination reached from a single shared header.
 
+**Amended:** 2026-11-03 - ticket `Mf-en7k` corrects this record's file
+inventory. `Mf-vinb` deleted `ui/review/ReviewNav.tsx` and its test and
+`Mf-x1p4` deleted `ui/ProjectSidebar.tsx`, so every passage naming them is now
+stated as history, and each REVIEW role gate is pointed at the test that pins it
+today: `ui/review/ReviewQueueTabs.test.tsx` for the rows, one by one, and
+`ui/WorkspaceHeader.test.tsx` for the Review entry. No decision changes.
+
+**Amended:** 2026-11-07 - ticket `Mf-0ck5` changes decision 17's create door, and
+one of its sentences. The one-step *Extract and create* no longer creates through
+the bundle report: it calls `POST /import/archive/project`, which lists the
+archive itself, resolves each planned entry against `Asset.storage_path` under the
+twin directory, and inserts the project and every member in one transaction - no
+bundle rule is consulted on that path at all. `useBundleDetect.createReporting` is
+deleted as dead code; the hook's void `create` is unchanged and the bulk doors
+still use it. "A settle `timeout` or `cancelled` creates nothing at all" is half
+superseded: `cancelled` still creates nothing, while a `timeout` now calls the door
+anyway, which answers from its own comparison. The confirm step and the queue's
+notices slot also say what the archive holds before a byte is written
+(`ui/archive/archivePlan.ts`). No decision about the destination model, the count
+rule, the role threshold or the fetch policy changes.
+
 **Extended:** ADR 0010, whose report is the first tenant of this surface.
 
 ## Context
@@ -60,14 +81,15 @@ destination model, the count rule, the role threshold and the fetch policy.
    inside this slice would have meant inventing a routing model for four surfaces
    at once.
 
-2. **REVIEW is one group, rendered by both sidebars.** `ui/review/ReviewNav.tsx`
-   is rendered by `Sidebar.tsx` and `ProjectSidebar.tsx` with identical props,
-   immediately above the shared footer, so the group is present in Files and
-   Projects mode and the two sidebars cannot drift apart. Switching mode does
-   **not** close an open queue (the group is shared, so the operator's place
-   survives); library navigation - selecting a folder or the unfiled pile,
-   opening a project, Imports running's "Scan now" - still returns to the
-   library, because those are browsing actions.
+2. **REVIEW is one group.** As accepted, both sidebars rendered a copy of it:
+   `ui/review/ReviewNav.tsx` was rendered by `Sidebar.tsx` and
+   `ProjectSidebar.tsx` with identical props, immediately above the shared
+   footer, so the group was present in Files and Projects mode and the two
+   sidebars could not drift apart. Switching mode does **not** close an open
+   queue (the group is shared, so the operator's place survives); library
+   navigation - selecting a folder or the unfiled pile, opening a project,
+   Imports running's "Scan now" - still returns to the library, because those
+   are browsing actions.
 
    **Superseded by `Mf-vinb` (2026-11-02).** The paragraph above is the decision
    as accepted, kept as its history; the two sidebar copies it describes are
@@ -168,12 +190,12 @@ destination model, the count rule, the role threshold and the fetch policy.
 
 7. **A row's role threshold is its route's threshold, per row.** The bundle card
    sat inside Settings behind an editor-only gate, which was stricter than the
-   API: `GET /bundles/detect` is `require_read`, and `POST /bundles/create` and
-   `/bundles/dismiss` are `require_contribute`. A queue that exists in order to
-   act takes the same threshold, so a contributor can use the surface the API
-   always granted them, and a viewer gets no bundle row and no detection request
-   at all - the settings card's deliberate "detection must never be fired for a
-   viewer" invariant is preserved.
+   API: `GET /bundles/detect` is `require_read`, and `POST /bundles/create`,
+   `/bundles/dismiss` and `/bundles/enrich` are `require_contribute`. A queue that
+   exists in order to act takes the same threshold, so a contributor can use the
+   surface the API always granted them, and a viewer gets no bundle row and no
+   detection request at all - the settings card's deliberate "detection must never
+   be fired for a viewer" invariant is preserved.
 
    The threshold is per row (`minRole` on `QUEUES` in `ui/review/queues.ts`,
    the table `ReviewNav.tsx` used to own), not one gate on the group, because
@@ -259,7 +281,21 @@ destination model, the count rule, the role threshold and the fetch policy.
     list, and the grouped `File type`/`Folder` sorts' 24-card sections with
     "Show all N", exactly as in the library - plus selection and bulk bar,
     keyboard operation, previews and card actions, all of them already proven
-    in the library, under a scope that cannot be escaped. What the toolbar
+    in the library, under a scope that cannot be escaped. Project mode also
+    derives its own sectioned view from the folder tree (Mf-aaqi): depth-aware,
+    with the project root taken as the longest common prefix of the members'
+    folder paths trimmed off and one remaining level shown as the group itself,
+    under a top-level filter row that is a pure predicate over the loaded items
+    (no refetch). This is new presentation, not data the grid already had: the
+    tree read had been short-circuited in project mode, so the sectioned view
+    makes project mode issue one `GET /folders` per tree-read activation - mount,
+    a folder-tree version bump, or entering project mode - rather than promising
+    one per mount: that read sits outside the StrictMode one-read claim recorded
+    below, so it is not covered by the listing's `walked` guard. It is
+    presentation only - it never scopes the listing, which is scoped by
+    membership alone - but it is a new failure path, because a failed tree read
+    now degrades project mode to the flat grid and toasts. No new entity and no
+    listing API change. What the toolbar
     keeps is what only narrows - search, sort, tag chips, the creator facet and
     "not in any project" - and `Reset` clears tags and creator only. The folder
     chrome (breadcrumbs, folder tiles, the uploader, drag/drop) is closed in
@@ -340,6 +376,199 @@ destination model, the count rule, the role threshold and the fetch policy.
     refuses the purge, so focus stays inside the dialog instead of landing on a
     disabled button.
 
+17. **A zip-only row gets one action, and it is a client-side sequence with the
+    server as the judge.** The row's one action lists the archive, extracts it,
+    waits for the library scan to register the files, and then creates one
+    project - four named phases, each said to the operator while it runs. It is
+    client-side on purpose. Extraction plus an asynchronous scan is inherently
+    two steps: `archive_service` ends with `scan_started =
+    bool(seams.start_scan())` and `library_scan.start_scan()` only starts a
+    daemon thread and returns at once, so the extracted files are invisible to
+    the bundle report until the walk registers them. A single server call that
+    claimed atomicity while scanning asynchronously would be a lie, and the
+    operator waiting on it would have no way to tell a slow scan from a hung
+    request. The honesty lives in a React-free, dependency-injected state machine,
+    `ui/review/extractAndCreate.ts`, so every branch is unit-testable with fakes;
+    the view only supplies the real deps and paints the sentences.
+
+    The predicate and the words live in `ui/review/bundleRows.ts`, not inline in
+    the component: `canExtractAndCreate` is the one rule that decides who gets
+    the door, and `EXTRACT_AND_CREATE_LABEL`, `EXTRACT_AND_CREATE_HINT` and
+    `archiveExtractTitle` are its sentences. `useBundleDetect` gained
+    `createReporting`, which refetches and then returns the server's answer,
+    while the existing `create` is untouched, so every bulk door is unchanged.
+    The hint says plain Extract's shortfall exactly: plain Extract runs the same
+    extraction and the same settle wait, and only stops before the project.
+    The action mounts in the detail panel beside the untouched
+    `ArchiveExtractAction` (decision 3: a selected item's row actions live in the
+    detail panel), and nothing focusable enters the listbox option, so Space stays
+    bulk selection and Enter stays plain Extract's door. The narration lives in
+    the queue's notices slot rather than in the aside, because a successful
+    create hides its own row by default (`showCreated` off) and a one-way write
+    must leave a sentence behind.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** `createReporting` is gone. The door this
+    action calls reports one verdict for one archive, so there is no report left to
+    read an answer out of: `ui/review/extractAndCreate.ts` calls
+    `createProjectFromExtract` (`curiarium/web/src/lib/api/imports.ts`), which posts
+    `{path, name?}` to `POST /import/archive/project` and hands back the verdict.
+    `useBundleDetect.create` is untouched - still a void action that refetches -
+    because that is what the bulk create doors need, and they are unchanged. The
+    queue is re-walked only once a project exists: the view refreshes on the
+    `created` and `already-created` verdicts and on nothing else, because this door
+    writes no bundle report of its own.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** `ArchiveExtractAction` is no longer the
+    untouched neighbour this paragraph describes. Its first sentence survives
+    byte-for-byte - "N files, X — extract into a new folder beside the
+    archive?" - and beside it the confirm step now renders the plan lines of
+    `ui/archive/archivePlan.ts` (`planArchive` and `archivePlanLines`, React-free
+    and tested in `archivePlan.test.ts`): the kinds the archive holds (models,
+    images, nested archives, other documents), the common root the entries land
+    under, how many system members (`.DS_Store`, `__MACOSX`, `Thumbs.db`) are left
+    out, and - when the archive's only model bytes are inside a nested archive -
+    that fact said plainly, because it is the moment the operator can still choose
+    differently. The plan deliberately prints no byte total of its own: the pinned
+    sentence already prints the listing's, which counts the system members the plan
+    excludes, and two different sizes side by side read as disagreement rather than
+    as the difference. The one-step action has no confirm panel of its own, so it
+    renders the same `archivePlanLines` in the queue's notices slot beside its phase
+    narration, under `data-extract-and-create-plan="<key>"`, from the listing the
+    run read before it wrote anything.
+
+    The run is not cancellable, and the queue's mutating doors are shut for its
+    duration rather than left open: a dismissal written mid-run would either have
+    to be undone or would still race the in-flight create. The doors are the five
+    bulk buttons, the detail pane's create/dismiss/enrich and its own extract
+    action, and the blocked-reason cell and Enter on a zip-only row. What the run
+    does not lock is what cannot race it - the filters, the reveal toggles,
+    Refresh, selection, the typed names and the group checkboxes - because it
+    snapshots what it needs when it starts and writes only the row it was given.
+    Leaving the queue is the cancellation: `afterExtract` answers `cancelled` on
+    unmount and `runExtractAndCreate` then creates nothing, so the one way out of
+    a run is the way that writes nothing.
+
+    Four server facts shape what the client will and will not claim.
+    `POST /import/archive` reports no per-entry failures: `ArchiveExtractOut`
+    carries only `path`, `destination`, `files`, `bytes`, `already_present`
+    and `scan_started` (`curiarium/api/schemas/imports.py:76-92`). So "a
+    partially failed extraction" can only be answered honestly as "0 of
+    M entries were written" - M from the pre-extract listing - plus the
+    server's own message. A per-entry failure report would be a contract
+    change to that schema and to `entry_policy`, and is a separate ticket; no
+    count is ever invented that the response does not carry. The extract is
+    all-or-nothing, so that zero is the truth and nothing was left half-written:
+    the junk-only no-op returns `files=0, already_present=False` before
+    any write (`archive_service.py:125-138`), the every-destination-exists
+    no-op returns `files=0, already_present=True` (the early return guarded
+    by `archive_service._already_present`), `_refuse_occupied` refuses a
+    partial collision at 409 *before* staging (`:153`, `:369-385`), and a
+    mid-publish failure unlinks this request's own publications newest-first
+    and re-raises (`:199-208`). The settle does not distinguish a failed scan
+    from a clean one: `SettleOutcome` is only `settled | timeout | cancelled`
+    (`curiarium/web/src/lib/scanSettle.ts:42`). So after a clean settle
+    the create response is the only readiness authority - a still-blocked
+    row answers `CREATE_BLOCKED` with the row's own `blocked_reason`
+    (`curiarium/api/bundle_service._create_one`, with `bundle_service.NOT_SCANNED`
+    as `"not_scanned"`), worded through the existing `BLOCKED_REASON_LABELS`
+    table and never inferred client-side from the refetched report, which
+    would also race a stale one. One reason is the exception: `archive_only`
+    is what this run just acted on, so its own sentence replaces the table's
+    instruction to re-extract and names the pairing the scan still has not made
+    instead. The `still-blocked` outcome carries `wrote` - `extracted.files > 0`
+    - because the `already_present` route creates without writing a byte, and
+    the sentence states which of the two happened. Exactly one item is sent
+    and the server echoes its key (`bundle_service._result`), so a response
+    whose `results` do not name this row is a failure and never another row's
+    verdict. And idempotence is the server's: `find_existing_project` answers
+    `CREATE_SKIPPED`/`already_created` with the existing project's id and name
+    (`_create_one`'s `find_existing_project` skip), so a second invocation reports
+    already-created and never makes a second project. A settle `timeout` or
+    `cancelled` creates nothing at all, and a create that answers `failed` after
+    a successful extraction keeps the files, leaves the row ready and the plain
+    `Create project` affordance as the retry - the run rolls nothing back, and
+    the deps type carries no rollback member at all (a compile-time fact, not a
+    runtime lookup).
+
+    **Amended by `Mf-0ck5` (2026-11-07).** The last sentence above is the one this
+    ticket supersedes, and only its first half. A `cancelled` settle still creates
+    nothing: leaving the queue remains the only way out of a run and the only
+    write-free one. A `timeout` no longer does - the run calls the door anyway,
+    because the settle is a courtesy to the operator and not the proof that makes a
+    create safe. The door's own comparison is the readiness authority now, and it
+    answers "none of the N entries the archive lists is a registered file - they
+    would be under `<twin>/`" from what it resolved, which says more than "the
+    library scan did not settle, refresh later" ever did. A settle that throws is
+    treated as a timeout, and the `settle-abandoned` outcome is gone.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** What is left of that paragraph -
+    `CREATE_BLOCKED` with the row's `blocked_reason` worded through
+    `BLOCKED_REASON_LABELS`, the `still-blocked` outcome's `wrote` flag, the one
+    `results` entry that must echo this row's key, and `find_existing_project`'s
+    `CREATE_SKIPPED`/`already_created` - is the account of the door this action used
+    to call, `POST /bundle/create`, and it stays here as that history. The action no
+    longer sends a bundle item, because that door cannot answer this question:
+    `bundle_service._create_one` refuses `archive_only` rows
+    (`CREATE_BLOCKED`/`archive_only`), and `find_existing_project` matches by
+    normalised directory, which a zip-only row has none of - so the old sequence
+    ended with a blocked row instructing the operator to do the thing they had just
+    done. Nor may one create commit twice: `project_service.create_project` commits
+    and `add_assets` commits again, which can strand an empty project - the owner
+    forbade that - so `project_service` gained `create_project_with_members`, which
+    inserts the `Project` row and every `ProjectAsset` row on one session and
+    commits once, members in the listing's order.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** The replacement is
+    `create_project_from_extract` in the new `curiarium/api/archive_project_service.py`,
+    routed at `POST /import/archive/project` by `curiarium/api/routers/imports.py`
+    under `require_contribute`. Its heart is a set comparison, not a rule: the door
+    lists the archive itself - `entry_policy.plan_selection` over the zip, the same
+    plan the extract door iterates - and resolves each planned entry against the
+    library as `Asset.storage_path == <twin>/<entry path>`, both sides compared as
+    normalised relative paths, where `<twin>` is the directory the extract door
+    writes into (`<parent>/<sanitised stem>`). A project is therefore only ever
+    created from asset ids that the lookup resolved, so a path the operator did not
+    extract can never join it - and nothing on this path consults `bundle_detect`,
+    `bundle_service`, `bundle_drift` or `archive_service`'s pairing rules: no
+    `archive_only` and no `pair_only` verdict, no unpaired-zip or loose-model
+    guess, no `find_existing_project`, and no key, normalised-directory or
+    `archive` group rule.
+    `curiarium/api/tests/test_archive_project.py` pins that two ways: it
+    monkeypatches the detector's and the bundle rules' functions to explode if
+    called, and it refuses the door when a bundle or archive-rule module appears in
+    the service module's import closure.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** Every verdict is an HTTP 200 with a
+    `status`, because the door has no policy to refuse on, and no count is
+    invented: `created`; `already_created`, the idempotent answer, keyed by the
+    archive path read out of the `_archive_project` marker written at create time
+    and looked up *before* the zip is opened, so a repeat click still answers
+    already-created after the extraction has left the archive deleted, renamed or
+    trashed (`metadata_json` carries no index, so that read scans the `project`
+    table in Python, the way `project_service` scans it for its own de-duplication);
+    `partial`, which creates nothing and reports how many of the M planned entries
+    never arrived, naming them in `failed[]`; and `nothing_resolved`, which creates
+    nothing and names the twin directory. The route is audited as
+    `archive.project.create` (`curiarium/api/audit.py`, documented in
+    `docs/AUDIT.md` and `docs/PERMISSIONS.md`) - one row per verdict, the two refusal
+    verdicts included, because the operator's decision is the evidence this door
+    acts on. A request the door refuses outright - the 400s, 404, 413, 415 and 409 it
+    raises itself - never reaches `audit.record`, so it writes no row and creates
+    nothing, which is the rule `archive.extract` already keeps.
+
+    The compound case is the server's as well: ONE item is sent for the row, so
+    the server's own compound branch makes one project with its groups; the
+    client adds no grouping logic and never sends `exclude_groups` from this
+    door.
+
+    **Amended by `Mf-0ck5` (2026-11-07).** The compound branch this sentence leans
+    on is `bundle_service`'s, and this path no longer reaches it. The door is given
+    one archive path; the project's groups are read off the listing's own structure
+    - the common root's subdirectories, each with how many members it holds -
+    never off a detector, which is what
+    `test_groups_come_from_the_listing_even_when_the_scan_named_the_folders_differently`
+    pins.
+
 ## Consequences
 
 - Settings is configuration only. Its imports section is relabelled **Import
@@ -383,7 +612,17 @@ destination model, the count rule, the role threshold and the fetch policy.
   directory gone), the detail panel moves to the row that took its place, and if
   the list still held focus that row is focused too - a mouse click on a write
   button moves focus to that button first, so the operator's focus is never
-  stolen.
+  stolen. Recovery has two doors, and they share this one ladder: a caret that
+  was in the detail pane when the settle refetch replaced its row lands on the
+  row that replaced it. When no row survives - an in-place extract emptied the
+  queue - the ladder's second step focuses the queue's own `region` landmark,
+  `tabIndex={-1}`, reached through `ReviewQueueView`'s `rootRef` prop, because
+  that branch renders neither the listbox nor a row. Each step consumes the flag
+  it used: removing the focused element fires no `focusout`, so a flag left
+  standing would pull the caret out of a filter chip the next time a filter
+  empties the list. There is no `document.activeElement === <body>` heuristic -
+  a report that replaces the active row with a row that is still there takes no
+  focus at all, and a caret left on `<body>` in that case is by design.
 - A queue's filter, selection and typed names live in the queue view, so leaving
   REVIEW discards them. That is the same contract the Settings card had, and it
   keeps the App state free of per-queue drafts.
@@ -432,18 +671,60 @@ destination model, the count rule, the role threshold and the fetch policy.
   is file-level: move an entry back into the storage folder, then rescan the
   library." - and a grep for "Settings → Storage" under `curiarium/web/src` now
   finds only the two test files that assert it is gone.
-- Two limitations are inherited and recorded rather than claimed fixed. The
-  shared `useAssetList` has no newest-wins request sequence and no
-  React.StrictMode guard, so under StrictMode the missing queue issues two list
-  fetches; the library behaves the same way and this slice did not touch that
-  hook's fetch policy, so a follow-up is owed. The StrictMode claim this ADR does
-  make is narrower than it sounds: it covers the four queue hooks' own `walked`
-  refs - `useBundleDetect`, `useImportRuns`, `useLibraryScan` and `useTrash` -
-  each of which keeps its own entry read to one per activation. The shared
-  `useAssetList` above is the exception.
-  And only the flat branch of the grid is virtualised: the grouped (folder/type)
-  branch remains a 24-card cap with a "Show all N" control, preserved as it was
-  at HEAD, because retrofitting group virtualisation is a different ticket.
+- The shared fetch policy was an inherited limitation and is now closed. This
+  slice recorded a `useAssetList` with no newest-wins request sequence and no
+  React.StrictMode guard, so under StrictMode the missing queue issued two list
+  fetches. Ticket `Mf-m45p` fixed that hook instead of leaving it to a follow-up.
+  `refresh` and `loadMore` now share one newest-wins sequence: a response that
+  started earlier is dropped whichever order the two settle in, so the last
+  request to start owns the list. That is invalidation, not cancellation - the
+  listing call takes no AbortSignal. The entry effect is guarded by a walked ref
+  keyed on the pile (folder, Unfiled, missing-only, project), so one entry issues
+  one list request, one tags request and one creators request, while a pile
+  change still refetches because the key changes with it. Two Load more clicks in
+  one tick are collapsed by a ref latch, since both would otherwise read the
+  pre-update `loadingMore` state and append the same page twice. The StrictMode
+  claim this ADR makes is therefore uniform rather than narrower than it sounds:
+  the four queue hooks keep their own `walked` refs - `useBundleDetect`,
+  `useImportRuns`, `useLibraryScan` and `useTrash`, each holding its entry read to
+  one per activation - and the shared `useAssetList` now does the same. Two
+  caveats sit outside that claim: it does not cover the hook's folder-tree read,
+  and offset paging is not cursor paging, so a `limit`/`offset` listing can still
+  skip or repeat a row when the underlying set changes under it.
+- One limitation stays inherited and unchanged: only the flat branch of the grid
+  is virtualised. The grouped (folder/type) branch remains a 24-card cap with a
+  "Show all N" control, preserved as it was at HEAD, because retrofitting group
+  virtualisation is a different ticket. The project's sectioned view (Mf-aaqi)
+  is a SECOND unvirtualised branch and keeps the same 24-card cap per section
+  with its "Show all N" escape, so the cap bounds EACH SECTION, not the branch:
+  200 sections of 5 parts is ~1000 live cards. What is disclosed where is also
+  precise: the section header carries the section's own count, the group chip
+  carries the group's total, and the escape control names the capped section's
+  full count only when that section is capped. A project above the 1000-member
+  page shows loaded counts, disclosed as "loaded ... more to load" rather than
+  presenting the loaded page as the whole project. Grouped-section
+  virtualisation remains that separate ticket, and it now covers both branches.
+- The toolbar sort still applies inside a section (Mf-aaqi): a section's item
+  order is the loaded, server-ordered listing, so `Size`/`Creator`/`Asc`/`Desc`
+  keep changing what is shown. Only the section LAYOUT is the project's folder
+  structure, and it deliberately does not follow `sortDir`.
+- A residual path-build cost is accepted and disclosed: building `folderNames`
+  calls `folderPath` once per folder, and `folderPath` rebuilds its own index per
+  call, so it is O(folders^2) whenever the folder array changes - now including
+  every project mount. The single-index fix (build that index once and reuse it
+  across the calls) does live inside this ADR's reach but is deliberately out of
+  scope for this ticket: it belongs in `folderTree.ts`, a shared module another
+  change is touching, and the cached `pathFor` wrapper cannot lower the call
+  count because that wrapper also calls `folderPath`. The cost is disclosed here
+  so it stays visible rather than silently inherited; folder counts are in the
+  hundreds and the memo runs only when the array changes.
+- One invariant was deliberately reversed, and the reversal is recorded here
+  rather than the assertion quietly deleted: project mode now reads the folder
+  tree. It previously never did - `useAssetList.ts` short-circuited the tree
+  fetch in project mode and `AssetGrid.project.test.tsx` pinned
+  "never touches folders". The tree is presentation only for a project: the
+  listing is still scoped by membership alone, so reading it cannot change which
+  parts are listed, only how they are sectioned.
 - An untouched, pre-existing heuristic remains a known sharp edge. A successful
   walk over a partially mounted storage root can flag present files as missing,
   because presence falls through to `(root/managed_rel).exists()`, which is
@@ -493,7 +774,8 @@ no API, permission, audit, migration or schema change is involved.
 ## Verification
 
 - `ui/App.review.test.tsx` proves the destination and the fetch policy through the
-  real `ReviewNav` and the real `BundleReviewView`: no `GET /bundles/detect` before
+  real `App` - the header's Review entry and the destination's own tab row - and
+  the real `BundleReviewView`: no `GET /bundles/detect` before
   the queue is opened, exactly one on entry with `{includeDismissed: true, limit:
   1000}`, one refetch after a create and one after a dismiss with the badge and the
   view both updating from that single new report, no timer firing while the
@@ -519,14 +801,20 @@ no API, permission, audit, migration or schema change is involved.
   truncated report whose rows look complete is `null`, a dismissed row and an
   already-created row are each excluded once, a row that is both is not subtracted
   twice, and blocked rows count.
-- `ui/review/ReviewNav.test.tsx` pins each row's own role gate - `contributor`
-  for bundles, `viewer` for imports, missing and trash - the dash for an
-  unknown count, and `aria-current` on exactly the open queue;
-  the group is proven by `WorkspaceHeader.test.tsx` (the Review entry exists
-  exactly once for every role that has a queue, and never for a role that has
-  none) and by `ReviewQueueTabs.test.tsx` (the destination's tab row, its role
-  thresholds and its counts), not by a per-mode sidebar: `Mf-x1p4` removed
-  `ProjectSidebar.tsx` and its test, and `Sidebar.tsx` no longer carries the
+- `ui/review/ReviewQueueTabs.test.tsx` pins each row's own role gate, row by row:
+  bundles from `contributor` up (a viewer gets no bundle row), imports, missing
+  and trash from `viewer` up, no tablist at all while the role is unknown, the
+  dash for an unknown count, and exactly one `aria-selected` tab. It is the pin
+  that replaces the one that went with the deleted component: `Mf-vinb` removed
+  `ui/review/ReviewNav.tsx` and its test, and the open-queue marker is
+  `aria-selected` on the tabs, not `aria-current`, which is the header Review
+  entry's own attribute (`WorkspaceHeader.test.tsx`, "marks the Review entry
+  current only while Review is the open view"). The group's single entry is
+  proven there too (the Review entry exists exactly once for every role that has
+  a queue, and never for a role that has none) and end to end by
+  `ui/App.review.test.tsx` ("gives a viewer no bundle tab and never walks the
+  library"), not by a per-mode sidebar: `Mf-x1p4` removed
+  `ProjectSidebar.tsx` and its test, and `Sidebar.tsx` carries no part of the
   group.
 - `ui/Settings.test.tsx` is the removal proof: for an editor, a contributor and a
   viewer, opening Imports and Import sources renders no bundle surface and no run
@@ -549,14 +837,61 @@ no API, permission, audit, migration or schema change is involved.
   control, label and status string, and `ui/App.imports.test.tsx` proves an
   upload from the queue creates the folder, fires both change signals and
   navigates.
-- `ui/App.imports.test.tsx` also proves the coordinator: the sidebar badge text
-  equals the queue header count on one fetch, the badge is a dash before entry,
+- `ui/App.imports.test.tsx` also proves the coordinator: the imports tab's badge
+  (the `.sidebar-count` span inside `review-count-imports`) is worded from the
+  same count as the queue header on one fetch, the badge is a dash before entry,
   1 while a run is running and 0 once it is finished, and the Imports row renders
-  for a viewer as well as an editor while no bundle row appears for a viewer.
+  for a viewer as well as an editor. The viewer's missing bundle row is not this
+  file's claim: `ui/App.review.test.tsx` and `ui/review/ReviewQueueTabs.test.tsx`
+  pin it, the latter row by row.
 - `src/lib/noNativeDialogs.test.ts` and `src/lib/palette.test.ts` stay green: the
   queues raise no native dialog - the queue-native confirmations are
   `ConfirmDialog`, and asset deletion keeps its own typed `AssetDeleteDialog` -
   and every new rule comes from the existing `--mv-*` tokens.
+- `ui/review/extractAndCreate.test.ts` pins the four-phase order with recording
+  fakes and every honesty branch by itself: an extract failure reports 0 of M and
+  no create, a junk-only archive neither settles nor creates, a settle `timeout`
+  creates nothing at all, a settle `cancelled` is silent, a
+  `skipped`/`already_created` answer reports already-created and exactly one
+  project across two identical runs, a failed create leaves the files - the deps
+  type carries no rollback member (a compile-time fact) and the sentence says so
+  - a `blocked`/`not_scanned` answer speaks the row's own sentence and says the
+  extraction stands, a `blocked`/`archive_only` answer names the missing pairing
+  instead of repeating the table's re-extract instruction, the same answer on the
+  `already_present` route says the run wrote nothing, a `results` list naming
+  another key and an empty `results` list each fail with the no-result
+  sentence, a throwing `beforeCreate` cannot stop the create, and a
+  compound-shaped row sends one item.
+  `ui/review/bundleRows.test.ts` pins the predicate and both hover sentences,
+  `ui/review/useBundleDetect.test.tsx` pins `createReporting` (the server's answer
+  returned unchanged and the report refetched, the old `create` still returning
+  nothing), and `ui/review/BundleReviewView.test.tsx` pins the single button and
+  its absence for a ready row, an already-created row and a viewer, the narration
+  surviving the hidden row - the same component instance rerendered with the
+  created row hidden, its narration still on screen while the row is gone from
+  the listbox - the narration cleared by the queue's Refresh that its own
+  `settle-abandoned` sentence asks for, and plain Extract and the bulk label
+  unchanged beside it.
+
+  **Amended by `Mf-0ck5` (2026-11-07).** That list is the state at landing, and the
+  cases written against the bundle door went with it. A settle `timeout` no longer
+  "creates nothing at all": the run calls the door and lets it judge - "creates
+  anyway when the scan does not settle, and lets the door judge", and the same for
+  a settle that throws - and the `blocked`/`not_scanned`, `blocked`/`archive_only`
+  and mismatched-`results` cases have no counterpart, because the door answers
+  `partial` (its own `planned` and `resolved`, with the failed names) or
+  `nothing_resolved` (the twin directory named). `already_present` is still pinned,
+  but as a run that skips the settle and creates. `createItem` became
+  `createPayload`: the archive path and the trimmed name, and no bundle key.
+  `ui/review/useBundleDetect.test.tsx` no longer pins `createReporting` - that
+  member is deleted together with the door that used it - and what the hook holds
+  today is the void `create` the bulk doors depend on, still returning nothing and
+  still refetching ("leaves the bulk create door returning nothing").
+  `ui/review/BundleReviewView.test.tsx` gained the run that calls the door when the
+  scan refuses to settle, the plan lines beside the phase narration while the run
+  is in flight, and the re-walk that follows a created or already-created verdict;
+  the narration is still cleared by the queue's Refresh, but the sentence asking
+  for it is one of the two refusals, not `settle-abandoned`.
 
 At the time of landing: web 1356 tests in 117 files became 1451 in 122; the API
 suite (2326 passed, 1 skipped), the route count (100) and the schema (14) are
@@ -616,20 +951,51 @@ one per activation including under `React.StrictMode`, a refetch on re-entry, no
 timer however long the queue stays open, the newest response winning, a 401
 signing out instead of reporting an error, one refetch after a successful purge,
 and a failed purge that sets only `purgeError` and keeps the rows.
-`ui/App.trash.test.tsx` (10) proves the destination end to end: the Trash row in
-both sidebars, the en dash before entry and the header number after it, no read
-at app load, one read per entry including under `React.StrictMode`, the queue
-surviving a Files/Projects switch, and - for an admin alone - a purge that
-refetches exactly once and moves the badge and the header to zero, against a
-viewer who gets the queue, its rows, its sizes and Refresh but no path to a
-purge. `ui/ConfirmDialog.test.tsx`
+`ui/App.trash.test.tsx` (10) proves the destination end to end: one Trash tab
+in one tablist whichever mode is showing, the en dash before entry and the
+header number after it, no read at app load, one read per entry including under
+`React.StrictMode`, the queue surviving a Files/Projects switch, and - for an
+admin alone - a purge that refetches exactly once and moves the badge and the
+header to zero, against a viewer who gets the queue, its rows, its sizes and
+Refresh but no path to a purge. `ui/ConfirmDialog.test.tsx`
 grew three cases for `body`, `confirmDisabled` and `busyLabel` - Escape still
 closes, and autofocus lands on Cancel when confirming is refused - while
-`ui/review/ReviewNav.test.tsx` pins the Trash row for all four roles,
+`ui/review/ReviewQueueTabs.test.tsx` pins the Trash row for all four roles,
 `ui/review/useReviewCounts.test.ts` pins `trashBadgeCount` and the wordings that
 read it, `ui/settings/StorageSection.test.tsx` proves no trash surface is left
 there, and `ui/Settings.test.tsx` is the removal proof by call: no request to
 `lib/api/trash` for a viewer, a contributor, an editor or an admin.
+
+Ticket `Mf-0ck5` adds its own proofs, on both sides of the new door. In the API
+suite, `test_archive_project.py` covers the comparison and the refusals: the
+planned entries become one project with every asset attached and the cover is the
+first member the library calls a model; no bundle rule is consulted on the path,
+pinned by exploding rule functions and by a forbidden import closure; a partial
+extraction creates no project and says how many entries failed, then creates once
+the rest arrives; a run whose planned paths resolve to nothing names the twin and
+creates nothing, as does an archive that was never extracted; a second run on the
+same archive is already-created and never a duplicate, and that repeat answer
+survives the archive being gone; junk, hidden and directory members cannot refuse
+the door forever; groups come from the listing even when the scan named the folders
+differently; and a name collision creates nothing rather than an empty project.
+On the web side,
+`src/lib/api.archiveProject.test.ts` pins the client (one create per archive, the
+whole archive when no entry list is given, a refusal verdict parsed as a 200
+answer, the twin carried through, the 409 name-collision detail, and `401` as
+`UnauthorizedError`), and `ui/archive/archivePlan.test.ts` pins the classifier and
+the lines it prints - the kinds, the root, the system files left out, the
+nested-archive case said twice over (models-only-inside, and packed-alongside) -
+and that the plan leaves the sizes to the panel's own first line.
+`ui/archive/ArchiveExtractAction.test.tsx` pins the confirm step's first line as
+byte-for-byte the sentence it was, with the plan rendered beside it.
+
+The ticket lands with the API suite at 2976 passed and 1 skipped (baseline 2940 and
+1) and the web suite at 2439 tests in 167 files (baseline 2405 in 165). The route
+count goes from 100 to 101 - one route, `POST /import/archive/project` - and
+`audit.ACTIONS` from 54 strings to 55; the OpenAPI fixtures gained that route and
+its two models, `ArchiveProjectRequest` and `ArchiveProjectOut`. There is no
+migration and no new column: the provenance marker lives in the `metadata_json`
+column the create doors already write.
 
 ## Superseding conditions
 
@@ -646,8 +1012,9 @@ This ADR is superseded if any of the following becomes true:
   entry and never polls);
 - an unknown count starts rendering as `0`, or a truncated report starts
   producing a number;
-- the REVIEW group is rendered differently by the two sidebars, or one mode stops
-  showing it;
+- the REVIEW group gains a second carrier beside the header - a sidebar or a mode
+  pane rendering its own copy of it - or one mode stops reaching it from the
+  header;
 - a bundle row becomes creatable while blocked or already a project, or blocked
   rows stop counting toward the badge;
 - the UI gate for a bundle write moves away from the route's CONTRIBUTE

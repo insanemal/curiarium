@@ -42,6 +42,7 @@ const AssetCard = React.memo(function AssetCard({
   onAssetChanged,
   onForgetMissing,
   onRescanMissing,
+  onExtractArchive,
   rescanning,
   onClearPreparedPrint,
   preparedClearing,
@@ -82,6 +83,13 @@ const AssetCard = React.memo(function AssetCard({
   // old card and as the bulk bar still gates it.
   if (canContribute) {
     toolItems.push({ label: "Add to project…", onSelect: () => onAddToProject(item) });
+    // The same predicate the preview footer uses (`ui/asset-grid/preview.tsx:404`):
+    // `storage_path` is filled in by a scan or an upload but is absent on
+    // mount/reference rows, whose file is not the library's own copy. A
+    // reference-row `.zip` therefore gets no item rather than a wrong path.
+    if (ext === "zip" && item.storage_path) {
+      toolItems.push({ label: "Extract archive…", onSelect: () => onExtractArchive(item) });
+    }
   }
   if (canOpenInSlicer) {
     toolItems.push({ label: `Open in ${slicerLabel}`, onSelect: () => onOpenInSlicer(item) });

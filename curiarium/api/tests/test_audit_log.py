@@ -45,6 +45,7 @@ import auth
 import bundle_service
 import config
 import db
+import import_resolvers
 import import_service
 import library_scan
 import login_throttle as login_throttle_module
@@ -85,6 +86,10 @@ FIRST_RUN_USERNAME = "first-admin"
 FIRST_RUN_PASSWORD = "correct horse battery staple"
 
 STL_BYTES = b"solid cube\nendsolid cube\n"
+# The committed Thingiverse page head the enrich sweep answers with, so the one
+# outbound call in the bundle family is a fixture and never a socket.
+THINGIVERSE_FIXTURES = Path(__file__).parent / "fixtures" / "thingiverse"
+DRAGON_KEY = "import/5390184_ARTICULATED_ice_dragon__fixed_"
 REQUEST_ID_HEADER = "X-Request-ID"
 
 RETENTION_KEYS = (
@@ -146,6 +151,10 @@ def isolated_storage(tmp_path, monkeypatch: pytest.MonkeyPatch):
     enabled_before = settings_service.get_mount_import_enabled(MOUNT_IMPORT_ENABLED)
     copy_before = settings_service.get_mount_import_copy(MOUNT_IMPORT_COPY)
     dismissals_before = settings_service.get_setting(settings_service.BUNDLE_DISMISSALS_KEY)
+    enrichments_before = settings_service.get_setting(settings_service.BUNDLE_ENRICHMENTS_KEY)
+    # Start every sweep with no cached page, so a leaked record from another module
+    # can never make the enrich route answer `cached` and write no row.
+    settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, "")
     # `POST /snapshots/retention` is one of the audited routes, so the four
     # settings it writes are saved and restored raw like the two above: a
     # configuration with no rows keeps none, which `test_snapshots.py` asserts.
@@ -165,6 +174,7 @@ def isolated_storage(tmp_path, monkeypatch: pytest.MonkeyPatch):
     settings_service.set_mount_import_enabled(enabled_before)
     settings_service.set_mount_import_copy(copy_before)
     settings_service.set_setting(settings_service.BUNDLE_DISMISSALS_KEY, dismissals_before or "")
+    settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, enrichments_before or "")
     with Session(engine) as session:
         for key, value in retention_before.items():
             row = session.get(AppConfig, key)
@@ -476,6 +486,18 @@ def call_import_archive(client, headers, ids, monkeypatch) -> Response:
     return client.post("/import/archive", json={"path": "sweep.zip"}, headers=headers)
 
 
+def call_import_archive_project(client, headers, ids, monkeypatch) -> Response:
+    # Mf-0ck5: the archive is staged as above, but nothing is extracted or scanned,
+    # so the door answers `nothing_resolved` - a 200 that still records the click.
+    # That is the verdict this sweep needs: the row is the point, not the create.
+    storage = Path(db.STORAGE)
+    storage.mkdir(parents=True, exist_ok=True)
+    with ZipFile(storage / "sweep.zip", "w") as archive:
+        archive.writestr("sweep.stl", STL_BYTES)
+    monkeypatch.setattr(main, "start_scan", lambda: True)
+    return client.post("/import/archive/project", json={"path": "sweep.zip"}, headers=headers)
+
+
 def call_rename_asset(client, headers, ids, monkeypatch) -> Response:
     return client.post(f"/asset/{ids.asset_id}/rename", json={"filename": "renamed.stl"}, headers=headers)
 
@@ -667,6 +689,22 @@ def call_dismiss_bundle(client, headers, ids, monkeypatch) -> Response:
     )
 
 
+def call_enrich_bundle(client, headers, ids, monkeypatch) -> Response:
+    """A real 5390184 export on the temp root, so the route fetches and writes its row.
+
+    The id-named directory is enough: detection derives a Thingiverse
+    ``source_url`` from the name, which is what the action caches. The page is the
+    committed fixture, so the sweep never opens a socket, and the audit row is the
+    route's own event (target = the bundle key).
+    """
+    files = db.STORAGE / DRAGON_KEY / "files"
+    files.mkdir(parents=True, exist_ok=True)
+    (files / "ARTICULATED_ice_dragon_fixed_p1.stl").write_bytes(STL_BYTES)
+    page = json.loads((THINGIVERSE_FIXTURES / "thing-5390184.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", lambda thing_id, cookie: page["html"])
+    return client.post("/bundles/enrich", json={"keys": [DRAGON_KEY]}, headers=headers)
+
+
 # The MFA routes (Mf-lg02) are driven by a throwaway account, never the fixture
 # admin: enrolling the admin would turn `/login` into a challenge and every later
 # spec in this sweep would be a different test. The sweep's request id has to
@@ -784,6 +822,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/import/project"): call_import_project,
     ("POST", "/import/zip"): call_import_zip,
     ("POST", "/import/archive"): call_import_archive,
+    ("POST", "/import/archive/project"): call_import_archive_project,
     ("DELETE", "/asset/{asset_id}"): call_delete_asset,
     ("POST", "/assets/batch/delete"): call_batch_delete,
     ("POST", "/asset/{asset_id}/rename"): call_rename_asset,
@@ -800,6 +839,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("DELETE", "/project/{project_id}"): call_delete_project,
     ("POST", "/bundles/create"): call_create_bundle,
     ("POST", "/bundles/dismiss"): call_dismiss_bundle,
+    ("POST", "/bundles/enrich"): call_enrich_bundle,
     ("POST", "/trash/purge"): call_purge,
     ("POST", "/settings/storage"): call_storage_settings,
     ("POST", "/settings/mount-import"): call_mount_import_settings,

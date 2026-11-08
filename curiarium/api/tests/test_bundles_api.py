@@ -14,11 +14,16 @@ at import time at a temp root, runs the migrations and deletes the rows a test
 created; the role fixtures are copied from ``tests/test_contributor_role.py``.
 """
 
+import json
+import shutil
+import socket
 from dataclasses import dataclass
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from argon2 import PasswordHasher
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from httpx import Response
 from sqlmodel import Session, delete, select
@@ -26,8 +31,11 @@ from sqlmodel import Session, delete, select
 import accounts
 import asset_file_service
 import asset_service
+import audit
+import bundle_detect
 import bundle_service
 import db
+import import_resolvers
 import library_scan
 import login_throttle as login_throttle_module
 import main
@@ -35,7 +43,8 @@ import permissions
 import settings_service
 from db import engine
 from migrations import run_migrations
-from models import Asset, AssetFile, Folder, MfaRecoveryCode, Project, ProjectAsset, User, UserSession
+from models import Asset, AssetFile, AuditEvent, Folder, MfaRecoveryCode, Project, ProjectAsset, User, UserSession
+from schemas.bundles import BundleDetectItemOut, BundleRefusalOut, BundleReportOut, BundleRuleSetOut
 
 ADMIN_USERNAME = "root"
 ADMIN_PASSWORD = "root-password-1"
@@ -52,6 +61,14 @@ LICENSE_TEXT = f"Moai statue -No overhang by moai_maker on Thingiverse: {THING_U
 STL_BYTES = b"solid cube\nendsolid cube\n"
 # The previews, in write order. The fourth is the largest, so it is the cover.
 IMAGE_SIZES = (100, 400, 200, 900, 300)
+
+# The owner's 5390184 export (Mf-nivh): its directory name is the only evidence,
+# so the row starts with no creator, no licence and a derived Thingiverse URL.
+DRAGON = "5390184_ARTICULATED_ice_dragon__fixed_"
+DRAGON_KEY = f"import/{DRAGON}"
+DRAGON_URL = "https://www.thingiverse.com/thing:5390184"
+CC_BY_NC_SA_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+THINGIVERSE_FIXTURES = Path(__file__).parent / "fixtures" / "thingiverse"
 
 
 # --- harness ----------------------------------------------------------------
@@ -104,6 +121,7 @@ def isolated_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     yield storage
     settings_service.set_storage_template(template_before)
     settings_service.set_setting(settings_service.BUNDLE_DISMISSALS_KEY, "")
+    settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, "")
     with Session(engine) as session:
         # Projects first: `idx_project_name_unique` is case-insensitive, so a
         # leaked row would 409 the next test's project.
@@ -202,6 +220,13 @@ def write_file(path: Path, payload: bytes = b"x") -> None:
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def write_zip(path: Path, entries: dict[str, bytes]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(path, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
 
 
 def moai_bundle(root: Path) -> Path:
@@ -325,3 +350,506 @@ def test_an_unknown_key_creates_nothing_and_never_fails(client: TestClient, cont
     assert body["created"] == 0 and body["failed"] == 1
     assert body["results"][0]["reason"] == "unknown bundle"
     assert project_ids(client, contributor) == []
+
+
+# --- duplicate archives (Mf-z4vv) -------------------------------------------
+
+
+def test_a_duplicate_archive_is_reported_and_never_a_bundle_row(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """A byte-identical copy is reclaimable bytes in the report, never a second row."""
+    moai_bundle(isolated_storage)
+    entries = {
+        "README.txt": README_TEXT.encode(),
+        "LICENSE.txt": LICENSE_TEXT.encode(),
+        **{f"images/{index}.jpg": b"j" * size for index, size in enumerate(IMAGE_SIZES)},
+        **{f"files/part{index}.stl": STL_BYTES for index in range(3)},
+    }
+    write_zip(isolated_storage / f"{MOAI}.zip", entries)
+    shutil.copyfile(isolated_storage / f"{MOAI}.zip", isolated_storage / f"{MOAI} (1).zip")
+    scan()
+
+    report = report_for(client, contributor)
+
+    size = (isolated_storage / f"{MOAI}.zip").stat().st_size
+    assert len(report["duplicates"]) == 1
+    duplicate = report["duplicates"][0]
+    assert duplicate["paths"] == [f"{MOAI}.zip", f"{MOAI} (1).zip"]
+    assert duplicate["reclaimable_bytes"] == duplicate["size"] == size
+    assert len(duplicate["sha256"]) == 64
+    assert all(character in "0123456789abcdef" for character in duplicate["sha256"])
+    assert f"{MOAI} (1).zip" not in {row["key"] for row in report["bundles"]}
+    assert [row["key"] for row in report["bundles"]] == [MOAI]
+    assert report["duplicates_total_bytes"] == size
+    assert f"{MOAI}.zip" in report["duplicates_text"]
+    assert f"{MOAI} (1).zip" in report["duplicates_text"]
+    assert "duplicate" in report["duplicates_text"]
+
+
+# --- scan fidelity: the report's own rule set and refused ledger (Mf-au4k) ---
+
+
+def test_the_report_model_declares_every_key_the_service_computes(
+    isolated_storage: Path,
+) -> None:
+    """The model and the service name the same keys, and the one drop is deliberate.
+
+    `build_report` is called directly, so the response model is not in the loop: the
+    dict it returns is the whole truth about what the service computes. The per-row
+    `rule_set` stamp is LEFT OFF `BundleDetectItemOut` on purpose - one rule set per
+    report, and the offline artifact keeps the per-row copy - so it is named in an
+    assertion rather than tolerated as an unexplained extra. The two drift keys
+    (`bundle_drift_state`/`bundle_drift_count`, Mf-8i04) ARE declared, so the
+    model cannot silently drop them the way `rule_set` and `refused` once were.
+    Mutation: delete either field from `BundleReportOut` and the set comparison
+    reds; delete either drift key from `BundleDetectItemOut` and the row
+    comparison reds; declare the per-row stamp on the row model and the
+    named-difference assertion reds.
+    """
+    moai_bundle(isolated_storage)
+    write_zip(
+        isolated_storage / "import" / "models-only.zip",
+        {"part-a.stl": b"s" * 40, "part-b.stl": b"s" * 41, "part-c.stl": b"s" * 42},
+    )
+    scan()
+
+    report = bundle_service.build_report()
+
+    assert report["refused"], "the fixture must refuse at least one path"
+    assert report["rule_set"]["stamp"], "every report names the rule set it was taken at"
+    assert set(report) == set(BundleReportOut.model_fields), "the model declares exactly the keys served"
+    assert set(report["rule_set"]) == set(BundleRuleSetOut.model_fields)
+    assert set(report["refused"][0]) == set(BundleRefusalOut.model_fields)
+    assert set(report["bundles"][0]) - set(BundleDetectItemOut.model_fields) == {
+        "rule_set"
+    }, "the per-row stamp is deliberately off the model"
+    assert set(BundleDetectItemOut.model_fields) - set(report["bundles"][0]) == set()
+
+
+def test_the_detect_report_serves_the_rule_set_stamp_and_the_refusal_ledger(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """The live route keeps both fields: the walk's rule set and every path it refused.
+
+    The stamp is compared to the constants the detector exports rather than to any
+    literal, so a rule-table edit moves both sides together. Mutation: drop
+    `rule_set`/`refused` from the response model and this reds - that is exactly the
+    shape Mf-nivh found for `enrichment`.
+    """
+    moai_bundle(isolated_storage)
+    write_zip(
+        isolated_storage / "import" / "models-only.zip",
+        {"part-a.stl": b"s" * 40, "part-b.stl": b"s" * 41, "part-c.stl": b"s" * 42},
+    )
+    scan()
+
+    body = report_for(client, contributor)
+
+    assert body["rule_set"] == {
+        "version": bundle_detect.RULE_SET_VERSION,
+        "stamp": bundle_detect.RULE_SET_STAMP,
+    }
+    assert body["refused"], "the models-only archive is in the ledger"
+    assert body["refused"] == bundle_service.build_report()["refused"], "the route never reshapes the ledger"
+    for item in body["refused"]:
+        assert item["kind"] in {"archive", "directory"}, item
+        assert item["rule"] in bundle_service.REFUSAL_RULES, item
+    assert [item["rel_path"] for item in body["refused"]] == sorted(
+        item["rel_path"] for item in body["refused"]
+    ), "the ledger is sorted by path"
+    assert "import/models-only.zip" in {item["rel_path"] for item in body["refused"]}
+
+
+def test_an_empty_ledger_is_served_as_an_empty_list_not_omitted(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """Nothing on disk still serves `refused: []`: an empty answer is an answer.
+
+    Mutation: drop `refused` from the model and the key disappears from the body;
+    make it `Optional[...] = None` and this serves `null` instead of `[]` - either
+    way a client can no longer tell "nothing was refused" from "no ledger here".
+    Whether it is DEFAULTED rather than required is the fixture's required/default
+    list, pinned by `test_openapi_contract.py`, not by this test.
+    """
+    body = report_for(client, contributor)
+
+    assert "refused" in body, "an empty ledger is served, never omitted"
+    assert body["refused"] == []
+    assert body["rule_set"]["stamp"] == bundle_detect.RULE_SET_STAMP
+
+
+# --- enrichment over HTTP (Mf-nivh) -----------------------------------------
+
+
+def dragon_bundle(root: Path) -> Path:
+    """The owner's export: one model under files/, no documents, the id in the name."""
+    bundle = root / "import" / DRAGON
+    write_file(bundle / "files" / "ARTICULATED_ice_dragon_fixed_p1.stl", STL_BYTES)
+    return bundle
+
+
+def fixture_html(name: str) -> str:
+    """One captured Thingiverse page head from this module's own fixture tree."""
+    return json.loads(THINGIVERSE_FIXTURES.joinpath(name).read_text(encoding="utf-8"))["html"]
+
+
+def stub_thing_page(monkeypatch: pytest.MonkeyPatch, html: str) -> list[tuple[str, str | None]]:
+    """Replace the fetch the service imports inside `enrich_bundles`; record its args."""
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_fetch(thing_id: str, thingiverse_cookie: str | None) -> str:
+        calls.append((thing_id, thingiverse_cookie))
+        return html
+
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", fake_fetch)
+    return calls
+
+
+def enrich(client: TestClient, actor: Actor, keys: list[str], **body) -> Response:
+    return client.post("/bundles/enrich", json={"keys": keys, **body}, headers=bearer(actor.token))
+
+
+def row_for(report: dict, key: str) -> dict:
+    return {row["key"]: row for row in report["bundles"]}[key]
+
+
+def test_the_owners_ice_dragon_gains_creator_and_licence(
+    client: TestClient, contributor: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one acceptance path: a page fills the empty fields, then a create records them.
+
+    Mutation: run the fetch during detection and the row is already attributed
+    before the enrich; drop `enrichment` from the response model and the fields
+    assertion reds; let the create ignore the row's values and the project's
+    creator/licence/licence_url and `_bundle.enrichment` red.
+    """
+    dragon_bundle(isolated_storage)
+    scan()
+
+    before = row_for(report_for(client, contributor), DRAGON_KEY)
+    assert before["creator"] is None and before["licence"] is None and before["licence_url"] is None
+    assert before["detector"] == "thingiverse-id-name"
+    assert before["source_url"] == DRAGON_URL
+    assert before["enrichment"] is None, "nothing on this row came from a page yet"
+
+    calls = stub_thing_page(monkeypatch, fixture_html("thing-5390184.json"))
+    response = enrich(client, contributor, [DRAGON_KEY])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["fetched"] == 1
+    assert calls == [("5390184", None)]
+
+    after = row_for(report_for(client, contributor), DRAGON_KEY)
+    assert after["creator"] == "P1lotz"
+    assert after["licence"] == "CC BY-NC-SA"
+    assert after["licence_url"] == CC_BY_NC_SA_URL
+    assert after["enrichment"]["fields"] == ["creator", "licence", "licence_url"]
+    assert after["enrichment"]["source_url"] == DRAGON_URL
+    assert after["detector"] == "thingiverse-id-name", "enrichment never rewrites detection"
+
+    created = client.post("/bundles/create", json={"items": [{"key": DRAGON_KEY}]}, headers=bearer(contributor.token))
+    assert created.status_code == 200, created.text
+    project_id = created.json()["results"][0]["project_id"]
+    project = project_by_id(client, contributor, project_id)
+    assert project["creator"] == "P1lotz"
+    assert project["licence"] == "CC BY-NC-SA"
+    assert project["licence_url"] == CC_BY_NC_SA_URL
+    assert project["metadata_json"]["_bundle"]["enrichment"] == after["enrichment"]
+
+
+def test_enrich_reports_a_429_as_a_readable_refusal(
+    client: TestClient, contributor: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rate limit is one refused item, not a thrown request, and writes nothing.
+
+    Mutation: retry the fetch and the call count becomes two; cache a refusal and
+    the empty-map assertion reds; put the cookie (or its absence) in the audit
+    detail and the last assertion reds.
+    """
+    dragon_bundle(isolated_storage)
+    scan()
+    calls: list[str] = []
+
+    def rate_limited(thing_id: str, thingiverse_cookie: str | None) -> str:
+        calls.append(thing_id)
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Thingiverse is rate limiting this server (HTTP 429) for thing {thing_id}. Set the "
+                "THINGIVERSE_COOKIE environment variable to a Cookie header from a signed-in browser."
+            ),
+        )
+
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", rate_limited)
+    headers = {**bearer(contributor.token), "X-Request-ID": "enrich-429"}
+
+    response = client.post("/bundles/enrich", json={"keys": [DRAGON_KEY], "thingiverse_cookie": "session=secret"}, headers=headers)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["refused"] == 1 and body["fetched"] == 0
+    result = body["results"][0]
+    assert result["status"] == "refused"
+    assert "THINGIVERSE_COOKIE" in result["reason"]
+    assert calls == ["5390184"], "a refusal is never retried"
+    assert bundle_service.get_enrichments() == {}, "a refusal caches nothing"
+    assert row_for(report_for(client, contributor), DRAGON_KEY)["creator"] is None
+    with Session(engine) as session:
+        rows = list(session.exec(select(AuditEvent).where(AuditEvent.request_id == "enrich-429")))
+        details = [row.detail_json or "" for row in session.exec(select(AuditEvent).where(AuditEvent.action == audit.BUNDLE_ENRICH))]
+    assert rows == [], "a refusal changed nothing, so it writes no audit row"
+    assert not any("secret" in detail for detail in details), "no enrich row ever carries the cookie"
+
+
+def test_a_missing_thing_stays_untouched_and_says_so(
+    client: TestClient, contributor: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 200 page with no thing metadata is a refusal that names the id it asked about."""
+    dragon_bundle(isolated_storage)
+    scan()
+    stub_thing_page(monkeypatch, fixture_html("thing-missing.json"))
+
+    response = enrich(client, contributor, [DRAGON_KEY])
+
+    assert response.status_code == 200, response.text
+    result = response.json()["results"][0]
+    assert result["status"] == "refused"
+    assert "5390184" in result["reason"]
+    assert bundle_service.get_enrichments() == {}
+    row = row_for(report_for(client, contributor), DRAGON_KEY)
+    assert row["creator"] is None and row["licence"] is None
+    assert row["enrichment"] is None
+
+
+def test_a_page_with_no_licence_leaves_the_row_licence_null(
+    client: TestClient, contributor: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page that states an author and no licence fills the author only, never a guess."""
+    dragon_bundle(isolated_storage)
+    scan()
+    page = (
+        '<html><head><script type="application/ld+json">'
+        '{"@context":"https://schema.org/","@type":"CreativeWork","author":{"@type":"Person","name":"Someone"}}'
+        "</script></head></html>"
+    )
+    stub_thing_page(monkeypatch, page)
+
+    response = enrich(client, contributor, [DRAGON_KEY])
+
+    assert response.status_code == 200, response.text
+    result = response.json()["results"][0]
+    assert result["status"] == "fetched"
+    assert result["creator"] == "Someone"
+    assert result["licence"] is None
+    row = row_for(report_for(client, contributor), DRAGON_KEY)
+    assert row["creator"] == "Someone"
+    assert row["licence"] is None
+    assert row["licence_url"] is None
+    assert row["enrichment"]["fields"] == ["creator"]
+
+
+def test_a_report_with_an_enrichable_row_makes_no_outbound_call(
+    client: TestClient, contributor: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report is a disk walk: a row that WANTS a page still opens no socket.
+
+    Mutation: call the fetch from `build_report` and one of the three tripwires
+    raises, so the 200 and the row assertions never run.
+    """
+    dragon_bundle(isolated_storage)
+    scan()
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the detection report must not open a socket")
+
+    monkeypatch.setattr(socket, "socket", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", refuse)
+
+    report = report_for(client, contributor)
+
+    assert [row["key"] for row in report["bundles"]] == [DRAGON_KEY]
+    assert report["bundles"][0]["source_url"] == DRAGON_URL
+
+
+def test_enrich_refuses_more_than_twenty_five_keys(client: TestClient, contributor: Actor) -> None:
+    """The bulk bound is a readable 400, before any walk or fetch."""
+    response = enrich(client, contributor, [f"no/such/{index}" for index in range(26)])
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "enrich at most 25 bundles at a time"
+
+
+def test_a_viewer_may_not_enrich(client: TestClient, viewer: Actor, isolated_storage: Path) -> None:
+    """Enrichment is an outbound fetch plus a stored claim, so it needs contribute."""
+    dragon_bundle(isolated_storage)
+    scan()
+
+    response = enrich(client, viewer, [DRAGON_KEY])
+
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
+    assert bundle_service.get_enrichments() == {}
+
+
+def test_enrich_carries_the_cookie_through_the_same_plumbing(
+    client: TestClient, contributor: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The body cookie is stripped by `resolve_thingiverse_cookie` and reaches the fetch.
+
+    Mutation: pass `body.thingiverse_cookie` raw and the stub sees the whole
+    `Cookie:` line; record it in the audit detail and the last assertion reds.
+    """
+    dragon_bundle(isolated_storage)
+    scan()
+    calls = stub_thing_page(monkeypatch, fixture_html("thing-5390184.json"))
+    headers = {**bearer(contributor.token), "X-Request-ID": "enrich-cookie"}
+
+    response = client.post(
+        "/bundles/enrich",
+        json={"keys": [DRAGON_KEY], "thingiverse_cookie": "Cookie: session=super-secret\nother=1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert calls == [("5390184", "session=super-secret")]
+    with Session(engine) as session:
+        rows = list(session.exec(select(AuditEvent).where(AuditEvent.request_id == "enrich-cookie")))
+    assert len(rows) == 1
+    assert "super-secret" not in (rows[0].detail_json or "")
+
+
+def test_an_enriched_project_is_never_edited_by_a_later_enrich(
+    client: TestClient, contributor: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A human's edit outranks a later page: enrichment fills empties, never re-claims."""
+    dragon_bundle(isolated_storage)
+    scan()
+    stub_thing_page(monkeypatch, fixture_html("thing-5390184.json"))
+    assert enrich(client, contributor, [DRAGON_KEY]).json()["fetched"] == 1
+
+    created = client.post("/bundles/create", json={"items": [{"key": DRAGON_KEY}]}, headers=bearer(contributor.token))
+    project_id = created.json()["results"][0]["project_id"]
+    renamed = client.patch(
+        f"/project/{project_id}",
+        json={"creator": "A Human"},
+        headers=bearer(contributor.token),
+    )
+    assert renamed.status_code == 200, renamed.text
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a fresh record must answer without a fetch")
+
+    monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", refuse)
+
+    response = enrich(client, contributor, [DRAGON_KEY])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["cached"] == 1 and body["fetched"] == 0
+    project = project_by_id(client, contributor, project_id)
+    assert project["creator"] == "A Human", "the project row is the human's, not the page's"
+    assert project["licence"] == "CC BY-NC-SA"
+    row = row_for(report_for(client, contributor), DRAGON_KEY)
+    assert row["creator"] == "P1lotz", "the report still shows what the page supplied"
+
+
+# --- a compound row carries its group breakdown (Mf-8xrc) --------------------
+
+STAGETOP_KEY = "import/Stagetop"
+STAGETOP_EDITION = "StageTop Wave One - Personal Use"
+OPENAPI_BUNDLES_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "openapi" / "components" / "bundles.json"
+)
+
+
+def stagetop_bundle(root: Path) -> Path:
+    """The owner's Stagetop tree: one product in two editions, 60 model files.
+
+    The counts are by `bundle_detect.MODEL_SUFFIXES`: `PlayTile - Blank` ships four
+    `.stl` with four `.step` beside them, and `.step` counts, so the row reads 60
+    and not 56. `PlayTiles/Accessory` is a `title-name` row on disk and is written
+    here too. Nothing sits at the parent's own depth: the models live 45 in the
+    first edition's ten part folders and 15 in `Wave 1.5`.
+    """
+    layout = {
+        "Accessories": (5, 0),
+        "Core": (3, 0),
+        "Legs": (5, 0),
+        "PlayTiles/PlayTile - 1x1": (4, 0),
+        "PlayTiles/PlayTile - 2x2": (4, 0),
+        "PlayTiles/PlayTile - 4x4": (3, 0),
+        "PlayTiles/PlayTile - Blank": (4, 4),
+        "PlayTiles/Accessory": (4, 0),
+        "Rails/Rail - Elite": (5, 0),
+        "Rails/Rail - Standard": (4, 0),
+    }
+    edition = root / "import" / "Stagetop" / STAGETOP_EDITION
+    for folder, (stl_count, step_count) in layout.items():
+        group = edition / folder
+        for index in range(stl_count):
+            write_file(group / f"part-{index}.stl", STL_BYTES)
+        for index in range(step_count):
+            write_file(group / f"part-{index}.step", b"ISO-10303-21;\n")
+        write_file(group / "cover.jpg", b"j")
+        write_text(group / "notes.txt", "notes\n")
+    wave = root / "import" / "Stagetop" / "Wave 1.5"
+    for index in range(15):
+        write_file(wave / f"part-{index}.stl", STL_BYTES)
+    write_file(wave / "cover.jpg", b"j")
+    write_text(wave / "notes.txt", "notes\n")
+    return root / "import" / "Stagetop"
+
+
+def test_the_compound_row_serves_its_groups(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """The live route serves the breakdown: one row, 60 models, 45 + 15 in two groups.
+
+    Mutation: drop `groups` from `BundleDetectItemOut` and the response model silently
+    drops the key (the Mf-nivh/Mf-au4k defect), so this reds.
+    """
+    stagetop_bundle(isolated_storage)
+    moai_bundle(isolated_storage)
+    scan()
+
+    report = report_for(client, contributor)
+
+    rows = [row for row in report["bundles"] if row["key"] == STAGETOP_KEY]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["detector"] == "compound-bundle"
+    assert row["confidence"] == "low"
+    assert row["metadata_shape"] == "compound"
+    assert row["model_count"] == 60
+    assert row["groups"] == [
+        {"name": STAGETOP_EDITION, "model_count": 45, "foreign": False, "separable": False},
+        {"name": "Wave 1.5", "model_count": 15, "foreign": False, "separable": True},
+    ]
+    assert row_for(report, MOAI)["groups"] == [], "an ordinary row answers with an empty list, not a missing key"
+
+
+def test_the_committed_openapi_fixture_declares_the_group_component() -> None:
+    """The group is a pinned component with four required fields, and the row carries it.
+
+    The rewrite run SKIPS, so a skipped regeneration would otherwise leave
+    stale-but-valid JSON: this assertion is what catches it.
+    """
+    fixture = json.loads(OPENAPI_BUNDLES_FIXTURE.read_text(encoding="utf-8"))
+
+    assert "BundleGroupOut" in fixture
+    group = fixture["BundleGroupOut"]
+    assert sorted(group["required"]) == ["foreign", "model_count", "name", "separable"]
+    assert {name: prop["type"] for name, prop in group["properties"].items()} == {
+        "name": "string",
+        "model_count": "integer",
+        "foreign": "boolean",
+        "separable": "boolean",
+    }
+    assert "groups" in fixture["BundleDetectItemOut"]["properties"]
+    create_item = fixture["BundleCreateItemIn"]
+    assert "exclude_groups" not in create_item.get("required", []), "the field is additive, never required"
+    assert create_item["properties"]["exclude_groups"]["type"] == "array"
+    assert create_item["properties"]["exclude_groups"]["items"]["type"] == "string"

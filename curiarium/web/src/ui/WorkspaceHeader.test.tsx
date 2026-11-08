@@ -186,4 +186,33 @@ describe("WorkspaceHeader narrow arrangement", () => {
     expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Audit log" })).toBeTruthy();
   });
+
+  it("closes the disclosure on a pointerdown outside it", () => {
+    render(<WorkspaceHeader narrow mode="files" onModeChange={vi.fn()} role="viewer" />);
+
+    const trigger = screen.getByRole("button", { name: "More destinations" });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "Review" })).toBeTruthy();
+
+    const radio = screen.getByRole("radio", { name: "Files" });
+    radio.focus();
+    fireEvent.mouseDown(radio);
+
+    expect(screen.queryByRole("button", { name: "Review" })).toBeNull();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    // An outside close is the user's choice of where focus goes: no theft back.
+    expect(document.activeElement).toBe(radio);
+  });
+
+  it("keeps the disclosure open for a pointerdown inside it", () => {
+    render(<WorkspaceHeader narrow mode="files" onModeChange={vi.fn()} role="viewer" />);
+
+    const trigger = screen.getByRole("button", { name: "More destinations" });
+    fireEvent.click(trigger);
+
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Review" }));
+
+    expect(screen.getByRole("button", { name: "Review" })).toBeTruthy();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  });
 });

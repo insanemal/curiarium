@@ -46,6 +46,28 @@
           }
         ],
         "title": "Rel Path"
+      },
+      "thumb_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Thumb Url"
+      },
+      "url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Url"
       }
     },
     "required": [
@@ -58,6 +80,14 @@
     "additionalProperties": false,
     "description": "One confirmed bundle; a key the fresh report does not know is `failed`.",
     "properties": {
+      "exclude_groups": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Exclude Groups",
+        "type": "array"
+      },
       "key": {
         "title": "Key",
         "type": "string"
@@ -234,6 +264,11 @@
         "title": "Low",
         "type": "integer"
       },
+      "medium": {
+        "default": 0,
+        "title": "Medium",
+        "type": "integer"
+      },
       "ready": {
         "default": 0,
         "title": "Ready",
@@ -277,6 +312,22 @@
         ],
         "title": "Blocked Reason"
       },
+      "bundle_drift_count": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Bundle Drift Count"
+      },
+      "bundle_drift_state": {
+        "default": "not_applicable",
+        "title": "Bundle Drift State",
+        "type": "string"
+      },
       "confidence": {
         "title": "Confidence",
         "type": "string"
@@ -315,6 +366,16 @@
         "title": "Dismissed",
         "type": "boolean"
       },
+      "enrichment": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BundleEnrichmentOut"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "existing_project_id": {
         "anyOf": [
           {
@@ -326,6 +387,17 @@
         ],
         "title": "Existing Project Id"
       },
+      "existing_project_match": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Existing Project Match"
+      },
       "existing_project_name": {
         "anyOf": [
           {
@@ -336,6 +408,14 @@
           }
         ],
         "title": "Existing Project Name"
+      },
+      "groups": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleGroupOut"
+        },
+        "title": "Groups",
+        "type": "array"
       },
       "image_count": {
         "default": 0,
@@ -473,6 +553,293 @@
     "title": "BundleDismissResponse",
     "type": "object"
   },
+  "BundleDuplicateGroupOut": {
+    "description": "Byte-identical archives: one bundle, the rest reclaimable bytes.",
+    "properties": {
+      "paths": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Paths",
+        "type": "array"
+      },
+      "reclaimable_bytes": {
+        "title": "Reclaimable Bytes",
+        "type": "integer"
+      },
+      "sha256": {
+        "title": "Sha256",
+        "type": "string"
+      },
+      "size": {
+        "title": "Size",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "sha256",
+      "size",
+      "paths",
+      "reclaimable_bytes"
+    ],
+    "title": "BundleDuplicateGroupOut",
+    "type": "object"
+  },
+  "BundleEnrichItemOut": {
+    "description": "What happened to one bundle: its status, its values and the reason for any refusal.",
+    "properties": {
+      "creator": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Creator"
+      },
+      "fetched_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Fetched At"
+      },
+      "filled": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Filled",
+        "type": "array"
+      },
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "licence": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Licence"
+      },
+      "licence_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Licence Url"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "source_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Source Url"
+      },
+      "status": {
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "key",
+      "status"
+    ],
+    "title": "BundleEnrichItemOut",
+    "type": "object"
+  },
+  "BundleEnrichRequest": {
+    "additionalProperties": false,
+    "description": "The bundles whose vendor pages to read.\n\n`refresh` re-reads a page the cache already answered. The cookie is the same\nplumbing the import door uses and is never stored or audited.",
+    "properties": {
+      "keys": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Keys",
+        "type": "array"
+      },
+      "refresh": {
+        "default": false,
+        "title": "Refresh",
+        "type": "boolean"
+      },
+      "thingiverse_cookie": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Thingiverse Cookie"
+      }
+    },
+    "title": "BundleEnrichRequest",
+    "type": "object"
+  },
+  "BundleEnrichResponse": {
+    "description": "Per-status counters plus one result per requested bundle.",
+    "properties": {
+      "cached": {
+        "default": 0,
+        "title": "Cached",
+        "type": "integer"
+      },
+      "fetched": {
+        "default": 0,
+        "title": "Fetched",
+        "type": "integer"
+      },
+      "refused": {
+        "default": 0,
+        "title": "Refused",
+        "type": "integer"
+      },
+      "results": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleEnrichItemOut"
+        },
+        "title": "Results",
+        "type": "array"
+      },
+      "unavailable": {
+        "default": 0,
+        "title": "Unavailable",
+        "type": "integer"
+      },
+      "unknown": {
+        "default": 0,
+        "title": "Unknown",
+        "type": "integer"
+      }
+    },
+    "title": "BundleEnrichResponse",
+    "type": "object"
+  },
+  "BundleEnrichmentOut": {
+    "description": "Which of the row's fields came from the vendor page, and when.",
+    "properties": {
+      "fetched_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Fetched At"
+      },
+      "fields": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Fields",
+        "type": "array"
+      },
+      "source_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Source Url"
+      }
+    },
+    "title": "BundleEnrichmentOut",
+    "type": "object"
+  },
+  "BundleGroupOut": {
+    "description": "One model-bearing group inside a compound folder, and whether it is somebody else's thing.",
+    "properties": {
+      "foreign": {
+        "title": "Foreign",
+        "type": "boolean"
+      },
+      "model_count": {
+        "title": "Model Count",
+        "type": "integer"
+      },
+      "name": {
+        "title": "Name",
+        "type": "string"
+      },
+      "separable": {
+        "title": "Separable",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "name",
+      "model_count",
+      "foreign",
+      "separable"
+    ],
+    "title": "BundleGroupOut",
+    "type": "object"
+  },
+  "BundleRefusalOut": {
+    "description": "One path the walk saw and did not offer, with the rule that refused it.",
+    "properties": {
+      "kind": {
+        "title": "Kind",
+        "type": "string"
+      },
+      "rel_path": {
+        "title": "Rel Path",
+        "type": "string"
+      },
+      "rule": {
+        "title": "Rule",
+        "type": "string"
+      }
+    },
+    "required": [
+      "rel_path",
+      "rule",
+      "kind"
+    ],
+    "title": "BundleRefusalOut",
+    "type": "object"
+  },
   "BundleReportOut": {
     "description": "A dry-run view of the storage root. Reading it writes nothing.",
     "properties": {
@@ -487,9 +854,38 @@
       "counts": {
         "$ref": "#/components/schemas/BundleDetectCountsOut"
       },
+      "duplicates": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleDuplicateGroupOut"
+        },
+        "title": "Duplicates",
+        "type": "array"
+      },
+      "duplicates_text": {
+        "default": "",
+        "title": "Duplicates Text",
+        "type": "string"
+      },
+      "duplicates_total_bytes": {
+        "default": 0,
+        "title": "Duplicates Total Bytes",
+        "type": "integer"
+      },
+      "refused": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleRefusalOut"
+        },
+        "title": "Refused",
+        "type": "array"
+      },
       "root": {
         "title": "Root",
         "type": "string"
+      },
+      "rule_set": {
+        "$ref": "#/components/schemas/BundleRuleSetOut"
       },
       "stale_dismissals": {
         "default": [],
@@ -507,9 +903,29 @@
     },
     "required": [
       "root",
-      "counts"
+      "counts",
+      "rule_set"
     ],
     "title": "BundleReportOut",
+    "type": "object"
+  },
+  "BundleRuleSetOut": {
+    "description": "The rule set one report was decided against: its revision, and what its tables were.",
+    "properties": {
+      "stamp": {
+        "title": "Stamp",
+        "type": "string"
+      },
+      "version": {
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "version",
+      "stamp"
+    ],
+    "title": "BundleRuleSetOut",
     "type": "object"
   }
 }

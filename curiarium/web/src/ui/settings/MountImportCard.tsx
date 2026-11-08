@@ -23,7 +23,7 @@ export default function MountImportCard({
         </p>
       </div>
       <p className="text-xs opacity-70">
-        Mount path: {mountPath || "Not configured"}
+        Mount path: {mountPath || "Not configured - set IMPORT_MOUNT_PATH on the server"}
       </p>
       <p className="text-xs opacity-70">
         Changes apply on the next server restart. In no-copy mode, mounted files stay read-only and

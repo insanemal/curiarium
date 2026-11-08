@@ -1,10 +1,18 @@
-import { type RefObject } from "react";
+import { useMemo, type RefObject } from "react";
 
 import { type Asset, type Folder } from "../../lib/api";
 import { GRID_GAP_PX } from "../../lib/virtualGrid";
 import { type FilesScopeKind } from "../filesScope";
 import type { VirtualRowsResult } from "../useVirtualRows";
-import { GROUP_CARD_CAP, type GroupBucket, type MissingScanOutcome, type SortKey } from "./assetGridMeta";
+import {
+  GROUP_CARD_CAP,
+  SERVER_SORT_KEYS,
+  type GroupBucket,
+  type MissingScanOutcome,
+  type SortKey,
+} from "./assetGridMeta";
+import ProjectFolderSections from "./ProjectFolderSections";
+import { projectSectionModel } from "./projectSections";
 
 type AssetGridBodyProps = {
   /** Virtualization result from the root; its refs are attached verbatim. */
@@ -42,9 +50,11 @@ type AssetGridBodyProps = {
 };
 
 /**
- * The result area: grouped sections for the grouped sorts, the virtualized flat
- * grid otherwise, plus the empty hints and the "Load more" control. Owns no
- * effects and no state; every value comes from the root.
+ * The result area: the project's folder-sectioned view, grouped sections for
+ * the grouped sorts, or the virtualized flat grid otherwise, plus the empty
+ * hints and the "Load more" control. Owns no effects and no state; every value
+ * comes from the root (the project filter's own state lives in its child, and
+ * the section model is a `useMemo` derivation, not state).
  */
 export default function AssetGridBody({
   virtual,
@@ -90,6 +100,20 @@ export default function AssetGridBody({
   const unfiledScope = filesActive && scopeKind === "unfiled";
   const allFilesScope = filesActive && scopeKind === "all";
   const settled = !loading && !items.length && !error;
+
+  // A project's parts section by folder, two levels deep, from the folder tree
+  // the listing hook fetched for this mode. The second argument is the loaded
+  // order, so each section keeps the server sort the toolbar asked for. One
+  // group means there is nothing to filter between (a folder-less project
+  // included), so the flat grid keeps it.
+  const sections = useMemo(() => projectSectionModel(folderGroups, items), [folderGroups, items]);
+  // The sectioned view is the project's structure layered on a server-ordered
+  // listing, so it applies exactly to the server-backed sorts. The grouped
+  // sorts (`folder`, `type`) keep their own branches below: `File type` is
+  // offered in project mode's toolbar and renders today's grouped branch, not
+  // the folder sections.
+  const sectionedProject =
+    isProject && sections.groups.length >= 2 && SERVER_SORT_KEYS.includes(sortKey);
 
   return (
     <>
@@ -194,19 +218,35 @@ export default function AssetGridBody({
         </div>
       )}
 
-      {/* "Empty" only means empty when no filter is narrowing it: a search or
-          tag filter that matched nothing is an empty result, not a new project. */}
-      {isProject &&
-        !loading &&
-        !items.length &&
-        !queryRef.current &&
-        activeTags.length === 0 && (
-          <p className="text-sm opacity-70" data-project-empty>
-            This project has no files yet.
-          </p>
-        )}
+      {/* The project is the last scope to route through the shared `narrowed`
+          flag rather than its own hand-rolled predicate: that flag already
+          folds the search, the tag chips, the creator and `notInProject`, so a
+          creator or tag filter that empties the grid is an empty RESULT and no
+          longer claims the project is empty. `notInProject` is defensive here
+          because its checkbox is files-only and each grid owns its own
+          `useAssetList` state, so it is always false in project mode.
+          `settled` already carries `!error`, so this branch must never re-grow
+          its own `&& !error` (the Mf-qzx5 failure mode) or a failed fetch would
+          paint an empty project over the error panel. */}
+      {isProject && settled && !narrowed && (
+        <p className="text-sm opacity-70" data-project-empty>
+          This project has no files yet.
+        </p>
+      )}
+      {isProject && settled && narrowed && (
+        <div className="text-sm opacity-70" data-project-empty-filter>
+          <p className="font-medium">No files in this project match this filter</p>
+          <p>Clear the search and the filters to see the whole project.</p>
+        </div>
+      )}
 
-      {["folder", "type"].includes(sortKey) ? (
+      {sectionedProject ? (
+        <ProjectFolderSections
+          groups={sections.groups}
+          renderCard={renderCard}
+          hasMore={hasMore}
+        />
+      ) : ["folder", "type"].includes(sortKey) ? (
         <div className="space-y-4">
           {(sortKey === "folder" ? folderGroups : typeGroups).map(group => {
             const collapsed = collapsedGroups.has(group.id);
@@ -247,9 +287,6 @@ export default function AssetGridBody({
                             {expanded ? "Show fewer" : `Show all ${group.items.length}`}
                           </button>
                         </div>
-                      )}
-                      {!group.items.length && (
-                        <div className="px-2 py-4 text-sm opacity-60">No assets in this folder</div>
                       )}
                     </div>
                   </div>

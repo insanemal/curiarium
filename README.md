@@ -23,6 +23,9 @@ with a trash, filesystem snapshots and a full audit trail.
 It is built for one household — a few people sharing a printer or two — rather than for
 publishing.
 
+Every document root is listed in the [documentation map](#documentation-map); if you are
+looking for one specific document, start there.
+
 ## What it does
 
 **Library and storage**
@@ -205,6 +208,82 @@ The API refuses to start with the published sample credentials (`super-secret` /
 Both are named volumes in the deploy manifest; point them anywhere with
 `FILE_STORAGE` and `DB_URL`. Putting the **database on a network filesystem is not
 supported** — SQLite wants a local disk, and the container relies on WAL.
+
+## Documentation map
+
+Where each document root lives, grouped by what it is for. Paths are relative to this
+file.
+
+**Product documentation**
+
+- [curiarium/docs/README.md](curiarium/docs/README.md) — the documentation index: what is
+  authoritative, what is historical, and what to read when.
+- [curiarium/docs/ARCHITECTURE_RUNBOOK.md](curiarium/docs/ARCHITECTURE_RUNBOOK.md) — how the
+  system fits together, its failure modes, and backup, restore and upgrade procedures.
+- [curiarium/docs/architecture/CONFIGURATION.md](curiarium/docs/architecture/CONFIGURATION.md)
+  — every environment variable: default, owner and effect.
+- [curiarium/docs/architecture/REVERSE_PROXY.md](curiarium/docs/architecture/REVERSE_PROXY.md)
+  — one public hostname in front, plus the header and body-size requirements.
+- [curiarium/docs/DEVELOPMENT.md](curiarium/docs/DEVELOPMENT.md) — local toolchains, the
+  verification gates and the migration rules.
+- [curiarium/docs/adr/](curiarium/docs/adr/) — architecture decision records, one file per
+  decision, with the reasoning behind it.
+- [curiarium/docs/guides/truenas.md](curiarium/docs/guides/truenas.md) — installing on
+  TrueNAS as a Docker Compose custom app: datasets, permissions, `.env`, ZFS snapshots.
+- [curiarium/docs/guides/cosmos.md](curiarium/docs/guides/cosmos.md) — installing on
+  Cosmos Cloud: the template, the env placeholders, a route to `web:5173`, the OIDC client
+  and the claims caveat.
+
+**Repository and process**
+
+- [AGENTS.md](AGENTS.md) — orientation for an agent or new contributor picking the
+  repository up cold.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to contribute to this fork: the divergence
+  rule, the boot guards and the review path.
+- [docs/TICKET_WORKFLOW.md](docs/TICKET_WORKFLOW.md) — how a ticket is planned, verified
+  and landed, one commit per ticket.
+- [docs/PERMISSIONS.md](docs/PERMISSIONS.md) — the four roles and the per-route permission
+  matrix the API enforces.
+- [docs/AUDIT.md](docs/AUDIT.md) — the append-only audit table: what is recorded, where it
+  is emitted, and how coverage is guarded.
+- [docs/images/README.md](docs/images/README.md) — the screenshots and diagrams the
+  documentation embeds, organised by topic.
+
+**Operations and components**
+
+- [curiarium/docker-compose.deploy.yml](curiarium/docker-compose.deploy.yml) — the canonical
+  production manifest, running the published images.
+- [curiarium/deploy/README.md](curiarium/deploy/README.md) — the deployment-artefact
+  contract and the target index: placeholder-only templates, one per platform, each paired
+  with a walkthrough.
+- [curiarium/docker-deploy.yml](curiarium/docker-deploy.yml) — compatibility alias for
+  deployments that still use the historical filename.
+- [curiarium/api/.env.example](curiarium/api/.env.example) — the environment file to copy
+  and edit before the first start.
+- [curiarium/slicer-bridge/README.md](curiarium/slicer-bridge/README.md) — the Go helper
+  behind **Open in Slicer**: protocol handlers for Windows and Linux clients.
+- [curiarium/snapshot-sidecar/README.md](curiarium/snapshot-sidecar/README.md) — the opt-in
+  BTRFS snapshot sidecar, and why you probably do not need it.
+
+**History and archive**
+
+- [curiarium/docs/archive/](curiarium/docs/archive/) — superseded strategy, roadmap and
+  security documents, kept for provenance.
+- [curiarium/docs/archive/evidence/gate-0/BASELINE.md](curiarium/docs/archive/evidence/gate-0/BASELINE.md)
+  — the Gate 0 baseline record; historical, not a description of the current system.
+- [curiarium/docs/archive/evidence/gate-0/RESULTS.md](curiarium/docs/archive/evidence/gate-0/RESULTS.md)
+  — the Gate 0 evidence review, likewise kept for provenance.
+
+## Guides
+
+Step-by-step walkthroughs for specific platforms. More guides live in
+[curiarium/docs/guides/](curiarium/docs/guides/).
+
+- [Installing on TrueNAS](curiarium/docs/guides/truenas.md) — Docker Compose custom app:
+  datasets, permissions, `.env`, first-run setup and ZFS snapshots.
+- [Installing on Cosmos Cloud](curiarium/docs/guides/cosmos.md) — the Cosmos application
+  template, its env placeholders, a route to `web:5173`, the OIDC client and the claims
+  caveat. The TrueNAS guide above is the sibling example.
 
 ## Configuration
 

@@ -101,4 +101,25 @@ describe("SettingsRootMenu", () => {
 
     expect(onOpen).toHaveBeenCalledWith("mfa");
   });
+
+  // IMPORT_MOUNT_PATH is read at startup, so the tile must not promise a control
+  // that can set it: the subtitle points at the options the section really has.
+  it("describes the imports section as mount-import options, not a settable path", () => {
+    render(<SettingsRootMenu onOpen={vi.fn()} role="admin" />);
+
+    expect(screen.getByText(/Set the mount-import options/)).toBeTruthy();
+    // The old subtitle promised a path you cannot set from the UI. Any tile that
+    // still mentions it is a regression, so the guard matches the phrase, not one
+    // sentence around it.
+    expect(screen.queryByText(/mounted import path/)).toBeNull();
+  });
+
+  it("opens the imports section", () => {
+    const onOpen = vi.fn();
+    render(<SettingsRootMenu onOpen={onOpen} role="admin" />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Import sources/ }));
+
+    expect(onOpen).toHaveBeenCalledWith("imports");
+  });
 });

@@ -45,7 +45,11 @@ export default function ConfirmDialog({
   onCancel,
 }: Props): ReactElement {
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (event.key !== "Escape" || busy) return;
+    if (event.key !== "Escape") return;
+    // An in-tree `onKeyDown` runs before the document bubble listener, so
+    // `defaultPrevented` is how this aria-modal surface claims the key, busy or not.
+    event.preventDefault();
+    if (busy) return;
     onCancel();
   };
 

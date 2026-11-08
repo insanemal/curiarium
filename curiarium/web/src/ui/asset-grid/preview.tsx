@@ -4,6 +4,7 @@ import { formatBytes } from "../../lib/format";
 import type { PreviewSettings, ResolvedTheme } from "../../lib/settings";
 import { useFileGrants } from "../../lib/useFileGrants";
 import type { ConfirmRequest } from "../ConfirmDialog";
+import ErrorBoundary from "../ErrorBoundary";
 import FileDownloadLink from "../FileDownloadLink";
 import LightBurnPreview from "../LightBurnPreview";
 import TagBadge from "../TagBadge";
@@ -26,6 +27,10 @@ const ModelViewer = React.lazy(() => import("../ModelViewer"));
 const ModelSnapshot = React.lazy(() =>
   import("../ModelViewer").then((module) => ({ default: module.ModelSnapshot })),
 );
+
+// A failed `ModelViewer-*.js` chunk must replace only this preview cell or
+// modal, not the whole library view, which the `<main>`-level boundary would
+// do.
 
 /** Visible stand-in while a lazily loaded 3D chunk is on the wire. */
 export function PreviewLoading({ label = "Loading 3D preview…" }: { label?: string }) {
@@ -138,17 +143,20 @@ export function renderPreviewContent(
       if (previewMode === "disabled") {
         return <div className="flex h-full w-full items-center justify-center text-xs text-muted">Preview generation disabled</div>;
       }
+      // Keyed per asset: switching to another asset clears a previous asset's failure.
       return (
-        <React.Suspense fallback={<PreviewLoading />}>
-          <ModelSnapshot
-            url={assetUrl}
-            ext={ext}
-            assetId={asset.id}
-            theme={theme}
-            mode={previewMode}
-            onThumbnailSaved={onThumbnailSaved}
-          />
-        </React.Suspense>
+        <ErrorBoundary compact key={asset.id}>
+          <React.Suspense fallback={<PreviewLoading />}>
+            <ModelSnapshot
+              url={assetUrl}
+              ext={ext}
+              assetId={asset.id}
+              theme={theme}
+              mode={previewMode}
+              onThumbnailSaved={onThumbnailSaved}
+            />
+          </React.Suspense>
+        </ErrorBoundary>
       );
     }
     if (isLightBurn) {
@@ -172,10 +180,13 @@ export function renderPreviewContent(
   }
 
   if (is3d) {
+    // Keyed per asset: switching to another asset clears a previous asset's failure.
     return (
-      <React.Suspense fallback={<PreviewLoading />}>
-        <ModelViewer key={`${variant}-${asset.id}`} url={assetUrl} ext={ext} assetId={asset.id} theme={theme} />
-      </React.Suspense>
+      <ErrorBoundary compact key={asset.id}>
+        <React.Suspense fallback={<PreviewLoading />}>
+          <ModelViewer key={`${variant}-${asset.id}`} url={assetUrl} ext={ext} assetId={asset.id} theme={theme} />
+        </React.Suspense>
+      </ErrorBoundary>
     );
   }
   if (thumbUrl || ext === "svg") {

@@ -37,6 +37,11 @@ import {
   type ProjectPatch,
 } from "../lib/api";
 import { saveResponseToDisk } from "../lib/download";
+// The drift read comes from the domain module, not the `../lib/api` barrel:
+// several suites mock the barrel as a fixed object, so a new named import from
+// it would come back `undefined` there (`useBundleDetect.ts` documents the same
+// rule). `addProjectAssets` below is the barrel's existing import.
+import { getProjectBundleDrift, type ProjectBundleDrift } from "../lib/api/projects";
 import { primeGrants } from "../lib/fileGrants";
 import { formatBytes, formatDate } from "../lib/format";
 import { is3mfAsset, isImageAsset, isModelAsset, typeLabelFor } from "../lib/assetKinds";
@@ -49,6 +54,12 @@ import {
   type SlicerSettings,
 } from "../lib/settings";
 import { notifyError, notifyInfo } from "../lib/toast";
+import {
+  ADD_DRIFT_PARTS_LABEL,
+  DRIFT_NOT_APPLICABLE,
+  DRIFT_UNKNOWN,
+  driftNoticeLine,
+} from "./projectBundleDrift";
 import { useFileGrants, useLiveFileGrants } from "../lib/useFileGrants";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
 import AssetGrid from "./asset-grid/AssetGrid";
@@ -116,6 +127,18 @@ const KNOWN_METADATA_LABELS: Record<string, string> = {
 };
 
 type MetadataEntry = { key: string; label: string; value: string };
+
+/** The drift state before (or without) a server answer: `unknown` for a project
+ *  that carries a folder marker, so the not-yet-fetched case reads as the en
+ *  dash rather than a false zero; `not_applicable` for one that carries no
+ *  marker, which has no question to answer and renders nothing at all. */
+function idleDrift(hasMarker: boolean): ProjectBundleDrift {
+  return {
+    state: hasMarker ? DRIFT_UNKNOWN : DRIFT_NOT_APPLICABLE,
+    count: null,
+    asset_ids: [],
+  };
+}
 
 /**
  * Flattens `metadata_json` into display rows. Known keys get pretty labels,
@@ -248,6 +271,65 @@ export default function ProjectLanding({
     setMembers([]);
     void refreshMembers();
   }, [refreshMembers, assetsVersion]);
+
+  // --- Bundle drift (a folder that grew after its project existed) ---------
+
+  // The `_bundle` marker is the app's own record of the folder this project was
+  // made from, so a project without one has nothing to compare against and
+  // issues no request at all.
+  const bundleMarker = Boolean(project.metadata_json?._bundle);
+
+  // `unknown` until the server answers, so the not-yet-fetched case reads as
+  // the en dash, never as a false zero. A project with no marker is
+  // `not_applicable` instead: it has no folder identity, so there is no question
+  // to answer and nothing at all is rendered - not even a dash.
+  const [drift, setDrift] = useState<ProjectBundleDrift>(() => idleDrift(bundleMarker));
+  const [driftBusy, setDriftBusy] = useState(false);
+
+  // Keyed on `assetsVersion` as well as the project, because App bumps it after
+  // every membership change: adding the parts refetches the drift, and the
+  // notice then disappears on its own.
+  useEffect(() => {
+    setDrift(idleDrift(bundleMarker));
+    if (!bundleMarker) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const answer = await getProjectBundleDrift(project.id);
+        // A late answer for a project that is no longer open says nothing.
+        if (cancelled) return;
+        setDrift(answer);
+      } catch {
+        // A failed read stays `unknown` (the en dash). It is a prompt, not an
+        // error the operator can act on - toasting it would be noise on a
+        // project they can still use.
+        if (cancelled) return;
+        setDrift(idleDrift(bundleMarker));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, bundleMarker, assetsVersion]);
+
+  const driftLine = driftNoticeLine(drift.state, drift.count);
+
+  // The one action on the notice, through the membership path that already
+  // exists: nothing is attached without the click, and there is no new write
+  // route. The empty-id guard is the same honesty as the sentence: a `known`
+  // count with no ids to send cannot be acted on.
+  const addDriftParts = async () => {
+    if (driftBusy || drift.asset_ids.length === 0) return;
+    setDriftBusy(true);
+    try {
+      await addProjectAssets(project.id, drift.asset_ids);
+      onAssetsChanged();
+    } catch (err) {
+      handleApiError(err, "Failed to add the folder's new parts.");
+    } finally {
+      setDriftBusy(false);
+    }
+  };
 
   // --- Derived hero data ---------------------------------------------------
 
@@ -499,8 +581,11 @@ export default function ProjectLanding({
     // themselves); ProjectView also ignores events from inside dialogs.
     if ((event.target as Element | null)?.closest?.('[role="dialog"]')) return;
     if (attacher.busy) {
-      // An attach gesture owns Escape too. The shared zip prompt has no Escape
-      // handler of its own, so closing the project under it would strand it.
+      // A busy attach gesture still owns Escape. The shared zip prompt is a
+      // `role="dialog"` descendant and answers Escape itself (preventDefault
+      // plus stopPropagation), so this branch covers the gestures that have no
+      // prompt of their own - a plain multi-file upload - and the project must
+      // not close under them either.
       event.preventDefault();
       return;
     }
@@ -759,6 +844,29 @@ export default function ProjectLanding({
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* One notice for the whole project, never one per group: the marker's
+            groups are a creation-time snapshot, so a new subfolder is not a
+            group and a per-group notice would miss exactly this growth. */}
+        {driftLine && (
+          <div
+            data-bundle-drift="true"
+            className="flex flex-wrap items-center gap-3 rounded-md border border-panel-strong bg-panel-soft px-3 py-2 text-sm"
+          >
+            <span className="text-muted">{driftLine}</span>
+            {/* No ids, no action: a count with nothing to send cannot be honoured. */}
+            {canContribute && drift.asset_ids.length > 0 && (
+              <button
+                type="button"
+                className={BUTTON_SECONDARY}
+                disabled={driftBusy}
+                onClick={() => void addDriftParts()}
+              >
+                {ADD_DRIFT_PARTS_LABEL}
+              </button>
+            )}
           </div>
         )}
       </header>

@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta
 from math import ceil
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from uuid import uuid4
 
 import pytest
@@ -49,6 +49,40 @@ def _auth_header(client: TestClient) -> dict:
         return {}
     token = client.post("/login", json={"username": "admin", "password": "super-secret"}).json()["token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+SCAN_WAIT_SECONDS = 10.0
+
+
+def _scan_is_running(status: dict) -> bool:
+    """A run holds the slot, so a second start must be refused."""
+    return bool(status["running"])
+
+
+def _scan_has_stopped(status: dict) -> bool:
+    """No run holds the slot, whatever it managed to do."""
+    return not status["running"]
+
+
+def _scan_is_finished(status: dict) -> bool:
+    """A run completed: it no longer runs and it stamped its end."""
+    return not status["running"] and status["finished_at"] is not None
+
+
+def _wait_for_scan_status(read_status: Callable[[], dict], done: Callable[[dict], bool], *, message: str) -> dict:
+    """Poll `read_status` until `done` holds, on a clock-based deadline.
+
+    Never a fixed iteration count: a slow host must fail with the last payload it
+    saw, not with "50 tries were not enough".
+    """
+    deadline = time.monotonic() + SCAN_WAIT_SECONDS
+    while True:
+        payload = read_status()
+        if done(payload):
+            return payload
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"{message}: last status was {payload}")
+        time.sleep(0.01)
 
 
 def _assets_by_path() -> dict:
@@ -154,6 +188,63 @@ def test_missing_files_are_counted_not_deleted(library_root):
     # made, so dropping the path here leaks a row into the shared session DB.
 
 
+def test_scan_endpoint_returns_before_the_background_run_finishes(
+    library_root, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The POST answers while the worker is still parked mid-run.
+
+    `library_scan._run_scan` resolves `scan_storage_root` through the module
+    global at call time, so patching that name is what gates the background
+    thread. The worker is held on an Event this test owns, which is why the
+    status read below can never race the walk finishing.
+    """
+    rel = "Loose/background-proof.stl"
+    _write(rel, b"solid background\n")
+    library_root.append(rel)
+
+    real_scan = library_scan.scan_storage_root
+    parked = threading.Event()
+    release = threading.Event()
+
+    def parked_scan(state=None):
+        parked.set()
+        # Bounded, not conditional: if a failure stopped the test before it could
+        # release, the worker still delegates and the run closes itself, instead
+        # of leaving the module-global run slot claimed for the rest of the
+        # session. The bound is well past the test's own deadline, so a parked
+        # assertion below can never lose a race with this timeout.
+        release.wait(timeout=SCAN_WAIT_SECONDS * 3)
+        return real_scan(state=state)
+
+    monkeypatch.setattr(library_scan, "scan_storage_root", parked_scan)
+
+    with TestClient(main.app) as client:
+        headers = _auth_header(client)
+        # The POST is inside the try: it claims the run slot, so any assertion
+        # from here on must still go through the release below.
+        try:
+            start = client.post("/library/scan", headers=headers)
+            assert start.status_code == 202, start.text
+            assert parked.wait(timeout=SCAN_WAIT_SECONDS), "the background run never reached the scanner"
+            status = client.get("/library/scan", headers=headers)
+            assert status.status_code == 200, status.text
+            # The work is provably unfinished: the worker is parked on `release`.
+            assert status.json()["running"] is True
+            assert status.json()["finished_at"] is None
+        finally:
+            # A failed assertion must not leave the daemon thread holding the run
+            # slot, or every later start_scan() would be refused.
+            release.set()
+            final = _wait_for_scan_status(
+                lambda: client.get("/library/scan", headers=headers).json(),
+                _scan_is_finished,
+                message="the released background run never finished",
+            )
+        assert final["registered"] >= 1
+
+    assert rel in _assets_by_path()
+
+
 def test_scan_endpoint_runs_in_background(library_root):
     rel = "Loose/from-api.stl"
     _write(rel, b"solid api\n")
@@ -163,14 +254,21 @@ def test_scan_endpoint_runs_in_background(library_root):
         headers = _auth_header(client)
         start = client.post("/library/scan", headers=headers)
         assert start.status_code == 202, start.text
-        assert start.json()["running"] is True
+        # `running` is not asserted here: the endpoint may already have finished
+        # the walk. Test A owns that proof. The endpoint also keeps the *last*
+        # finished run visible, so `started_at` is the per-run identity that
+        # distinguishes this run from an earlier finished one.
+        started_at = start.json()["started_at"]
+        assert started_at is not None
 
-        for _ in range(50):
-            status = client.get("/library/scan", headers=headers).json()
-            if not status["running"]:
-                break
-            time.sleep(0.1)
-        assert status["running"] is False
+        def this_run_finished(status: dict) -> bool:
+            return status["started_at"] == started_at and _scan_is_finished(status)
+
+        status = _wait_for_scan_status(
+            lambda: client.get("/library/scan", headers=headers).json(),
+            this_run_finished,
+            message="the started run never finished",
+        )
         assert status["registered"] >= 1
 
     assert rel in _assets_by_path()
@@ -676,6 +774,94 @@ def test_counters_account_for_every_library_file(temp_library: Path) -> None:
     assert second.registered + second.known + second.failed == len(files)
 
 
+def test_is_skipped_name_is_the_one_rule_both_doors_ask() -> None:
+    """The basename predicate the scan registers by, and what a hidden-name door means.
+
+    `bundle_detect` asks this exact function for its model count, so the truth
+    table is the shared contract rather than a copy of one door's behaviour.
+    Mutation: change either half of the expression (a debris name admitted, or the
+    hidden half made unconditional) and a line below reds. It is a pure
+    predicate, so the REGISTRATION side - what `_register_tree` actually skips -
+    is pinned by `test_a_nested_macosx_tree_registers_its_dead_file_and_skips_the_sidecar`
+    and `test_a_hidden_directory_is_never_walked` below, not here.
+    """
+    skipped = {
+        "plain.stl": False,
+        "._plain.stl": True,
+        ".hidden.stl": True,
+        "__MACOSX": False,
+        "Thumbs.db": True,
+        ".DS_Store": True,
+        "desktop.ini": True,
+    }
+    for name, expected in skipped.items():
+        assert library_scan.is_skipped_name(name) is expected, name
+
+    # `include_hidden=True` admits a dot NAME but never a debris name: the two
+    # halves of the predicate are independent.
+    assert library_scan.is_skipped_name("._plain.stl", include_hidden=True) is False
+    assert library_scan.is_skipped_name(".hidden.stl", include_hidden=True) is False
+    assert library_scan.is_skipped_name(".DS_Store", include_hidden=True) is True
+    assert library_scan.is_skipped_name("Thumbs.db", include_hidden=True) is True
+
+
+def test_a_nested_macosx_tree_registers_its_dead_file_and_skips_the_sidecar(
+    temp_library: Path,
+) -> None:
+    """The premise the whole Mf-94od fix rests on, measured through `_register_tree`.
+
+    The scan REGISTERS a non-dot file under a nested `__MACOSX` - only its dot
+    NAMES are skipped - which is why the detector may not be wired to
+    `entry_policy.is_junk_entry` (that vocabulary refuses `__MACOSX` outright and
+    would UNDER-count a real part). Recorded as a docstring claim in three places
+    before this test existed; an absence-only assertion cannot red when someone
+    changes the rule, and this one can.
+
+    Mutation: skip anything under a `__MACOSX` directory and `dead` stops
+    registering while `run.registered` and `run.ignored` both move.
+    """
+    storage = temp_library
+    _write_under(storage, "mac/real.stl", b"solid real\n")
+    _write_under(storage, "mac/__MACOSX/mac/dead.stl", b"solid dead\n")
+    _write_under(storage, "mac/__MACOSX/mac/._real.stl", b"sidecar\n")
+
+    run = scan_storage_root()
+
+    assert set(_library_rows("mac/")) == {"mac/real.stl", "mac/__MACOSX/mac/dead.stl"}
+    assert run.registered == 2
+    assert run.ignored == 1, "exactly the `._*` sidecar, by name"
+
+
+def test_a_hidden_directory_is_never_walked(temp_library: Path) -> None:
+    """The walk's OWN dot rule, which `is_skipped_name` deliberately does not cover.
+
+    `_register_tree` asks the predicate about a NAME; pruning a hidden DIRECTORY
+    is a different question answered by `_walk_storage`, and until Mf-94od nothing
+    could red if that prune were deleted. The two halves are independent, so a
+    tree can hold a hidden directory that would otherwise register a real model.
+
+    Mutation: drop `if not include_hidden and entry.name.startswith(".")` and
+    `g/.secret/x.stl` registers, so `run.registered` and the walked set move.
+    """
+    storage = temp_library
+    _write_under(storage, "g/.secret/x.stl", b"solid hidden\n")
+    _write_under(storage, "g/kept.stl", b"solid kept\n")
+
+    run = scan_storage_root()
+
+    assert set(_library_rows("g/")) == {"g/kept.stl"}
+    assert run.registered == 1
+
+    walked = [rel_dir for rel_dir, _entries, _ignored in library_scan._walk_storage(storage)]
+    assert walked == ["", "g"]
+    # The prune is a DOOR, not a refusal: asking with it open walks the directory
+    # (the mount door uses this for a source whose dot-directories are content).
+    walked_open = [
+        rel_dir for rel_dir, _entries, _ignored in library_scan._walk_storage(storage, include_hidden=True)
+    ]
+    assert walked_open == ["", "g", "g/.secret"]
+
+
 def test_folders_come_only_from_directories_that_register_files(temp_library: Path) -> None:
     storage = temp_library
     _write_under(storage, "revisited/kept.stl", b"solid kept\n")
@@ -1109,10 +1295,11 @@ def test_a_second_scan_is_refused_while_one_is_running(
     assert library_scan.start_scan() is True
     try:
         assert entered.wait(timeout=10)
-        deadline = time.monotonic() + 10
-        while not library_scan.scan_status()["running"]:
-            assert time.monotonic() < deadline
-            time.sleep(0.01)
+        _wait_for_scan_status(
+            library_scan.scan_status,
+            _scan_is_running,
+            message="the started run never showed as running",
+        )
 
         before = library_scan.scan_status()
         assert library_scan.start_scan() is False
@@ -1122,11 +1309,11 @@ def test_a_second_scan_is_refused_while_one_is_running(
         assert library_scan.scan_status() == before
     finally:
         gate.set()
-        deadline = time.monotonic() + 10
-        while library_scan.scan_status()["running"]:
-            if time.monotonic() > deadline:
-                raise AssertionError("the first run never finished")
-            time.sleep(0.01)
+        _wait_for_scan_status(
+            library_scan.scan_status,
+            _scan_has_stopped,
+            message="the first run never finished",
+        )
 
 
 # --- derived display names (Mf-tkdp) ----------------------------------------

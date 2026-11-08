@@ -185,7 +185,54 @@ describe("LightBurnPreview vector rendering", () => {
       return found;
     });
     expect(path?.getAttribute("stroke")).toBe("#000000");
+    // The model and the seeded hidden set land in the same commit, so a
+    // file-hidden layer is never rendered at any point.
     expect(container.querySelector('path[data-layer="1"]')).toBeNull();
+  });
+
+  // The model and its seeded hidden set land in one commit, so no committed
+  // render may contain a path for a layer the file marks hidden. Instrumenting
+  // the attribute write is the only way to see that commit boundary: waitFor
+  // can resolve on either side of it.
+  it("never commits a path for a layer the file marks hidden", async () => {
+    const layersWritten: string[] = [];
+    const setAttribute = Element.prototype.setAttribute;
+    const spy = vi
+      .spyOn(Element.prototype, "setAttribute")
+      .mockImplementation(function (this: Element, name: string, value: string) {
+        if (name === "data-layer" && this.nodeName.toLowerCase() === "path") {
+          layersWritten.push(value);
+        }
+        setAttribute.call(this, name, value);
+      });
+
+    try {
+      const { container } = renderCard({
+        url: "/api/assets/lb-hidden-commit/file",
+        assetId: "lb-hidden-commit",
+      });
+
+      fireIntersect();
+
+      await waitFor(() => expect(container.querySelector('path[data-layer="0"]')).not.toBeNull());
+      // The visible layer's path was written: the instrumentation is live.
+      expect(layersWritten).toContain("0");
+      expect(layersWritten.filter(layer => layer === "1")).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("seeds the hidden layer from the cached model on remount", async () => {
+    const first = renderCard({ url: "/api/assets/lb-cached/file", assetId: "lb-cached" });
+    fireIntersect();
+    await waitFor(() => expect(first.container.querySelector('path[data-layer="0"]')).not.toBeNull());
+    first.unmount();
+
+    const second = renderCard({ url: "/api/assets/lb-cached/file", assetId: "lb-cached" });
+    await waitFor(() => expect(second.container.querySelector("svg")).not.toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(second.container.querySelector('path[data-layer="1"]')).toBeNull();
   });
 
   it("toggles layers from the modal panel", async () => {
@@ -197,8 +244,9 @@ describe("LightBurnPreview vector rendering", () => {
 
     const normalToggle = await screen.findByRole("checkbox", { name: "Outer Cut" });
     const hiddenToggle = await screen.findByRole("checkbox", { name: "Hidden Layer" });
-    // The file's hidden flags seed the toggles in a follow-up effect.
-    await waitFor(() => expect((hiddenToggle as HTMLInputElement).checked).toBe(false));
+    // The file's hidden flags are seeded with the model, so the first commit
+    // that shows the panel already has the toggle off.
+    expect((hiddenToggle as HTMLInputElement).checked).toBe(false);
     expect((normalToggle as HTMLInputElement).checked).toBe(true);
 
     const svg = screen.getByRole("img", { name: "preview.lbrn2" });

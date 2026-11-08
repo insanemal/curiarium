@@ -12,13 +12,16 @@ const root = createRoot(el);
 // The boot mode is decided BEFORE the first render, so the app never paints one
 // mode and then flips to the other. The await therefore sits in front of
 // `render`. A throw inside this IIFE is a permanently blank page, which is why
-// resolveInitialMode() is non-rejecting: it always settles on a mode.
+// resolveInitialMode() is non-rejecting: it always settles on a decision.
+// The decision carries the project list the probe fetched (when it fetched one),
+// so App seeds its project state from it instead of paying a second
+// `GET /projects` on a fresh boot into Projects.
 void (async () => {
-  const mode = await resolveInitialMode();
+  const { mode, projects } = await resolveInitialMode();
   root.render(
     <React.StrictMode>
       <>
-        <App initialMode={mode} />
+        <App initialMode={mode} initialProjects={projects} />
         <Toaster />
       </>
     </React.StrictMode>

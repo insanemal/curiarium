@@ -1,14 +1,13 @@
-import os
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
-from typing import FrozenSet, List, Optional
-from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile, ZipInfo
+from typing import List, Optional
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 from fastapi import BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
+import entry_policy
 from asset_file_service import managed_asset_file_path
 from asset_service import (
     AssetOrigin,
@@ -20,25 +19,14 @@ from asset_service import (
     resolve_asset_file,
     save_thumb,
 )
-from config import IMPORT_MAX_BYTES, IMPORT_ZIP_MAX_BYTES
 from db import engine
-from file_utils import mime_from_content_type, sanitize_filename, sanitize_path_segment
+from entry_policy import normalize_zip_entry_path
+from file_utils import mime_from_content_type, sanitize_path_segment
 from folder_service import validate_parent_folder
 from models import Asset, AssetFile, Folder, Project
 from schemas import ImportZipExtractRequest
 
 ATTRIBUTION_FILENAME = "ATTRIBUTION.txt"
-
-
-def normalize_zip_entry_path(name: str) -> Optional[str]:
-    cleaned = (name or "").replace("\\", "/").lstrip("/")
-    if not cleaned or cleaned.endswith("/"):
-        return None
-    parts = [part for part in cleaned.split("/") if part]
-    if not parts or any(part == ".." for part in parts):
-        return None
-    parts = [part for part in parts if part != "."]
-    return "/".join(parts)
 
 
 def sanitize_folder_name(name: str) -> str:
@@ -81,149 +69,6 @@ def read_zip_text_entry(zip_path: Path, entry_path: str, max_bytes: int) -> Opti
     return payload.decode("utf-8", errors="replace")
 
 
-STREAM_CHUNK_BYTES = 1024 * 1024
-
-
-@dataclass(frozen=True)
-class ZipSelectionPlan:
-    """What one entry selection resolves to, before a single byte is decompressed.
-
-    ``entries`` is every normalised member of the archive, ``ordered`` is the
-    request's picks after normalisation and de-duplication, ``oversized`` are the
-    picks whose *declared* size is over ``IMPORT_MAX_BYTES`` and
-    ``declared_total`` sums the rest. The declaration is metadata a crafted
-    archive can lie about, so this plan rejects the obviously-too-big before any
-    write and ``stream_zip_entry`` re-checks the bytes it actually reads.
-    """
-
-    entries: dict[str, ZipInfo]
-    ordered: List[str]
-    oversized: FrozenSet[str]
-    declared_total: int
-
-
-class ZipEntryTooLarge(ValueError):
-    """One member's own bytes crossed ``IMPORT_MAX_BYTES`` while streaming.
-
-    A ``ValueError`` on purpose: the pre-existing extractor treats any
-    non-``HTTPException`` failure as one bad entry (``failed``) rather than a bad
-    request, and that contract must not change.
-    """
-
-
-class ZipBudgetExceeded(Exception):
-    """This member's bytes crossed the selection's remaining budget.
-
-    ``total_written`` is how many bytes this member had written when it crossed;
-    the caller adds whatever the selection spent on earlier members, because the
-    running total is the caller's, not one member's.
-    """
-
-    def __init__(self, total_written: int) -> None:
-        super().__init__(f"selected zip entries expand beyond {total_written} bytes")
-        self.total_written = total_written
-
-
-def _normalised_members(zf: ZipFile) -> dict[str, ZipInfo]:
-    """Every member the normaliser accepts, keyed by its normalised name."""
-    members: dict[str, ZipInfo] = {}
-    for info in zf.infolist():
-        name = normalize_zip_entry_path(info.filename)
-        if not name:
-            continue
-        members[name] = info
-    return members
-
-
-def all_zip_entry_names(zf: ZipFile) -> List[str]:
-    """Every member name in archive order, normalised and de-duplicated.
-
-    This is the ``entries: null`` selection for the in-library extraction door.
-    De-duplication is deliberate: two raw members can normalise to one path
-    (``/a.stl`` and ``a.stl``) and only one file can be written there.
-    ``list_zip_entries`` reports the raw members instead, so an entries listing
-    can show one such path twice where this returns it once.
-    """
-    names: List[str] = []
-    seen: set[str] = set()
-    for info in zf.infolist():
-        name = normalize_zip_entry_path(info.filename)
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        names.append(name)
-    return names
-
-
-def plan_zip_selection(zf: ZipFile, selections: List[str]) -> ZipSelectionPlan:
-    """Resolve one request's entries and refuse an empty or over-budget selection.
-
-    Shared by both extractors so the two doors cannot disagree about what a
-    selection means or when it is too big. The details are the exact strings the
-    zip-import route has always answered with, because existing clients depend on
-    them.
-    """
-    entries = _normalised_members(zf)
-    ordered: List[str] = []
-    seen: set[str] = set()
-    for raw in selections:
-        name = normalize_zip_entry_path(raw)
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        ordered.append(name)
-    if not ordered:
-        raise HTTPException(status_code=400, detail="No zip entries selected")
-    oversized: set[str] = set()
-    declared_total = 0
-    for entry_name in ordered:
-        info = entries.get(entry_name)
-        if not info or info.is_dir():
-            continue
-        declared = int(info.file_size or 0)
-        if declared > IMPORT_MAX_BYTES:
-            oversized.add(entry_name)
-            continue
-        declared_total += declared
-    if declared_total > IMPORT_ZIP_MAX_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"Selected zip entries expand to {declared_total} bytes; "
-                f"the limit is {IMPORT_ZIP_MAX_BYTES} bytes (IMPORT_ZIP_MAX_MB)"
-            ),
-        )
-    return ZipSelectionPlan(
-        entries=entries,
-        ordered=ordered,
-        oversized=frozenset(oversized),
-        declared_total=declared_total,
-    )
-
-
-def stream_zip_entry(zf: ZipFile, info: ZipInfo, dest: Path, *, remaining_bytes: int) -> int:
-    """Stream one member into ``dest`` and return the bytes written.
-
-    Both caps are enforced on the bytes, never on the declaration: the member's
-    own size against ``IMPORT_MAX_BYTES`` (``ZipEntryTooLarge``) and what is left
-    of the selection's budget (``ZipBudgetExceeded``). The chunk size is fixed so
-    a lying archive cannot make the copy allocate its real size up front.
-    """
-    size = 0
-    with zf.open(info) as src, open(dest, "wb") as out:
-        while True:
-            chunk = src.read(STREAM_CHUNK_BYTES)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > IMPORT_MAX_BYTES:
-                raise ZipEntryTooLarge("Extracted file exceeds size limit")
-            if size > remaining_bytes:
-                raise ZipBudgetExceeded(size)
-            out.write(chunk)
-    return size
-
-
 def list_zip_entries(zip_path: Path) -> List[dict]:
     entries: List[dict] = []
     with ZipFile(zip_path) as zf:
@@ -231,7 +76,7 @@ def list_zip_entries(zip_path: Path) -> List[dict]:
             name = normalize_zip_entry_path(info.filename)
             if not name:
                 continue
-            entries.append({"path": name, "size": int(info.file_size or 0)})
+            entries.append({"path": name, "size": int(info.file_size or 0), "junk": entry_policy.is_junk_entry(name)})
     entries.sort(key=lambda entry: entry["path"])
     return entries
 
@@ -280,42 +125,57 @@ def extract_zip_entries_to_assets(
     created_ids: List[str] = []
     total_written = 0
     with ZipFile(zip_path) as zf, Session(engine) as session:
-        plan = plan_zip_selection(zf, selections)
+        plan = entry_policy.plan_selection(zf, selections)
         if body.folder_id:
             validate_parent_folder(session, body.folder_id)
         folder_cache: dict = {}
-        for entry_name in plan.ordered:
-            info = plan.entries.get(entry_name)
-            if not info or info.is_dir() or entry_name in plan.oversized:
+        for entry_name in plan.requested:
+            # Junk (OS metadata), an oversized member, a name the archive does not
+            # hold and a directory member all fail here, before any byte is
+            # decompressed and before `resolve_zip_folder_id`: none creates a
+            # Folder row, an asset row or an audit row, consumes no name slot, and
+            # none can become a project member or a cover.
+            if entry_name not in plan.writable:
                 failed.append(entry_name)
                 continue
+            info = plan.members[entry_name]
             target_folder_id = resolve_zip_folder_id(session, body.folder_id, entry_name, folder_cache)
-            filename = sanitize_filename(os.path.basename(entry_name))
+            filename = entry_policy.entry_filename(entry_name)
             mime = mime_from_content_type("", filename)
             asset: Optional[Asset] = None
             try:
+                # The archive title names the project and never the files: a None
+                # title makes `create_asset_record` fall back to
+                # `model_name_from_filename`, so every entry keeps its own stem.
                 asset = create_asset_record(
-                    filename, mime, body.title, body.notes, body.tags, target_folder_id, origin=origin
+                    filename,
+                    mime,
+                    title=None,
+                    notes=body.notes,
+                    tags=body.tags,
+                    folder_id=target_folder_id,
+                    origin=origin,
                 )
                 created_ids.append(asset.id)
                 dest = managed_asset_path(asset)
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                spent = total_written
                 try:
-                    size = stream_zip_entry(zf, info, dest, remaining_bytes=IMPORT_ZIP_MAX_BYTES - total_written)
-                except ZipBudgetExceeded as overspend:
+                    total_written = entry_policy.stream_entry(zf, info, dest, spent_bytes=spent)
+                except entry_policy.BudgetExceeded as overspend:
                     # The archive lied about its declared sizes; abandon the whole
                     # selection rather than keep filling the storage.
-                    total_written += overspend.total_written
+                    total_written = overspend.total_written
                     for created_id in created_ids:
                         cleanup_asset(created_id)
                     raise HTTPException(
                         status_code=413,
                         detail=(
                             f"Selected zip entries expand beyond {total_written} bytes; "
-                            f"the limit is {IMPORT_ZIP_MAX_BYTES} bytes (IMPORT_ZIP_MAX_MB)"
+                            f"the limit is {entry_policy.IMPORT_ZIP_MAX_BYTES} bytes (IMPORT_ZIP_MAX_MB)"
                         ),
                     ) from overspend
-                total_written += size
+                size = total_written - spent
                 if (mime or "").startswith("image/") and dest.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
                     save_thumb(asset.id, dest)
                 elif dest.suffix.lower() == ".3mf":
@@ -323,14 +183,18 @@ def extract_zip_entries_to_assets(
                 refreshed = finalize_asset_record(asset.id, size, mime)
                 assets.append(refreshed or asset)
             except HTTPException as exc:
-                # A name or path conflict is one bad entry, not a bad zip: report it
-                # in `failed` and keep extracting. Every other HTTPException (a bad
-                # storage template, say) applies to the whole request.
+                # A name conflict or an entry with no extension is one bad entry;
+                # every other HTTPException (a bad storage template, say) applies
+                # to the whole request. `entry_policy.is_entry_failure` decides by
+                # exception class, not by status: a storage-template failure is
+                # also a 400, and the 413 overspend raise above lives inside this
+                # same `try`.
                 if asset is not None:
                     cleanup_asset(asset.id)
-                if exc.status_code != 409:
+                if entry_policy.is_entry_failure(exc):
+                    failed.append(entry_name)
+                else:
                     raise
-                failed.append(entry_name)
             except Exception:
                 if asset is not None:
                     cleanup_asset(asset.id)

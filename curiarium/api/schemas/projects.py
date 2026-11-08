@@ -8,6 +8,7 @@ from .batch import BatchFailure
 
 __all__ = [
   "ProjectAssetsRequest",
+  "ProjectDriftOut",
   "ProjectIn",
   "ProjectMembersOut",
   "ProjectOut",
@@ -100,3 +101,26 @@ class ProjectRemovalOut(BaseModel):
   removed: List[str] = []
   skipped: List[str] = []
   failed: List[BatchFailure] = []
+
+
+class ProjectDriftOut(BaseModel):
+  """Whether a bundle project's folder has grown, and the parts it would add.
+
+  `state` is one of three exhaustive cases, never a number by itself:
+
+  * `not_applicable` - the project carries no `_bundle` marker (a hand-made
+    project, or malformed metadata): no question, so `count` is `null`;
+  * `known` - the marker names a folder this server may walk, so `count` is the
+    honest number and `asset_ids` is exactly the set it counts. A `0` here means
+    the folder has nothing new and the client shows no notice at all - it never
+    renders a zero;
+  * `unknown` - the marker's key is an identity (`zip-project:<url>`) with no
+    path to walk: `count` is `null` and the client renders an en dash.
+
+  `count` is `len(asset_ids)` whenever the state is `known`, so the number and
+  the `POST /project/{id}/assets` action cannot disagree about what is new.
+  """
+
+  state: str
+  count: Optional[int] = None
+  asset_ids: List[str] = []
