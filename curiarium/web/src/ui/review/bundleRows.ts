@@ -288,12 +288,37 @@ export function confidenceLabel(confidence: string): string {
   return "Low confidence";
 }
 
+/** The `archive_only` sentence for a row that is NOT an archive on disk: the
+ *  live `import/01_Fates End - Wizard Tower` shape, whose `rel_path` is a
+ *  directory. "zip only" is false about that row, and one string has to serve
+ *  both directory shapes `extractPathFor` knows - a directory with a twin, where
+ *  the Extract door extracts the TWIN and never this folder, and a directory with
+ *  no twin, where there is no door at all. So this sentence claims no remedy (the
+ *  door's own title is the only place a remedy is promised), names no count (an
+ *  unknown count is `countsLine`'s en dash to say, never a number invented here)
+ *  and calls the row nothing it is not: it says only which thing on disk the row
+ *  is, in the same "X only" voice as the zip sentence it sits beside. */
+export const ARCHIVE_ONLY_FOLDER_LABEL = "folder only - this row is a folder, not an archive";
+
+/** The blocked reason's words for THIS row. `archive_only` is read through
+ *  `isArchivePath` - the very predicate `extractPathFor` reads - so the door and
+ *  the sentence cannot disagree about whether the row is a zip: a row the badge
+ *  calls a zip is the only row the sentence calls a zip. Every other reason keeps
+ *  the plain lookup, an unknown one still reads as its own name, and a row with
+ *  no reason at all says `blocked` rather than nothing. */
+export function blockedReasonLabel(row: BundleDetectItem): string {
+  if (row.blocked_reason === ARCHIVE_ONLY) {
+    return isArchivePath(row.rel_path)
+      ? BLOCKED_REASON_LABELS.archive_only
+      : ARCHIVE_ONLY_FOLDER_LABEL;
+  }
+  if (!row.blocked_reason) return "blocked";
+  return BLOCKED_REASON_LABELS[row.blocked_reason] ?? row.blocked_reason;
+}
+
 export function statusLine(row: BundleDetectItem): string {
   if (!isBlocked(row)) return "Ready";
-  const reason = row.blocked_reason
-    ? BLOCKED_REASON_LABELS[row.blocked_reason] ?? row.blocked_reason
-    : "blocked";
-  return `Blocked - ${reason}`;
+  return `Blocked - ${blockedReasonLabel(row)}`;
 }
 
 /** The bucket a row falls in for the queue's reveal toggles. This is the

@@ -3837,6 +3837,70 @@ def refusal_rules(storage: Path) -> Dict[str, str]:
     }
 
 
+def member_refusals_name_a_real_row(storage: Path) -> List[str]:
+    """The ``member-of-bundle`` entries that name nothing - an empty list is the pass.
+
+    The word says "a bundle the operator was OFFERED owns this path". A path that is
+    neither a row nor strictly inside a row is owned by nobody, so naming it is a lie:
+    the payload has no row, and the ledger points at one that does not exist. That is
+    exactly what B-1 produced - a promotion dissolved its child eagerly, a later prune
+    vetoed the promotion, and both rows went away - so the promotion's dissolution is
+    committed after that prune and this helper is what pins it across a scan. Every
+    promotion witness calls it; the general shape is asserted once here rather than
+    restated per tree.
+    """
+    scan = bundle_service.scan_bundles(storage)
+    offered_keys = {candidate.key for candidate in scan.candidates}
+    offered_dirs = {candidate.key for candidate in scan.candidates if not candidate.is_archive}
+    return [
+        item.rel_path
+        for item in scan.refusals
+        if item.rule == bundle_service.REFUSAL_MEMBER_OF_BUNDLE
+        and item.rel_path not in offered_keys
+        and not any(item.rel_path.startswith(directory + "/") for directory in offered_dirs)
+    ]
+
+
+def no_offered_row_contains_another_offered_row(storage: Path) -> List[str]:
+    """Creatable rows still holding another offered row - an empty list is the pass.
+
+    ``member-of-bundle`` is how a promotion says "I took that row", so the row set a
+    promotion leaves behind is ONE row, never the parent and the child side by side.
+    This asks that of the OFFERED set: no row the operator could create from - not an
+    archive, and not a ``pair_only`` container, which is the answer that legitimately
+    sits ABOVE a row it refuses to own (``import/M``, ``import/L``, ``import/D``,
+    ``import/X``) - may strictly contain another offered row. ``[]`` is the pass on
+    every committed shape, and it is exactly what the deferred
+    ``promoted_dissolutions`` apply site exists to keep true. Mutation (run): neuter the
+    apply site's removal - write the refusals, skip the ``found`` filter - and on the one
+    tree where the dissolution is the only thing that removes the child (the tower whose
+    child holds no archive of its own) this returns
+    ``['import/01_Fates End - Wizard Tower/01_Wizard']`` while ``member_refusals_name_a_real_row``
+    still returns ``[]``. On the trees whose child the archive-containment strip drops
+    anyway (the live tower, ``import/W``) it stays empty whatever the apply site does, and
+    on B-1 the vetoed wrapper is never offered - which is why it is called from every
+    promotion witness rather than trusted from one, and why it is a net over the ROW SET
+    rather than a second reading of the ledger.
+
+    Why this is not a copy of ``member_refusals_name_a_real_row``: that helper is
+    measured against the LEDGER, and a ledger entry can be honest about a row set that
+    is wrong. On a VETOED promotion it passes even in the broken build, because the
+    veto leaves a cover row above the dissolved path - ``import/X`` is a row and
+    ``import/X/P/A`` sits inside it, so "names a row or sits inside one" is satisfied.
+    This helper never reads a refusal at all: it reads the rows themselves, so it
+    catches the failure the ledger cannot express - two offered rows for one payload -
+    and it does so without a fixture-shaped expected list for somebody to update to
+    match a broken build. Neither subsumes the other, which is why each promotion
+    witness calls both.
+    """
+    scan = bundle_service.scan_bundles(storage)
+    offered = {candidate.key for candidate in scan.candidates}
+    containers = [candidate.key for candidate in scan.candidates if not candidate.is_archive and not candidate.pair_only]
+    return sorted(
+        key for container in containers for key in offered if key != container and key.startswith(f"{container}/")
+    )
+
+
 def test_service_a_single_root_archive_without_a_readme_is_a_low_row(isolated_storage: Path) -> None:
     """AC-1: the Fates End tower becomes a row through ``build_report``, not only a scan.
 
@@ -6725,7 +6789,11 @@ CLAIMED_CHILD_DIR = "import/Q/Moai_statue"
 # that export SHIPS a readable nested archive. Models plus a render under one root and
 # no text is what makes the nested zip candidate-shaped on its own - which is exactly
 # the threat: a surviving archive row below an emptied ancestor is what turns the
-# ancestor's ``pair_only`` row into the Decision 18 swallow.
+# ancestor's OWN row into the Decision 18 swallow. Since Mf-ny89 this ancestor is
+# promoted rather than ``pair_only`` (its single child is LOW, so the promotion fires),
+# and the threat is sharper, not softer - a promoted key joins ``bundle_dirs`` AND
+# ``contained_keys``, so the swallow runs by both routes. The witness below pins that
+# no archive row survives beneath it either way.
 EMPTY_CLAIMED_DIR = "import/W"
 EMPTY_CLAIMED_ZIP = f"{EMPTY_CLAIMED_DIR}.zip"
 EMPTY_CLAIMED_CHILD_DIR = f"{EMPTY_CLAIMED_DIR}/Moai_statue"
@@ -6738,6 +6806,63 @@ EMPTY_CLAIMED_NESTED_ENTRIES = {
     "vendor/part-a.stl": b"z" * 60,
     "vendor/render.png": b"j" * 90,
 }
+
+# Mf-ny89's three parents, each the promoted live shape with exactly one thing
+# changed, so the ONLY thing that can decide them is ``_single_claimed_child_subtree``
+# and the ``_holds_stronger_candidate`` leg beside it. Every child below them is a
+# ``low_export_directory`` - models, a preview and a ``notes.txt``, no vendor markers -
+# because a HIGH child would be refused promotion by the stronger-candidate leg and
+# prove nothing about the shape question. ``import/M``'s one child is the exception on
+# purpose: the id-named dragon is MEDIUM, and MEDIUM outranks a shape inference.
+#
+# * ``import/M`` - one MEDIUM child: the guard direction, parent stays pair-only.
+# * ``import/L`` - one claimed child PLUS a model of its own at its own depth: the
+#   LOOSE FILE negative, a wrapper holds nothing of its own.
+# * ``import/D`` - TWO claimed children: the PILE negative. Its children are
+#   ``files/`` and ``models/`` because ``R3_MODEL_DIRS`` counts the models under
+#   ``files/`` as own-depth, so ``_own_depth_model_count`` lets the pairing through
+#   and only the two-first-segments answer can refuse it - unlike ``pile_fixture``,
+#   whose UNCLAIMED ``alpha/`` and ``beta/`` are refused by that inherited bound
+#   before this helper is ever consulted.
+MEDIUM_PARENT_DIR = "import/M"
+MEDIUM_PARENT_ZIP = f"{MEDIUM_PARENT_DIR}.zip"
+MEDIUM_CHILD_DIR = f"{MEDIUM_PARENT_DIR}/{DRAGON}"
+MEDIUM_CHILD_MODEL = "ARTICULATED_ice_dragon_fixed_p1.stl"
+# The shape that makes the ``work`` leg load-bearing rather than decorative: the
+# parent's ONE child is not itself a row - ``A`` holds two models of its own plus a
+# claimed grandchild - so the parent's post-claim view still lists ``A/own0.stl`` while
+# ``folded`` still answers "one first segment". Emptiness is the only question the
+# emptied view can answer honestly, and here it is the only thing that keeps the parent
+# a container instead of the row that swallows a claimed grandchild.
+PARTIAL_PARENT_DIR = "import/Z"
+PARTIAL_PARENT_ZIP = f"{PARTIAL_PARENT_DIR}.zip"
+PARTIAL_CHILD_DIR = f"{PARTIAL_PARENT_DIR}/A"
+PARTIAL_CHILD_MODELS = ("own0.stl", "own1.stl")
+PARTIAL_GRANDCHILD_DIR = f"{PARTIAL_CHILD_DIR}/B"
+LOOSE_PARENT_DIR = "import/L"
+LOOSE_PARENT_ZIP = f"{LOOSE_PARENT_DIR}.zip"
+LOOSE_CHILD_DIR = f"{LOOSE_PARENT_DIR}/parts"
+LOOSE_OWN_MODEL = f"{LOOSE_PARENT_DIR}/leftover.stl"
+DOUBLE_PARENT_DIR = "import/D"
+DOUBLE_PARENT_ZIP = f"{DOUBLE_PARENT_DIR}.zip"
+DOUBLE_CHILD_DIRS = ("files", "models")
+
+# B-1, the promotion the nested-member pass later VETOES. Three levels, two verified
+# twins, and the payload one level deeper than either twin's directory:
+# ``import/X/x_info.stl`` (a model of its own, so ``X`` is NOT a wrapper - it answers
+# pair-only), ``import/X/P/A/{part0.stl,part1.stl,part2.stl,preview.png,notes.txt}``
+# (the R3 trio that earns ``A`` a ``low`` row, and the claim that empties ``P``),
+# ``import/X/P.zip`` the verified twin of ``P``, ``import/X.zip`` the verified twin of
+# ``X``. ``P`` is therefore promoted on its single claimed child - and then the prune
+# takes ``P.zip`` away as a member of the pair-only ``X``, so the promotion itself is
+# dropped. Whether anything is left to create from is decided purely by WHEN the
+# promotion's dissolution was committed; see ``b1_vetoed_promotion_tree``.
+B1_PARENT_DIR = "import/X"
+B1_PARENT_ZIP = f"{B1_PARENT_DIR}.zip"
+B1_PARENT_OWN_MODEL = f"{B1_PARENT_DIR}/x_info.stl"
+B1_MID_DIR = f"{B1_PARENT_DIR}/P"
+B1_MID_ZIP = f"{B1_MID_DIR}.zip"
+B1_CHILD_DIR = f"{B1_MID_DIR}/A"
 
 EMPTY_TWIN_DIR = "import/emptypair"
 EMPTY_TWIN_ZIP = "import/emptypair.zip"
@@ -6817,12 +6942,19 @@ def twin_archive_of(storage: Path, rel_dir: str, archive: str) -> None:
     write_zip(storage / archive, entries)
 
 
-def tower_extraction(storage: Path, *, with_text: bool) -> None:
+def tower_extraction(storage: Path, *, with_text: bool, with_nested_zip: bool = True) -> None:
     """The extraction on disk plus the archive it came in, with or without the ``.txt``.
 
     ``with_text`` is the ONLY difference between the two shapes the ticket measured.
     With it R3 offers ``01_Wizard`` a row of its own and the claim empties the
     parent's own view; without it nothing below the parent is claimed at all.
+
+    ``with_nested_zip=False`` leaves the vendor's deliverable out, so the child holds
+    no candidate-shaped archive and nothing drops it out of the offered set: with a
+    pair-only parent that shape showed TWO rows, the child keeping a ``ready`` row of
+    its own. It is written before ``twin_archive_of``, which reads the bytes off disk -
+    an archive that declared a file the child does not hold would be refused
+    ``twin-unverified`` and the test would measure nothing.
     """
     payload = {f"{TOWER_ROOT}/{name}": b"s" * (40 + index) for index, name in enumerate(TOWER_MODEL_NAMES)}
     for name, size in zip(TOWER_PREVIEW_NAMES, TOWER_PREVIEW_SIZES, strict=True):
@@ -6831,7 +6963,8 @@ def tower_extraction(storage: Path, *, with_text: bool) -> None:
         payload[f"{TOWER_ROOT}/{TOWER_TEXT_NAME}"] = TOWER_TEXT_BYTES
     for name, content in payload.items():
         write_file(storage / TOWER_DIR / name, content)
-    write_zip(storage / TOWER_NESTED_ZIP, TOWER_NESTED_ENTRIES)
+    if with_nested_zip:
+        write_zip(storage / TOWER_NESTED_ZIP, TOWER_NESTED_ENTRIES)
     twin_archive_of(storage, TOWER_DIR, TOWER_ZIP)
 
 
@@ -6894,6 +7027,51 @@ def thingiverse_export_directory(storage: Path, rel_dir: str) -> None:
         write_file(base / f"part{index}.stl", b"s" * (40 + index))
 
 
+def low_export_directory(storage: Path, rel_dir: str) -> None:
+    """A child the folder pass CLAIMS as a LOW row: three models, a preview, a document.
+
+    ``notes.txt`` rather than ``README.txt``/``LICENSE.txt`` is the whole point: the
+    trio earns R3's ``low`` row and nothing more, so a parent whose only content is
+    this child is bounded by the shape question alone. A vendor document pair would
+    make the child ``high`` and ``_holds_stronger_candidate`` would answer before the
+    shape was ever asked - which is ``import/Q``'s witness, not these.
+    """
+    base = storage / rel_dir
+    for index in range(3):
+        write_file(base / f"part{index}.stl", b"s" * (40 + index))
+    write_file(base / "preview.png", b"p" * 70)
+    write_file(base / "notes.txt", EMPTY_CLAIMED_CHILD_TEXT_BYTES)
+
+
+def b1_vetoed_promotion_tree(storage: Path) -> None:
+    """The B-1 tree: a promotion the nested-member pass vetoes after it recorded a dissolution.
+
+    Built bottom-up so each twin declares the bytes its directory really holds
+    (``twin_archive_of`` reads them off disk): the R3-shaped ``A`` first, then ``P``'s
+    twin, then ``X``'s - which is why the parent's own model is written before the
+    archives and never inside either of them. ``X`` is a pair-only container because a
+    model of its own stands beside the bundle it ships; ``P`` is a real wrapper and is
+    promoted on ``A``; and ``P.zip`` sitting strictly inside the pair-only ``X`` is then
+    a member, so the prune drops ``P``'s pairing and the promoted row with it.
+    """
+    low_export_directory(storage, B1_CHILD_DIR)
+    write_file(storage / B1_PARENT_OWN_MODEL, STL_BYTES)
+    twin_archive_of(storage, B1_MID_DIR, B1_MID_ZIP)
+    twin_archive_of(storage, B1_PARENT_DIR, B1_PARENT_ZIP)
+
+
+def files_under(storage: Path, rel_dir: str) -> List[Path]:
+    """The files a directory holds, as the library scan counted them - never a literal.
+
+    A row's ``assets_total`` is the number of registered files under its key, so the
+    assertion is read off the fixture it was built from: change the fixture and the
+    number moves with it. Counting the ``.zip`` beside the directory is the mistake
+    this helper exists to prevent - a loose ``LIKE 'dir%'`` on the live library
+    counted ``01_Fates End - Wizard Tower.zip`` as one of the tower's own files.
+    """
+    return [path for path in (storage / rel_dir).rglob("*") if path.is_file()]
+
+
 def role_counts(candidate: bundle_service.BundleCandidate) -> Dict[str, int]:
     """How many entries of a candidate's own listing each pure role claims."""
     counts: Dict[str, int] = {}
@@ -6934,7 +7112,9 @@ def test_service_an_extraction_whose_files_all_live_in_one_subdirectory_is_promo
     (every model here sits one level down, in ``01_Wizard``), and this row disappears.
     What this shape does NOT pin is worth saying out loud: nothing below the parent is
     claimed, so ``work`` and ``folded`` agree and the fallback is a no-op - the
-    pair-only test below is the discriminator for that line.
+    claimed-child member witness below
+    (``test_service_a_claimed_child_towers_nested_vendor_archive_is_a_member_not_a_row``,
+    named for the answer it gave before Mf-ny89) is the discriminator for that line.
     """
     tower_extraction(isolated_storage, with_text=False)
     scan()
@@ -6992,40 +7172,61 @@ def test_service_a_promoted_towers_nested_vendor_archive_is_a_member_not_a_row(
     nested_vendor_zip_is_a_member(isolated_storage)
 
 
-def test_service_a_pair_only_towers_nested_vendor_archive_is_a_member_not_a_row(
+def test_service_a_claimed_child_towers_nested_vendor_archive_is_a_member_not_a_row(
     isolated_storage: Path,
 ) -> None:
-    """AC-2 (the pair-only shape): membership does not depend on how the row was earned.
+    """AC-2 (the claimed-child shape): membership does not depend on how the row was earned.
 
-    The same tree with the vendor's ``.txt`` added, where the parent is a container
-    and its row is ``pair_only`` rather than ``archive_owned``. The nested archive is
-    still a member: a zip inside a bundle directory proved nothing about a sibling
-    directory whatever the parent's own answer is.
+    The same tree with the vendor's ``.txt`` added. Since Mf-ny89 both tower shapes
+    are ``archive_owned``, so this is no longer the promoted/pair-only pair its
+    original name promised; what still separates it from the doc-less sibling above
+    is HOW the parent got its listing. Here ``01_Wizard`` is claimed, so
+    ``work[TOWER_DIR]`` is empty and the row is built off ``folded``; there the two
+    listings agree. The nested archive is a member either way - a zip inside a
+    bundle directory proves nothing about a sibling directory whatever the parent's
+    own answer is - but only THIS shape asks that question of a listing the claim
+    emptied.
 
-    Mutation: build ``bundle_dirs`` from the ``archive_owned`` rows alone and this
-    shape loses the member answer while the promoted shape keeps it.
+    Mutation: revert the ``folded`` fallback (``entries = work.get(folder) or []``)
+    and this row loses the member answer while the doc-less sibling keeps it - the
+    emptied own view means the pairing never verifies, no ``archive_owned`` key
+    reaches ``bundle_dirs``, and the vendor's zip survives as a row. (The old claim
+    here - narrow ``bundle_dirs`` to the ``archive_owned`` rows and only this shape
+    breaks - was measured false by Mf-ny89: both shapes are ``archive_owned`` now,
+    that mutation is green on both, and the witness that really catches it is
+    ``test_service_a_paired_extraction_inside_a_bundle_is_not_a_second_row``.)
     """
     tower_extraction(isolated_storage, with_text=True)
 
     nested_vendor_zip_is_a_member(isolated_storage)
 
 
-def test_service_a_verified_twin_of_a_claimed_ancestor_is_a_pair_only_row(isolated_storage: Path) -> None:
-    """The measured live shape: the pair stays visible and the CHILD keeps the models.
+def test_service_a_verified_twin_of_a_claimed_ancestor_is_promoted_on_its_single_child(
+    isolated_storage: Path,
+) -> None:
+    """AC-1's other half: the ancestor's ONE child is CLAIMED, and it is still promoted.
 
     ``Wizard_Dice_v5.4_fixes.txt`` is the whole difference from AC-1: R3 now offers
-    ``01_Wizard`` a row of its own, the claim strips every file out of the parent's
-    own view, and the parent is a claimed ancestor. An ancestor never qualifies on
-    its child's models, so the verified twin cannot make it a creatable row - the
-    container rule answers with a ``pair_only`` row, which is the pair the operator
-    can see on disk shown as ``blocked``/``archive_only`` and created by nobody.
-    ``archive_owned is False`` is the point: the ancestor rule is holding, and this
-    is not a weaker reading of the same row.
+    ``01_Wizard`` a row of its own and the claim strips every file out of the parent's
+    own view, so the listing the pairing is judged on has to be ``folded``, the
+    unclaimed subtree - and once it is, the answer is the same row AC-1 gets: one
+    ``ready`` line keyed at the DIRECTORY, ``archive_owned``, the twin attached as
+    provenance, and the child dissolved into it as ``member-of-bundle``. A parent
+    whose entire payload sits in one child is that child's wrapper, not a container of
+    somebody else's bundle, and the owner ruling is explicit that the operator gets a
+    creatable row rather than a ``blocked``/``archive_only`` line with 0 assets that
+    nothing can be made from.
+
+    ``archive_owned is True`` and ``pair_only is False`` are the point: this is the
+    promotion, not a weaker reading of the blocked row this test used to assert. The
+    child is refused, never offered as a second row - the models are counted once.
 
     Mutation: read the pairing and the promotion off ``work`` (the pre-fix reading) and
     the emptied listing asks the shape question of nothing - the tower itself renders
     no row, the archive answers ``twin-unverified``, the no-facts reason, and the only
-    row left in the tree is the vendor's nested zip: the row Mf-wd3v removed.
+    row left in the tree is the vendor's nested zip: the row Mf-wd3v removed. Delete
+    the ``_single_claimed_child_subtree`` leg of the ``claimed_ancestors`` branch and
+    the row goes back to ``blocked``/``archive_only`` with ``assets_total`` 0.
     """
     tower_extraction(isolated_storage, with_text=True)
     scan()
@@ -7038,8 +7239,8 @@ def test_service_a_verified_twin_of_a_claimed_ancestor_is_a_pair_only_row(isolat
     )
     candidate = candidates[0]
     assert candidate.confidence == "low"
-    assert candidate.pair_only is True, "a claimed ancestor is shown, never created"
-    assert candidate.archive_owned is False
+    assert candidate.pair_only is False, "a single claimed child is a wrapper, not a container"
+    assert candidate.archive_owned is True, "the verified pairing owns this directory"
     assert candidate.is_archive is False
     assert candidate.archive_path == TOWER_ZIP
     assert role_counts(candidate) == {
@@ -7053,10 +7254,13 @@ def test_service_a_verified_twin_of_a_claimed_ancestor_is_a_pair_only_row(isolat
 
     row = row_for(bundle_service.build_report(), TOWER_DIR)
 
-    assert (row["status"], row["blocked_reason"]) == ("blocked", "archive_only"), (
-        "a pair-only row names the import door as its remedy and creates nothing"
+    assert (row["status"], row["blocked_reason"]) == ("ready", None), (
+        "a wrapper promoted on the one child it holds is creatable like any other low row"
     )
     assert (row["model_count"], row["image_count"], row["text_count"]) == (10, 2, 1)
+    assert row["assets_total"] == len(files_under(isolated_storage, TOWER_DIR)), (
+        "every file under the tower is counted, none of them out of the archive"
+    )
     assert row["archive"] == {"rel_path": TOWER_ZIP, "twin_verified": True}
 
 
@@ -7228,8 +7432,8 @@ def test_service_a_twin_directory_that_is_empty_on_disk_is_still_refused_for_wan
     assert refusal_rules(isolated_storage)[EMPTY_TWIN_ZIP] == bundle_service.REFUSAL_TWIN_UNVERIFIED
 
 
-def test_service_the_measured_live_tower_is_a_pair_only_row_at_its_real_counts(isolated_storage: Path) -> None:
-    """The LIVE witness at its MEASURED counts, not at the ticket's invented 10/2 shape.
+def test_service_the_measured_live_tower_is_promoted_at_its_real_counts(isolated_storage: Path) -> None:
+    """The LIVE witness at its MEASURED counts, and it is ONE creatable row.
 
     This is ``/mnt/ceph/3D_models/import/01_Fates End - Wizard Tower`` and its
     extraction ``.../01_Wizard`` as the operator's library actually holds them: twenty
@@ -7238,24 +7442,40 @@ def test_service_the_measured_live_tower_is_a_pair_only_row_at_its_real_counts(i
     ``Wizard_Dice_v5.4_fixes.txt`` and the vendor's readable ``01_Wizard_v5.4.zip`` -
     beside the outer ``import/01_Fates End - Wizard Tower.zip`` that declares those
     exact twenty files. The ticket's stated shape (10 STLs, 2 previews, no text file)
-    is NOT this tree, and every count here is off disk: the report row is 15/3/1 and
-    the snapshot is 15 models / 3 images / 1 text / 1 archive.
+    is NOT this tree, and every count here is off disk: the report row is 15/3/1, the
+    snapshot is 15 models / 3 images / 1 text / 1 archive, and ``assets_total`` is read
+    off the files the fixture wrote rather than from a number in a ticket note.
 
-    ``Wizard_Dice_v5.4_fixes.txt`` is the load-bearing file. Its presence is what R3
-    reads to offer ``01_Wizard`` a row of its own, the claim then strips all twenty
-    files out of the parent's own view, and a claimed ancestor can never qualify on
-    its child's models - so the parent can only answer as a container, as a
-    ``pair_only`` row that creates nothing. Nothing from the archive is attached, and
-    the vendor's nested deliverable stays a member rather than becoming a row.
+    ``Wizard_Dice_v5.4_fixes.txt`` is the load-bearing file: its presence is what R3
+    reads to offer ``01_Wizard`` a row of its own, and the claim then strips all twenty
+    files out of the parent's own view. That used to be the end of the parent's story -
+    a claimed ancestor is a container, so the row came back ``blocked``/``archive_only``
+    with ``assets_total`` 0, nothing creatable, the cover not even a registered asset
+    (``largest-image-unregistered``), while the child that held every one of those
+    files was refused ``member-of-bundle``: one visible, unimportable line. It is not
+    the end of the story any more. Every file the parent owns sits inside that ONE
+    child, so the parent is the child's wrapper and it is PROMOTED - the operator's
+    answer is one ``ready`` row keyed at ``import/01_Fates End - Wizard Tower``, 15
+    models / 3 images / 1 text, with ``01_Wizard`` shown inside it: the cover's own
+    ``rel_path`` runs through the child, because the child's payload IS the row.
 
-    Mutation: judge the pairing or the shape question off ``work`` instead of
-    ``folded`` (either of the two reverted expressions) and this row vanishes - the
-    parent answers nothing and the archive lies about being unverified. Change any
-    count above without changing the fixture, or drop the ``.txt`` and the row becomes
-    a promoted ``archive_owned`` one, which is the AC-1 test's job, not this one's.
+    Mutation: delete the ``_single_claimed_child_subtree`` leg of the
+    ``claimed_ancestors`` branch and this row is the blocked one again - ``pair_only``,
+    ``assets_total`` 0, no creatable row in the tree. Delete the
+    ``_holds_stronger_candidate`` leg beside it and ``import/Q``'s HIGH export child is
+    swallowed by its parent (the ``:7136`` witness reds, not this one - a LOW child is
+    exactly what this branch is for). Change any count here without changing the
+    fixture, or drop the ``.txt``, and the row stops being this shape at all - the
+    document-less tree is the AC-1 test's job, not this one's.
     """
     live_tower_extraction(isolated_storage)
     scan()
+    files = files_under(isolated_storage, TOWER_DIR)
+
+    assert len(files) == len(LIVE_MODEL_NAMES) + len(LIVE_PREVIEW_NAMES) + 2, (
+        "the fixture holds the fifteen STLs, the three PNGs, the vendor's .txt and the "
+        "vendor's own deliverable zip - the twenty entries the library scan registered"
+    )
 
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
 
@@ -7265,8 +7485,8 @@ def test_service_the_measured_live_tower_is_a_pair_only_row_at_its_real_counts(i
     )
     candidate = candidates[0]
     assert candidate.confidence == "low", "the shape came from the archive, not from a rule"
-    assert candidate.pair_only is True, "a claimed ancestor is shown, never created"
-    assert candidate.archive_owned is False
+    assert candidate.pair_only is False, "a parent holding nothing but one child is a wrapper"
+    assert candidate.archive_owned is True, "the verified pairing owns this directory"
     assert candidate.is_archive is False
     assert candidate.archive_path == TOWER_ZIP
     assert role_counts(candidate) == {
@@ -7276,57 +7496,94 @@ def test_service_the_measured_live_tower_is_a_pair_only_row_at_its_real_counts(i
         bundle_detect.ARCHIVE: 1,
     }, "the twenty files the live tree actually holds"
 
+    result = bundle_service.scan_bundles(isolated_storage)
+
+    assert result.absorbed == (), (
+        "a promoted parent is a real row, so R7 can now see it as absorbable: nothing "
+        "above ``import/01_Fates End - Wizard Tower`` is a compound, and a promoted "
+        "row vanishing into one would take the operator's only creatable line with it"
+    )
+
     row = row_for(bundle_service.build_report(), TOWER_DIR)
 
+    assert (row["status"], row["blocked_reason"]) == ("ready", None), (
+        "one ready row for the pair the operator can see on disk"
+    )
     assert (row["model_count"], row["image_count"], row["text_count"]) == (15, 3, 1)
-    assert (row["status"], row["blocked_reason"]) == ("blocked", "archive_only")
+    assert row["assets_total"] == len(files), (
+        "every file under the tower is registered and counted - and none of them from "
+        "the twin archive beside it"
+    )
+    assert row["detector"] == "generic-bundle"
+    assert row["archive"] == {"rel_path": TOWER_ZIP, "twin_verified": True}
+    largest_preview = LIVE_PREVIEW_NAMES[LIVE_PREVIEW_SIZES.index(max(LIVE_PREVIEW_SIZES))]
+    assert row["cover"]["rel_path"] == f"{TOWER_MEMBER_DIR}/{largest_preview}", (
+        "the cover comes out of the claimed child: the child's payload is the row's"
+    )
+    assert row["cover"]["asset_id"] is not None
+    assert row["cover"]["reason"] == "largest-image", "a promoted row covers with a registered asset"
 
     rules = refusal_rules(isolated_storage)
     assert rules[TOWER_MEMBER_DIR] == bundle_service.REFUSAL_MEMBER_OF_BUNDLE
     assert rules[TOWER_NESTED_ZIP] == bundle_service.REFUSAL_NESTED_MEMBER
+    assert rules[TOWER_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED
     assert TOWER_NESTED_ZIP not in {offered.key for offered in candidates}, (
         "the vendor's deliverable is a file of the bundle, never a row of its own"
     )
 
 
-def test_service_an_emptied_claimed_ancestor_holds_no_archive_row_of_its_own(
+def test_service_a_promoted_emptied_claimed_ancestor_holds_no_archive_row_of_its_own(
     isolated_storage: Path,
 ) -> None:
-    """The invariant the ``folded`` fallback rests on, pinned on its own.
+    """The invariant the ``folded`` fallback rests on, pinned on a PROMOTED ancestor.
 
     ``import/W`` holds NOTHING of its own. Its one child ``import/W/Moai_statue`` is an
-    R3-shaped export - three models, a preview, a ``.txt`` - and that export ships a
-    real, readable nested archive: models and a render under one root with no text, so
+    R3-shaped export - three models, a preview, a ``notes.txt`` - and that export ships
+    a real, readable nested archive: models and a render under one root with no text, so
     its own shape is candidate-shaped, which is precisely the point. ``import/W.zip`` is
     the twin of the whole subtree. This is the shape Mf-wd3v's fallback acts on: the
     child's claim strips every file out of the parent's OWN view, and the fallback then
-    reads the pair off ``folded``, the unclaimed full-subtree listing.
+    reads the pair off ``folded``, the unclaimed full-subtree listing - and the answer
+    Mf-ny89 rules is the promotion: one ``ready`` row keyed at ``import/W``,
+    ``archive_owned``, never ``pair_only``.
 
-    What is pinned here is not the row, it is the interlock that makes that fallback
-    safe. ``_forget_claimed_subtree`` has exactly ONE call site, and it runs together
-    with the ``claimed_ancestors`` marking, so "my own view is empty" and "I am a
-    claimed ancestor" are always created as a pair; and ``_nested_archives`` together
+    Why THIS ancestor is promoted and ``import/Q`` is not is the load-bearing detail.
+    ``W``'s single child earns ``low`` from the shape trio; ``Q``'s earns ``high`` from
+    a vendor document pair. One claimed child is the shape question, and it is answered
+    by ``_single_claimed_child_subtree``; the child's STRENGTH is a separate question,
+    answered by ``_holds_stronger_candidate``, and it is a leg of the same branch - so
+    ``Q`` falls through to the pair-only container answer untouched. The two tests
+    together are what stops either leg from being "tidied" into the other.
+
+    What is pinned here is still not the row, it is the interlock that makes the
+    promotion safe. ``_forget_claimed_subtree`` has exactly ONE call site, and it runs
+    together with the ``claimed_ancestors`` marking, so "my own view is empty" and "I am
+    a claimed ancestor" are always created as a pair; and ``_nested_archives`` together
     with the archive-containment strip keep an archive from SURVIVING as a row below
-    such an ancestor. Both halves are load-bearing: a ``pair_only`` key joins
-    ``bundle_dirs``, so a strong archive child that did survive underneath would be
-    swallowed by the ancestor's own row - the Decision 18 swallow ``_build_candidates``
-    warns about in its own comment.
+    such an ancestor. Both halves are load-bearing, and MORE so now that the ancestor
+    is a real row rather than a pair-only one: a promoted key joins ``bundle_dirs`` and
+    ``contained_keys``, so a surviving archive row underneath it would be swallowed by
+    the very row that owns it - the Decision 18 swallow ``_build_candidates`` warns
+    about in its own comment.
 
     Say it out loud: the child is refused ``member-of-bundle``, NOT kept as the R3 row
-    its models and document earned it. The rule that owns that outcome is the
-    archive-containment container strip - a LOW folder candidate whose subtree strictly
-    contains an archive-only row is dropped - and ``_reconcile_refusals`` then relabels
-    the drop ``member-of-bundle`` because the directory sits strictly inside the row
-    that did survive, ``import/W``. That is PRE-EXISTING behaviour, not something
-    Mf-wd3v introduced, and this test records it without endorsing it: a directory
-    holding its own models, preview and document is being told it is a file of
-    something else.
+    its models and document earned it. Since Mf-ny89 that refusal is written directly,
+    by the dissolution the promotion performs - the R7 absorption shape, a row that is
+    being taken into a bigger one - committed after the nested-member prune rather than
+    at the branch itself, which is what stops a VETOED promotion from taking a row it no
+    longer justifies (B-1, and its witness). Before Mf-ny89 the same word arrived
+    indirectly: the
+    archive-containment container strip dropped the LOW folder candidate because its
+    subtree held an archive-only row, and ``_reconcile_refusals`` relabelled the drop
+    ``member-of-bundle`` because the directory sat strictly inside the row that did
+    survive. The operator's answer is unchanged; the rule that writes it moved.
 
-    Mutation: move the zip-only pass before the claims, or exempt nested archives from
-    membership, and an emptied ancestor's ``pair_only`` key joining ``bundle_dirs``
-    becomes the Decision 18 swallow this invariant exists to prevent - the "no archive
-    row" assertion below is what catches it, and reverting either ``folded`` expression
-    takes the ancestor's row away entirely.
+    Mutation: exempt nested archives from membership, or move the zip-only pass before
+    the claims, and an archive row survives below the promoted ancestor for its row to
+    swallow - the "no archive row" assertion below is what catches it. Delete the
+    ``_single_claimed_child_subtree`` leg and the ancestor goes back to ``pair_only``
+    with ``assets_total`` 0, and reverting either ``folded`` expression takes the
+    ancestor's row away entirely.
     """
     for index, name in enumerate(EMPTY_CLAIMED_CHILD_MODELS):
         write_file(isolated_storage / EMPTY_CLAIMED_CHILD_DIR / name, b"s" * (40 + index))
@@ -7340,10 +7597,15 @@ def test_service_an_emptied_claimed_ancestor_holds_no_archive_row_of_its_own(
 
     assert truncated is False
     by_key = {candidate.key: candidate for candidate in candidates}
+    assert [candidate.key for candidate in candidates] == [EMPTY_CLAIMED_DIR], (
+        "the emptied ancestor is the tree's one row - the fallback is what puts it there, "
+        "and the dissolution is what keeps its child out"
+    )
     parent = by_key.get(EMPTY_CLAIMED_DIR)
     assert parent is not None, "the emptied ancestor is offered - the fallback is what puts it there"
-    assert (parent.confidence, parent.pair_only, parent.archive_owned) == ("low", True, False), (
-        "an ancestor whose own view was emptied is shown, never created on its child's models"
+    assert (parent.confidence, parent.pair_only, parent.archive_owned) == ("low", False, True), (
+        "an ancestor whose whole payload sits in one claimed child is that child's "
+        "wrapper, and a wrapper is promoted rather than shown and blocked"
     )
 
     deep_archives = [
@@ -7352,8 +7614,9 @@ def test_service_an_emptied_claimed_ancestor_holds_no_archive_row_of_its_own(
         if candidate.is_archive and candidate.key.startswith(f"{EMPTY_CLAIMED_DIR}/")
     ]
     assert deep_archives == [], (
-        "no archive row exists below an emptied claimed ancestor: a pair-only ancestor "
-        "joins `bundle_dirs`, so a surviving archive row there would be swallowed by it"
+        "no archive row exists below the promoted ancestor: its key joins "
+        "`bundle_dirs` and `contained_keys`, so a surviving archive row there would be "
+        "swallowed by the very row that owns it"
     )
 
     rules = refusal_rules(isolated_storage)
@@ -7363,3 +7626,563 @@ def test_service_an_emptied_claimed_ancestor_holds_no_archive_row_of_its_own(
     assert rules[EMPTY_CLAIMED_NESTED_ZIP] == bundle_service.REFUSAL_NESTED_MEMBER
     assert EMPTY_CLAIMED_CHILD_DIR not in by_key, "the child is not a second row"
     assert rules[EMPTY_CLAIMED_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED
+    assert member_refusals_name_a_real_row(isolated_storage) == []
+    assert no_offered_row_contains_another_offered_row(isolated_storage) == [], (
+        "the promotion left one row for the payload, not the parent and the child it took"
+    )
+
+
+def test_service_the_promoted_live_tower_dissolves_its_child_row_and_leaves_the_archive_a_member(
+    isolated_storage: Path,
+) -> None:
+    """AC-2 (the live shape): one row, and the only thing dissolved out of it is a ROW.
+
+    Promotion takes the child's row and nothing else. ``01_Wizard`` WAS an offered row
+    - R3 gave it one for the ``.txt`` inside it - so it is named ``member-of-bundle`` by
+    the dissolution, the same shape R7 uses when a compound absorbs the rows a container
+    was hiding. ``01_Wizard_v5.4.zip`` was an offered row too, and it is NOT dissolved:
+    an archive inside a bundle is a member, and the pass that owns that answer still
+    owns it - ``nested-member``, the word that says "a zip inside a detected bundle",
+    not "a row that was taken into a bigger one".
+
+    Mutation: revert the ``claimed_ancestors`` branch and the tower is the blocked row
+    again - the ledger still reads ``member-of-bundle`` for the child, because the
+    archive-containment strip and the reconciliation used to write that word, but the
+    row comes back ``blocked`` with ``assets_total`` 0. Say what this witness does NOT
+    pin: deleting the dissolution ALONE reds nothing here, because in THIS tree the
+    child is separately dropped by the archive-containment strip - the test below, whose
+    child holds no archive at all, is the one that pins the dissolution ITSELF, and
+    ``test_service_a_promotion_the_nested_member_prune_vetoes_takes_no_rows_at_all`` is
+    the one that pins WHEN it may be committed (B-1).
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+
+    candidates = bundle_service.scan_bundles(isolated_storage).candidates
+
+    assert [candidate.key for candidate in candidates] == [TOWER_DIR], (
+        "one row for the tower: the child that owns the files is inside it, not beside it"
+    )
+    assert TOWER_MEMBER_DIR not in {candidate.key for candidate in candidates}
+    assert candidates[0].archive_path == TOWER_ZIP
+    assert candidates[0].entry_root is None, "the stem route names no entry root"
+
+    rules = refusal_rules(isolated_storage)
+
+    assert rules[TOWER_MEMBER_DIR] == bundle_service.REFUSAL_MEMBER_OF_BUNDLE
+    assert rules[TOWER_NESTED_ZIP] == bundle_service.REFUSAL_NESTED_MEMBER
+    assert rules[TOWER_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED
+    assert member_refusals_name_a_real_row(isolated_storage) == []
+    assert no_offered_row_contains_another_offered_row(isolated_storage) == []
+
+    row = row_for(bundle_service.build_report(), TOWER_DIR)
+
+    assert (row["status"], row["blocked_reason"]) == ("ready", None)
+    assert row["assets_total"] == len(files_under(isolated_storage, TOWER_DIR))
+
+
+def test_service_a_tower_whose_child_holds_no_archive_of_its_own_is_still_one_row(
+    isolated_storage: Path,
+) -> None:
+    """AC-2 (the shape that used to show TWO rows): the archive inside the child is not what dissolves it.
+
+    The same parent and the same claimed ``01_Wizard``, minus the vendor's
+    ``01_Wizard_v5.4.zip``. Before the dissolution this tree showed the blocked
+    pair-only parent AND a ``ready`` row for ``01_Wizard`` - with no candidate-shaped
+    archive in the child, the archive-containment strip had nothing to drop it on, so
+    the operator was offered a row that created nothing beside a row that offered the
+    very same ten models, two previews, document and file count a second time. The
+    lying row was a side effect of the way the FIRST shape happened to lose its child,
+    which is why the live shape never showed it.
+
+    Mutation: make the dissolution depend on the nested archive being there (or on the
+    container strip that depends on it) and ``01_Wizard`` is a second row again. The
+    answer that has to survive is the shape question - one child, nothing of the
+    parent's own - and it does not read a single byte of the child's contents.
+    Mutation (run): neuter the deferred apply site's removal and this is the only test in
+    the file that reds, on the candidate list two lines above; measured directly, this
+    tree is also the one where ``no_offered_row_contains_another_offered_row`` returns the
+    child's key while ``member_refusals_name_a_real_row`` still says ``[]``.
+    """
+    tower_extraction(isolated_storage, with_text=True, with_nested_zip=False)
+    scan()
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert [candidate.key for candidate in candidates] == [TOWER_DIR], (
+        "one row, with or without an archive inside the child"
+    )
+
+    rules = refusal_rules(isolated_storage)
+
+    assert rules[TOWER_MEMBER_DIR] == bundle_service.REFUSAL_MEMBER_OF_BUNDLE
+    assert rules[TOWER_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED
+    assert member_refusals_name_a_real_row(isolated_storage) == []
+    assert no_offered_row_contains_another_offered_row(isolated_storage) == [], (
+        "the dissolution left one row for the payload, not the parent and the child it "
+        "took - the tree where nothing but the dissolution removes that child"
+    )
+
+    row = row_for(bundle_service.build_report(), TOWER_DIR)
+
+    assert (row["status"], row["blocked_reason"]) == ("ready", None)
+    assert (row["model_count"], row["image_count"], row["text_count"]) == (10, 2, 1)
+    assert row["assets_total"] == len(files_under(isolated_storage, TOWER_DIR)), (
+        "the thirteen files the child holds, counted once, under the parent's key"
+    )
+
+
+def test_service_a_promotion_the_nested_member_prune_vetoes_takes_no_rows_at_all(
+    isolated_storage: Path,
+) -> None:
+    """B-1: a vetoed promotion takes nothing, and the payload's own row survives.
+
+    Three levels, two verified twins, the payload deeper than either twin (see
+    ``b1_vetoed_promotion_tree``). ``import/X`` holds a model of its own beside the
+    bundle it ships, so it is not a wrapper and answers as the pair-only container it
+    is. ``import/X/P`` IS a wrapper - nothing of its own, one child ``import/X/P/A``
+    holding the three models, the preview and the ``notes.txt`` that earned the claim -
+    so the ``claimed_ancestors`` branch promotes it on that child and RECORDS the intent
+    to dissolve the child's row. Then the nested-member pass runs: ``P.zip`` sits
+    strictly inside the pair-only ``X``, so it is a member, its pairing is pruned, and
+    the promoted candidate is dropped as no longer archive-owned. The promotion the
+    dissolution was justified by is gone.
+
+    Whether anything is left to create from is decided purely by WHEN that dissolution
+    was committed. Committed after the prune - what the code does - a vetoed promotion
+    takes nothing: ``A`` keeps the ``low`` row its own trio earned and the operator can
+    create from it. Committed at branch time, which was the defect, ``A`` was already
+    gone when the veto arrived: no row for ``A``, no row for ``P``, one
+    ``blocked``/``archive_only`` row for ``X`` with ``assets_total`` 0 and NOTHING
+    creatable in the whole tree - measured, 1 row / 0 creatable rows before the fix, 2
+    rows / 1 creatable row after it. Five files that exist on disk and belong to nobody,
+    and a ledger writing ``member-of-bundle`` for a path whose owning row does not
+    exist: the P1 symptom (a directory described ``archive_only`` with ``assets_total`` 0
+    and nothing creatable) re-created one level up.
+
+    The invariant, stated once so it can be pointed at: **the ledger never carries
+    ``member-of-bundle`` for a path that is neither a row nor strictly inside a row.**
+    The word means "a bundle the operator was offered owns this path".
+    ``member_refusals_name_a_real_row`` asserts it over the whole scan, and the apply
+    site in ``_build_candidates`` makes it structural rather than lucky. Say what it
+    does NOT catch on its own: in THIS tree the surviving ``X`` is a row and ``A`` sits
+    inside it, so the shape check passes even in the broken build - what catches B-1 is
+    the row-level assertion below, that the child keeps its row and that a creatable row
+    exists at all. The helper is here because the narrower failure (both rows gone, the
+    refusal left naming nothing above it) is caught by it directly.
+
+    Mutation (run): restore the eager dissolve - refuse with the override and drop the
+    child from ``found`` inside the branch, leave the apply site in place - and this is
+    the only test in the file that reds, on "the child keeps its own row".
+    """
+    b1_vetoed_promotion_tree(isolated_storage)
+    scan()
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    by_key = {candidate.key: candidate for candidate in candidates}
+    assert B1_CHILD_DIR in by_key, (
+        "the child keeps its own row: the promotion that would have taken it was vetoed, "
+        "so its dissolution commits nothing"
+    )
+    assert [candidate.key for candidate in candidates] == [B1_PARENT_DIR, B1_CHILD_DIR]
+    assert B1_MID_DIR not in by_key, "the vetoed promotion is not offered"
+    child = by_key[B1_CHILD_DIR]
+    assert (child.pair_only, child.archive_owned, child.confidence) == (False, False, "low"), (
+        "the row the child's own listing earned, untouched by a promotion that did not survive"
+    )
+
+    report = bundle_service.build_report()
+    creatable = [row["key"] for row in report["bundles"] if row["status"] == "ready"]
+    assert creatable == [B1_CHILD_DIR], (
+        "at least one row is creatable - the defect left this tree with none at all"
+    )
+    child_row = row_for(report, B1_CHILD_DIR)
+    assert (child_row["model_count"], child_row["image_count"], child_row["text_count"]) == (3, 1, 1)
+    assert child_row["assets_total"] == len(files_under(isolated_storage, B1_CHILD_DIR)), (
+        "the five files the child holds are owned by a row, which is what the eager "
+        "dissolve took away"
+    )
+    parent_row = row_for(report, B1_PARENT_DIR)
+    assert (parent_row["status"], parent_row["blocked_reason"]) == ("blocked", "archive_only"), (
+        "the pair-only container answer for a parent with a model of its own is unchanged"
+    )
+
+    rules = refusal_rules(isolated_storage)
+    assert member_refusals_name_a_real_row(isolated_storage) == []
+    # The row-set half of the same invariant, stated without a fixture-shaped literal:
+    # the vetoed wrapper is silence, so the pair-only ``import/X`` is the ONLY row above
+    # the payload. Say what it does not do here - under the apply-site neuter this stays
+    # ``[]``, because the veto already left the child its row - so this call is the
+    # redundancy that holds when the candidate-list literal above is edited to match a
+    # broken build, not the first line to red on this tree.
+    assert no_offered_row_contains_another_offered_row(isolated_storage) == []
+    assert rules[B1_MID_DIR] == bundle_service.REFUSAL_MEMBER_OF_BUNDLE, (
+        "the vetoed wrapper is a member of the container that does exist - silence, and "
+        "no second row for a directory that owns nothing of its own"
+    )
+    assert rules[B1_MID_ZIP] == bundle_service.REFUSAL_NESTED_MEMBER
+    assert rules[B1_PARENT_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED
+
+
+def test_service_a_single_medium_child_keeps_its_own_row_and_its_parent_stays_pair_only(
+    isolated_storage: Path,
+) -> None:
+    """AC-4, the guard direction: ONE child is the shape; the child's STRENGTH still rules.
+
+    ``import/M`` holds nothing but ``5390184_ARTICULATED_ice_dragon__fixed_``, whose own
+    model and id-bearing name buy it a MEDIUM row from R4. So ``_single_claimed_child_subtree``
+    answers YES - one child, nothing else - and the answer that decides is
+    ``_holds_stronger_candidate``, sitting as a leg of the same test: a name-derived
+    statement about which thing a directory IS outranks a shape inference about a zip
+    beside it (ADR 0010 Decision 18), so the parent is refused the promotion and falls
+    through to the ``pair_only`` container answer it always gave, and the dragon keeps
+    its own ``medium`` ``ready`` row.
+
+    This is the witness that the guard is a LEG and not a gate: hoist it above the
+    ``claimed_ancestors`` branch and the parent does not merely lose the promotion, it
+    loses the pair-only row too, which is a different (and worse) answer for the
+    operator. Delete it and the parent is promoted on the dragon's model while the
+    dragon is refused ``member-of-bundle`` - the Decision 18 swallow, now wearing the
+    shape rule's clothes. The single-LOW-child witnesses above are what stop the
+    opposite edit.
+    """
+    write_file(isolated_storage / MEDIUM_CHILD_DIR / MEDIUM_CHILD_MODEL, STL_BYTES)
+    twin_archive_of(isolated_storage, MEDIUM_PARENT_DIR, MEDIUM_PARENT_ZIP)
+    scan()
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    by_key = {candidate.key: candidate for candidate in candidates}
+    assert [candidate.key for candidate in candidates] == [MEDIUM_PARENT_DIR, MEDIUM_CHILD_DIR]
+    parent = by_key[MEDIUM_PARENT_DIR]
+    assert (parent.pair_only, parent.archive_owned, parent.confidence) == (True, False, "low"), (
+        "a strong child bounds the promotion and leaves the container answer alone"
+    )
+    child = by_key[MEDIUM_CHILD_DIR]
+    assert (child.pair_only, child.archive_owned, child.confidence) == (False, False, "medium")
+    assert refusal_rules(isolated_storage)[MEDIUM_PARENT_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED
+
+    report = bundle_service.build_report()
+
+    parent_row = row_for(report, MEDIUM_PARENT_DIR)
+    assert (parent_row["status"], parent_row["blocked_reason"]) == ("blocked", "archive_only")
+    child_row = row_for(report, MEDIUM_CHILD_DIR)
+    assert (child_row["status"], child_row["confidence"], child_row["model_count"]) == ("ready", "medium", 1)
+
+
+def test_service_a_claimed_ancestor_with_a_file_of_its_own_is_not_promoted(
+    isolated_storage: Path,
+) -> None:
+    """AC-5, the LOOSE FILE negative: a wrapper holds nothing of its own.
+
+    ``import/L`` is the live tower with one file added - ``leftover.stl``, sitting at the
+    parent's OWN depth beside the claimed ``parts/``. That single file is the whole
+    difference between a vendor's extraction directory and somebody's working folder: it
+    says the parent is a thing in its own right, and a promoted row would hand the
+    operator 3 of the 4 models in the tree under a key that names a directory holding
+    somebody else's bundle. So ``work`` - asked only "empty?", the one question the
+    post-claim view answers honestly - says NO, and the parent keeps the ``pair_only``
+    container answer while the child keeps the ``low`` row its trio earned.
+
+    Mutation: delete the shape question and the parent is promoted on its child's
+    models with its own ``leftover.stl`` as the only evidence against it - this row is
+    what reds. What it does NOT pin is the ``work`` leg on its own: a loose file is a
+    first segment of ``folded`` too, so both legs answer this tree, and the partly
+    claimed child below is what pins ``work`` alone.
+    """
+    low_export_directory(isolated_storage, LOOSE_CHILD_DIR)
+    write_file(isolated_storage / LOOSE_OWN_MODEL, b"s" * 55)
+    twin_archive_of(isolated_storage, LOOSE_PARENT_DIR, LOOSE_PARENT_ZIP)
+    scan()
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    by_key = {candidate.key: candidate for candidate in candidates}
+    assert [candidate.key for candidate in candidates] == [LOOSE_PARENT_DIR, LOOSE_CHILD_DIR]
+    parent = by_key[LOOSE_PARENT_DIR]
+    assert (parent.pair_only, parent.archive_owned) == (True, False), (
+        "one file of its own and the directory is no longer a wrapper"
+    )
+    assert by_key[LOOSE_CHILD_DIR].confidence == "low", "the child keeps the row it earned"
+    assert refusal_rules(isolated_storage)[LOOSE_PARENT_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED
+
+    row = row_for(bundle_service.build_report(), LOOSE_PARENT_DIR)
+
+    assert (row["status"], row["blocked_reason"]) == ("blocked", "archive_only")
+
+
+def test_service_a_claimed_ancestor_holding_two_claimed_children_is_not_promoted(
+    isolated_storage: Path,
+) -> None:
+    """AC-5, the PILE negative: one payload, one child - and this one has two.
+
+    ``import/D`` holds ``files/`` and ``models/``, each a claimed LOW export of its own,
+    and ``D.zip`` declares exactly their payload, so the pairing verifies. The names are
+    the load-bearing choice: ``R3_MODEL_DIRS`` counts the models under ``files/`` as
+    own-depth, so ``_own_depth_model_count`` passes the listing and the inherited
+    cardinality bound NEVER reaches this branch - the archive is refused
+    ``twin-consumed``, not ``promotion:no-own-depth-model``, which is what proves the
+    refusal here came from ``_single_claimed_child_subtree`` reading two first segments
+    off ``folded``. The ``pile_fixture`` witnesses do not test this helper at all: their
+    ``alpha/`` and ``beta/`` are UNCLAIMED and the inherited bound refuses the pairing
+    before the shape question is asked.
+
+    Mutation: read the single segment off ``work`` (empty, so no segments at all) or
+    drop the cardinality test, and ``import/D`` becomes a creatable ``archive_owned``
+    row built on two products' models - the pile promoted as one thing because an
+    archive happened to ship both.
+    """
+    for name in DOUBLE_CHILD_DIRS:
+        low_export_directory(isolated_storage, f"{DOUBLE_PARENT_DIR}/{name}")
+    twin_archive_of(isolated_storage, DOUBLE_PARENT_DIR, DOUBLE_PARENT_ZIP)
+    scan()
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    by_key = {candidate.key: candidate for candidate in candidates}
+    assert [candidate.key for candidate in candidates] == [
+        DOUBLE_PARENT_DIR,
+        f"{DOUBLE_PARENT_DIR}/files",
+        f"{DOUBLE_PARENT_DIR}/models",
+    ]
+    parent = by_key[DOUBLE_PARENT_DIR]
+    assert (parent.pair_only, parent.archive_owned) == (True, False), (
+        "two claimed children is a pile whatever the archive beside it declares"
+    )
+    for name in DOUBLE_CHILD_DIRS:
+        assert by_key[f"{DOUBLE_PARENT_DIR}/{name}"].confidence == "low", (
+            "each product keeps the row its own listing earned"
+        )
+    rules = refusal_rules(isolated_storage)
+    assert rules[DOUBLE_PARENT_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED, (
+        "the pairing verified: the shape guard is the only thing that can refuse it, "
+        "and the inherited own-depth bound is not it - ``files/`` supplies the models"
+    )
+
+    row = row_for(bundle_service.build_report(), DOUBLE_PARENT_DIR)
+
+    assert (row["status"], row["blocked_reason"]) == ("blocked", "archive_only")
+
+
+def test_service_a_parent_whose_single_child_is_only_partly_claimed_is_not_promoted(
+    isolated_storage: Path,
+) -> None:
+    """The ``work`` leg on its own: one first segment is not yet one wrapper.
+
+    ``import/Z`` holds ``A/`` and nothing else, so ``folded`` answers the segment
+    question YES - and ``A`` is not a row of its own: it holds two models and a claimed
+    grandchild ``A/B``, which is what the folder pass offered. The claim stripped
+    ``A/B`` out of the parent's view and left ``A/own0.stl`` and ``A/own1.stl`` behind,
+    so ``work`` is NOT empty and the parent is not a wrapper: it is a directory still
+    holding two models of somebody's, above a bundle that is not its own. It keeps the
+    ``pair_only`` container answer, ``A`` is refused ``member-of-bundle``, and ``B``
+    keeps the ``low`` row its trio earned.
+
+    Mutation: delete the ``work`` leg and read only ``folded`` - one first segment, so
+    ``import/Z`` is promoted ``archive_owned`` and its claimed grandchild is dissolved
+    into it. That is Decision 18's swallow wearing the shape rule's clothes, and no
+    other test in this file reds when it happens: the pile reds on the segment leg and
+    the loose file on both, which is why this tree exists.
+    """
+    for name in PARTIAL_CHILD_MODELS:
+        write_file(isolated_storage / PARTIAL_CHILD_DIR / name, b"s" * (30 + len(name)))
+    low_export_directory(isolated_storage, PARTIAL_GRANDCHILD_DIR)
+    twin_archive_of(isolated_storage, PARTIAL_PARENT_DIR, PARTIAL_PARENT_ZIP)
+    scan()
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    by_key = {candidate.key: candidate for candidate in candidates}
+    assert [candidate.key for candidate in candidates] == [PARTIAL_PARENT_DIR, PARTIAL_GRANDCHILD_DIR]
+    parent = by_key[PARTIAL_PARENT_DIR]
+    assert (parent.pair_only, parent.archive_owned) == (True, False), (
+        "a leftover subtree under the single child means the parent is not that child's wrapper"
+    )
+    assert by_key[PARTIAL_GRANDCHILD_DIR].confidence == "low", "the claimed grandchild keeps its own row"
+
+    rules = refusal_rules(isolated_storage)
+
+    assert rules[PARTIAL_CHILD_DIR] == bundle_service.REFUSAL_MEMBER_OF_BUNDLE
+    assert rules[PARTIAL_PARENT_ZIP] == bundle_service.REFUSAL_TWIN_CONSUMED
+
+    row = row_for(bundle_service.build_report(), PARTIAL_PARENT_DIR)
+
+    assert (row["status"], row["blocked_reason"]) == ("blocked", "archive_only")
+
+
+# --- what the promotion is FOR: the operator creates the project (Mf-ny89) ----
+#
+# Everything above is about which rows the report offers. The ticket's complaint is
+# about what happens NEXT - "it won't let me create it as a project" - and a
+# ``blocked``/``archive_only`` row with ``assets_total`` 0 is a row the UI has nothing
+# to send for. So the promotion earns nothing until the real create pass makes a
+# project out of it, and the project has to be the CHILD's payload under the PARENT's
+# key: a ``ready`` row that creates 0 assets, or creates a project holding somebody
+# else's parts, leaves the operator exactly where the ticket found them.
+
+
+def test_a_promoted_tower_creates_one_project_whose_parts_come_out_of_the_child(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """THE complaint, answered on the real route: it creates, 15 assets, out of ``01_Wizard``.
+
+    The real ``POST /bundles/create`` over the real fixture (``live_tower_extraction``
+    plus the real ``library_scan``) gives the measured answer: ``created`` 1 and
+    ``blocked``/``skipped``/``failed`` all 0, ``status`` ``created`` with no ``reason``,
+    15 assets added, and every member ``storage_path`` running through ``01_Wizard/`` -
+    the fifteen STLs the vendor actually shipped, attached to the project keyed at
+    ``import/01_Fates End - Wizard Tower``. The child's payload became the parent's
+    project, which is the entire claim of the promotion; the marker is what says the
+    project was made from the PARENT's key rather than the child's.
+
+    The CONTAINS_BUNDLES belt passing is this same assertion, not a second one, so it is
+    stated both ways. The row is ``low``, which sits in ``bundle_detect.INFERRED_CONFIDENCES``,
+    so the belt is LIVE on it: ``_create_one`` answers ``failed``/``contains_bundles``
+    before the project row exists whenever ``len(assets) > len(own_assets)`` - registered
+    files under the key versus the paths the candidate's own snapshot names. A promoted
+    snapshot is built off ``folded``, the unclaimed FULL-SUBTREE listing, so the two sets
+    are equal and the create succeeding IS the belt passing; the set equality below says
+    it in the belt's own terms rather than trusting the one result line. Say what a
+    belt-shaped failure would look like instead: a row promoted on the parent's EMPTIED
+    own view registers 20 files against 0 own paths and answers ``failed`` here - which
+    is a different defect from the one the promotion fixed, since the ``pair_only``
+    ancestor this row replaced answered ``blocked``/``archive_only`` and created nothing.
+
+    Mutation (run): make the promotion answer "no wrapper" - ``_single_claimed_child_subtree``
+    returning ``None`` is the pre-Mf-ny89 fall-through - and this reds before the POST even
+    happens, with the row answering ``('blocked', 'archive_only', 'low')``; measured with
+    the row probe removed, the same create answers ``blocked``/``archive_only`` with
+    ``(created, blocked) == (0, 1)`` and no Project row at all - the owner's complaint in
+    its original form. This is the only test in the file that asks the CREATE question of
+    the promoted key, which is why that complaint is pinned here and nowhere else.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), TOWER_DIR)
+
+    assert (row["status"], row["blocked_reason"], row["confidence"]) == ("ready", None, "low")
+    assert row["assets_total"] == len(files_under(isolated_storage, TOWER_DIR)) == 20
+
+    created = create(client, headers, [{"key": TOWER_DIR}])
+
+    assert (created["created"], created["skipped"], created["blocked"], created["failed"]) == (
+        1,
+        0,
+        0,
+        0,
+    ), "the promoted row is creatable - the operator's complaint, measured on the real route"
+    result = created["results"][0]
+    assert (result["status"], result["reason"]) == ("created", None), (
+        "not `skipped`, not `unknown bundle`, and not the belt's `contains_bundles`"
+    )
+    project_id = result["project_id"]
+    assert project_id is not None
+    assert result["assets_added"] == len(LIVE_MODEL_NAMES) == 15, (
+        "the fifteen models the vendor shipped - a promoted row that created 0 assets "
+        "is the ticket's complaint wearing a `ready` badge"
+    )
+
+    members = project_storage_paths(project_id)
+
+    assert members == {f"{TOWER_MEMBER_DIR}/{name}" for name in LIVE_MODEL_NAMES}, (
+        "the members are the child's fifteen STLs: the child's payload IS the project"
+    )
+    assert all(path.startswith(f"{TOWER_MEMBER_DIR}/") for path in members), (
+        "every attached member runs through ``01_Wizard/``, so nothing came from anywhere else"
+    )
+    assert member_count(project_id) == 15
+    assert len(project_asset_ids(client, headers, project_id)) == 15, "the served project agrees"
+    assert project_marker(project_id)["key"] == TOWER_DIR, "created from the PARENT's key"
+    assert project_listing(client, headers)[project_id]["origin"] == "imported"
+
+    # The belt's own comparison, said out loud so a reader never has to infer it from
+    # one result line: the promoted snapshot names every registered file under the key.
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    candidate = next(item for item in candidates if item.key == TOWER_DIR)
+    with Session(engine) as session:
+        registered = bundle_service.registered_assets(session, TOWER_DIR)
+        own = bundle_service._own_paths(TOWER_DIR, candidate)
+
+    assert {asset.path for asset in registered} == own, (
+        "the belt is live on this `low` row and satisfied, not bypassed: registered "
+        "files under the key and the paths the promoted snapshot names are one set"
+    )
+
+
+def test_a_created_promotion_answers_its_own_project_id_and_a_second_create_is_a_skip(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The answer a promoted key gives AFTER the create - new surface, not a re-run.
+
+    Before Mf-ny89 this key was outside the create door, and that is why nothing here
+    covered it: the row was ``pair_only``, ``_report_row`` answers such a candidate
+    ``blocked``/``archive_only`` with its containment set deliberately left EMPTY ("nothing
+    to create, so nothing is looked up"), ``find_existing_project`` was therefore handed no
+    assets to prove the files with, and the row pinned ``existing_project_id`` to ``None``
+    however many projects the operator had made. The promotion put the key inside that
+    door, and the post-create contract came with it. Pinned here for the first time: the
+    row reports the project it became - by MARKER, with the name read back from the
+    project endpoint for that same id - the report counts it once under
+    ``already_created``, and a second ``POST /bundles/create`` for the promoted key is a
+    ``skipped``/``already_created`` carrying the SAME id rather than a second project over
+    the same fifteen files. The idempotency of an ordinary low row is the pattern
+    ``test_a_second_run_creates_nothing`` sets; what is new is that it now holds for a row
+    whose assets are entirely a claimed child's.
+
+    Mutation (run): the same revert as the create witness - ``_single_claimed_child_subtree``
+    answering ``None`` - and this reds at its first assertion, ``assert first["created"] ==
+    1``, measured as ``0 == 1`` with counters ``(created, skipped, blocked, failed) == (0,
+    0, 1, 0)``: a ``pair_only`` row creates nothing, so it never has an
+    ``existing_project_id`` to report. The duplicate-project assertions are what a create
+    door without the existing-project check would break; they are here because a promotion
+    that hands the operator a row which creates twice is worse than one that creates never.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    first = create(client, headers, [{"key": TOWER_DIR}])
+
+    assert first["created"] == 1, "nothing below is worth measuring unless the row creates once"
+    project_id = first["results"][0]["project_id"]
+    assert project_id is not None
+
+    report = detect(client, headers)
+    row = row_for(report, TOWER_DIR)
+    projects = project_listing(client, headers)
+
+    assert row["existing_project_id"] == project_id, (
+        "a promoted row answers the project it became - the answer a `pair_only` row "
+        "could never give, because it handed the identity check an empty asset set"
+    )
+    assert row["existing_project_name"] == projects[project_id]["name"]
+    assert row["existing_project_match"] == "marker", "the create's own marker is the identity"
+    assert report["counts"]["already_created"] == 1
+
+    second = create(client, headers, [{"key": TOWER_DIR}])
+
+    assert (second["created"], second["skipped"], second["blocked"], second["failed"]) == (
+        0,
+        1,
+        0,
+        0,
+    )
+    assert (second["results"][0]["status"], second["results"][0]["reason"]) == (
+        "skipped",
+        "already_created",
+    )
+    assert second["results"][0]["project_id"] == project_id, "the same project, not a new one"
+    assert len(project_listing(client, headers)) == 1, "no duplicate project over 15 shared files"
+    assert table_counts()["projects"] == 1
+    assert member_count(project_id) == 15, "a skip attaches nothing a second time"

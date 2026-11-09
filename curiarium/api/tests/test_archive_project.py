@@ -28,9 +28,10 @@ import dataclasses
 import hashlib
 import json
 import mimetypes
+import posixpath
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence, Tuple
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -228,6 +229,61 @@ def staged_archive(storage: Path, entries: Dict[str, bytes], directories: List[s
     return write_zip(storage / ARCHIVE, entries, directories)
 
 
+def write_tree(storage: Path, payload: Dict[str, bytes], omit: Sequence[str] = ()) -> List[str]:
+    """Write payload bytes into the twin by hand, exactly as an ordinary unzip would.
+
+    No `/import/archive` call is involved: this is the tree that arrived by `rsync`,
+    by a snapshot restore, or by the operator's own `unzip` beside the zip - the
+    state a plain library scan then registers. `omit` drops known members so a test
+    can build a tree that is short by a number it chose rather than by luck.
+
+    Returns every file's library-relative path, sorted, so an assertion compares
+    against the tree the test built instead of against a literal it hoped for.
+    """
+    omitted = set(omit)
+    unknown = omitted - set(payload)
+    assert not unknown, f"omitting {sorted(unknown)} asks for members the payload does not hold"
+    written: List[str] = []
+    for name, content in payload.items():
+        if name in omitted:
+            continue
+        target = storage / TWIN / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        written.append(posixpath.join(TWIN, name))
+    return sorted(written)
+
+
+def files_under(storage: Path, rel: str) -> List[str]:
+    """Every file under `rel`, read off disk, as sorted library-relative paths.
+
+    A fixture that contradicts the wire is this repo's recurring defect, so the walk
+    is the evidence and the expectation is what gets compared against it. Nothing is
+    filtered here - dotfiles and all - because a tree a test did not intend to write
+    is exactly what this function is for.
+    """
+    base = storage / rel
+    if not base.is_dir():
+        return []
+    return sorted(posixpath.join(rel, path.relative_to(base).as_posix()) for path in base.rglob("*") if path.is_file())
+
+
+def fingerprint_tree(storage: Path, rel: str) -> Dict[str, Tuple[str, int]]:
+    """Every file under `rel` as `{library relative path: (sha256, st_mtime_ns)}`.
+
+    Both halves are load-bearing and neither implies the other: the hash says the
+    bytes are the same, which a rewrite of identical bytes satisfies perfectly; the
+    mtime is the thing a rewrite cannot keep.
+    """
+    base = storage / rel
+    tree: Dict[str, Tuple[str, int]] = {}
+    for path in sorted(base.rglob("*")):
+        if path.is_file():
+            key = posixpath.join(rel, path.relative_to(base).as_posix())
+            tree[key] = (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns)
+    return tree
+
+
 def extract(client: TestClient, headers: dict, path: str = ARCHIVE, entries: List[str] | None = None) -> dict:
     response = client.post("/import/archive", json={"path": path, "entries": entries}, headers=headers)
     assert response.status_code == 200, response.text
@@ -298,6 +354,38 @@ def only_row(value: str) -> AuditEvent:
     rows = events_for(value)
     assert len(rows) == 1, [row.action for row in rows]
     return rows[0]
+
+
+def extract_rows_for(value: str) -> List[AuditEvent]:
+    """The `archive.extract` rows one request id carries - the OTHER door's action.
+
+    `events_for` can only see this door's own action, so it cannot tell a create that
+    extracted from a create that only compared. A create that started extracting on
+    the operator's behalf would record through the same `audit.AuditContext`, i.e.
+    under the create request's own id, so an empty list here says the extract door
+    never ran inside this request rather than merely that some row is missing.
+    """
+    with Session(engine) as session:
+        return list(
+            session.exec(
+                select(AuditEvent).where(
+                    AuditEvent.request_id == value,
+                    AuditEvent.action == audit.ARCHIVE_EXTRACT,
+                )
+            )
+        )
+
+
+def extract_row_count() -> int:
+    """How many `archive.extract` rows the table holds, however old.
+
+    `AuditEvent` is not undone between tests, so a test in the middle of this file
+    cannot assert a global zero - earlier tests really did extract. It can assert
+    that the count standing before its own clicks is the count still standing after,
+    which is the same claim about this test and immune to its neighbours.
+    """
+    with Session(engine) as session:
+        return len(list(session.exec(select(AuditEvent).where(AuditEvent.action == audit.ARCHIVE_EXTRACT))))
 
 
 # --- AC-1: the planned entries become one project, no rule consulted --------
@@ -893,6 +981,274 @@ def test_junk_hidden_and_directory_members_cannot_refuse_the_door_forever(
     assert body["planned"] == PLANNED, "the unregistrable members are not planned members"
     assert body["resolved"] == PLANNED
     assert body["failed"] == []
+
+
+# --- the tree that arrived without the extract door -------------------------
+
+# Three members left out of the twin on purpose, so the `partial` answer is checked
+# against three different kinds of member - a model, an image, a nested archive -
+# rather than three spellings of one, and so the count it reports is one this test
+# chose rather than one it counted after the fact.
+MISSING_ON_DISK = [
+    f"{ROOT}/02_Grounding/grounding_tree.stl",
+    f"{ROOT}/images/preview.png",
+    f"{ROOT}/nested/accessories.zip",
+]
+
+# The destinations left standing under the twin when the extract door meets a
+# partially occupied tree: two loose files at the root and three models in a
+# subdirectory, so the blockers span both shapes the preflight has to walk.
+OCCUPIED_ON_DISK = [
+    f"{ROOT}/README.txt",
+    f"{ROOT}/LICENSE.txt",
+    f"{ROOT}/02_Grounding/grounding_base.stl",
+    f"{ROOT}/02_Grounding/grounding_rocks_a.stl",
+    f"{ROOT}/02_Grounding/grounding_rocks_b.stl",
+]
+
+
+def test_a_tree_the_scan_registered_creates_with_the_extract_door_never_opened(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ticket note said this could not happen. Measured: it does, and it is correct.
+
+    Shape: the archive sits in the library - unread by any door until the create, but
+    listable, which is all the create reads - and its payload was written into the
+    twin by something that was not this API. `rsync`, a snapshot restore, an
+    operator's own `unzip`. Registration is this file's own `scan()`: the real,
+    synchronous `library_scan.scan_storage_root`, not the stub. The extract door is
+    never opened - `extract()` does not appear in this test - and the two audit
+    assertions at the bottom are what turns that claim into evidence.
+
+    Measured on the live report's own archive: `created`, planned 21, resolved 21,
+    `failed` empty, one project row, and its members are exactly the files the disk
+    walk finds - compared against the tree this test built, not against a literal.
+    No `archive.extract` row exists under this run's request id, and the table's
+    total extract count is the same number it was before the first click.
+
+    Why that is the right answer rather than a hole: this door is a set comparison
+    of the listing's `<twin>/<entry>` paths against registered `Asset.storage_path`.
+    It never asks who wrote the bytes, and it cannot - `archive_service` is not in
+    its import closure at all (`test_no_bundle_rule_is_consulted_on_this_path`).
+    Requiring the extract door to have run would make every library that arrived by
+    `rsync` uncreateable, which is the bug this suite exists to keep dead.
+
+    Mutation this refuses: a create that insists the extract door ran first - a
+    marker written by the extract, a per-request token, "resolve from what the
+    extract returned", or a plain `import archive_service` plus a call to it. The
+    first three answer `nothing_resolved` here; the last grows an `archive.extract`
+    row under this request's id, and both of the audit assertions below trip.
+    """
+    headers = auth_header(client)
+    payload = tower_payload()
+    staged_archive(isolated_storage, payload)
+    tree = write_tree(isolated_storage, payload)
+    # The fixture is checked against the wire before any answer is trusted: the door
+    # compares against the listing, so a tree that quietly disagreed with the archive
+    # would make every assertion below a tautology about the wrong payload.
+    assert tree == sorted(posixpath.join(TWIN, name) for name in TOWER_ENTRIES)
+    assert len(tree) == PLANNED
+
+    stub_scan(monkeypatch)
+    scan()
+    before = extract_row_count()
+    request = f"scan-arrived-{uuid4().hex}"
+    body = create(client, headers, request_id=request)
+
+    assert body["status"] == "created"
+    assert body["planned"] == PLANNED
+    assert body["resolved"] == PLANNED
+    assert body["failed"] == []
+    assert body["project"] is not None
+    assert body["project"]["asset_count"] == PLANNED
+    assert member_paths(body["project"]["id"]) == tree, "the members are the files on disk, all of them"
+    assert len(projects()) == 1, "one project, and nothing else"
+
+    # The row for this click exists, so the request id really did reach the audit
+    # table - without that, the two assertions below would be vacuously true.
+    assert only_row(request).action == audit.ARCHIVE_PROJECT_CREATE
+    assert extract_rows_for(request) == []
+    assert extract_row_count() == before, "not one extract row was written by this test"
+
+
+def test_a_tree_the_scan_registered_short_by_three_files_refuses_as_partial_and_creates_nothing(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same door, three members short: it counts them and it names them.
+
+    Shape is the previous test's - payload written beside the zip, no extract door -
+    minus `MISSING_ON_DISK`. The scan registers what it can see, so the create is
+    left holding 18 of the 21 paths the listing promised.
+
+    Measured: `partial` (``archive_project_service.STATUS_PARTIAL``, not a status
+    code - this door has no policy to refuse on), planned 21, resolved 18, the
+    missing count is 21 - 18 = 3, `failed` is exactly the three names in sorted
+    order, `project` is null, and `projects()` is empty.
+
+    The asymmetry with the extract door is the point of the pair: the same
+    partially-present tree is a 409 over there (`test_a_partially_occupied_twin...`)
+    and an informative `partial` over here. This door creates nothing on a partial
+    because presenting 18 files as the Wizard Tower would be the lie it exists to
+    stop - and because nothing was written, the operator's next click after adding
+    the three files creates cleanly (see
+    `test_a_partial_extraction_still_creates_once_the_rest_arrives`).
+
+    Mutation this refuses: creating over the survivors (`asset_count` 18 on a real
+    project), reporting the count but not the names, or - the silent one - letting
+    an unregistrable-looking member drop out of `planned` so 18/18 reads as complete
+    and a project ships without its roof.
+    """
+    headers = auth_header(client)
+    payload = tower_payload()
+    staged_archive(isolated_storage, payload)
+    tree = write_tree(isolated_storage, payload, omit=MISSING_ON_DISK)
+    assert tree == sorted(posixpath.join(TWIN, name) for name in TOWER_ENTRIES if name not in MISSING_ON_DISK)
+    assert len(tree) == PLANNED - 3
+
+    stub_scan(monkeypatch)
+    scan()
+    body = create(client, headers)
+
+    assert body["status"] == archive_project_service.STATUS_PARTIAL
+    assert body["planned"] == PLANNED, "the listing still promised all 21"
+    assert body["resolved"] == len(tree) == 18
+    assert PLANNED - body["resolved"] == len(MISSING_ON_DISK), "the count it reports is the count that is missing"
+    assert body["failed"] == sorted(MISSING_ON_DISK)
+    assert body["project"] is None
+    assert projects() == [], "and it leaves no empty project behind"
+
+
+def test_the_extract_door_touches_no_byte_and_no_mtime_when_the_tree_is_already_there(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every destination exists: the door reads the plan, changes nothing, says so.
+
+    Shape: a complete tree under the twin - byte-for-byte the archive's own payload,
+    asserted before the click, arrived at by writing the bytes directly so that
+    nothing else in this test can have written them - then the one-step flow's own
+    first call, `POST /import/archive`, and then the scan and the create.
+
+    Measured: the extract answers 200 with `already_present=True`, `files=0`,
+    `bytes=0`, `scan_started=False` and the right `destination`; the create answers
+    `created`; and all 21 files carry the same sha256 *and* the same `st_mtime_ns`
+    as before the click - both checked per file, on every file, not sampled. That no
+    `archive.extract` row was written is the same signature from the server's side:
+    a request that changes nothing records nothing.
+
+    `st_mtime_ns` is the load-bearing half. A future "optimisation" that re-streamed
+    the members and let the no-clobber move sort it out, or that rewrote identical
+    bytes for the sake of one code path, leaves every hash untouched - only the
+    clock can see it. And the hash is still worth keeping beside it, because a
+    rewrite that also preserved mtimes would be the worse bug.
+
+    Mutation this refuses: dropping the `_already_present` short-circuit so the door
+    stages and publishes over a finished tree, which surfaces as a 409 rather than
+    as an idempotent no-op; or a re-extract that republishes identical bytes and
+    passes a bytes-only assertion.
+    """
+    headers = auth_header(client)
+    payload = tower_payload()
+    staged_archive(isolated_storage, payload)
+    tree = write_tree(isolated_storage, payload)
+    assert tree == sorted(posixpath.join(TWIN, name) for name in TOWER_ENTRIES), "complete means complete"
+
+    stub_scan(monkeypatch)
+    before = fingerprint_tree(isolated_storage, TWIN)
+    assert set(before) == set(tree) and len(before) == PLANNED, "the snapshot covers the whole tree"
+    extract_before = extract_row_count()
+
+    result = extract(client, headers)
+
+    assert result["destination"] == TWIN
+    assert result["already_present"] is True, "every destination existed, so this request was a no-op"
+    assert result["files"] == 0
+    assert result["bytes"] == 0
+    assert result["scan_started"] is False, "nothing landed, so there is nothing for a scan to register"
+
+    scan()
+    body = create(client, headers)
+
+    assert body["status"] == "created"
+    assert body["planned"] == PLANNED
+    assert body["resolved"] == PLANNED
+    assert member_paths(body["project"]["id"]) == tree
+    assert extract_row_count() == extract_before, "a request that changed nothing recorded nothing"
+
+    after = fingerprint_tree(isolated_storage, TWIN)
+    assert set(after) == set(before), "the no-op added or removed a file"
+    for path, (digest, mtime_ns) in before.items():
+        assert after[path][0] == digest, f"{path} no longer holds the bytes the archive holds"
+        assert after[path][1] == mtime_ns, f"{path} was rewritten - identical bytes, new clock"
+
+
+def test_a_partially_occupied_twin_is_a_409_at_the_extract_door_and_a_partial_at_this_one(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PIN, not endorsement: two doors, two different verdicts on one tree.
+
+    Shape: five of the 21 planned destinations are standing under the twin
+    (`OCCUPIED_ON_DISK`: two loose files plus three models) and sixteen are not. Both
+    doors are then asked about that same tree.
+
+    Measured, and deliberately left exactly as it is:
+
+    * `POST /import/archive` answers **409** -
+      `refusing to extract: these paths already exist - move or delete them first: `
+      `<the five blockers, sorted, comma-joined>`. That is `archive_service`'s
+      all-or-nothing contract: `_already_present` (definition `:364`, consulted at
+      `:141`) no-ops only when *every* destination exists, and `_refuse_occupied`
+      raises at `:380` as soon as *one* exists, naming every blocker so the operator
+      can clear them all in one pass. Its three sibling 409s - `:390` for a path that
+      exists but is not a directory, `:425` for a directory that cannot be created, and
+      `:195` for a name claimed after the preflight - are the same contract, and none of
+      them is the one hit here. Nothing is written and no `archive.extract` row is
+      recorded; the tree on disk is the tree that was there before the click.
+    * `POST /import/archive/project` on the same tree answers **partial** - planned
+      21, resolved 5, `failed` the other sixteen names, no project.
+
+    This test asserts the asymmetry, not a preference. A "top-up extract" that filled
+    only the missing destinations would be a change of contract for `archive_service`
+    - one that quietly writes into a directory some other process has half-filled -
+    and if anyone makes it, the 409 assertion here fails loudly and forces that
+    decision to be made on purpose rather than landing silently. Do not "fix" the
+    409 here; the door under test is not this one, and nothing in this file changes
+    it.
+
+    Mutation this refuses on the create's side: `create` growing the extract door's
+    all-or-nothing reflex - a `_resolve` that returns nothing unless every planned path
+    resolved. Measured against that mutation the create answers `nothing_resolved`, so
+    the operator with sixteen files still to copy gets a verdict that names nothing in
+    place of the one that names all sixteen.
+    """
+    headers = auth_header(client)
+    payload = tower_payload()
+    staged_archive(isolated_storage, payload)
+    tree = write_tree(isolated_storage, payload, omit=[name for name in TOWER_ENTRIES if name not in OCCUPIED_ON_DISK])
+    assert tree == sorted(posixpath.join(TWIN, name) for name in OCCUPIED_ON_DISK)
+    assert len(tree) == 5
+
+    stub_scan(monkeypatch)
+    extract_before = extract_row_count()
+
+    response = client.post("/import/archive", json={"path": ARCHIVE}, headers=headers)
+
+    blockers = sorted(posixpath.join(TWIN, name) for name in OCCUPIED_ON_DISK)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == (
+        "refusing to extract: these paths already exist - move or delete them first: " + ", ".join(blockers)
+    ), "one 409 naming every blocker, so the operator clears them in one pass"
+    assert files_under(isolated_storage, TWIN) == tree, "a refused extract publishes nothing"
+    assert extract_row_count() == extract_before, "and records nothing"
+
+    scan()
+    body = create(client, headers)
+
+    assert body["status"] == archive_project_service.STATUS_PARTIAL
+    assert body["planned"] == PLANNED
+    assert body["resolved"] == len(OCCUPIED_ON_DISK)
+    assert body["failed"] == sorted(name for name in TOWER_ENTRIES if name not in OCCUPIED_ON_DISK)
+    assert body["project"] is None
+    assert projects() == []
 
 
 # --- one transaction -------------------------------------------------------

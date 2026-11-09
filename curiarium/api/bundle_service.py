@@ -407,6 +407,65 @@ def _holds_stronger_candidate(rel_dir: str, candidates: Sequence[BundleCandidate
     )
 
 
+def _single_claimed_child_subtree(
+    rel_dir: str,
+    work: Mapping[str, Sequence[bundle_detect.BundleEntry]],
+    folded: Mapping[str, Sequence[bundle_detect.BundleEntry]],
+) -> Optional[str]:
+    """The ONE child directory ``rel_dir``'s entire payload sits in, or ``None``.
+
+    A vendor extraction keeps everything in one child - ``01_Wizard`` holds all
+    twenty files of ``import/01_Fates End - Wizard Tower`` - and the folder pass
+    then offers that child for a document of its own and strips every one of those
+    files out of the parent's view. The question this answers is whether that is
+    the shape on disk: one child, and nothing else beside it. It is asked of a
+    claimed ancestor only, and it is a pure read of two listings already built - no
+    walk, no stat, no store.
+
+    **``work`` is asked only "empty?", never "what shape?".** ``work[rel_dir]`` is
+    the post-claim view ``_forget_claimed_subtree`` has already emptied, so asking
+    it WHAT the directory holds is the Mf-wd3v trap ``_compound_pass`` and the pairing
+    loop both name: an emptied listing answers "nothing" to every shape question and a
+    verified pair with real models behind it is refused for want of facts. Emptiness is
+    the one question the emptied view answers honestly - it is exactly what the claim
+    leaves behind, and it is the same fact that put ``rel_dir`` in ``claimed_ancestors``.
+
+    **``folded`` is asked only "one first segment?".** It is the unclaimed
+    full-subtree listing, so it is the only listing that says what the directory
+    actually holds; it is read for the name of the single child and for nothing
+    else, because the counts, cover and roles it would also describe are the
+    caller's own decision, not evidence for this one.
+
+    The two negatives are why the question is asked at all. The PILE - a parent whose
+    two children are each a claimed bundle of their own, one of them named ``files/``
+    so the own-depth bound lets the pairing through - has two first segments, so two
+    things' payloads are never promoted as one thing because an archive happened to
+    ship both. The LOOSE FILE of its own - one file at the parent's own depth next to
+    the claimed child - leaves ``work`` non-empty as well as ``folded`` with two
+    segments, so a directory that is not purely a wrapper keeps the container answer it
+    always gave. The two legs overlap on both negatives, and neither is redundant:
+    ``work`` is the only one that sees a single child which is only PARTLY claimed (its
+    own leftover files still stand under one first segment), and that is exactly where
+    promoting the parent would swallow a claimed grandchild.
+
+    One limit, stated rather than glossed: ``folded`` lists FILES, so an EMPTY sibling
+    directory is invisible here and a parent with one claimed child beside an empty
+    directory answers "one child" and promotes. That is accepted - an empty directory
+    holds no payload for a row to own, and it is refused ``member-of-bundle`` like any
+    other path inside the promoted key - so "one child, and no other FILE beside it"
+    is what this predicate actually decides.
+    """
+    if work.get(rel_dir):
+        return None
+    entries = folded.get(rel_dir) or ()
+    if not entries:
+        return None
+    segments = {entry.rel_path.split("/", 1)[0] for entry in entries}
+    if len(segments) != 1:
+        return None
+    return next(iter(segments))
+
+
 def _basename(rel_dir: str) -> str:
     return rel_dir.rsplit("/", 1)[-1]
 
@@ -914,6 +973,9 @@ def _build_candidates(
     # puts its key in `contained_keys`, so the strip below drops the guess rather
     # than the archived evidence.
     pair_only_specs: Dict[str, Tuple[bundle_detect.BundleSnapshot, bundle_detect.BundleFacts]] = {}
+    # The rows each PROMOTED directory intends to take, keyed by the promoted key.
+    # Recorded here and applied after the nested-member prune - see the apply site.
+    promoted_dissolutions: Dict[str, List[str]] = {}
     for folder in sorted(pairs, key=lambda item: (item.casefold(), item)):
         pair_zips = [zip_rel for zip_rel, _entry_root in pairs[folder]]
         if any(candidate.key == folder for candidate in found):
@@ -951,6 +1013,70 @@ def _build_candidates(
                 _refuse(refusals, zip_rel, _refusal_of(detection), override=True)
             continue
         if folder in claimed_ancestors:
+            # The vendor-extraction answer (owner ruling, Mf-ny89): an ancestor whose
+            # WHOLE payload sits in ONE child is that child's wrapper, not a pile of
+            # other things' models. ``import/01_Fates End - Wizard Tower`` holds
+            # nothing but ``01_Wizard``, which the folder pass offered for the vendor
+            # ``.txt`` inside it - so the claim emptied the parent, the container rule
+            # made the parent a ``blocked``/``archive_only`` row with ``assets_total``
+            # 0 and nothing creatable, and the child that owns the models was refused
+            # ``member-of-bundle``: the pair stays visible and nobody can import it.
+            # Such a parent is promoted instead - one READY row keyed at the
+            # directory - and the child rides inside it as a group, dissolved exactly
+            # the way R7 dissolves the rows a compound absorbs (``member-of-bundle``,
+            # and the override is what puts a ledger entry under a path that was a row
+            # until the commit took it). The commit is NOT this branch's act: it runs
+            # at the APPLY SITE below, after the nested-member prune. Why, and what it
+            # enforces, is B-1.
+            #
+            # ``_holds_stronger_candidate`` stays a LEG of this test and must not be
+            # hoisted above it or dropped: one child is not automatically a weaker one
+            # (a claimed Thingiverse export earns HIGH from its vendor document pair),
+            # and a strong child has to lose the promotion while still answering as the
+            # pair-only container it always answered as - the fall-through below is that
+            # answer, and it is what keeps Decision 18 intact. The archive rows below
+            # are deliberately NOT dissolved: a zip inside the bundle is a member, and
+            # the nested-member pass owns that answer. Measured, dropping the
+            # ``not candidate.is_archive`` filter moves nothing in the suite -
+            # ``_reconcile_refusals`` relabels any zip inside a bundle directory
+            # ``nested-member`` whatever was written here - so the filter is kept to
+            # keep this dissolution writing refusals only for rows it really took.
+            #
+            # **The dissolution is a deferred commit, not an act of this branch (B-1).**
+            # The rows below are only RECORDED as taken; the refusal and the removal
+            # happen at the apply site after the nested-member prune. Dissolving here
+            # was the defect: a later pass can veto the very promotion this branch
+            # built - the prune empties `pairs[folder]` and the promoted candidate is
+            # then dropped as no longer archive-owned - and the child dissolution was
+            # never rolled back. The child had lost its row, the parent lost its row,
+            # and NO ROW OWNED THE PAYLOAD. The invariant the apply site enforces is
+            # that no ``member-of-bundle`` entry may name a row that does not exist,
+            # and it is only enforceable where the final row set is known: after the
+            # prune. Applying it there makes "a refusal that names a row that does not
+            # exist" structurally impossible rather than rare - the eager dissolve is
+            # exactly what made it possible, because it committed at a point where the
+            # promotion that justified it could still be undone. Nothing else about
+            # this branch changes; see the apply site for the whole argument.
+            single_child = _single_claimed_child_subtree(folder, work, folded)
+            if single_child is not None and not _holds_stronger_candidate(folder, found):
+                promoted_dissolutions[folder] = [
+                    candidate.key
+                    for candidate in found
+                    if candidate.key.startswith(folder + "/") and not candidate.is_archive
+                ]
+                found.append(
+                    BundleCandidate(
+                        key=folder,
+                        snapshot=snapshot,
+                        archive_path=None,
+                        is_archive=False,
+                        confidence=facts.confidence,
+                        archive_owned=True,
+                    )
+                )
+                for zip_rel in pair_zips:
+                    _refuse(refusals, zip_rel, REFUSAL_TWIN_CONSUMED, override=True)
+                continue
             pair_only_specs[folder] = (snapshot, facts)
             for zip_rel in pair_zips:
                 _refuse(refusals, zip_rel, REFUSAL_TWIN_CONSUMED, override=True)
@@ -1096,8 +1222,11 @@ def _build_candidates(
         }
         # A promoted candidate whose pairing was just pruned is no longer
         # archive-owned: a zip inside a bundle proved nothing about a sibling
-        # directory. The residual is silence - that directory is simply not
-        # offered - which is never a wrong project and never a delete invitation.
+        # directory. The residual for THAT directory is silence - it is simply not
+        # offered - which is never a wrong project and never a delete invitation. The
+        # residual for its children is the opposite and deliberate: they keep the rows
+        # they had, because a promotion that never happened takes nothing (B-1 - the
+        # dissolution it recorded is committed at the apply site below, never here).
         for candidate in found:
             if candidate.archive_owned and candidate.key not in pairs:
                 _refuse(refusals, candidate.key, REFUSAL_MEMBER_OF_BUNDLE)
@@ -1106,6 +1235,45 @@ def _build_candidates(
             for candidate in found
             if not (candidate.archive_owned and candidate.key not in pairs)
         ]
+
+    # **B-1: the apply site for the promotions' deferred dissolutions.** A promoted
+    # directory takes the rows strictly below it, exactly as R7's compound absorption
+    # does - ``member-of-bundle``, written with the override, because each of those
+    # paths WAS an offered row until this commit said otherwise. It is committed here,
+    # at the one point where the row set is finally settled - after the nested-member
+    # prune, which is the pass that can veto a promotion this branch was built on (it
+    # empties `pairs[folder]`, and a promoted candidate that no longer has its pairing
+    # is dropped as no longer archive-owned, with silence as its residual).
+    #
+    # The invariant this enforces: **no ``member-of-bundle`` entry may name a row that
+    # does not exist.** Committed here - after the prune - that is structural, not
+    # lucky: a dissolution is written if and only if the promotion that justifies it
+    # survived to be a row. The eager branch-time dissolve was precisely what made the
+    # violation possible, and it was not rare - on the B-1 tree (`import/X.zip` the twin
+    # of `import/X`, `import/X/P.zip` the twin of `import/X/P`, the payload in
+    # `import/X/P/A`) the prune dropped the promoted `import/X/P` after its child
+    # `import/X/P/A` had already been dissolved out, so the child lost its row, the
+    # parent lost its row, NO ROW OWNED THE PAYLOAD, and the ledger wrote
+    # ``member-of-bundle`` for a path no row owns. Measured on that tree before the fix:
+    # one row (`import/X`, ``blocked``/``archive_only``, ``assets_total`` 0) and nothing
+    # creatable at all.
+    #
+    # `survivors` is read from `found` BEFORE any removal, so a promoted row sitting
+    # inside a surviving promoted parent still has its own children taken - they sit
+    # inside the surviving ancestor too, which is the correct answer and needs no
+    # fixpoint. A promoted directory that was itself dissolved never appears in
+    # `survivors`, so what it intended to take is simply never taken.
+    survivors = {candidate.key for candidate in found}
+    taken_keys = {
+        key
+        for folder, keys in promoted_dissolutions.items()
+        if folder in survivors
+        for key in keys
+    }
+    if taken_keys:
+        for key in sorted(taken_keys):
+            _refuse(refusals, key, REFUSAL_MEMBER_OF_BUNDLE, override=True)
+        found = [candidate for candidate in found if candidate.key not in taken_keys]
 
     for folder in sorted(pair_only_specs, key=lambda item: (item.casefold(), item)):
         snapshot, facts = pair_only_specs[folder]

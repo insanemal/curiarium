@@ -7,6 +7,7 @@ import {
   type BundleEnrichment,
 } from "../../lib/api/bundles";
 import {
+  ARCHIVE_ONLY_FOLDER_LABEL,
   ENRICH_NONE_REASON,
   EXTRACT_AND_CREATE_HINT,
   EXTRACT_AND_CREATE_LABEL,
@@ -17,6 +18,7 @@ import {
   ROW_STATE_IN_PROJECT,
   archiveExtractTitle,
   archiveLine,
+  blockedReasonLabel,
   bulkEnrichTitle,
   canEnrich,
   canExtractAndCreate,
@@ -429,8 +431,12 @@ describe("statusLine", () => {
     expect(statusLine(makeBundle({ status: "blocked", blocked_reason: "not_scanned" }))).toBe(
       "Blocked - no model file registered by a scan",
     );
+    // `makeBundle`'s default `rel_path` is `Moai statue`, a DIRECTORY, so the
+    // honest sentence for this row is the folder one. What used to be asserted
+    // here called that folder a zip - the exact lie this ticket is about - so the
+    // corrected expectation is the fix, not a regression.
     expect(statusLine(makeBundle({ status: "blocked", blocked_reason: "archive_only" }))).toBe(
-      "Blocked - zip only - extract the archive in place, then the scan registers it",
+      "Blocked - folder only - this row is a folder, not an archive",
     );
   });
 
@@ -442,6 +448,95 @@ describe("statusLine", () => {
 
   it("falls back to a bare blocked line when the reason is missing", () => {
     expect(statusLine(makeBundle({ status: "blocked", blocked_reason: null }))).toBe("Blocked - blocked");
+  });
+});
+
+describe("blockedReasonLabel", () => {
+  // Written out rather than imported, so a rename of the label in `bundleRows.ts`
+  // fails here instead of moving both sides of the comparison together.
+  const ZIP_SENTENCE = "zip only - extract the archive in place, then the scan registers it";
+  const zipRow = (rel_path: string) =>
+    makeBundle({
+      key: rel_path,
+      rel_path,
+      status: "blocked",
+      blocked_reason: "archive_only",
+      archive: null,
+    });
+
+  it("keeps the zip sentence byte for byte for a row that IS an archive", () => {
+    // The shape the zip sentence was written for: the server builds a zip-only
+    // candidate with `archive: null`, so the row's own path is the archive and
+    // "extract the archive in place" is true of the thing on disk.
+    const row = zipRow("import/01_Fates End - Wizard Tower.zip");
+    expect(blockedReasonLabel(row)).toBe(ZIP_SENTENCE);
+    expect(statusLine(row)).toBe(`Blocked - ${ZIP_SENTENCE}`);
+  });
+
+  it("reads the same suffix predicate the door reads, case included", () => {
+    // `Foo.ZIP` is a zip to the server's walk and to `extractPathFor`, so the
+    // sentence must call it a zip too. Both sides ask `isArchivePath`, which is
+    // the whole point: a badge and a sentence that cannot disagree.
+    const row = zipRow("import/Moai.ZIP");
+    expect(isArchiveOnly(row)).toBe(true);
+    expect(blockedReasonLabel(row)).toBe(ZIP_SENTENCE);
+  });
+
+  it("refuses to call the ticket's directory row a zip", () => {
+    // The live wire row: `rel_path` is a folder and the twin zip sits beside it,
+    // so the Extract door next to this sentence extracts the TWIN, never this
+    // folder. The sentence has to be true about the row it is printed on.
+    const folder = makeBundle({
+      key: "import/01_Fates End - Wizard Tower",
+      rel_path: "import/01_Fates End - Wizard Tower",
+      status: "blocked",
+      blocked_reason: "archive_only",
+      archive: { rel_path: "import/01_Fates End - Wizard Tower.zip", twin_verified: true },
+    });
+    expect(isArchiveOnly(folder)).toBe(true);
+    expect(blockedReasonLabel(folder)).toBe(ARCHIVE_ONLY_FOLDER_LABEL);
+    expect(statusLine(folder)).toBe(`Blocked - ${ARCHIVE_ONLY_FOLDER_LABEL}`);
+    expect(statusLine(folder)).not.toBe(`Blocked - ${ZIP_SENTENCE}`);
+    // No count is claimed in a status cell: the en dash belongs to the one count
+    // formatter, and an unknown number must never become a false zero here.
+    expect(ARCHIVE_ONLY_FOLDER_LABEL).not.toMatch(/\d/);
+    expect(ARCHIVE_ONLY_FOLDER_LABEL).not.toContain("\u2013");
+  });
+
+  it("says the folder sentence for a directory row with no twin and no door", () => {
+    // The other directory shape: `extractPathFor` answers null, so nothing beside
+    // this sentence offers extraction at all. One sentence serves both shapes only
+    // because it promises no remedy - the door's own title is where a remedy is
+    // promised, and there is no door to over-promise here.
+    const twinless = makeBundle({
+      key: "import/endorphin",
+      rel_path: "import/endorphin",
+      status: "blocked",
+      blocked_reason: "archive_only",
+      archive: null,
+    });
+    expect(isArchiveOnly(twinless)).toBe(false);
+    expect(extractPathFor(twinless)).toBeNull();
+    expect(statusLine(twinless)).toBe(`Blocked - ${ARCHIVE_ONLY_FOLDER_LABEL}`);
+  });
+
+  it("passes an unknown reason through unchanged", () => {
+    // A reason from a newer server still reads as its own name rather than as the
+    // archive's sentence, whatever the row's path looks like.
+    expect(
+      blockedReasonLabel(makeBundle({ status: "blocked", blocked_reason: "future-reason" })),
+    ).toBe("future-reason");
+  });
+
+  it("says blocked with no reason at all", () => {
+    // The cell still has to say something: `Blocked - blocked` rather than the
+    // dashed stub an empty lookup would leave behind.
+    expect(blockedReasonLabel(makeBundle({ status: "blocked", blocked_reason: null }))).toBe(
+      "blocked",
+    );
+    expect(statusLine(makeBundle({ status: "blocked", blocked_reason: null }))).toBe(
+      "Blocked - blocked",
+    );
   });
 });
 

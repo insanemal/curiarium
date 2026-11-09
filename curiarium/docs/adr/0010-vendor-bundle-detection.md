@@ -2286,6 +2286,238 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     asks the per-project route only when the project carries a `_bundle` marker,
     so a hand-made project costs no request at all.
 
+28. **A claimed ancestor whose whole payload sits in ONE child is that child's
+    wrapper, and it is offered as one `low` row.** `Mf-ny89` answers an owner
+    ruling of 2026-11-09, taken on the live deployment and quoted verbatim:
+    "Fates End - Wizard Tower which as previously extracted, now shows as Fates
+    End - Wizard Tower, but it claims it's a zip even though it's extracted and
+    it won't let me create it as a project." And his expectation, also verbatim:
+    "one row, key `import/01_Fates End - Wizard Tower`, titled from the
+    directory/archive, 15 models / 3 images / 1 text, status READY, creatable -
+    with `01_Wizard` as a group inside it, because folders are 1:1 with disk and a
+    subfolder of the project is a section, not a separate product." The tree is
+    `import/01_Fates End - Wizard Tower` holding nothing but `01_Wizard`, which
+    holds all twenty of the tower's files, beside the outer
+    `import/01_Fates End - Wizard Tower.zip` that declares exactly those twenty.
+    `Wizard_Dice_v5.4_fixes.txt` inside the child is what lets R3 offer the child a
+    row of its own; the claim then strips all twenty files out of the parent's own
+    view, the folder pass records the parent in `claimed_ancestors` alongside that
+    strip, and Decision 18's branch answered with the container row - a `blocked`
+    / `archive_only` line nobody could create from, which is the sentence the owner
+    read as "it claims it's a zip even though it's extracted". This decision
+    changes that ONE answer. It is the third step of the lineage Decisions 17 and
+    18 started - 17 makes a nested archive opaque, 18 lets a verified archive name
+    a directory, this one says which of the two rows a wrapper earns - and both
+    of them are left exactly as written, including 18's guard, which this decision
+    reuses rather than redefines.
+
+    **The single-subtree promotion.** The `claimed_ancestors` leg of the pairing
+    loop now asks one shape question before it answers: does this directory's whole
+    payload sit inside one child? `bundle_service._single_claimed_child_subtree`
+    answers it - the child's name, or `None` - and when it answers, the directory is
+    offered in `found` as an `archive_owned` row keyed at the DIRECTORY, the same
+    row Decision 18 promotes elsewhere, instead of entering `pair_only_specs`.
+    Which listing each half of the question is asked of is the whole design, and it
+    is the Mf-wd3v trap named for the second time in this file. `work` is asked
+    ONLY "empty?", never "what shape?": `work[rel_dir]` is the post-claim view
+    `bundle_service._forget_claimed_subtree` has already emptied, and an emptied
+    listing answers "nothing" to every shape question, which is how a verified pair
+    with real models behind it came to be refused for want of facts. Emptiness is
+    the one question that view answers honestly - it IS what the claim left behind,
+    and it is the same fact that put `rel_dir` in `claimed_ancestors`, since
+    `_forget_claimed_subtree` has exactly one call site and runs together with the
+    marking, so the two are always created as a pair. `folded` is asked ONLY "one
+    first segment?": it is the unclaimed full-subtree listing, so it is the only
+    listing that says what the directory actually holds, and it is read for a
+    segment NAME and nothing else, because the counts, cover and roles it would also
+    describe are the caller's decision, not evidence for this one. No walk, no
+    stat, no store - a pure read of two listings the pass already built.
+
+    **Confidence stays `low`: promotion is not new evidence about the shape.**
+    `bundle_detect.archive_owned_facts` is the one facts function and it is the same
+    call the non-ancestor promotion makes, so `detector` stays `generic-bundle`, the
+    badge still says the shape was inferred rather than read, and every provenance
+    field the row could carry (`creator`, `licence`, `licence_url`, `source_url`,
+    `thing_id`, `description`) stays `None` for Decision 18's reason: a stem is
+    evidence of WHICH thing this is, never of who made it. Promotion adds an
+    ownership judgement - this directory is its child's wrapper - and an ownership
+    judgement is infrastructure, not a naming guess, so it cannot raise a badge that
+    measures naming evidence. Decision 7's orthogonality is what makes that
+    coherent: what promotion changed is `status`, which the database owns, and not
+    `confidence`, which the rules own.
+
+    **The child's dissolve, and the honesty of it.** Every non-archive candidate
+    strictly below the promoted parent is dissolved with `REFUSAL_MEMBER_OF_BUNDLE`
+    and `override=True` - the absorption shape `bundle_service._compound_pass`
+    writes when R7 takes the rows a container was hiding, reused rather than
+    re-invented so that this module has ONE way for a row to be taken into a bigger
+    one. The word is not new and that is the point. The child's
+    `member-of-bundle` entry was ALREADY on the ledger before this change, by an
+    indirect route: the archive-containment container strip dropped the LOW child
+    because its subtree held an archive-only row, and `bundle_service._reconcile_refusals`
+    relabelled the drop `member-of-bundle` because the directory sat strictly inside
+    the row that survived. What was wrong was the ownership, not the vocabulary -
+    the payload belonged to no row (the parent was `blocked` with `assets_total` 0),
+    so the ledger named a bundle that did not exist and pointed at nothing a create
+    could attach. Now it names the row that really owns those files. Archive rows
+    below the parent are deliberately NOT dissolved: a zip inside a detected bundle
+    is a member and `REFUSAL_NESTED_MEMBER` is the word that says so, the member
+    pass still owns that answer, and the dissolution's `not candidate.is_archive`
+    filter is what leaves it alone.
+
+    **The dissolve is a deferred commit, and that is load-bearing.** The branch
+    RECORDS the keys it intends to take; the ledger entries and the row removals are
+    applied later, once the nested-member pass has had its chance to veto the
+    promotion itself - `bundle_service._nested_archives` can empty the promoted
+    directory's `pairs`, and the prune after it drops an `archive_owned` candidate
+    whose pairing is gone. Dissolving at branch time therefore let a promotion that
+    was going to be unwound take a row with it: the child lost its row, the parent
+    lost its row, and no row owned the payload - the `assets_total` 0 / nothing
+    creatable symptom this ticket was filed about, re-created one level up, with the
+    ledger naming a bundle that no longer existed. The invariant the commit point
+    enforces is **no `member-of-bundle` entry may name a row that does not exist**,
+    and applying it after the prune is what makes that structural rather than lucky;
+    `test_service_a_promotion_the_nested_member_prune_vetoes_takes_no_rows_at_all`
+    pins it, and moving the commit back into the branch reds that test alone.
+
+    **One route cannot reach this branch: the entry root.** The pairing above this
+    branch is reached by the STEM rule in practice. `bundle_service._entry_root_pair`
+    judges containment with `entry_root_verified(zip, root, work.get(folder, ()))` -
+    the EMPTIED post-claim view - so a claimed ancestor fails containment and never
+    enters `pairs` at all (measured: `promotion:no-own-depth-model` and
+    `container-rule`, the child keeping its row). That asymmetry predates this
+    decision and Mf-wd3v left it untouched; it is recorded here because the
+    surrounding text says a pairing qualifies "on the entry-root route or the stem
+    route", and only the stem route can actually promote a wrapper.
+
+    **The `groups: []` residual, and why filling it was refused.** The promoted row
+    ships `groups: []`. `groups` is R7's field alone: `BundleFacts.groups` defaults
+    to `()` and has exactly ONE writer in the module,
+    `bundle_detect.compound_bundle_facts` returning `replace(facts, groups=groups)`;
+    `archive_owned_facts` never sets it. So the operator's literal sentence -
+    "`01_Wizard` as a group inside it" - is not what the wire says, and the Review
+    view renders a compound breakdown only for a row that HAS groups, so no panel
+    names `01_Wizard` on this row. Teaching `archive_owned_facts` to emit
+    `BundleGroup`s was REFUSED, not deferred: `BundleGroup` is
+    `{name, model_count, foreign}` and the report derives `separable` from R7's
+    absorbed set, so emitting one means deciding `foreign` (a vendor thing id in the
+    name, or a group carrying its own documents) and `separable` (whether R7 claimed
+    it) - both of which belong to R7's ATTACH decision (Decision 23's shape
+    predicates, Decision 24's excluded-group split), not to a wrapper promotion that
+    has no opinion about either. **This is a reading, and it is labelled as one
+    deviating from the literal wire reading so the owner can overrule it:** the
+    reading is that `01_Wizard` survives as a group because it survives on disk -
+    every member of the created project keeps `01_Wizard` inside its
+    `Asset.storage_path`, and the project's folder sections are derived from exactly
+    those paths - so the subfolder really is a section of the project and not a
+    separate product, which is the half of his sentence that carries the intent.
+    What the literal reading would require him to see is the child NAMED on the row:
+    a breakdown listing `01_Wizard` and its part count beneath the tower's row, the
+    way `import/Stagetop`'s two `Wave` groups are listed under theirs. He does not
+    see that today; what he sees is one `ready` row titled from the directory whose
+    cover, counts and create all run through `01_Wizard`.
+
+    **A stronger child still wins, and the parent keeps the `pair_only` row
+    Decision 18 gave it.** `bundle_service._holds_stronger_candidate` is UNCHANGED -
+    same subtree scan, same `bundle_detect.STRONG_CONFIDENCES` membership test, same
+    docstring - and it now sits as a LEG of the promotion test
+    (`single_child is not None and not _holds_stronger_candidate(folder, found)`)
+    rather than as a guard standing after it. **It must not be hoisted above the
+    `claimed_ancestors` branch, and hoisting remains forbidden.** The reason is the
+    shape of the two strips, not taste: the container strip asks
+    `key.startswith(candidate.key + "/")` over `contained_keys`, so it drops
+    candidates that CONTAIN a contained key and never ones nested INSIDE one, and
+    `bundle_service._nested_archives` returns archives only - which together mean a
+    strong candidate below a `pair_only` parent is never stripped by either. A hoist
+    would therefore not merely refuse the promotion, it would take the parent's
+    `pair_only` row down with it, and that row is Decision 18's visible answer for a
+    container the operator has on disk. "The parent loses entirely" would be a
+    regression, not a fix: one child is not automatically a weaker one - a claimed
+    Thingiverse export earns `high` from its document pair and a claimed id-named
+    folder earns `medium` from its name - so the strong child has to lose the
+    promotion while still answering as the pair-only container it always answered
+    as, and the fall-through to `pair_only_specs` IS that answer. Witnessed in both
+    strengths: `test_service_a_verified_twin_never_promotes_a_directory_holding_a_strong_bundle`
+    pins `high` (`import/Q`'s claimed export keeps its own row while
+    `by_key[CLAIMED_PARENT_DIR]` still answers `pair_only=True, archive_owned=False`
+    and its twin answers `twin-consumed`), and the new
+    `test_service_a_single_medium_child_keeps_its_own_row_and_its_parent_stays_pair_only`
+    pins `medium` (`import/M` over R4's `5390184_ARTICULATED_ice_dragon__fixed_`:
+    `_single_claimed_child_subtree` answers YES and the strength leg answers NO, so
+    the parent stays `blocked` / `archive_only` and the dragon keeps its own `ready`
+    `medium` row). The two together are what stop either leg being "tidied" into the
+    other.
+
+    **The witnesses, and which leg each one actually pins.**
+    `test_service_the_measured_live_tower_is_promoted_at_its_real_counts` is the
+    live tree at its measured counts;
+    `test_service_a_verified_twin_of_a_claimed_ancestor_is_promoted_on_its_single_child`
+    is the same shape at the fixture's own counts;
+    `test_service_a_promoted_emptied_claimed_ancestor_holds_no_archive_row_of_its_own`
+    pins the interlock - the emptied ancestor is the tree's one row and no archive
+    row survives below it for that row to swallow - and pins with it why `W`'s LOW
+    child is promoted while `Q`'s HIGH child is not; and
+    `test_service_a_tower_whose_child_holds_no_archive_of_its_own_is_still_one_row`
+    is the witness that pins the DISSOLUTION itself, because in the live tree the
+    child happens to hold a candidate-shaped archive and is therefore ALSO dropped by
+    the archive-containment strip, so deleting the dissolution alone reds nothing
+    there. The two shape negatives are
+    `test_service_a_claimed_ancestor_holding_two_claimed_children_is_not_promoted`
+    (two claimed child subtrees) and
+    `test_service_a_claimed_ancestor_with_a_file_of_its_own_is_not_promoted` (one
+    subtree plus a loose `leftover.stl` of the parent's own). The measured subtlety:
+    the loose-file shape is refused by BOTH legs - a file at the parent's own depth
+    makes `work` non-empty AND adds a second first segment to `folded` - so it
+    cannot discriminate between them. The PILE is what pins the `folded` leg: its
+    `files/` name is in `bundle_detect.R3_MODEL_DIRS`, so its models count as
+    own-depth, the inherited `Mf-snd8` cardinality bound never runs, and the archive
+    answers `twin-consumed` rather than `promotion:no-own-depth-model` - which is
+    exactly what proves the refusal came from reading two segments off `folded`. And
+    only a PARTLY claimed single child pins the `work` leg:
+    `test_service_a_parent_whose_single_child_is_only_partly_claimed_is_not_promoted`
+    holds `A/` and nothing else, so `folded` answers "one segment" YES while the
+    claim left `A/own0.stl` and `A/own1.stl` standing under that one segment - and
+    promoting there would dissolve a claimed grandchild into a row that does not own
+    it, Decision 18's swallow wearing the shape rule's clothes, with no other test
+    in the file reding when it happens.
+
+    **The R7 absorbability residual: monitored, not disproved.** A promoted parent
+    is a real row, so R7 can now see it as absorbable - the absorbing side's only
+    row-set guard is `not candidate.pair_only`, and while this directory was
+    pair-only it was exempt by that filter alone. `bundle_detect.compound_bundle_facts`
+    is untouched, so no NEW compound key can appear anywhere: the set of rows R7 can
+    build is exactly what Decision 23 described. But a compound that could already
+    form above a tower would now take the tower's row instead of leaving it alone,
+    and take the operator's only creatable line with it. The live fixture asserts
+    `scan.absorbed == ()` on precisely that tree, which is a measurement of the tree
+    we have and not a proof about trees we do not have - so this is recorded as an
+    open residual under observation, and the thing to look for is a compound row
+    whose absorbed set contains an `archive_owned` key.
+
+    **The measured before/after, on the live-shape fixture.** Before: ONE row keyed
+    at the directory, `blocked` / `archive_only`, `assets_total` **0** (while its own
+    `model_count`/`image_count`/`text_count` already read 15/3/1 off the unclaimed
+    listing - a row advertising parts it could not attach), cover reason
+    `largest-image-unregistered` with `asset_id: null`, and the child refused
+    `member-of-bundle`. After: the same single row, `ready`, `assets_total` **20**,
+    15 models / 3 images / 1 text, cover reason `largest-image` carrying a real
+    `asset_id` and a `rel_path` that runs through `01_Wizard` - because the child's
+    payload IS the row. The refusal ledger is byte-identical across the change, four
+    entries both sides: `import` `R3:no-own-depth-model`, the twin
+    `twin-consumed`, `01_Wizard` `member-of-bundle`, and
+    `01_Wizard/01_Wizard_v5.4.zip` `nested-member`. That is the shape of the change:
+    a row moved, no verdict did. Every count above is fixture-derived, read off the
+    files the fixture wrote - and **the number `21` in the ticket note is wrong**,
+    the product of a loose `LIKE '<prefix>%'` that also matched the sibling
+    `import/01_Fates End - Wizard Tower.zip`; it is named here because an ADR reader
+    who starts from 21 will otherwise spend an afternoon chasing a file that is not
+    inside the tower. The mutation that reproduces the bug is deleting the
+    `_single_claimed_child_subtree` leg of the branch - the row goes back to
+    `blocked` / `archive_only` with `assets_total` 0 and nothing creatable in the
+    tree. Deleting the `_holds_stronger_candidate` leg beside it is Decision 18's
+    swallow in new clothes, and it reds the two strength witnesses, not the tower
+    one: a LOW child is exactly what this branch exists to promote.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -2426,6 +2658,19 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   per report (one report-wide registered index, constant in the number of
   candidates) and the project route costs the project row plus one prefix SELECT
   - no per-part query, no stored count, no cache to invalidate.
+* **A wrapper of one claimed child is now a row, and its child's name lives on disk
+  rather than on the wire.** `import/01_Fates End - Wizard Tower` answers one
+  creatable `low` row where it used to answer a blocked `archive_only` line with 0
+  assets: nothing new was detected, nothing was deleted, no file moved, and the
+  refusal ledger is unchanged - the promoted row reads `ready` because its folder
+  resolves and its models are registered (Decision 7), never because a rule got more
+  confident. Two accepted costs travel with it and both are argued in Decision 28
+  rather than left to be discovered: the row ships `groups: []`, so the child
+  reaches the operator as the folder section every member's `storage_path` still
+  carries instead of as a named breakdown on the row (a reading of the owner's
+  sentence, and labelled one), and a promoted parent is now absorbable by R7, which
+  the `not candidate.pair_only` filter used to forbid - monitored by
+  `scan.absorbed == ()` on the live fixture, not proven impossible.
 ## Alternatives considered
 
 - **A `bundle_candidates` table, populated by a scan, confirmed later.**
