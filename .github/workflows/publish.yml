@@ -6,8 +6,14 @@ name: Publish
 #   edge            - every push to main (what a self-hosted deployment should pin
 #                     to, or a sha- tag for reproducibility)
 #   sha-<7>         - every commit, immutable handle for a rollback
-#   <semver>        - from a v* git tag (v5.2.0 -> 5.2.0, plus 5.2 and 5)
-#   latest          - on a v* tag (metadata-action's default)
+#   <semver>        - wired for a v* git tag (v5.2.0 -> 5.2.0, plus 5.2 and 5) but
+#                     never exercised: the only tags the repo has, v5 and
+#                     v5.2.0-rc.1, both predate this workflow, so no v* leg has
+#                     ever run
+#   latest          - metadata-action's default on a v* tag, so equally unproven.
+#                     Measured against GHCR: curiarium-api:latest, :5.2.0-rc.1,
+#                     :5.2, :5 and curiarium-web:latest are all NOT_FOUND. Nothing
+#                     above should be read as saying the semver/latest tags exist.
 #
 # The API image has a second variant: the same context built with
 # INSTALL_ZFS=1 (Mf-qirh), which adds the `zfs` userspace a ZFS-backed
@@ -21,6 +27,11 @@ name: Publish
 # Images are multi-arch (amd64 + arm64) so a homelab box and an Apple/ARM host
 # pull the same tag. Builds are cached per image in the Actions cache, which
 # keeps a no-op rebuild to well under a minute.
+#
+# Each leg then re-reads the digest it just pushed from GHCR and fails if the
+# published org.opencontainers.image.revision is not the commit that triggered
+# the run - see the `Verify published identity` step for why the check is built
+# on the digest rather than on the tag it also pushed.
 
 on:
   push:
@@ -29,8 +40,11 @@ on:
   workflow_dispatch:
 
 concurrency:
+  # No cancel-in-progress: a cancelled run tears a multi-leg publish down the
+  # middle of one image repository - the api leg can be replaced under a web leg
+  # that is still pushing, and the half-published state is what a deployment
+  # pulls. Queued runs are cheap here, torn ones are not.
   group: publish-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -80,12 +94,16 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
-          # The plain legs keep the OCI titles they had before the variant
-          # existed; the variant is told apart by its matrix name.
+          # Only the two labels metadata-action cannot know: the plain legs keep
+          # the OCI titles they had before the variant existed and the variant is
+          # told apart by its matrix name, while the description says what each
+          # leg actually is. Everything else metadata-action derives (including
+          # org.opencontainers.image.source, whose published value is byte-identical
+          # to its own repo.html_url default) is left alone on purpose - an
+          # override that re-states a default is one more thing to drift.
           labels: |
             org.opencontainers.image.title=curiarium-${{ matrix.name }}
             org.opencontainers.image.description=${{ matrix.description }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           flavor: ${{ matrix.flavor }}
           tags: |
             type=raw,value=edge,enable={{is_default_branch}}
@@ -107,13 +125,103 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
-      - name: Summary
+      - name: Verify published identity
+        env:
+          LEG: ${{ matrix.name }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          EXPECTED_REVISION: ${{ github.sha }}
+          PUSHED_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
+          set -euo pipefail
+
+          # Comparison 1: the checkout itself. metadata-action emits
+          # org.opencontainers.image.revision from the runner environment
+          # (process.env.GITHUB_SHA on the default context: workflow path), so it
+          # can never notice a wrong-ref checkout: the label would still name the
+          # triggering commit while describing a different tree, so nothing downstream
+          # could tell. Only `git` on the actual workspace can catch that, and it costs
+          # no network, so it runs first. And a `git` that cannot answer at all is its
+          # own failure: `rev-parse HEAD` exits 128 outside a tree with a commit, which
+          # is red with no annotation naming the leg unless it is said out loud.
+          checked_out="$(git rev-parse HEAD)" || {
+            echo "::error::leg ${LEG}: git could not resolve HEAD in the checkout, so nothing can be compared; the workspace has no commit to read, and every revision label this run publishes is unverifiable"
+            exit 1
+          }
+          if [ "$checked_out" != "$EXPECTED_REVISION" ]; then
+            echo "::error::leg ${LEG}: the checkout is ${checked_out}, not the triggering commit ${EXPECTED_REVISION}; the images this run pushes were built from a different tree than the one that triggered it, while every revision label will still name the triggering commit and look correct"
+            exit 1
+          fi
+
+          # Comparison 2: the end-to-end check, against the digest, never a tag.
+          # steps.build.outputs.digest is the manifest-list index digest for a
+          # multi-platform push, so it names exactly what this leg pushed; a tag
+          # would be racy as soon as two Publish runs queue, and the shared moving
+          # tag may already point elsewhere by the time this step asks the registry.
+          ref="${IMAGE}@${DIGEST}"
+
+          # The labels live in .Image, a per-platform map, NOT on the index: the
+          # index carries no annotations at all (its .Manifest.Annotations is null,
+          # and `docker buildx imagetools inspect --raw` on a correct image yields
+          # zero occurrences of org.opencontainers.image.revision), so an assertion
+          # built on grepping that --raw walk is satisfied by any image, good or
+          # bad - and that walk descends through the attestation manifests too.
+          # .Image yields one entry per real platform and buildx excludes the two
+          # unknown/unknown attestation manifests from it, so a correct multi-arch
+          # image answers exactly twice.
+          #
+          # Separator is a trailing comma, never a backslash-n: inside a YAML
+          # literal block scalar a backslash-n stays two characters, Go renders them
+          # literally, and both platforms land on one line - a line-count check then
+          # passes on a one-platform image.
+          if ! revisions="$(docker buildx imagetools inspect "$ref" --format '{{ range $k, $v := .Image }}{{ index $v.Config.Labels "org.opencontainers.image.revision" }},{{ end }}' 2>&1)"; then
+            # A ref that points at a single child manifest makes Go dump the whole
+            # image struct into one multi-KB line - and that line can contain the
+            # registry's own text. The log keeps all of it; the annotation, which the
+            # run UI renders, gets the first line only, where the reason starts. Only
+            # the first line because a ::error:: carrying a newline is split into
+            # several annotations, and a workflow command inside registry output would
+            # then be rendered as one of ours.
+            echo "$revisions"
+            IFS= read -r first_line <<< "$revisions"
+            echo "::error::leg ${LEG}: cannot read the published index at ${ref}: ${first_line:0:400}"
+            exit 1
+          fi
+
+          IFS=',' read -r -a revisions_per_platform <<< "$revisions"
+
+          count=0
+          published=""
+          for revision in "${revisions_per_platform[@]}"; do
+            if [ -z "$revision" ]; then
+              continue
+            fi
+            count=$((count + 1))
+            if [ "$count" -eq 1 ]; then
+              published="$revision"
+            elif [ "$revision" != "$published" ]; then
+              echo "::error::leg ${LEG}: ${ref} disagrees with itself - platforms publish ${published} and ${revision}; a multi-arch image whose entries came from different trees is undeployable"
+              exit 1
+            fi
+          done
+
+          if [ "$count" -ne 2 ]; then
+            echo "::error::leg ${LEG}: ${ref} published ${count} org.opencontainers.image.revision values, expected exactly 2 (linux/amd64 + linux/arm64); raw output was [${revisions}]"
+            exit 1
+          fi
+
+          if [ "$published" != "$EXPECTED_REVISION" ]; then
+            echo "::error::leg ${LEG}: ${ref} publishes revision ${published}, not the triggering commit ${EXPECTED_REVISION}"
+            exit 1
+          fi
+
           {
-            echo "### curiarium-${{ matrix.image }} (${{ matrix.name }})"
+            echo "### ${LEG}: published identity verified"
+            echo ""
+            echo "- ref: ${ref}"
+            echo "- revision: ${published} (== ${checked_out}, the triggering commit) on every platform this leg builds, which is the set the count guard above just required"
             echo ""
             echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
+            echo "$PUSHED_TAGS"
             echo '```'
-            echo "digest: \`${{ steps.build.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
