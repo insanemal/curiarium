@@ -51,6 +51,7 @@ import db
 import file_utils
 import library_scan
 import main
+import project_create_service
 import project_service
 import settings_service
 from db import engine
@@ -329,10 +330,17 @@ def projects() -> List[Project]:
 
 
 def marker_of(project_id: str) -> dict:
+    """This door's payload as one reader returns it.
+
+    `project_create_service.archive_extract_payload_of` is the only reader of it:
+    the door writes the payload and no longer knows how to find it again. It reads
+    `_bundle["archive_extract"]` and falls back to the legacy `_archive_project`
+    block, so rows written before the namespace existed still tell their story.
+    """
     with Session(engine) as session:
         project = session.get(Project, project_id)
         assert project is not None
-        return archive_project_service.archive_project_marker_of(project.metadata_json)
+        return project_create_service.archive_extract_payload_of(project.metadata_json)
 
 
 def events_for(value: str) -> List[AuditEvent]:
@@ -640,7 +648,15 @@ def test_no_bundle_rule_is_consulted_on_this_path(
         "generic_doc_candidates",
     ):
         monkeypatch.setattr(bundle_detect, name, explode)
-    for name in ("scan_bundles", "iter_bundle_candidates", "create_bundles", "find_existing_project"):
+    for name in ("scan_bundles", "iter_bundle_candidates", "create_bundles"):
+        # `find_existing_project` used to be in this list, and used to belong in it:
+        # it was a `bundle_service` function and the archive door had its own
+        # `_find_by_archive` precisely so it would never call one. Mf-yhjo moved the
+        # dedupe to `project_create_service`, where it is a CREATE rule and not a
+        # bundle rule, and this door now asks it - that ask is how a folder the
+        # detector already made into a project stops becoming a second project.
+        # What this test still forbids is the detector's own vocabulary, and it
+        # still explodes on every one of them.
         monkeypatch.setattr(bundle_service, name, explode)
 
     body = create(client, headers)
@@ -903,8 +919,12 @@ def test_the_marker_records_the_archive_the_counts_the_groups_and_the_fingerprin
     with Session(engine) as session:
         project = session.get(Project, body["project"]["id"])
         stored = json.loads(project.metadata_json)
-    assert set(stored) == {"_archive_project"}, "the marker reserves its own key and writes no other"
-    assert "_bundle" not in stored, "this project was declared, not detected"
+    # Mf-yhjo: one namespace for every creating door, and the door is told apart by
+    # `origin` rather than by a namespace of its own. `_archive_project` is still
+    # READ (so pre-namespace rows are still found) and never written.
+    assert set(stored) == {"_bundle"}, "the marker reserves the one key and writes no other"
+    assert stored["_bundle"]["origin"] == "archive_extract", "declared by an operator, not detected"
+    assert "_archive_project" not in stored, "the legacy block is read, never written"
 
 
 def test_a_listing_with_no_single_root_has_no_common_root_and_no_groups(
@@ -1601,3 +1621,284 @@ def test_the_audit_row_names_the_refusal_when_nothing_was_created(
     assert detail["status"] == "nothing_resolved"
     assert detail["project_id"] is None
     assert detail["twin"] == TWIN
+
+
+# --- the dedupe the doors share (Mf-yhjo) ------------------------------------
+#
+# `project_create_service.find_existing_project` answers "does this already exist?" for
+# every door that makes a project, and it answers it from four identities. Two archives
+# that share a basename are the case where one of those four - the name - would be a
+# lie: `import/a/thing.zip` and `import/b/thing.zip` are two products the operator
+# filed in two folders, and this door names a project after `posixpath.basename` of the
+# twin, so BOTH of them are called `thing`. An archive door that handed that name to the
+# shared dedupe would merge the second product into the first and tell the operator
+# they had already made it.
+
+
+THING_ZIPS = ("a/thing.zip", "b/thing.zip")
+THING_ENTRY_NAMES = ("thing/part-1.stl", "thing/part-2.stl", "thing/preview.png")
+# The one name BOTH twins get: `posixpath.basename("a/thing") == posixpath.basename("b/thing")`.
+THING_NAME = "thing"
+
+
+def thing_payload(copy: str) -> Dict[str, bytes]:
+    """The same three entries, tagged with which copy of the archive they came from.
+
+    Same NAMES in both archives, different BYTES, so the two products cannot be
+    confused by content either: each extraction registers its own three assets.
+    """
+    return {name: f"{copy}: {name} was printed twice\n".encode() for name in THING_ENTRY_NAMES}
+
+
+def thing_member_paths(folder: str) -> List[str]:
+    """The three paths one twin holds - the entry path, under `<folder>/<stem>/`."""
+    return sorted(f"{folder}/{THING_NAME}/{name}" for name in THING_ENTRY_NAMES)
+
+
+def thing_member_ids(folder: str) -> List[str]:
+    """The registered ASSET IDs the ``<folder>/thing`` twin holds.
+
+    The containment leg is fed ids, not paths, so asking it needs this one lookup.
+    """
+    paths = thing_member_paths(folder)
+    with Session(engine) as session:
+        return list(
+            session.exec(select(Asset.id).where(Asset.storage_path.in_(paths)))  # type: ignore[attr-defined]
+        )
+
+
+def dedupe_answer_for(path: str, twin: str, name: str = "", assets: Sequence[str] = ()):
+    """What the ONE dedupe says about one archive, asked with the identities this door holds.
+
+    ``name`` defaults to the empty string because that is what the door hands - a door
+    that holds no name must not match on one. The one place this test asks with a name is
+    labelled as asking a question the door does not ask.
+
+    ``assets`` defaults to the empty tuple for the same reason: containment is a leg a
+    door has to ASK for (``Dedupe.assets``), and this door never asks for it. Where a
+    test passes ids here it is measuring the leg directly, one step behind the door, to
+    show what the door is declining to ask - not asking on the door's behalf.
+    """
+    with Session(engine) as session:
+        return project_create_service.find_existing_project(
+            session, key=twin, archive=path, name=name, assets=assets
+        )
+
+
+def create_status(client: TestClient, headers: dict, path: str) -> Tuple[int, object]:
+    """The raw verdict of one create click: status code and body, nothing asserted.
+
+    The module's `create` helper pins 200, which is right for every test in this file
+    until Mf-yhjo put a second door in front of the same dedupe. This is the one place
+    the code itself is the thing under test.
+    """
+    response = client.post("/import/archive/project", json={"path": path}, headers=headers)
+    return response.status_code, response.json()
+
+
+def test_an_archive_whose_name_contains_a_backslash_is_still_found_on_the_second_click(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``\\`` is a legal character in a Linux filename, and this door owns that fact.
+
+    ``backslash/a\\b.zip`` below is ONE file whose name contains a backslash, not a
+    directory: legal on any filesystem, and exactly what a Windows-authored archive
+    leaves in a library. Two failures hang on how the dedupe spells it, and both were
+    measured against the version of this code that folded the ASK
+    (``_normalised`` did ``.replace("\\", "/")``) while the door stored what
+    ``posixpath.normpath`` left alone:
+
+    * the second click on the SAME file MISSED, so it wrote a second ``Project`` where
+      base answered ``already_created`` - an archive the operator had already turned
+      into a product became two products (observed as a 409 from the name index until
+      the second click was given its own name; see the mutation note below for why that
+      distinction is the test's own);
+    * the fold ran the other way as well: click the DIFFERENT file ``backslash/a/b.zip``
+      after the backslash one has a project, and the folded spellings met in the middle -
+      that click answered ``already_created`` carrying the project made from
+      ``backslash/a\\b.zip``. One archive's click reported success against another
+      archive's product - a merge no operator asked for and no marker undoes.
+
+    Base could not fail either way because it ran BOTH sides through one rule:
+    ``archive_project_service._find_by_archive`` normalised the stored marker value as
+    well as the ask. The shared dedupe keeps the falsy guard (blank is not an identity)
+    and does no canonicalisation at all, which is what these two assertions are.
+
+    Mutation, all three measured:
+
+    * fold the ASK only (``.replace("\\", "/")`` back in ``_normalised``) or fold the
+      STORED side only (fold ``payload["archive"]`` in ``_read_marker``) - either one
+      breaks the symmetry, and the second click above answers ``created`` with a NEW id
+      where it must answer ``already_created`` carrying the first one;
+    * fold BOTH sides, which is the "just normalise everywhere" repair that looks like
+      it fixes the first pair and quietly creates the second bug: the second click goes
+      green and the THIRD assertion reds - the click on the DIFFERENT file ``a/b.zip``
+      answers ``already_created`` carrying the project made from ``a\\b.zip``.
+
+    That third mutation is the reason this function canonicalises nothing at all rather
+    than canonicalising in one place: symmetric folding makes two different files one
+    product, and no operator can undo a merge made on a spelling.
+    """
+    headers = auth_header(client)
+    stub_scan(monkeypatch)
+    backslash = "backslash/a\\b.zip"
+    forward = "backslash/a/b.zip"
+    write_zip(isolated_storage / "backslash" / "a\\b.zip", thing_payload("backslash"))
+    write_zip(isolated_storage / "backslash" / "a" / "b.zip", thing_payload("forward"))
+    # The bytes already on disk under the name the extract door WOULD have filed them
+    # under: `_twin_rel` sanitises the stem (`a\\b` -> `a_b`) while the door stores the
+    # archive path verbatim, and that is the whole asymmetry this test is about. Going
+    # through `POST /import/archive` is not an option - that door refuses to pair a
+    # backslash archive with a sanitised twin at all, with a 400 that tells the operator
+    # to rename - so the files are written here and registered by the scan.
+    for folder, copy in (("a_b", "backslash"), ("a/b", "forward")):
+        for name, content in thing_payload(copy).items():
+            landing = isolated_storage / "backslash" / folder / name
+            landing.parent.mkdir(parents=True, exist_ok=True)
+            landing.write_bytes(content)
+    scan()
+
+    first = create(client, headers, backslash)
+
+    assert (first["status"], (first["planned"], first["resolved"])) == ("created", (3, 3)), first
+    first_id = first["project"]["id"]
+
+    # A distinct name on the second click, so this measures the DEDUPE and not the name
+    # index. Both CLICKS of this one archive recompute the same twin (`_twin_rel` of the
+    # same path is ``backslash/a_b`` both times), so the two clicks want the same project
+    # NAME and a dedupe that misses dies on ``idx_project_name_unique`` with a 409 - the
+    # test reports the index instead of the answer. That is a real outcome, and it is the
+    # argument ``test_two_archives_that_share_a_basename_in_different_folders_are_two_projects``
+    # below makes about a 409 not being ``already_created``; it is simply not the outcome
+    # under observation here. Asked with a name the first project does not have, a miss
+    # has nowhere to hide: it becomes a second product.
+    again = create(client, headers, backslash, name="the backslash archive, clicked twice")
+
+    assert (again["status"], again["project"]["id"]) == ("already_created", first_id), (
+        "the same file, clicked twice: a folded ask does not equal the stored spelling, "
+        "and the second click writes a second product"
+    )
+
+    other = create(client, headers, forward)
+
+    assert other["status"] == "created", (
+        "the click on `a/b.zip` answered `already_created` carrying the project made "
+        "from `a\\b.zip`: folding both sides meets two different files in the middle and "
+        "makes one product of them"
+    )
+    assert other["project"]["id"] != first_id
+    assert len(projects()) == 2, "two files the operator filed as two products"
+
+
+def test_two_archives_that_share_a_basename_in_different_folders_are_two_projects(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two `.zip`s named `thing`, in two folders: two products, never one project.
+
+    Both archives hold the same three entry names, and both twins are therefore called
+    ``thing`` - which is exactly the shape a NAME leg in the shared dedupe would merge.
+    This door hands no name to ``Dedupe`` (``archive_project_service``: "a name leg here
+    would merge ``a/thing.zip`` with ``b/thing.zip``") and the assertions below are that
+    claim measured:
+
+    * both extractions register their OWN three assets, six rows in all - the two
+      products are distinct files, not two names for one set of bytes;
+    * the first create is ``created``, named ``thing``;
+    * asked directly, the ONE dedupe finds **nothing** for the second archive with the
+      two identities the door holds (its twin as the key, the archive as itself), and it
+      also finds nothing on the assets leg - the second archive's member ids are nobody's
+      members;
+    * the second product is created too, with a DIFFERENT project id, and its three
+      members are the ``b/`` copies: two ``Project`` rows, each holding its own files.
+
+    One measured deviation from the ticket's wording, stated rather than hidden: the
+    second click cannot be created under the name ``thing`` as well, because
+    ``idx_project_name_unique`` is a NOCASE UNIQUE index on ``project.name`` and the
+    second INSERT is refused by the NAME INDEX (a 409 ``Project name already exists``),
+    not by the dedupe. That refusal is asserted below, before the named create, because
+    the difference is the whole point: a 409 is the operator telling the database twice
+    that two things are called ``thing``, which is a naming problem they can settle by
+    typing a second name; ``already_created`` would be the dedupe claiming two different
+    products are one, which is a lie no operator can undo. So the name leg is refused
+    here on both counts, and the 409 is the observable proof that the dedupe did NOT
+    merge them.
+
+    Mutation: add ``name=project_name`` to ``archive_project_service``'s
+    ``Dedupe(key=twin_rel, archive=normalized)`` - the fifth identity the module docstring
+    refuses - and the second click answers ``200 already_created`` carrying the FIRST
+    project's id instead of the 409 the name index owes it, which reds the ``(code,
+    detail)`` assertion below. The probe above is that same fact read without waiting for
+    the mutation, so the reason is in the file rather than in a commit message.
+    """
+    headers = auth_header(client)
+    stub_scan(monkeypatch)
+    for folder in ("a", "b"):
+        write_zip(isolated_storage / folder / "thing.zip", thing_payload(folder))
+
+    for folder in ("a", "b"):
+        assert extract(client, headers, f"{folder}/thing.zip")["destination"] == f"{folder}/thing"
+    scan()
+
+    with Session(engine) as session:
+        registered = session.exec(select(Asset.storage_path)).all()
+    assert sorted(thing_member_paths("a") + thing_member_paths("b")) == sorted(
+        path for path in registered if not path.endswith(".zip")
+    ), (
+        "six registered files: two copies of one listing, not one listing seen twice - "
+        "the two `.zip`s register as assets too, and they are the only things filtered here"
+    )
+
+    first = create(client, headers, THING_ZIPS[0])
+
+    assert first["status"] == "created"
+    assert (first["planned"], first["resolved"]) == (3, 3)
+    assert first["twin"] == "a/thing"
+    first_id = first["project"]["id"]
+    assert first["project"]["name"] == THING_NAME, "both twins are called `thing` - the merge risk, named"
+    assert member_paths(first_id) == thing_member_paths("a")
+
+    assert dedupe_answer_for(THING_ZIPS[1], "b/thing") is None, (
+        "the ONE dedupe, asked with the two identities this door holds, sees no project "
+        "behind the second archive: no key and no twin"
+    )
+    assert dedupe_answer_for(THING_ZIPS[1], "b/thing", assets=thing_member_ids("b")) is None, (
+        "and the same asked one step behind the door, with the containment leg the door "
+        "does NOT hold fed in by hand: the second archive's three files are nobody's "
+        "members, so even a leg this door declines to ask could not merge them"
+    )
+
+    # The same question with the identity this door deliberately does NOT hold. Asked
+    # directly, because the claim is about what a name leg would do, and a witness that
+    # only shows up under a mutation is a witness nobody reads.
+    would_merge = dedupe_answer_for(THING_ZIPS[1], "b/thing", name=THING_NAME)
+
+    assert would_merge is not None and would_merge.match == "name" and would_merge.project.id == first_id, (
+        "handed the name BOTH twins have, the shared dedupe merges the second product "
+        "into the first and calls it already made - which is the sentence this door is "
+        "not allowed to say about two archives the operator filed in two folders"
+    )
+
+    code, body = create_status(client, headers, THING_ZIPS[1])
+
+    assert (code, body.get("status"), body.get("detail")) == (
+        409,
+        None,
+        "Project name already exists",
+    ), (
+        "refused by the NOCASE name index, NOT answered `already_created`: the dedupe "
+        "did not merge two products, it let the second one reach the insert"
+    )
+
+    second = create(client, headers, THING_ZIPS[1], name="thing (the other folder)")
+
+    assert second["status"] == "created", "the same product under a second name is still its own project"
+    second_id = second["project"]["id"]
+    assert second_id != first_id
+    assert (second["planned"], second["resolved"]) == (3, 3)
+    assert second["twin"] == "b/thing"
+    assert member_paths(second_id) == thing_member_paths("b")
+
+    rows = projects()
+    assert len(rows) == 2, "TWO rows - the merged answer would have left one"
+    assert {project.name for project in rows} == {THING_NAME, "thing (the other folder)"}
+    assert member_paths(first_id) == thing_member_paths("a"), "the first product kept its own files"

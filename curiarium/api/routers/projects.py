@@ -2,11 +2,12 @@
 
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlmodel import Session, select
 
 import audit
 import bundle_drift
+import project_create_service
 import project_service
 from auth import AuthContext
 from db import engine
@@ -48,17 +49,45 @@ def list_projects(_: Optional[AuthContext] = Depends(require_read)):
 @router.post("/projects", response_model=ProjectOut, status_code=201)
 def create_project(body: ProjectIn, _: Optional[AuthContext] = Depends(require_contribute)):
     with Session(engine) as s:
-        project = project_service.create_project(
+        # The same create half every creating door uses, asked with NOTHING to
+        # dedupe on. This is a form: `ProjectIn` carries no member list, so the
+        # member set comes from nowhere and `dedupe=None` says so — a door that
+        # holds no identity must not match on one, and an empty key, an empty name
+        # or an empty file set are each a way of matching everything.
+        #
+        # `marker=None` is load-bearing. A `_bundle` marker is the proof that makes
+        # `GET /project/{id}/bundle-drift` answer `known` rather than `not_applicable`,
+        # and a hand-typed project has no detection to have drifted from; writing
+        # `origin: "manual"` here would hand every form-made project a drift state
+        # it cannot support. `require_members=False` for the same reason in
+        # reverse: a project made from a form legitimately starts empty and gets
+        # its files through the membership doors, so the empty member set this
+        # door hands down is its own answer and not the refusal the primitive
+        # exists to make for the doors that promise files.
+        outcome = project_create_service.create_project_from_members(
             s,
-            body.name,
-            body.description,
-            body.cover_asset_id,
+            name=body.name,
+            origin=project_create_service.ORIGIN_MANUAL,
+            members=(),
+            marker=None,
+            dedupe=None,
+            cover_asset_id=body.cover_asset_id,
+            require_members=False,
+            description=body.description,
             creator=body.creator,
             source_url=body.source_url,
+            project_origin=body.origin,
             licence=body.licence,
             licence_url=body.licence_url,
-            origin=body.origin,
         )
+        # A refusal is unreachable from this door (no `refuse`, and members are not
+        # required of it), but a route must not read a `None` id as a project.
+        if outcome.status != project_create_service.STATUS_CREATED:
+            raise HTTPException(status_code=409, detail=outcome.reason or "project already exists")
+        # Re-read rather than carry the row out of the primitive: `CreateOutcome`
+        # is deliberately a pair of scalars, so no caller can reach for a column
+        # the session has expired.
+        project = project_service.get_project(s, outcome.project_id or "")
         asset_count, total_size, cover_thumb_version = project_service.member_stats(s, project.id)
     return project_to_out(project, asset_count, total_size, cover_thumb_version)
 

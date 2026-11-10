@@ -131,14 +131,19 @@ the same bundle becomes creatable with no code change, while an R2 bundle that
 still has only a flattened row stays visible as ``high`` confidence and
 ``blocked``.
 
-**The three commit windows, and why a re-run is safe.** One created bundle
-commits three times: the project row *with* its ``_bundle`` marker (one
-transaction, through ``project_service.create_project(metadata=...)``), then the
-member assets (``project_service.add_assets``), then the audit row
-(``audit.record``). Two shared services own their sessions, so this cannot be one
-transaction without refactoring them; a crash between the windows can leave a
-project with a marker and no members. It cannot duplicate one: every create pass
-first asks ``find_existing_project`` - the marker key, then the source URL, then
+**The two commit windows, and why a re-run is safe.** One created bundle commits
+twice: the project row *with* its ``_bundle`` marker *and* every member row, in one
+transaction through ``project_create_service.create_project_from_members`` (which
+calls ``project_service.create_project_with_members``), then the audit row
+(``audit.record``). It used to be three windows - project, then members through
+``project_service.add_assets`` in a second session - and that gap is what could
+leave a project with a marker and no members; an unknown asset id now refuses the
+whole request before the insert rather than failing per id after it. The audit row
+is its own window by design (an effect's audit row must be durable even when the
+business write is not). It cannot duplicate a project: every create pass first asks
+``project_create_service.find_existing_project`` - the marker key, then the twin
+archive, then
+the source URL, then
 an exact casefolded name, then asset containment over the models a create would
 attach - and a hit is ``skipped`` with the existing project id and the project
 is never touched. A human edit is therefore never overwritten by
@@ -186,11 +191,12 @@ import bundle_drift
 import bundle_enrich
 import db
 import library_scan
+import project_create_service
 import project_service
 import settings_service
 import zip_service
 from db import engine
-from models import Asset, Folder, Project, ProjectAsset
+from models import Asset, Folder, Project
 
 # The storage root bundle keys are resolved against. A module global so tests can
 # point it at a temp tree exactly like ``library_scan.STORAGE``.
@@ -234,11 +240,11 @@ CREATE_FAILED = "failed"
 CONTAINS_BUNDLES = "contains_bundles"
 
 # Which of the four identities found an existing project. Reported because they
-# are not equally certain, so the client can say how sure it is.
-MATCH_MARKER = "marker"
-MATCH_SOURCE_URL = "source_url"
-MATCH_NAME = "name"
-MATCH_ASSETS = "assets"
+# are not equally certain, so the client can say how sure it is. The four live
+# with the dedupe they name (``project_create_service``), and this module reads
+# them rather than restating them: a second list here could disagree with the
+# answer it labels.
+MATCH_MARKER = project_create_service.MATCH_MARKER
 
 # Why this service refused a path the walk saw. The detector owns the R1-R5
 # vocabulary (``bundle_detect.REFUSAL_RULES``); these are the refusals only the
@@ -1649,30 +1655,6 @@ def _folder_index(session: Session) -> Dict[str, str]:
     return index
 
 
-def project_assets_index(session: Session) -> Dict[str, Tuple[str, ...]]:
-    """Every asset's project memberships as ``{asset id: (project id, ...)}``.
-
-    Loaded once per report: deciding whether a project contains a bundle's files
-    is a dictionary lookup, not a table scan per candidate, so the cost is one
-    statement for the whole report however many bundles are offered.
-
-    Each tuple is ordered by ``(asset id, project id)`` so nothing downstream
-    depends on row order, and only assets with a ``storage_path`` are indexed -
-    the same refusal the rest of the report applies, because a row with no path
-    is not a file this bundle could contain.
-    """
-    index: Dict[str, List[str]] = {}
-    statement = (
-        select(ProjectAsset)
-        .join(Asset, Asset.id == ProjectAsset.asset_id)
-        .where(Asset.storage_path.is_not(None))
-        .order_by(ProjectAsset.asset_id, ProjectAsset.project_id)
-    )
-    for membership in session.exec(statement):
-        index.setdefault(membership.asset_id, []).append(membership.project_id)
-    return {asset_id: tuple(project_ids) for asset_id, project_ids in index.items()}
-
-
 def registered_index(session: Session) -> List[Tuple[str, str, int]]:
     """Every registered asset as ``(id, storage_path, size)``, in one statement.
 
@@ -1752,6 +1734,46 @@ def registered_assets(session: Session, rel_dir: str) -> List[RegisteredAsset]:
 def _own_paths(key: str, candidate: BundleCandidate) -> set:
     """The storage paths the candidate's own snapshot names, never a child's."""
     return {f"{key}/{entry.rel_path}" for entry in candidate.snapshot.entries}
+
+
+def _own_assets(
+    assets: Sequence[RegisteredAsset], *, key: str, candidate: BundleCandidate
+) -> List[RegisteredAsset]:
+    """The registered assets this candidate's OWN snapshot names.
+
+    The ownership half of the answer, and ONE expression for it: a registered asset
+    below a nested child bundle belongs to that bundle, not to this row, so a
+    recursive prefix read is never the owner's list. Read by the report (cover,
+    the create-time belt) and by the create door alike.
+    """
+    own = _own_paths(key, candidate)
+    return [asset for asset in assets if asset.path in own]
+
+
+def _claimed_assets(
+    assets: Sequence[RegisteredAsset], *, key: str, claims: Optional[Mapping[str, str]]
+) -> List[RegisteredAsset]:
+    """``_own_assets`` narrowed by the report-wide one-owner map.
+
+    THE ownership expression the report and the create door share (Mf-quv4's
+    hand-off, closed here). Two rows can name one path - a parent's snapshot and a
+    child's - and ``_claim_owners`` settled which one the deepest-first walk gave
+    it to, so a container neither reports ready over a child's models nor attaches
+    them. ``claims is None`` is the inert re-offered group: it owns nothing and
+    forfeits nothing, so it keeps every asset its own snapshot names.
+
+    A path the map is silent about stays with the row that named it, which is what
+    lets this one expression serve a list of ALL kinds: the map indexes MODELS only
+    (``_claim_owners``), so an image or a README has no entry and no entry means no
+    owner, not a forfeit. Written as ``claims.get(asset.path, key)``, not
+    ``claims.get(asset.path)``: the latter would drop every non-model whenever a
+    caller widened ``member_asset_ids``' ``kinds`` beyond models, and the caller
+    that does that is ``Mf-wsdo``. For the models the map does index, the two forms
+    answer identically - every model a non-archive candidate names is in it.
+    """
+    if claims is None:
+        return list(assets)
+    return [asset for asset in assets if claims.get(asset.path, key) == key]
 
 
 def twin_verified(zip_path: Path, folder_entries: Sequence[bundle_detect.BundleEntry]) -> bool:
@@ -1892,16 +1914,6 @@ def _set_enrichments(records: Mapping[str, dict]) -> None:
     settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, json.dumps(dict(records), sort_keys=True))
 
 
-def _bundle_marker(metadata_json: Optional[str]) -> dict:
-    """The reserved ``_bundle`` marker of one project row, or ``{}``.
-
-    Delegates to `project_service.bundle_marker_of`, the one implementation:
-    `bundle_service` already imports that module, so the arrow points this way and
-    no cycle can form.
-    """
-    return project_service.bundle_marker_of(metadata_json)
-
-
 def _compound_splits(session: Session) -> Dict[str, Tuple[str, ...]]:
     """Which groups a created project's own marker records as excluded, by bundle key.
 
@@ -1920,7 +1932,7 @@ def _compound_splits(session: Session) -> Dict[str, Tuple[str, ...]]:
     """
     splits: Dict[str, Tuple[str, ...]] = {}
     for project in session.exec(select(Project).order_by(Project.id)):
-        marker = _bundle_marker(project.metadata_json)
+        marker = project_service.bundle_marker_of(project.metadata_json)
         key = marker.get("key")
         groups = marker.get("groups")
         if not isinstance(groups, list):
@@ -1933,100 +1945,6 @@ def _compound_splits(session: Session) -> Dict[str, Tuple[str, ...]]:
         if isinstance(key, str) and excluded:
             splits[key] = tuple(dict.fromkeys(splits.get(key, ()) + excluded))
     return splits
-
-
-class ExistingProject(NamedTuple):
-    """The project a bundle already became, and which identity proved it.
-
-    The identity is reported because the four are not equally certain: a
-    ``_bundle`` marker is proof the app made this project from this bundle, a
-    source URL is strong evidence of the same origin, a name match is a guess,
-    and asset containment is strong evidence about the FILES that says nothing
-    about intent - a human may have made that project for their own reasons.
-    """
-
-    project: Project
-    match: str
-
-
-def _asset_owner(
-    index: Mapping[str, Tuple[str, ...]],
-    asset_ids: Sequence[str],
-    projects: Mapping[str, Project],
-) -> Optional[Project]:
-    """The one project that holds every wanted asset, or None.
-
-    Containment, not intersection: an asset id with no membership contributes
-    nothing, so a project holding only SOME of the files can never reach
-    ``len(asset_ids)`` and a large project that happens to hold one file cannot
-    claim a bundle it does not represent. An empty wanted set owns nothing. A
-    membership row whose project row is missing is ignored, so a dangling row
-    can never claim a bundle.
-
-    Ties break on ``(lower(project.name), project.id)``: row order must never
-    decide which project owns a bundle.
-    """
-    wanted = tuple(dict.fromkeys(asset_ids))
-    if not wanted:
-        return None
-    counts: Dict[str, int] = {}
-    for asset_id in wanted:
-        for project_id in index.get(asset_id, ()):
-            counts[project_id] = counts.get(project_id, 0) + 1
-    owners = [
-        projects[project_id]
-        for project_id, count in counts.items()
-        if count == len(wanted) and project_id in projects
-    ]
-    if not owners:
-        return None
-    return min(owners, key=lambda project: (project.name.lower(), project.id))
-
-
-def find_existing_project(
-    session: Session,
-    *,
-    key: str,
-    source_url: Optional[str],
-    name: str,
-    assets: Sequence[str] = (),
-    asset_index: Optional[Mapping[str, Tuple[str, ...]]] = None,
-) -> Optional[ExistingProject]:
-    """The project this bundle already became, in the order that cannot lie.
-
-    Four identities, strongest first. The marker key is the identity a previous
-    create wrote; the source URL covers a project imported by hand from the same
-    page; an exact casefolded name covers a project made before the marker
-    existed; asset containment covers a project a human made by hand over the
-    bundle's own files. Any hit means ``already_created`` and the row is never
-    touched again.
-
-    The marker returns from inside the loop on purpose: it is proof, so it is
-    also the cheapest answer - a marker match never reads the membership index.
-    """
-    wanted_name = (name or "").strip().casefold()
-    projects_by_id: Dict[str, Project] = {}
-    by_name: Optional[Project] = None
-    for project in session.exec(select(Project).order_by(func.lower(Project.name), Project.id)):
-        projects_by_id[project.id] = project
-        if _bundle_marker(project.metadata_json).get("key") == key:
-            return ExistingProject(project, MATCH_MARKER)
-        if by_name is None and wanted_name and project.name.strip().casefold() == wanted_name:
-            by_name = project
-    existing = project_service.find_project_by_source(session, source_url)
-    if existing is not None:
-        return ExistingProject(existing, MATCH_SOURCE_URL)
-    if by_name is not None:
-        return ExistingProject(by_name, MATCH_NAME)
-    wanted = tuple(dict.fromkeys(asset for asset in assets if asset))
-    if not wanted:
-        # An empty containment set can never claim a bundle.
-        return None
-    # Lazy: a marker, source or name hit never pays for the index, and a caller
-    # that did not prebuild one still gets the asset identity.
-    index = asset_index if asset_index is not None else project_assets_index(session)
-    owner = _asset_owner(index, wanted, projects_by_id)
-    return ExistingProject(owner, MATCH_ASSETS) if owner is not None else None
 
 
 def _scope(path: str) -> str:
@@ -2179,11 +2097,12 @@ def _claim_owners(candidates: Sequence[BundleCandidate], *, scope: str) -> Dict[
     * DEEPEST KEY FIRST, and the first writer wins. Two rows can name one path
       (a parent's snapshot and a child's), and the deepest key is the row the
       deepest-first walk claimed the path for, so it is the row the report credits.
-      The CREATE door still builds its attach set from ``_own_paths`` rather than
-      from this map (``_create_one``), so making the two agree is the dedupe work
-      ``Mf-yhjo`` owns, not this ticket's; what this map decides today is which row
-      the report says owns a model, and so which row ``find_existing_project``'s
-      assets leg can call already-created.
+      The CREATE door reads this same map now (``_create_one`` through
+      ``_claimed_assets``), which is what ``Mf-yhjo`` closed: the report no longer
+      credits one row with a model while the create hands it to another. What this
+      map decides is which row owns a model, and so both which row the report says
+      is ``ready`` and which row ``find_existing_project``'s assets leg can call
+      already-created.
     * Only ``bundle_detect.MODEL_SUFFIXES`` paths are claimable. The app attaches
       MODELS and nothing else (``_create_one``'s ``model_assets``), so images and
       text are not what decides ownership - letting a cover image decide it would
@@ -2282,15 +2201,13 @@ def _report_row(
     assets = registered_assets(session, key)
     # Only the candidate's OWN entries decide status and cover: a registered
     # asset below a nested child bundle belongs to that bundle, not to this one.
-    own = _own_paths(key, candidate)
-    own_assets = [asset for asset in assets if asset.path in own]
+    # The ONE ownership expression, shared with the create door (`_create_one`).
+    own_assets = _own_assets(assets, key=key, candidate=candidate)
     models = [asset for asset in own_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
-    # The models this row OWNS, not merely the ones under its prefix. Two rows can
-    # name one path; ``claims`` settled which one the deepest-first walk gave it
-    # to, so a container no longer reports ready over a child's models.
-    # ``claims is None`` is the inert re-offered group: it owns nothing and
-    # forfeits nothing, so it keeps every model its own snapshot names.
-    mine = models if claims is None else [asset for asset in models if claims.get(asset.path) == key]
+    # The models this row OWNS, not merely the ones under its prefix: the same
+    # narrowing the create door applies, so the row that says `ready` is the row
+    # that would attach these files and no other.
+    mine = _claimed_assets(models, key=key, claims=claims)
     # Deliberate reading of "every registered asset": the app only ever
     # attaches MODELS to a project (``_create_one``'s ``model_assets``), so
     # literal full-set containment over images and text too would report the
@@ -2356,9 +2273,30 @@ def _report_row(
             "rel_path": _qualify(scope, candidate.archive_path),
             "twin_verified": _archive_twin_verified(root, candidate.archive_path, candidate),
         }
-    existing = find_existing_project(
+    # The twin identity, for the door that creates from the ARCHIVE. A directory row
+    # that twins a `.zip` is the same product the Extract door would have made from
+    # that `.zip`, and the archive-extract marker records the archive it read - so
+    # asking with it is what makes the two doors see each other.
+    #
+    # Restricted to non-archive candidates, and that is the SECOND of two locks on
+    # losing a `.zip` row - the first is `archive_identity`'s `archive:` prefix, and
+    # the measurement credits the prefix, not this guard. Asked of a `.zip` candidate
+    # today this leg is inert anyway: an `is_archive` candidate carries no
+    # `archive_path` of its own, so there is nothing to ask with. It stays because
+    # "a `.zip` row is never asked with an archive identity" is the rule rather than a
+    # coincidence of the current candidate shape. What is genuinely load-bearing is
+    # that the marker's `key` is not a bare path: measured with the prefix dropped,
+    # the `.zip` row answers `existing_project_match == "marker"` and the report's
+    # `already_created` goes 0 -> 1 for it, and the web layer hides already_created
+    # rows behind "Show created" - which is the only place the Extract door that
+    # `.zip` row exists to offer is ever shown. Pinned by
+    # `test_the_zip_row_keeps_its_extract_door_after_its_archive_became_a_project`,
+    # whose mutation is that prefix.
+    twin = None if candidate.is_archive else _qualify(scope, candidate.archive_path or "")
+    existing = project_create_service.find_existing_project(
         session,
         key=key,
+        archive=twin,
         source_url=facts.source_url,
         name=suggestion,
         assets=containment,
@@ -2385,7 +2323,7 @@ def _report_row(
     drift_state = bundle_drift.DRIFT_NOT_APPLICABLE
     drift_count: Optional[int] = None
     if existing is not None and existing.match == MATCH_MARKER:
-        marker = _bundle_marker(existing.project.metadata_json)
+        marker = project_service.bundle_marker_of(existing.project.metadata_json)
         drift_state, drift_root = bundle_drift.classify(
             marker, root_present=lambda root: bundle_drift.has_rows_under(registered, root)
         )
@@ -2528,7 +2466,7 @@ def _report_from_scan(
     with Session(engine) as session:
         folders = _folder_index(session)
         # One query for ALL candidates: containment is a dict lookup per row.
-        asset_index = project_assets_index(session)
+        asset_index = project_create_service.project_assets_index(session)
         # One registered set for the whole report too: drift is a string prefix
         # and a dict lookup per row, never a per-candidate read.
         registered = registered_index(session)
@@ -2774,6 +2712,7 @@ def _create_one(
     ctx: audit.AuditContext,
     *,
     asset_index: Optional[Mapping[str, Tuple[str, ...]]] = None,
+    claims: Optional[Mapping[str, str]] = None,
 ) -> dict:
     key = (item.key or "").strip()
     if row is None or candidate is None:
@@ -2792,40 +2731,54 @@ def _create_one(
     name = (item.name or "").strip() or row["name_suggestion"]
     enrichment = _enrichment(row, item.name_only)
     marker = {
-        "_bundle": {
-            "key": key,
-            "detector": row["detector"],
-            "confidence": row["confidence"],
-            "rel_dir": row["rel_path"],
-            "archive": (row["archive"] or {}).get("rel_path"),
-            "twin_verified": (row["archive"] or {}).get("twin_verified") if row["archive"] else None,
-        }
+        "key": key,
+        "detector": row["detector"],
+        "confidence": row["confidence"],
+        "rel_dir": row["rel_path"],
+        "archive": (row["archive"] or {}).get("rel_path"),
+        "twin_verified": (row["archive"] or {}).get("twin_verified") if row["archive"] else None,
     }
     # The project records what the page supplied, so a later reader can tell the
     # vendor's word from a human's; `name_only` deliberately records none.
     if not item.name_only and row.get("enrichment"):
-        marker["_bundle"]["enrichment"] = row["enrichment"]
+        marker["enrichment"] = row["enrichment"]
     with Session(engine) as session:
         # The same set the report used: the files this bundle's snapshot names,
         # never a nested child bundle's models under the recursive prefix. Hoisted
         # so the existing-project check and the create-time belt read one query.
         assets = registered_assets(session, key)
-        own = _own_paths(key, candidate)
-        own_assets = [asset for asset in assets if asset.path in own]
+        # THE ownership expression, the one `_report_row` reads: this row's own
+        # snapshot, narrowed by the report-wide one-owner map. Two rows can name
+        # one model and the map settled which row the deepest-first walk gave it
+        # to; a create that asked its OWN question instead is how a parent and its
+        # child became two projects over one set of files (Mf-quv4's hand-off).
+        own_assets = _own_assets(assets, key=key, candidate=candidate)
         # The ATTACH set, filtered: an excluded group's parts stay registered and
         # stay in the row's own paths, they are simply not this product's. The
         # empty case is a no-op because `startswith(())` is False.
         included_assets = [asset for asset in own_assets if not asset.path.startswith(prefixes)]
-        included_models = [
-            asset for asset in included_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES
+        owned_assets = _claimed_assets(included_assets, key=key, claims=claims)
+        members = [
+            project_create_service.MemberCandidate(asset.id, asset.path) for asset in owned_assets
         ]
-        model_assets = [asset.id for asset in included_models]
+        # Which KINDS a create attaches is one seam's question and this door's
+        # answer: models only, because the app attaches models and support files
+        # follow other rules. `MODEL_SUFFIXES` is named HERE, by the door that owns
+        # detection, and handed down - this function holds no suffix test of its
+        # own, so the day the answer stops being a suffix (Mf-wsdo) moves one
+        # argument and one body, not two doors.
+        model_assets = project_create_service.member_asset_ids(
+            members, kinds=bundle_detect.MODEL_SUFFIXES
+        )
+        attached = set(model_assets)
         # Bucket the attach set by group once, so `attached` below is a lookup
         # rather than a prefix scan repeated for every group.
         models_by_group: Dict[str, int] = {}
         key_prefix = f"{key}/"
-        for asset in included_models:
-            group_name = asset.path[len(key_prefix):].split("/", 1)[0]
+        for member in members:
+            if member.asset_id not in attached:
+                continue
+            group_name = member.path[len(key_prefix):].split("/", 1)[0]
             models_by_group[group_name] = models_by_group.get(group_name, 0) + 1
         cover = row["cover"]
         if prefixes:
@@ -2852,22 +2805,6 @@ def _create_one(
         cover_rel_path = cover["rel_path"]
         if cover_rel_path and not cover_rel_path.startswith(key_prefix):
             cover_rel_path = f"{key_prefix}{cover_rel_path}"
-        existing = find_existing_project(
-            session,
-            key=key,
-            source_url=enrichment["source_url"],
-            name=name,
-            assets=model_assets,
-            asset_index=asset_index,
-        )
-        if existing is not None:
-            return _result(
-                key,
-                CREATE_SKIPPED,
-                project_id=existing.project.id,
-                name=existing.project.name,
-                reason="already_created",
-            )
         # THE BELT IS UNTOUCHED, and neither `assets` nor `own_assets` is filtered
         # by the exclusion. The create-time belt is the same rule the report
         # applies: every inferred confidence, not just `low`, is refused when its
@@ -2878,8 +2815,18 @@ def _create_one(
         # compound row from the belt is the named anti-fix. The belt stays live on
         # a `low` compound row, and the refusal comes before the project row, so
         # it can never leave a half-created project.
-        if row["confidence"] in bundle_detect.INFERRED_CONFIDENCES and len(assets) > len(own_assets):
-            return _result(key, CREATE_FAILED, reason=CONTAINS_BUNDLES)
+        #
+        # What moved is WHERE it is answered: the reason is settled here and handed
+        # to the primitive, which asks it AFTER the dedupe and BEFORE the write. A
+        # row that both already exists and would be refused therefore still
+        # answers `already_created` - the operator has the project, and that is the
+        # more useful sentence than the one about a create that never happens.
+        belt = (
+            CONTAINS_BUNDLES
+            if row["confidence"] in bundle_detect.INFERRED_CONFIDENCES
+            and len(assets) > len(own_assets)
+            else None
+        )
         if candidate.compound:
             # The guard uses the walk's own verdict, not the row's: in-process both
             # come from ONE `scan`, so they cannot disagree.
@@ -2894,8 +2841,8 @@ def _create_one(
             # `IMPORT_MOUNT_INCLUDE_HIDDEN=1` makes it register the sidecars the
             # detector still refuses, which separates the numbers again - named in
             # ADR 0010 Decision 25, off by default and untested.
-            marker["_bundle"]["shape"] = "compound"
-            marker["_bundle"]["groups"] = [
+            marker["shape"] = "compound"
+            marker["groups"] = [
                 {
                     "name": group["name"],
                     "model_count": group["model_count"],
@@ -2905,24 +2852,47 @@ def _create_one(
                 }
                 for group in groups
             ]
-            marker["_bundle"]["cover"] = {
+            marker["cover"] = {
                 "asset_id": cover["asset_id"],
                 "rel_path": cover_rel_path,
                 "reason": cover["reason"],
                 "group": _cover_group(cover_rel_path, key, groups),
             }
+        # One dedupe, one write, one transaction. The primitive asks
+        # `find_existing_project` with the identities THIS door holds - the bundle
+        # key, the twin archive this row pairs with (so a project the Extract door
+        # already made from that `.zip` is seen from here), the vendor URL and the
+        # name - and then writes the project and every member in the SAME commit,
+        # so nothing here strands a project that holds no files.
         try:
-            project = project_service.create_project(
+            outcome = project_create_service.create_project_from_members(
                 session,
-                name,
-                enrichment["description"],
-                cover["asset_id"],
+                name=name,
+                origin=project_create_service.ORIGIN_DETECTION,
+                members=members,
+                marker=marker,
+                dedupe=project_create_service.Dedupe(
+                    key=key,
+                    archive=(row["archive"] or {}).get("rel_path"),
+                    source_url=enrichment["source_url"],
+                    name=name,
+                    # Containment is this door's identity to hold: it is asking about a
+                    # folder a scan registered, and a hand-made project over those same
+                    # files IS the answer. The archive door deliberately does not ask
+                    # this leg (`archive_project_service`), because what it holds is one
+                    # click on one archive.
+                    assets=True,
+                ),
+                cover_asset_id=cover["asset_id"],
+                kinds=bundle_detect.MODEL_SUFFIXES,
+                refuse=belt,
+                description=enrichment["description"],
                 creator=enrichment["creator"],
                 source_url=enrichment["source_url"],
+                project_origin="imported",
                 licence=enrichment["licence"],
                 licence_url=enrichment["licence_url"],
-                origin="imported",
-                metadata=marker,
+                asset_index=asset_index,
             )
         except HTTPException as exc:
             if exc.status_code == 409:
@@ -2930,10 +2900,25 @@ def _create_one(
                 # cleans to an existing one slips the pre-check: a skip, never a 500.
                 return _result(key, CREATE_SKIPPED, name=name, reason="project name already exists")
             return _result(key, CREATE_FAILED, name=name, reason=str(exc.detail))
-        project_id = project.id
-        project_name = project.name
+        if outcome.status == project_create_service.STATUS_ALREADY_CREATED:
+            return _result(
+                key,
+                CREATE_SKIPPED,
+                project_id=outcome.project_id,
+                name=outcome.name,
+                reason="already_created",
+            )
+        if outcome.status == project_create_service.STATUS_REFUSED:
+            # Nothing was written: a refusal is the primitive's word for "I did not
+            # even insert", which is the case the belt exists to catch. No `name`, as
+            # before - a refused create names nothing, and an item that never existed
+            # in the database must not start carrying a name on the wire now that the
+            # answer comes from a different module.
+            return _result(key, CREATE_FAILED, reason=outcome.reason or CONTAINS_BUNDLES)
+        project_id = outcome.project_id
+        project_name = outcome.name
+        assets_added = len(outcome.members)
 
-    added, skipped, failed = project_service.add_assets(project_id, model_assets)
     audit.record(
         audit.Event(
             audit.BUNDLE_CREATE,
@@ -2941,8 +2926,8 @@ def _create_one(
             {
                 "project_id": project_id,
                 "created": True,
-                "assets_added": len(added),
-                "assets_failed": len(failed),
+                "assets_added": assets_added,
+                "assets_failed": 0,
                 "detector": row["detector"],
                 "confidence": row["confidence"],
                 "name_only": bool(item.name_only),
@@ -2953,14 +2938,21 @@ def _create_one(
         ),
         ctx=ctx,
     )
+    # `skipped_assets` and `failed_assets` are kept on the wire at 0 / `[]`, and
+    # they are structurally constant now: the create is one commit, so a member is
+    # never "already a member" of a project that does not exist yet and an unknown
+    # asset id refuses the whole request before the insert (404) rather than
+    # failing per id after it. They are not deleted because they are declared
+    # fields of `BundleCreateItemOut` and of the serialised OpenAPI fixture, and
+    # removing a wire field is a contract change this ticket did not ask for.
     return _result(
         key,
         CREATE_CREATED,
         project_id=project_id,
         name=project_name,
-        assets_added=len(added),
-        skipped_assets=len(skipped),
-        failed_assets=failed,
+        assets_added=assets_added,
+        skipped_assets=0,
+        failed_assets=[],
     )
 
 
@@ -2984,12 +2976,26 @@ def create_bundles(items: Sequence[BundleCreateItem], ctx: audit.AuditContext) -
     by_key.update({candidate.key: candidate for candidate in scan.absorbed if candidate.key in rows})
     # One query for the whole create pass, so a create is never O(items) queries.
     with Session(engine) as session:
-        asset_index = project_assets_index(session)
+        asset_index = project_create_service.project_assets_index(session)
+    # The same report-wide one-owner map the report rows were stamped with, built
+    # from the SAME scan, so the create door and the report cannot disagree about
+    # which row owns a model. An absorbed group re-offered as its own row is served
+    # `claims=None` exactly as `_report_from_scan` serves it: it never writes
+    # anything, so it may neither take a path away nor have one taken from it.
+    claims = _claim_owners(scan.candidates, scope="")
+    absorbed_keys = {candidate.key for candidate in scan.absorbed}
     counters = {CREATE_CREATED: 0, CREATE_SKIPPED: 0, CREATE_BLOCKED: 0, CREATE_FAILED: 0}
     results: List[dict] = []
     for item in items:
         key = (item.key or "").strip()
-        result = _create_one(item, rows.get(key), by_key.get(key), ctx, asset_index=asset_index)
+        result = _create_one(
+            item,
+            rows.get(key),
+            by_key.get(key),
+            ctx,
+            asset_index=asset_index,
+            claims=None if key in absorbed_keys else claims,
+        )
         counters[result["status"]] += 1
         results.append(result)
     return {
