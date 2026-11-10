@@ -141,7 +141,7 @@ function makeState(report: BundleReport | null): BundleDetectState {
     showCreated: false,
     setShowCreated: () => undefined,
     refresh: async () => undefined,
-    create: async () => undefined,
+    create: async () => null,
     dismiss: async () => undefined,
     // Source-page enrichment is the queue view's concern; these fixtures never
     // call it and never show a notice.

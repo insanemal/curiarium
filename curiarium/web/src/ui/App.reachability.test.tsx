@@ -671,8 +671,10 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
     expect(getImportRunsMock, `${context}: a mode switch reads no imports`).toHaveBeenCalledTimes(1);
     expect(getBundleReportMock, `${context}: a mode switch walks no bundles`).toHaveBeenCalledTimes(1);
 
-    // leaving and re-entering the destination refetches once.
-    fireEvent.click(screen.getByRole("button", { name: "Back to library" }));
+    // leaving and re-entering the destination refetches once. The control names
+    // the mode it returns to, and this queue was reached from Projects (the radio
+    // above switched it), so that is the name to click.
+    fireEvent.click(screen.getByRole("button", { name: "Back to projects" }));
     expect(screen.queryAllByRole("tablist"), `${context}: leaving Review drops the tab row`).toHaveLength(
       0,
     );

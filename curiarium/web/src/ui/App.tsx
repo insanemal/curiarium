@@ -43,7 +43,7 @@ import { useSessionRole } from "./useSessionRole";
 // this ticket's touch-set. `ui/deferredFileGrants.test.tsx` sets the same precedent
 // by importing `../lib/api/grants` directly.
 import { OidcExchangeError, exchangeOidcCode } from "../lib/api/auth";
-import type { ActiveView, ReviewQueueKey } from "./views";
+import { BACK_TO_MODE_LABEL, type ActiveView, type ReviewQueueKey } from "./views";
 import BundleReviewView from "./review/BundleReviewView";
 import ImportsReviewView from "./review/ImportsReviewView";
 import MissingFilesReviewView from "./review/MissingFilesReviewView";
@@ -233,7 +233,8 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
     root.classList.toggle("theme-blue", resolvedTheme === "blue");
   }, [resolvedTheme]);
   // Leaving the Review destination unmounts the control that was clicked
-  // ("Back to library"), so the browser drops focus to <body> and a keyboard
+  // (the header's back control, named for the mode it returns to - "Back to
+  // files" or "Back to projects"), so the browser drops focus to <body> and a keyboard
   // user restarts at the top of the document. Land on the header's Review entry
   // instead - but only when nothing still-connected owns focus, so a click on a
   // header control that stays mounted (Settings, Audit, the mode switch) is
@@ -481,11 +482,21 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
   // The project list only loads once projects mode was visited, so the bump
   // of `assetsVersion` (the list effect's other dependency) refetches it even
   // when the import happened from a first, files-mode session.
+  //
+  // `setActiveView("library")` is the part that makes this a LANDING. Without it
+  // `handleModeChange` keeps Review open - it ends with `setActiveView(view =>
+  // view === "review" ? view : "library")`, because switching mode must not throw
+  // the operator out of a queue - so a project created from the queue would set
+  // `openProjectId` and leave the queue on screen: the Projects radio checked,
+  // the project open behind it, and nothing the operator can see. `UploadBar`
+  // mounts only under `activeView === "library"`, which is the only reason its
+  // use of this handler has never shown the defect.
   const handleProjectImported = React.useCallback(
     (projectId: string) => {
       handleModeChange("projects");
       setOpenProjectId(projectId);
       setAssetsVersion(n => n + 1);
+      setActiveView("library");
     },
     [handleModeChange],
   );
@@ -502,11 +513,29 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
   }, []);
 
   // The card grid appends the row the server just returned instead of
-  // refetching, matching ProjectPickerDialog's precedent: an appended row keeps
-  // the created card focusable immediately. It can disagree with the server's
-  // name ordering until the next refetch (`assetsVersion`), which is accepted.
+  // refetching: an appended row keeps the created card focusable immediately,
+  // which a refetch cannot promise because it shows what the server had when the
+  // request was answered. It can disagree with the server's name ordering until
+  // the next refetch (`assetsVersion`), which is accepted.
+  //
+  // `ProjectPickerDialog`'s own append (Mf-1sfc) is the precedent this copies,
+  // and it is only a precedent from here: at the base of this ticket the picker
+  // appended to its own private list and said nothing to App, so nothing in the
+  // tree did this before. Appending is now the shared half of the contract, and
+  // every surface that hands App a created row hands it the server's - never a
+  // client-fabricated Project.
+  //
+  // The id guard is what makes append-plus-append safe. Two doors can report the
+  // same project to this one handler (a surface that both appends and bumps, a
+  // retry, a double click), and append-then-append is the only way the grid can
+  // show the same card twice; a bump is always idempotent, because the refetch
+  // replaces the whole array.
   const handleProjectCreated = React.useCallback((project: Project) => {
-    setProjects(list => (list ? [...list, project] : [project]));
+    setProjects(list => {
+      const current = list ?? [];
+      if (current.some(item => item.id === project.id)) return list;
+      return [...current, project];
+    });
   }, []);
 
   // One handler for all three effects of a delete, so React batches them into a
@@ -753,7 +782,7 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                   className="px-3 py-2 rounded-md border border-panel-strong text-sm"
                   onClick={() => setActiveView("library")}
                 >
-                  Back to library
+                  {BACK_TO_MODE_LABEL[mode]}
                 </button>
               )}
               <button
@@ -792,6 +821,7 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                   scrollElementRef={mainScrollRef}
                   onNavigateFolder={handleSelectFolder}
                   onProjectsChanged={handleAssetsChanged}
+                  onProjectCreated={handleProjectCreated}
                 />
               </div>
             )}
@@ -850,7 +880,12 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                     aria-labelledby={`review-tab-${resolvedQueue}`}
                   >
                     {resolvedQueue === "bundles" && (
-                      <BundleReviewView state={bundleReview} canContribute={canContribute} />
+                      <BundleReviewView
+                        state={bundleReview}
+                        canContribute={canContribute}
+                        onProjectsChanged={handleAssetsChanged}
+                        onProjectImported={handleProjectImported}
+                      />
                     )}
                     {resolvedQueue === "imports" && (
                       <ImportsReviewView

@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within, type RenderResult } from "@testing-library/react";
 import { createRef } from "react";
 
-import type { Asset, Folder } from "../lib/api";
+import type { Asset, Folder, Project } from "../lib/api";
 
 vi.mock("../lib/api", () => ({
   UnauthorizedError: class UnauthorizedError extends Error {},
@@ -59,11 +59,13 @@ import {
   addProjectAssets,
   batchDeleteAssets,
   batchSetTags,
+  createProject,
   deleteAsset,
   listAssets,
   listCreators,
   listFolders,
   listProjectAssets,
+  listProjects,
   listTags,
   removeProjectAssets,
   setTags,
@@ -82,6 +84,8 @@ const removeProjectAssetsMock = vi.mocked(removeProjectAssets);
 const deleteAssetMock = vi.mocked(deleteAsset);
 const batchDeleteAssetsMock = vi.mocked(batchDeleteAssets);
 const addProjectAssetsMock = vi.mocked(addProjectAssets);
+const createProjectMock = vi.mocked(createProject);
+const listProjectsMock = vi.mocked(listProjects);
 const updateAssetMetaMock = vi.mocked(updateAssetMeta);
 const setTagsMock = vi.mocked(setTags);
 const batchSetTagsMock = vi.mocked(batchSetTags);
@@ -1045,5 +1049,153 @@ describe("AssetGrid project membership", () => {
 
     // Selection is pure UI state: no membership or delete route may be touched.
     expectNoWriteCalls();
+  });
+});
+
+describe("AssetGrid project picker hand-off", () => {
+  /**
+   * The middle link of App → AssetGrid → ProjectPickerDialog. Both project-list
+   * callbacks are mounted here: `onProjectsChanged` is the bump the grid has always
+   * forwarded, `onProjectCreated` is the append threaded straight through to the
+   * dialog without the grid holding an opinion about the row.
+   */
+  function renderHandoffGrid(handoff: {
+    onProjectCreated: (project: Project) => void;
+    onProjectsChanged: () => void;
+  }) {
+    return render(
+      <AssetGrid
+        canContribute
+        canDelete
+        theme="dark"
+        projectId="p1"
+        projectName="Hydra"
+        onProjectsChanged={handoff.onProjectsChanged}
+        onProjectCreated={handoff.onProjectCreated}
+      />,
+    );
+  }
+
+  /** What `createProject` resolves. No field here is something the client could fill in. */
+  function createdServerRow(): Project {
+    return {
+      id: "p9",
+      name: "Fresh",
+      description: null,
+      creator: null,
+      source_url: null,
+      licence: null,
+      licence_url: null,
+      origin: "own",
+      cover_asset_id: null,
+      cover_thumb_url: "/thumbs/fresh.jpg?v=9",
+      asset_count: 7,
+      metadata_json: {},
+      total_size: 0,
+      created_at: "2026-01-03T00:00:00Z",
+      updated_at: "2026-01-03T00:00:00Z",
+    };
+  }
+
+  /**
+   * Select both loaded members and reach the picker through the card kebab — the
+   * sequence `AssetGrid.projectPicker.test.tsx` drives.
+   */
+  async function openPickerFromCard(utils: RenderResult): Promise<HTMLElement> {
+    const boxes = screen.getAllByRole("checkbox", { name: "Select" });
+    expect(boxes).toHaveLength(2);
+    boxes.forEach(box => fireEvent.click(box));
+    return openPickerFromMenu(utils);
+  }
+
+  /** The kebab half of the sequence, for a second open over an existing selection. */
+  async function openPickerFromMenu(utils: RenderResult): Promise<HTMLElement> {
+    fireEvent.click(within(cardFor("a1")).getByRole("button", { name: "More actions" }));
+    // One card menu is open, so this cannot be the bulk bar's button of the same name.
+    fireEvent.click(screen.getByRole("menuitem", { name: "Add to project…" }));
+    return utils.findByRole("dialog", { name: "Add to project" });
+  }
+
+  /** Types a name into the inline create field and submits the create-and-add form. */
+  function createAndAdd(dialog: HTMLElement, name: string): void {
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "New project name" }), {
+      target: { value: name },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create and add" }));
+  }
+
+  /** A `listProjects` that never answers, so no refetch can be the source of a row. */
+  function leaveTheListUnresolved(): void {
+    listProjectsMock.mockReturnValue(new Promise<Project[]>(() => {}));
+  }
+
+  it("threads the row the picker created straight to the caller, with no list to refetch from", async () => {
+    const createdRow = createdServerRow();
+    leaveTheListUnresolved();
+    createProjectMock.mockResolvedValue(createdRow);
+    addProjectAssetsMock.mockResolvedValue({ added: ["a1", "b2"], skipped: [], failed: [] });
+    const onProjectCreated = vi.fn();
+    const onProjectsChanged = vi.fn();
+    const utils = renderHandoffGrid({ onProjectCreated, onProjectsChanged });
+
+    await screen.findByText("Calibration cube");
+    const dialog = await openPickerFromCard(utils);
+
+    // The dialog asked for the list and is still waiting: its own list is pending,
+    // so the row below cannot have arrived through a render of fetched projects.
+    expect(listProjectsMock).toHaveBeenCalledTimes(1);
+    expect(within(dialog).getByText("Loading projects…")).toBeTruthy();
+    expect(within(dialog).queryByRole("radio", { name: "Hydra" })).toBeNull();
+
+    createAndAdd(dialog, "Fresh");
+
+    await waitFor(() => expect(onProjectCreated).toHaveBeenCalledTimes(1));
+    const handed = onProjectCreated.mock.calls[0][0];
+    // Identity: the grid handed over the object `createProject` resolved rather than
+    // rebuilding one from the typed name on the way out.
+    expect(handed).toBe(createdRow);
+    expect(onProjectCreated).toHaveBeenCalledWith(createdRow);
+    expect(handed.asset_count).toBe(7);
+    expect(handed.cover_thumb_url).toBe("/thumbs/fresh.jpg?v=9");
+
+    // The bump survived threading as well: App still gets its `assetsVersion` nudge
+    // beside the append.
+    expect(onProjectsChanged).toHaveBeenCalled();
+
+    expect(createProjectMock).toHaveBeenCalledTimes(1);
+    expect(createProjectMock).toHaveBeenCalledWith({ name: "Fresh" });
+    expect(addProjectAssetsMock).toHaveBeenCalledTimes(1);
+    expect(addProjectAssetsMock).toHaveBeenCalledWith("p9", ["a1", "b2"]);
+  });
+
+  it("reports the same row twice when the create path runs twice — the dedupe is App's", async () => {
+    const createdRow = createdServerRow();
+    leaveTheListUnresolved();
+    // Both creates resolve to the very same row, which is what a retry or a second
+    // "Add to project…" over the same selection hands back.
+    createProjectMock.mockResolvedValue(createdRow);
+    addProjectAssetsMock.mockResolvedValue({ added: ["a1", "b2"], skipped: [], failed: [] });
+    const onProjectCreated = vi.fn();
+    const onProjectsChanged = vi.fn();
+    const utils = renderHandoffGrid({ onProjectCreated, onProjectsChanged });
+
+    await screen.findByText("Calibration cube");
+
+    // One grid, one threaded prop, two creates (the add closes the dialog each time).
+    createAndAdd(await openPickerFromCard(utils), "Fresh");
+    await waitFor(() => expect(onProjectCreated).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(utils.queryByRole("dialog")).toBeNull());
+
+    createAndAdd(await openPickerFromMenu(utils), "Fresh");
+    await waitFor(() => expect(onProjectCreated).toHaveBeenCalledTimes(2));
+
+    // The grid forwards what it is given and adds no dedupe of its own. The id guard
+    // lives in `App.handleProjectCreated`, and it is pinned there at App level.
+    expect(onProjectCreated).toHaveBeenNthCalledWith(1, createdRow);
+    expect(onProjectCreated).toHaveBeenNthCalledWith(2, createdRow);
+    expect(onProjectCreated.mock.calls[0][0]).toBe(createdRow);
+    expect(onProjectCreated.mock.calls[1][0]).toBe(createdRow);
+    expect(onProjectsChanged).toHaveBeenCalled();
+    expect(createProjectMock).toHaveBeenCalledTimes(2);
   });
 });

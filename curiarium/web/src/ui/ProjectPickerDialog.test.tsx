@@ -54,11 +54,13 @@ type HarnessProps = {
   assetIds: string[];
   onClose: () => void;
   onChanged: () => void;
+  /** The list owner's append: the server's row for a project this dialog created. */
+  onProjectCreated?: (project: Project) => void;
   onUnauthorized: () => void;
 };
 
 /** Mounts the picker the way the grid does: `onClose` really unmounts it. */
-function Harness({ assetIds, onClose, onChanged, onUnauthorized }: HarnessProps) {
+function Harness({ assetIds, onClose, onChanged, onProjectCreated, onUnauthorized }: HarnessProps) {
   const [open, setOpen] = useState(true);
   if (!open) return null;
   return (
@@ -69,24 +71,59 @@ function Harness({ assetIds, onClose, onChanged, onUnauthorized }: HarnessProps)
         onClose();
       }}
       onChanged={onChanged}
+      onProjectCreated={onProjectCreated}
       onUnauthorized={onUnauthorized}
     />
   );
 }
 
+/**
+ * A mount that hands the dialog a prop it does not declare.
+ *
+ * `ProjectPickerDialog` must never receive the landing callback: the operator here
+ * is mid-edit choosing which project to add the selection to, so a callback that
+ * switched mode and opened the new project would abandon that selection. Passing
+ * `onProjectImported` through a cast keeps the mount compiling while the dialog
+ * ignores it — and makes the moment someone wires it up observable, because the spy
+ * below starts firing.
+ */
+function LandingSpyHarness({
+  onProjectImported,
+  ...harness
+}: Omit<HarnessProps, "onClose"> & { onProjectImported?: (project: Project) => void }) {
+  const [open, setOpen] = useState(true);
+  if (!open) return null;
+  const dialogProps = {
+    ...harness,
+    onClose: () => setOpen(false),
+    onProjectImported,
+  } as unknown as Parameters<typeof ProjectPickerDialog>[0];
+  return <ProjectPickerDialog {...dialogProps} />;
+}
+
 function renderPicker(overrides: Partial<Omit<HarnessProps, "assetIds">> & { assetIds?: string[] } = {}) {
   const onClose = overrides.onClose ?? vi.fn();
   const onChanged = overrides.onChanged ?? vi.fn();
+  const onProjectCreated = overrides.onProjectCreated;
   const onUnauthorized = overrides.onUnauthorized ?? vi.fn();
   const utils = render(
     <Harness
       assetIds={overrides.assetIds ?? ids}
       onClose={onClose}
       onChanged={onChanged}
+      onProjectCreated={onProjectCreated}
       onUnauthorized={onUnauthorized}
     />,
   );
-  return { ...utils, onClose, onChanged, onUnauthorized };
+  return { ...utils, onClose, onChanged, onProjectCreated, onUnauthorized };
+}
+
+/** Types a name into the inline create field and submits the create-and-add form. */
+function createAndAdd(dialog: HTMLElement, name: string): void {
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "New project name" }), {
+    target: { value: name },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Create and add" }));
 }
 
 /** A promise the test settles by hand, for the "request in flight" cases. */
@@ -293,5 +330,156 @@ describe("ProjectPickerDialog", () => {
           toast.message === "Editor or administrator access required",
       ),
     ).toBe(true);
+  });
+
+  it("hands the list owner the server's own row for the project it created", async () => {
+    // Values no client could invent: the server's own member count and its
+    // cache-busted cover path. A hand-off built from the typed name would carry
+    // neither, so these two fields are what "the server's row" actually means.
+    const createdRow = makeProject({
+      id: "p9",
+      name: "Fresh",
+      asset_count: 7,
+      cover_thumb_url: "/thumbs/x.jpg?v=3",
+    });
+    createProjectMock.mockResolvedValue(createdRow);
+    const onProjectCreated = vi.fn();
+    const onClose = vi.fn();
+    renderPicker({ onProjectCreated, onClose });
+
+    const dialog = await screen.findByRole("dialog", { name: "Add to project" });
+    await within(dialog).findByRole("radio", { name: "Hydra" });
+    createAndAdd(dialog, "Fresh");
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(onProjectCreated).toHaveBeenCalledTimes(1);
+    expect(onProjectCreated).toHaveBeenCalledWith(createdRow);
+
+    const handed = onProjectCreated.mock.calls[0][0];
+    // Identity, not structural equality: the hand-off is the very object
+    // `createProject` resolved, so nothing rebuilt it on the way out.
+    expect(handed).toBe(createdRow);
+    expect(handed.asset_count).toBe(7);
+    expect(handed.cover_thumb_url).toBe("/thumbs/x.jpg?v=3");
+  });
+
+  it("appends AND bumps — the append never replaces the existing notification", async () => {
+    const createdRow = makeProject({ id: "p9", name: "Fresh", asset_count: 0 });
+    createProjectMock.mockResolvedValue(createdRow);
+    // One ordered tape for both channels, so a swap or a drop shows up as an
+    // unexpected entry rather than a passing `toHaveBeenCalled`.
+    const reported: string[] = [];
+    const onChanged = vi.fn(() => reported.push("onChanged"));
+    const onProjectCreated = vi.fn(() => reported.push("onProjectCreated"));
+    const onClose = vi.fn();
+    renderPicker({ onChanged, onProjectCreated, onClose });
+
+    const dialog = await screen.findByRole("dialog", { name: "Add to project" });
+    await within(dialog).findByRole("radio", { name: "Hydra" });
+    createAndAdd(dialog, "Fresh");
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    // The bump is the pre-existing half of this contract (it reaches App as
+    // `onProjectsChanged`, which bumps `assetsVersion`); the append sits beside it.
+    expect(onChanged).toHaveBeenCalled();
+    expect(onProjectCreated).toHaveBeenCalledTimes(1);
+    // Bump first, then the append, then the membership bump from `addToProject`
+    // itself — the create's report did not consume the add's.
+    expect(reported).toEqual(["onChanged", "onProjectCreated", "onChanged"]);
+  });
+
+  it("keeps the created row selectable in the dialog's own list", async () => {
+    const createdRow = makeProject({ id: "p9", name: "Fresh", asset_count: 7 });
+    createProjectMock.mockResolvedValue(createdRow);
+    // A failing add keeps the dialog mounted, which is the state the private append
+    // exists for. App's own append is not a substitute: the radio can only be
+    // checked against a row this dialog is still rendering.
+    addProjectAssetsMock.mockRejectedValue(
+      new Error("Editor or administrator access required"),
+    );
+    const onClose = vi.fn();
+    renderPicker({ onClose });
+
+    const dialog = await screen.findByRole("dialog", { name: "Add to project" });
+    await within(dialog).findByRole("radio", { name: "Hydra" });
+    createAndAdd(dialog, "Fresh");
+
+    await waitFor(() => expect(addProjectAssetsMock).toHaveBeenCalledTimes(1));
+    expect(onClose).not.toHaveBeenCalled();
+
+    const fresh = (await within(dialog).findByRole("radio", { name: "Fresh" })) as HTMLInputElement;
+    expect(fresh.checked).toBe(true);
+    const hydra = within(dialog).getByRole("radio", { name: "Hydra" }) as HTMLInputElement;
+    expect(hydra.checked).toBe(false);
+    // The server's count, so the row this list shows is the row the server sent.
+    expect(within(dialog).getByText("7 files")).toBeTruthy();
+    // And the add button still names it: the operator can add the selection to the
+    // project they just made without leaving the dialog.
+    expect(within(dialog).getByRole("button", { name: 'Add 3 files to "Fresh"' })).toBeTruthy();
+  });
+
+  it("offers the list owner an append and nothing that lands on the project", async () => {
+    // The pin: a bump and an append are safe mid-edit, a landing is not. Flipping
+    // mode and opening the project would abandon the selection the operator is
+    // choosing, so `onProjectImported` must never be reached from this dialog.
+    const createdRow = makeProject({ id: "p9", name: "Fresh", asset_count: 0 });
+    createProjectMock.mockResolvedValue(createdRow);
+    const landingSpy = vi.fn();
+    const onChanged = vi.fn();
+    const onProjectCreated = vi.fn();
+
+    const handoff = {
+      assetIds: ids,
+      onChanged,
+      onProjectCreated,
+      onUnauthorized: vi.fn(),
+      onProjectImported: landingSpy,
+    };
+
+    // Create-and-add path.
+    const first = render(<LandingSpyHarness {...handoff} />);
+    const createDialog = await first.findByRole("dialog", { name: "Add to project" });
+    createAndAdd(createDialog, "Fresh");
+    await waitFor(() => expect(onProjectCreated).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(addProjectAssetsMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(first.queryByRole("dialog")).toBeNull());
+
+    // Plain add path, on a fresh mount: the create closed the first dialog.
+    const second = render(<LandingSpyHarness {...handoff} />);
+    const addDialog = await second.findByRole("dialog", { name: "Add to project" });
+    fireEvent.click(await within(addDialog).findByRole("radio", { name: "Hydra" }));
+    fireEvent.click(within(addDialog).getByRole("button", { name: 'Add 3 files to "Hydra"' }));
+    await waitFor(() => expect(addProjectAssetsMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(second.queryByRole("dialog")).toBeNull());
+
+    expect(landingSpy).not.toHaveBeenCalled();
+    // Read the pair as "bump yes, landing no": the list owner was told, and nobody
+    // was told to navigate.
+    expect(onChanged).toHaveBeenCalled();
+    expect(onProjectCreated).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands the list owner the created row even when the add that follows fails", async () => {
+    const createdRow = makeProject({ id: "p9", name: "Fresh", asset_count: 0 });
+    createProjectMock.mockResolvedValue(createdRow);
+    addProjectAssetsMock.mockRejectedValue(
+      new Error("Editor or administrator access required"),
+    );
+    const onChanged = vi.fn();
+    const onProjectCreated = vi.fn();
+    const onClose = vi.fn();
+    renderPicker({ onChanged, onProjectCreated, onClose });
+
+    const dialog = await screen.findByRole("dialog", { name: "Add to project" });
+    await within(dialog).findByRole("radio", { name: "Hydra" });
+    createAndAdd(dialog, "Fresh");
+
+    await waitFor(() => expect(addProjectAssetsMock).toHaveBeenCalledTimes(1));
+    // The project really exists — a failed add does not un-create it — so the list
+    // owner has to be handed the row even though nothing was ever added to it.
+    expect(onProjectCreated).toHaveBeenCalledTimes(1);
+    expect(onProjectCreated).toHaveBeenCalledWith(createdRow);
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

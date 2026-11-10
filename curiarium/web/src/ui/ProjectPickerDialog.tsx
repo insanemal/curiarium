@@ -16,6 +16,16 @@ type Props = {
   onClose: () => void;
   /** Fires after the picker created a project or changed its membership. */
   onChanged?: () => void;
+  /** The row the server returned for a project this dialog just created.
+   *
+   *  `onChanged` already tells the list owner that something changed, and it
+   *  refetches; this hands over the row itself so the card is on screen and
+   *  focusable before that answer arrives. It is deliberately NOT a landing
+   *  callback: the operator is mid-edit here, choosing which project to add the
+   *  selection to, so nothing may switch mode, open a project and abandon the
+   *  selection they were making. `onProjectImported` stays out of this component.
+   */
+  onProjectCreated?: (project: Project) => void;
   onUnauthorized?: () => void;
 };
 
@@ -63,6 +73,7 @@ export default function ProjectPickerDialog({
   assetIds,
   onClose,
   onChanged,
+  onProjectCreated,
   onUnauthorized,
 }: Props): ReactElement {
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -146,6 +157,14 @@ export default function ProjectPickerDialog({
     }
     // The project now exists, so it is kept and shown even if the add fails.
     onChanged?.();
+    // The server's own row for the owner of the list, beside the bump: an append
+    // and a bump is safe (the refetch replaces the array with what the server
+    // says, duplicates and all), and it is append-plus-append that double-lists,
+    // which `App`'s handler refuses by id.
+    onProjectCreated?.(created);
+    // The dialog's own list keeps the row too, and the radio keeps the selection:
+    // the operator is still here choosing what to add to, and a radio cannot be
+    // checked against a row this dialog has stopped showing.
     setProjects(current => (current ? [...current, created] : [created]));
     setSelectedId(created.id);
     setDraft("");

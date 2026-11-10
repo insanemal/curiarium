@@ -9,6 +9,7 @@ import {
   getBundleReport,
   setBundleDismissed,
   type BundleCreateItem,
+  type BundleCreateResponse,
   type BundleEnrichItemResult,
   type BundleReport,
 } from "../../lib/api/bundles";
@@ -34,7 +35,16 @@ export type BundleDetectState = {
   showCreated: boolean;
   setShowCreated: (value: boolean) => void;
   refresh: () => Promise<void>;
-  create: (items: BundleCreateItem[]) => Promise<void>;
+  /** The server's verdict for one bulk create, or null when nothing answered.
+   *
+   *  It returns rather than being a void action because the caller is the only
+   *  thing that knows what the click meant: `POST /bundles/create` answers one
+   *  result per key, `project_id` is non-null on `skipped` as well as on
+   *  `created`, and only the doors can decide which of them to report to the
+   *  owner of the project list. A create that failed or armed nothing answers
+   *  null - the error line already speaks it.
+   */
+  create: (items: BundleCreateItem[]) => Promise<BundleCreateResponse | null>;
   dismiss: (keys: string[], dismissed: boolean) => Promise<void>;
   enrich: (keys: string[], options?: { refresh?: boolean }) => Promise<void>;
   /** A line about the last enrichment that is news rather than a failure. */
@@ -210,11 +220,36 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     [enabled, onUnauthorized, refresh],
   );
 
+  // Deliberately not routed through `mutate`, for the same reason `enrich` is
+  // not: `mutate` discards the response, and here the response is the only
+  // record of which keys became projects. Everything else about `mutate`'s
+  // contract is kept, in the same order - `busy`, the notice reset (a create is
+  // a new decision, so the last enrichment's sentence no longer describes what
+  // the operator did), `error` cleared only after the request answered, the
+  // refetch inside the try, and `busy` released in `finally`.
   const create = React.useCallback(
     async (items: BundleCreateItem[]) => {
-      await mutate(() => createBundles(items), "Failed to create the selected bundles.");
+      if (!enabled) return null;
+      setBusy(true);
+      setNotice(null);
+      try {
+        const response = await createBundles(items);
+        setError(null);
+        await refresh();
+        return response;
+      } catch (err) {
+        if (err instanceof UnauthorizedError) onUnauthorized?.();
+        setError(
+          err instanceof Error && err.message
+            ? err.message
+            : "Failed to create the selected bundles.",
+        );
+        return null;
+      } finally {
+        setBusy(false);
+      }
     },
-    [mutate],
+    [enabled, onUnauthorized, refresh],
   );
 
   // Modelled on `enrich`, not on `mutate`: the one-step extract-and-create door

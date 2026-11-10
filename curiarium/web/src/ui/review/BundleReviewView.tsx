@@ -5,6 +5,7 @@ import {
   ENRICH_MAX_KEYS,
   type BundleCover,
   type BundleCreateItem,
+  type BundleCreateResponse,
   type BundleDetectItem,
   type BundleReport,
 } from "../../lib/api/bundles";
@@ -182,6 +183,22 @@ type Props = {
   state: BundleDetectState;
   /** Writes (create, dismiss, extract) are CONTRIBUTE actions; a viewer reads. */
   canContribute: boolean;
+  /** At least one project was created by this click, and the operator stays put.
+   *
+   *  App owns the project list, so a queue that creates a project without saying
+   *  so leaves the sidebar and the project grid showing a list from before the
+   *  click - the owner's "I have to refresh the whole thing". This is the same
+   *  callback App already passes to `AssetGrid` and `ImportsReviewView`; the
+   *  queue adds no mechanism of its own.
+   */
+  onProjectsChanged?: () => void;
+  /** Land on the one project this click created.
+   *
+   *  Offered only when one click made exactly one project; the bump above is what
+   *  a multi-row create gets, because landing on an arbitrary one of five is
+   *  worse than not landing at all.
+   */
+  onProjectImported?: (projectId: string) => void;
   /** Only reaches the derived cover's renderer, which reads its colours from the
    *  `--mv-*` variables; App does not thread it yet, so light is the default. */
   theme?: ResolvedTheme;
@@ -336,7 +353,13 @@ function DuplicateArchivesPanel({ report }: { report: BundleReport }): React.Rea
  * so this view only filters rows, holds a selection, a per-row name draft and
  * the active row.
  */
-export default function BundleReviewView({ state, canContribute, theme = "light" }: Props) {
+export default function BundleReviewView({
+  state,
+  canContribute,
+  onProjectsChanged,
+  onProjectImported,
+  theme = "light",
+}: Props) {
   const {
     report,
     loading,
@@ -534,16 +557,52 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
       return item;
     });
 
+  /** Reports a bulk create to the owner of the project list, from the server's
+   *  verdict and nothing else.
+   *
+   *  Only `status === "created"` counts. `project_id` is non-null on the
+   *  `already_created` skip too (`bundle_service.py:2990-2996`), so reporting
+   *  anything with an id would append rows - or land the operator on a project -
+   *  this click never made; the name-collision skip at `:2987` answers
+   *  `project_id: null` and is a second reason not to read the id as the verdict.
+   *  `blocked` and `failed` wrote nothing either. A response with no created item
+   *  therefore reports nothing at all: no wasted refetch of a list that cannot
+   *  have changed.
+   *
+   *  Landing is narrower still: one item asked for, one project made. Five rows
+   *  that all created is a real change to the list (so it is bumped) but no
+   *  single project to land on. And when the landing call goes out it is the only
+   *  one: `handleProjectImported` bumps `assetsVersion` itself, so one click
+   *  stays one request.
+   */
+  const reportBulkCreate = (
+    requested: BundleCreateItem[],
+    response: BundleCreateResponse | null,
+  ) => {
+    if (!response) return;
+    const made = response.results.filter(result => result.status === "created");
+    if (made.length === 0) return;
+    const landed = made.length === 1 && requested.length === 1 ? made[0].project_id : null;
+    if (landed) onProjectImported?.(landed);
+    else onProjectsChanged?.();
+  };
+
+  /** One door, one call, one report: the three create doors differ only in which
+   *  rows they turn into items. */
+  const createAndReport = async (items: BundleCreateItem[]): Promise<void> => {
+    reportBulkCreate(items, await state.create(items));
+  };
+
   const createSelected = () => {
     // A cover must never block or fail a create: `primeModelCovers` swallows its
     // own failures and is deliberately not awaited.
     void primeModelCovers(creatableSelected, { mediaUrl: fileUrl });
-    void state.create(createItems(creatableSelected));
+    void createAndReport(createItems(creatableSelected));
   };
 
   const createLowAsNameOnly = () => {
     void primeModelCovers(lowCreatable, { mediaUrl: fileUrl });
-    void state.create(lowCreatable.map(row => ({ key: row.key, name_only: true })));
+    void createAndReport(lowCreatable.map(row => ({ key: row.key, name_only: true })));
   };
 
   const dismissSelected = () => {
@@ -624,7 +683,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const createActive = () => {
     if (!activeRow) return;
     void primeModelCovers([activeRow], { mediaUrl: fileUrl });
-    void state.create(createItems([activeRow], { excludeGroups: true }));
+    void createAndReport(createItems([activeRow], { excludeGroups: true }));
   };
 
   // One action, four named phases, and the server as the readiness authority:
@@ -668,10 +727,37 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
       },
     }).then(outcome => {
       update(outcomeLine(outcome), false);
+      // The list owner hears about the one verdict that wrote a project. This
+      // door asks for one archive, so a `created` verdict is one project and the
+      // operator lands on it - the row is the server's own re-read `ProjectOut`,
+      // which is the only reason App can be handed an id at all; nothing here
+      // invents a Project client-side. A `created` that named no row is still a
+      // new project, so it gets the bump instead of the landing. `already_created`
+      // wrote nothing this run and so reports nothing.
+      let landedOn = null as string | null;
+      if (outcome.kind === "created") {
+        const createdId = outcome.project?.id;
+        // Only a host that CAN land counts as landed: with no callback the queue
+        // stays on screen, so the re-walk below is still the answer.
+        if (createdId && onProjectImported) {
+          onProjectImported(createdId);
+          landedOn = createdId;
+        } else {
+          onProjectsChanged?.();
+        }
+      }
       // The door writes no bundle report of its own, so the queue is re-walked
-      // only once a project actually exists - including the already-created
-      // verdict, whose row is created too and should read that way.
-      if (outcome.kind === "created" || outcome.kind === "already-created") void state.refresh();
+      // once a project actually exists - including the already-created verdict,
+      // whose row is created too and should read that way. A LANDING is the one
+      // case that skips it, and that is not an omission: leaving Review
+      // deactivates the hook, which bumps its request sequence
+      // (`useBundleDetect.ts`'s `seq`), so a walk started now fails its own
+      // newest-wins guard and its answer is thrown away - a whole-library server
+      // walk for nothing. Re-entering the queue re-arms the activation effect and
+      // walks properly then (pinned by App.review's "refetches once on re-entry").
+      if (!landedOn && (outcome.kind === "created" || outcome.kind === "already-created")) {
+        void state.refresh();
+      }
     });
   };
 
