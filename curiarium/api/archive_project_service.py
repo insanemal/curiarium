@@ -291,9 +291,14 @@ def create_project_from_extract(
             origin=project_create_service.ORIGIN_ARCHIVE_EXTRACT,
             # Every entry the listing resolved, and nothing filtered out: what the
             # operator ticked IS the file set, so this door has no kind to ask
-            # about and hands `kinds` down as None. The bundle door hands its
-            # detector's table down instead. One seam, two answers, no suffix test
-            # in either door.
+            # about and hands `kinds` down as None. The bundle door hands TWO tables
+            # down since Mf-wsdo — its ATTACH table (`bundle_service
+            # .PROJECT_MEMBER_SUFFIXES`, what the project holds: models plus the
+            # images the landing page can render) and its MODEL table
+            # (`bundle_detect.MODEL_SUFFIXES`, what containment is asked with) — while
+            # this door still hands none, because a listing an operator ticked needs
+            # no table to say what it is. One seam, three answers, no suffix test in
+            # either door.
             members=[
                 project_create_service.MemberCandidate(member.asset_id, member.rel_path)
                 for member in members

@@ -229,6 +229,30 @@ COVER_MODEL_PREVIEW = "model-preview"
 # model a cover can never be rendered from, so it is never offered as one.
 PREVIEW_SUFFIXES = frozenset({".stl", ".3mf", ".step", ".stp"})
 
+# THE ATTACH TABLE: what a project made from a bundle holds. Models - the files a
+# human prints - plus the images the landing page can render as a cover, in a
+# gallery, or in its cover picker (web `ui/ProjectLanding.tsx` filters its members
+# by `isImageAsset`, and a bundle whose previews were never attached showed an
+# empty picker; Mf-wsdo's complaint, measured on project `b8a5e66b`). Text is not
+# in it: the landing list renders every member, so "the page does not show it" is
+# not the reason - no cover, gallery or preview affordance reads a text member, and
+# a nested `.zip` is a member of the bundle but never of the project (Decision 17).
+#
+# This is NOT the detector's model table and it deliberately does not live in
+# `bundle_detect`: `rule_set_stamp()` hashes `MODEL_SUFFIXES` and `IMAGE_SUFFIXES`
+# by value, so a member table parked beside them would re-rank every cached report
+# row the first time anyone tuned what a project holds.
+#
+# Nor is it `file_utils.MODEL_SUFFIXES` - a THIRD, different table (`.obj` in it,
+# `.lbrn2` not), the one the web mirrors and the archive door's cover rule reads.
+# It is deliberately not the member rule: `bundle_detect.classify_entry(".obj")`
+# answers `other`, so an `.obj` member would be a project holding a file the row
+# counts as "other", and members and facts would disagree. `.lbrn`/`.lbrn2` stay
+# members because registration is not suffix-gated (`library_scan`) and the
+# detector calls them models - `test_an_obj_file_is_registered_but_is_neither_a_member_nor_a_model`
+# pins both halves.
+PROJECT_MEMBER_SUFFIXES = bundle_detect.MODEL_SUFFIXES | bundle_detect.IMAGE_SUFFIXES
+
 CREATE_CREATED = "created"
 CREATE_SKIPPED = "skipped"
 CREATE_BLOCKED = "blocked"
@@ -2103,10 +2127,21 @@ def _claim_owners(candidates: Sequence[BundleCandidate], *, scope: str) -> Dict[
       map decides is which row owns a model, and so both which row the report says
       is ``ready`` and which row ``find_existing_project``'s assets leg can call
       already-created.
-    * Only ``bundle_detect.MODEL_SUFFIXES`` paths are claimable. The app attaches
-      MODELS and nothing else (``_create_one``'s ``model_assets``), so images and
-      text are not what decides ownership - letting a cover image decide it would
-      hand a path to a row that can never attach it.
+    * Only ``bundle_detect.MODEL_SUFFIXES`` paths are claimable. The RULE is
+      unchanged by ``Mf-wsdo``; the REASON this bullet used to give is what changed.
+      It said "the app attaches MODELS and nothing else", and that stopped being
+      true when the create grew ``PROJECT_MEMBER_SUFFIXES`` - a row can certainly
+      attach a preview now. So say what a claim is FOR: this map settles which row's
+      PARTS a path is. A preview is a product's face, not one of its parts, and the
+      MODEL answer ``_create_one`` still builds as ``model_assets`` - the same table,
+      read by the same call - is what ``attached``, the compound marker's per-group
+      counts and ``Dedupe.containment`` are asked with. Letting an image into the map
+      makes two rows contest a cover, which re-opens the ``Mf-quv4`` ownership bound
+      this bullet exists to keep; ``Mf-wsdo``'s ADR record (Decision 30) defers that
+      to a decision of its own. And this table is not what keeps a non-model with its
+      row - ``_claimed_assets``' ``claims.get(asset.path, key)`` default is: a path
+      the map is silent about stays with the row that named it instead of going to
+      nobody.
 
     ``is_archive`` rows are skipped: no registered file can live under a
     ``<x>.zip/`` prefix, so an archive row is never an owner - it is only ever
@@ -2203,17 +2238,24 @@ def _report_row(
     # asset below a nested child bundle belongs to that bundle, not to this one.
     # The ONE ownership expression, shared with the create door (`_create_one`).
     own_assets = _own_assets(assets, key=key, candidate=candidate)
-    models = [asset for asset in own_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
-    # The models this row OWNS, not merely the ones under its prefix: the same
-    # narrowing the create door applies, so the row that says `ready` is the row
-    # that would attach these files and no other.
-    mine = _claimed_assets(models, key=key, claims=claims)
-    # Deliberate reading of "every registered asset": the app only ever
-    # attaches MODELS to a project (``_create_one``'s ``model_assets``), so
-    # literal full-set containment over images and text too would report the
-    # owner's own hand-made project as NOT owning the bundle. The models are
-    # the containment set.
-    containment = [asset.id for asset in mine]
+    # ONE owned set feeds both questions the row answers. `_claimed_assets` narrows
+    # by the report-wide one-owner map, so the row that says `ready` is the row that
+    # would attach these files and no other; `models` is that set read as the MODEL
+    # question. The two filters commute - `_own_assets` then the map, or the map then
+    # `_own_assets`, is one set either way - and `claims` indexes MODELS only, so a
+    # non-model keeps the row that named it (`claims.get(path, key)`, never
+    # `claims.get(path)`).
+    owned_assets = _claimed_assets(own_assets, key=key, claims=claims)
+    models = [asset for asset in owned_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
+    # Deliberate reading of "every registered asset": containment is the MODEL
+    # question, and it stays the model question now that a project also holds the
+    # previews. A human's hand-made project over a bundle's files holds the models,
+    # so literal full-set containment over the images and the text too would report
+    # the owner's own project as NOT owning the bundle it was made from. This is the
+    # same set `_create_one` asks the dedupe with (`Dedupe.containment`), and
+    # `test_service_a_project_holding_the_models_owns_a_bundle_that_also_has_images`
+    # is the witness.
+    containment = [asset.id for asset in models]
     # The container leg, read from the row OUTWARD: an INFERRED row that HOLDS one
     # of the directories the report offers is a pile, not a bundle. Bounded to
     # ``INFERRED_CONFIDENCES`` because that is the container rule this module has
@@ -2255,7 +2297,7 @@ def _report_row(
         and not candidate.compound
         and any(_strictly_inside_any(other, parents) for other in offered_dirs)
     )
-    if mine and not candidate.is_archive and not container and key.casefold() in folders:
+    if models and not candidate.is_archive and not container and key.casefold() in folders:
         status, blocked_reason = READY, None
     elif candidate.is_archive or candidate.pair_only:
         # BEFORE the folder leg, and the order is load-bearing: the web Extract door
@@ -2369,7 +2411,27 @@ def _report_row(
             }
             for group in facts.groups
         ],
-        "cover": _cover(own_assets, facts),
+        # The row's cover and the create's cover are ONE expression: `_create_one`
+        # re-asks this same `_cover` over its own exclusion-filtered `owned_assets`
+        # instead of writing a second rule free to disagree. What that guarantees is
+        # narrower than what this comment used to claim. What IS true of every asset
+        # this returns an `asset_id` for: `cover_for_registered`' image leg is bounded
+        # to `IMAGE_SUFFIXES` and its model leg to `PREVIEW_SUFFIXES`, a subset of
+        # `MODEL_SUFFIXES`, so a row's cover always sits inside the ATTACH table - and
+        # can never name a `.txt` or a nested `.zip`, which are in the row's own
+        # `owned_assets` and never in what a create writes.
+        # "Therefore a card cannot advertise a file the project it creates does not
+        # hold" holds only for a create that excludes NO group: this cover is chosen
+        # exclusion-blind over the whole owned set, so a create that excludes a group
+        # routinely leaves the row advertising a file its project will not hold - the
+        # exclusion re-ask in `_create_one` is what puts a member in its place, and
+        # `test_the_cover_never_picks_a_registered_image_under_an_excluded_group` is
+        # exactly that case (row cover `Inbox/foreign/cover.jpg`, project holds only
+        # `Inbox/part-0.stl`).
+        # Picking from `owned_assets` rather than `own_assets` is the one-owner
+        # narrowing: a model-preview the map gave to a deeper row cannot be this row's
+        # face.
+        "cover": _cover(owned_assets, facts),
         "assets_total": len(assets),
         "status": status,
         "blocked_reason": blocked_reason,
@@ -2761,12 +2823,24 @@ def _create_one(
         members = [
             project_create_service.MemberCandidate(asset.id, asset.path) for asset in owned_assets
         ]
-        # Which KINDS a create attaches is one seam's question and this door's
-        # answer: models only, because the app attaches models and support files
-        # follow other rules. `MODEL_SUFFIXES` is named HERE, by the door that owns
-        # detection, and handed down - this function holds no suffix test of its
-        # own, so the day the answer stops being a suffix (Mf-wsdo) moves one
-        # argument and one body, not two doors.
+        # Which KINDS a create attaches is TWO questions and TWO tables, both handed
+        # to one seam (`project_create_service.member_asset_ids`), and this door - the
+        # one that owns detection - names both tables here so the seam holds no suffix
+        # test of its own:
+        #
+        #   * the MODEL question - `kinds=bundle_detect.MODEL_SUFFIXES`, below, into
+        #     `member_asset_ids` - is the set of printed parts. It feeds `attached`
+        #     and the compound marker's per-group `attached` count, and it stays
+        #     models-only whatever a project holds;
+        #   * the ATTACH question - `kinds=PROJECT_MEMBER_SUFFIXES`, on the create call
+        #     below - is what the project HOLDS: those models plus the images the
+        #     landing page can render (Mf-wsdo). It is a module-level name of THIS
+        #     module, not a `bundle_detect` one, precisely because the detector's own
+        #     tables are hashed into `rule_set_stamp()`.
+        #
+        # Neither is a test in this body: no `_suffix` call and no `.stl` literal is
+        # allowed here, which is what makes one argument and one body change when the
+        # answer stops being a suffix again.
         model_assets = project_create_service.member_asset_ids(
             members, kinds=bundle_detect.MODEL_SUFFIXES
         )
@@ -2782,8 +2856,12 @@ def _create_one(
             models_by_group[group_name] = models_by_group.get(group_name, 0) + 1
         cover = row["cover"]
         if prefixes:
-            # Same cover rule, re-asked over the included parts: a second rule
-            # here would be free to disagree with the report's.
+            # Same cover rule, re-asked over the INCLUDED parts of the OWNED set: a
+            # second rule here would be free to disagree with the report's, and a
+            # wider set than `owned_assets` would be free to disagree with the
+            # project. `owned_assets` is the own-and-claimed set minus every excluded
+            # group's prefix, so an excluded group's image can still never win the
+            # face - it was filtered out two lines above, not here.
             cover_facts = _candidate_facts(STORAGE, candidate)
             if cover_facts is not None:
                 # A facts-level cover under an excluded prefix names the very
@@ -2794,7 +2872,7 @@ def _create_one(
                 # without that the two spaces never intersect and the leg wins.
                 if cover_facts.cover_entry and f"{key}/{cover_facts.cover_entry}".startswith(prefixes):
                     cover_facts = replace(cover_facts, cover_entry=None)
-                cover = _cover(included_assets, cover_facts)
+                cover = _cover(owned_assets, cover_facts)
             else:
                 # No facts means no cover can be proven outside the exclusion.
                 cover = _cover_none_fields(None, COVER_NONE)
@@ -2882,9 +2960,17 @@ def _create_one(
                     # this leg (`archive_project_service`), because what it holds is one
                     # click on one archive.
                     assets=True,
+                    # ... and it is asked with the MODEL set, not with the (wider) set
+                    # the project is about to hold: "does a project already hold this
+                    # bundle's files" is the same question `_report_row` answers with
+                    # its `containment`, which is `models` - so the row and the create
+                    # agree, and a hand-made project of models still stops a duplicate
+                    # create (Mf-yhjo). Ask this with the member set and every re-click
+                    # over a human's project writes a second project.
+                    containment=tuple(model_assets),
                 ),
                 cover_asset_id=cover["asset_id"],
-                kinds=bundle_detect.MODEL_SUFFIXES,
+                kinds=PROJECT_MEMBER_SUFFIXES,
                 refuse=belt,
                 description=enrichment["description"],
                 creator=enrichment["creator"],
