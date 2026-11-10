@@ -40,6 +40,7 @@ import import_service
 import library_scan
 import main
 import permissions
+import project_create_service
 import project_import
 import project_service
 import settings_service
@@ -1292,11 +1293,11 @@ def test_the_readers_still_read_the_new_marker(monkeypatch: pytest.MonkeyPatch, 
     raw = project_row(outcome.project_id).metadata_json
     marker = json.loads(raw)["_bundle"]
 
-    assert bundle_service._bundle_marker(raw) == marker
+    assert project_service.bundle_marker_of(raw) == marker
     with Session(engine) as session:
         assert bundle_service._compound_splits(session).get(marker["key"]) is None
         assert (
-            bundle_service.find_existing_project(
+            project_create_service.find_existing_project(
                 session, key="import/17_ClockworkMonster", source_url=None, name="", assets=()
             )
             is None

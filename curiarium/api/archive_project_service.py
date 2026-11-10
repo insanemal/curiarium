@@ -24,25 +24,35 @@ The design is a set comparison of knowns, not a guess about shape:
 3. The project is created from the asset ids that resolved, and its groups come
    from the listing's own structure — the common root's subdirectories — never
    from a detector.
-4. Provenance goes in the marker (``_archive_project``): the archive path, the
-   planned and resolved counts, the common root, the groups, and a fingerprint of
-   the listing. A later reader can tell an operator-declared project from a
-   detected one, and a second run on the same archive is idempotent **by archive
-   path**, never by a bundle key that may not exist.
+4. Provenance goes in the marker — the one `_bundle` namespace every creating door
+   writes, discriminated by `origin: "archive_extract"`, with this door's payload in
+   the `archive_extract` sub-block: the archive path, the planned and resolved counts,
+   the common root, the groups, and a fingerprint of the listing. A later reader can
+   tell an operator-declared project from a detected one, and a second run on the same
+   archive is already-created **by archive identity**, never by a bundle key that may
+   not exist. Rows written before the namespace existed carry the same payload in the
+   legacy `_archive_project` block and are still found: `project_create_service` reads
+   it. Nothing writes it, and nothing migrates it.
 
 What still refuses is fact, not rule, and each refusal creates nothing: a partial
 extraction reports how many planned entries never appeared; a settle after which
 none of the planned paths is a registered asset names the twin directory so the
 operator can go and look; and a repeat run on the same archive is already-created
-rather than a duplicate. The project and every member are inserted in one
-transaction (``project_service.create_project_with_members``), so a refusal — or
-a name collision — can never strand an empty project.
+rather than a duplicate. That last question is not this door's to answer on its own
+any more — it asks `project_create_service.find_existing_project`, the same dedupe
+the detection door asks, with the two identities it holds: the archive it was told
+to extract, and the twin directory its bytes were promised to. Asking with the twin
+is what makes a folder the DETECTOR already made into a project answer
+already-created here, instead of becoming a second project with a second name.
+The project and every member are inserted in one transaction
+(``project_service.create_project_with_members``, reached through
+``project_create_service.create_project_from_members``), so a refusal — or a name
+collision — can never strand an empty project.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import posixpath
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,20 +65,13 @@ from sqlmodel import Session, select
 import audit
 import entry_policy
 import library_scan
-import project_service
+import project_create_service
 import snapshot_guard
 import snapshots
 import zip_service
 from db import engine
 from file_utils import is_model_path
-from models import Asset, Project
-
-# The marker namespace this door owns. `_bundle` is detection's (see
-# `project_service.bundle_marker_of`); a project carrying *this* key instead was
-# declared by an operator, and that distinction is the whole reason the marker
-# exists. It is written at insert time through `create_project(metadata=...)`, so
-# a project and its provenance can never be separated by a crash between commits.
-ARCHIVE_PROJECT_MARKER = "_archive_project"
+from models import Asset
 
 # The four verdicts, every one of them a 200: this door has no policy to refuse
 # on, so the verdict is a field rather than a status code.
@@ -170,11 +173,15 @@ def create_project_from_extract(
     moved to the trash — which is precisely the state a completed extraction
     leaves the archive in. Reading the zip first would answer 404 instead, and a
     404 on the door whose whole job is the operator's own earlier click reads as
-    a client error rather than as the idempotent no-op it is.
+    a client error rather than as the idempotent no-op it is. The lookup is
+    `project_create_service.find_existing_project`, the ONE dedupe, asked with the
+    identity this door owns; the twin-directory identity is asked by the create
+    primitive a few lines below, once the twin is known to be nameable.
     """
     normalized = _normalised(path)
 
-    existing = _find_by_archive(normalized)
+    with Session(engine) as session:
+        existing = project_create_service.find_existing_project(session, archive=normalized)
     if existing is not None:
         return _finish(
             ArchiveProjectResult(
@@ -183,7 +190,7 @@ def create_project_from_extract(
                 twin=_twin_rel(normalized),
                 planned=0,
                 resolved=0,
-                project=ProjectRef(existing.id, existing.name),
+                project=ProjectRef(existing.project.id, existing.project.name),
             ),
             ctx,
         )
@@ -256,8 +263,16 @@ def create_project_from_extract(
     common_root = _common_root(entry.entry for entry in planned)
     groups = _groups(planned, common_root)
     fingerprint = _fingerprint(entry.entry for entry in planned)
-    marker = {
-        ARCHIVE_PROJECT_MARKER: {
+    # This door's payload, in the sub-block of the ONE marker namespace. `key` is
+    # the archive's IDENTITY rather than its path: `key` is matched against a
+    # candidate's storage path, and a bare `.zip` path sitting in that field would
+    # make the queue's own zip row read already_created and vanish behind the web
+    # layer's "show created" toggle — the toggle hides already-created rows, and
+    # that row is the only place the Extract door is ever offered. The path itself
+    # is in the sub-block, which is what the dedupe's twin leg reads.
+    payload = {
+        "key": project_create_service.archive_identity(normalized),
+        project_create_service.ORIGIN_ARCHIVE_EXTRACT: {
             "archive": normalized,
             "twin": twin_rel,
             "planned": len(planned),
@@ -265,23 +280,73 @@ def create_project_from_extract(
             "fingerprint": fingerprint,
             "common_root": common_root,
             "groups": [{"name": group.name, "count": group.count} for group in groups],
-        }
+        },
     }
     project_name = (name or "").strip() or posixpath.basename(twin_rel)
 
     with Session(engine) as session:
-        project = project_service.create_project_with_members(
+        outcome = project_create_service.create_project_from_members(
             session,
-            project_name,
-            None,
-            _cover_asset_id(members),
-            [member.asset_id for member in members],
-            origin="own",
-            metadata=marker,
+            name=project_name,
+            origin=project_create_service.ORIGIN_ARCHIVE_EXTRACT,
+            # Every entry the listing resolved, and nothing filtered out: what the
+            # operator ticked IS the file set, so this door has no kind to ask
+            # about and hands `kinds` down as None. The bundle door hands its
+            # detector's table down instead. One seam, two answers, no suffix test
+            # in either door.
+            members=[
+                project_create_service.MemberCandidate(member.asset_id, member.rel_path)
+                for member in members
+            ],
+            marker=payload,
+            # The two identities this door holds. The twin is asked as a KEY, so a
+            # folder the detection door already made into a project answers
+            # already_created here rather than becoming a second project under a
+            # second name; the archive is asked as itself, which is what a repeat
+            # click on this same archive answers. Neither door asks on a NAME:
+            # the two disagree on what a folder is called by design (the detector
+            # strips a leading ordinal, this door names the twin after the archive),
+            # and a name leg here would merge `a/thing.zip` with `b/thing.zip`.
+            dedupe=project_create_service.Dedupe(key=twin_rel, archive=normalized),
+            cover_asset_id=_cover_asset_id(members),
+            project_origin="own",
         )
+        if outcome.status == project_create_service.STATUS_ALREADY_CREATED:
+            # A project already covers these files — made here once, or made by the
+            # detection door from the folder these bytes are the twin of. Nothing
+            # was written.
+            return _finish(
+                ArchiveProjectResult(
+                    status=STATUS_ALREADY_CREATED,
+                    archive=normalized,
+                    twin=twin_rel,
+                    planned=len(planned),
+                    resolved=len(members),
+                    project=ProjectRef(outcome.project_id or "", outcome.name or ""),
+                    common_root=common_root,
+                    groups=groups,
+                    fingerprint=fingerprint,
+                ),
+                ctx,
+            )
+        if outcome.status == project_create_service.STATUS_REFUSED:
+            # The backstop the door's own `members` check should have caught; the
+            # verdict it maps to is the door's existing word for it, because this
+            # door's vocabulary is the wire's and a fifth status is not on offer.
+            return _finish(
+                ArchiveProjectResult(
+                    status=STATUS_NOTHING_RESOLVED,
+                    archive=normalized,
+                    twin=twin_rel,
+                    planned=len(planned),
+                    resolved=0,
+                    failed=failed,
+                ),
+                ctx,
+            )
         # Read back before the session closes: after it, scalar attributes are
         # whatever the identity map happens to still hold.
-        created = ProjectRef(project.id, project.name)
+        created = ProjectRef(outcome.project_id or "", outcome.name or "")
 
     return _finish(
         ArchiveProjectResult(
@@ -297,24 +362,6 @@ def create_project_from_extract(
         ),
         ctx,
     )
-
-
-def archive_project_marker_of(metadata_json: Optional[str]) -> dict:
-    """This door's marker, or ``{}`` — the one reader of ``_archive_project``.
-
-    The shape `project_service.bundle_marker_of` uses for detection's key: a
-    malformed or non-object metadata column reads as no marker rather than
-    raising, because a reader of a project must not be taken down by a row
-    something else wrote.
-    """
-    try:
-        parsed = json.loads(metadata_json or "{}")
-    except (TypeError, ValueError):
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    marker = parsed.get(ARCHIVE_PROJECT_MARKER)
-    return marker if isinstance(marker, dict) else {}
 
 
 # --- the plan: what the listing promised -------------------------------------
@@ -532,28 +579,6 @@ def _fingerprint(entries: Iterable[str]) -> str:
 # --- the archive, its twin, and what already exists --------------------------
 
 
-def _find_by_archive(archive: str) -> Optional[Project]:
-    """The project this archive already produced, or ``None``.
-
-    Keyed by the archive path, because a bundle key may not exist: the row this
-    flow acts on is exactly the kind detection declines to key, which is the
-    failure this door replaces. The comparison is over the normalised
-    library-relative path, the same case-sensitive string `asset.storage_path`
-    uniqueness uses. The whole `project` table is scanned in Python, as
-    `project_service` does for its own de-duplication: household scale, no
-    index to miss, and no migration to add a column for it.
-    """
-    wanted = _normalised(archive)
-    if not wanted:
-        return None
-    with Session(engine) as session:
-        for project in session.exec(select(Project)).all():
-            marker = archive_project_marker_of(project.metadata_json)
-            if _normalised(str(marker.get("archive") or "")) == wanted:
-                return project
-    return None
-
-
 def _normalised(path: str) -> str:
     """The echoed library-relative path: POSIX, with ``.`` segments collapsed."""
     candidate = posixpath.normpath(path) if path else ""
@@ -580,7 +605,7 @@ def _twin_rel(normalized: str) -> str:
     happen, one request earlier, on the call that wrote the files; what is needed
     here is only the name they landed under, which is ``<parent>/`` plus
     ``zip_service.sanitize_folder_name`` of the stem — the same two calls, and
-    `test_the_twin_name_matches_what_the_extract_door_writes` pins that the two
+    `test_the_twin_name_matches_what_the_extract_door_actually_wrote` pins that the two
     doors still agree.
     """
     parent = posixpath.dirname(normalized)

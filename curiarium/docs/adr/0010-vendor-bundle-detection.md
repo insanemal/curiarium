@@ -269,7 +269,8 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    * **The project's own record** of what created it is a `_`-prefixed marker in
      the existing `Project.metadata_json`:
      `{"_bundle": {"key", "detector", "confidence", "rel_dir", "archive",
-     "twin_verified"}}`. `Project.origin` keeps its closed
+     "twin_verified"}}` - plus, since `Mf-yhjo`, `origin`, the field that says which
+     door wrote it. `Project.origin` keeps its closed
      `CHECK (origin IN ('own','imported'))` - a bundle-created project is
      `imported`, because it is - and no new column, no new enum value and no
      migration is involved. The underscore prefix is the existing convention for
@@ -289,6 +290,18 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    (`test_a_pre_c2_marker_re_offers_nothing`), and a marker that recorded an
    exclusion re-offers precisely the group it names and nothing else
    (`test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered`).
+
+   **Extended by Mf-yhjo.** That one stored marker is now the one marker of every
+   creating door, told apart by `origin` (`detection` | `archive_extract`) rather than
+   by a namespace of its own. A detection marker keeps the flat field list above,
+   because `bundle_drift.classify` and the create-time belt read those names where
+   they sit and no migration is allowed; the archive door's payload lives in
+   `_bundle["archive_extract"]`, named for its `origin`, because both doors spell a
+   field `archive` and a field `groups` to mean different things and a sub-block is
+   what keeps the two shapes out of one dict. The legacy `_archive_project` block is
+   still READ and never written, nothing was migrated, and a row written before the
+   namespace is still found by the dedupe. Decision 29 has the doors, the shapes and
+   the witnesses.
 
 4. **The folder is the truth; a twin zip is provenance only.** When a directory
    and a `<name>.zip` sit side by side (`twin_key` casefolds the basename and
@@ -580,6 +593,18 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     files still answers `assets`, which is
     `test_a_hand_made_project_over_the_mount_files_reports_already_created_by_assets`.
 
+    **Extended by Mf-yhjo.** `find_existing_project` now lives in
+    `project_create_service`, and every creating door asks it - the four identities,
+    the order and the laziness above are unchanged, and they had to be, because the
+    defect this closes is two doors answering "already exists?" by two different rules
+    over one folder (Decision 29). The create door also asks the SAME ownership
+    question as the report: `_create_one` builds its attach set from the
+    `_own_assets` / `_claimed_assets` pair `_report_row` calls, narrowed by the same
+    report-wide one-owner map, so the row that says `ready` is the row that would
+    attach those files. The containment set the report asks with and the attach set
+    the create writes are two reads of one ownership expression now, instead of two
+    prefix reads free to disagree.
+
     The ordering of the create path is deliberate: exclusion validation
     (`_exclusion_prefixes`) runs before `find_existing_project`, so an
     already-created compound row whose group list moved under the operator answers
@@ -626,6 +651,18 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     first and looks every key up in the fresh rows, so a bundle that has turned
     `blocked` since the screen rendered creates nothing, and an unknown key is
     `failed` ("unknown bundle").
+
+    **Extended by Mf-yhjo.** The window is gone rather than repaired. The project row
+    and its members are ONE commit now, because the door reaches the insert through
+    `project_create_service.create_project_from_members`, which calls
+    `project_service.create_project_with_members` - and an unknown asset id is refused
+    BEFORE the insert (a whole-request 404 naming every id it could not find) instead
+    of failing per id after it, which is the state that used to leave a
+    marker-bearing project with no members for the re-run to paper over. Two commits
+    per created bundle now: the create and its audit row. `skipped_assets` /
+    `failed_assets` stay on the wire at `0` / `[]`, because they are declared fields
+    of `BundleCreateItemOut` and of the serialised OpenAPI fixture, and deleting a
+    wire field is a contract change no ticket asked for.
 
 14. **The report is bounded, and says so.** The walk stops at
     `MAX_SCAN_ENTRIES` (200 000 entries) and each document read is capped at
@@ -2149,7 +2186,7 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `detector`**:
     that field's vocabulary is detection-rule names, and a door there would
     corrupt every later reader of it. Nothing reads the new `source` yet, and the
-    existing readers ignore what they do not know (`_bundle_marker` returns the
+    existing readers ignore what they do not know (`bundle_marker_of` returns the
     object, `_compound_splits` reads only `key` and `groups`), pinned by
     `test_the_readers_still_read_the_new_marker`.
 
@@ -2171,9 +2208,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `set_project_metadata_marker` is deliberately not used (measured 2 statements
     of its own, its own session, `updated_at` churn, and it cannot fill a cover).
     `project_service.bundle_marker_of` is the one implementation of the `_bundle`
-    read, and `bundle_service._bundle_marker` delegates to it, because
-    `bundle_service` already imports `project_service`: the arrow points this way,
-    so the layering is a DAG and no cycle can form.
+    read. It was reached through a `bundle_service._bundle_marker` that only
+    delegated here, and Mf-yhjo deleted that alias: the report's two readers call
+    `bundle_marker_of` directly and the multi-shape read - the one that also knows
+    the `origin` sub-blocks and the legacy `_archive_project` fallback - lives with
+    the doors in `project_create_service`, which imports `project_service`. The
+    arrow points this way either way, so the layering stays a DAG and no cycle can
+    form.
 
     **Two branches are untouched, and pinned.** The archive-as-single-asset door
     (`entries is None`) and the gated branch pass no cover and no marker: neither
@@ -2560,6 +2601,213 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `_holds_stronger_candidate` leg beside it is Decision 18's swallow in new
     clothes, and it reds the two strength witnesses, not the tower one: a LOW child
     is exactly what this branch exists to promote.
+
+29. **One door in, one identity check, one write, for every door that makes a
+    project.** Three doors create a project: `POST /projects` from a typed form,
+    the bundle door (`POST /bundles/create`) from a directory the detector read, and
+    the archive door (`POST /import/archive/project`) from a `.zip` an operator
+    ticked and then extracted. Until `Mf-yhjo` each of them decided "already
+    exists?" for itself, and the two that overlap decided it by different rules: the
+    bundle door asked Decision 11's four identities, while the archive door asked a
+    private `_find_by_archive` that compared one field of its own `_archive_project`
+    marker. One folder reached by both doors therefore became two projects with two
+    names - measured on the live tower, `Fates End - Wizard Tower` from the directory
+    and `01_Fates End - Wizard Tower` from the `.zip` beside it - and the operator was
+    asked to confirm one product twice. Both halves of that question now live in
+    `curiarium/api/project_create_service.py`, which imports `project_service` and
+    nothing else that owns a project; no door holds either half any more.
+
+    **The dedupe, the member-set rule and the write are each exactly one function.**
+    `find_existing_project` is the only dedupe - Decision 11's four identities, in
+    that order. The marker and twin legs answer from inside ONE walk of the `Project`
+    table and the name leg records there and answers after the source-URL read, which
+    outranks it; the source-URL leg is a second read, as it always was, because it
+    goes through `project_service.find_project_by_source` and is reached only when no
+    marker answered.
+    `member_asset_ids(candidates, *, kinds=None)` is the only member-set rule.
+    `create_project_from_members` asks the dedupe once and then calls
+    `project_service.create_project_with_members`, so the project row and every
+    `project_asset` row land in one commit, and it answers `created`,
+    `already_created` or `refused`. A refusal has written nothing, which is why a
+    create can no longer strand a project that holds no files: this door used to
+    commit the project through `create_project` and attach the files afterwards in a
+    SECOND session through `add_assets`, whose contract is per-id failure, so one
+    unknown id left a project in the list with no members and no way to get them.
+    `test_no_member_create_leaves_an_empty_project_behind` runs exactly that state
+    through the real route - the seam answers `["no-such-asset"]`, the item is
+    `failed` with no project id, and the `Project` table is empty - and its mutation
+    is the split itself, put back into two commits.
+
+    **A door asks only with the identities it actually holds.** `Dedupe`'s five fields
+    are all optional and each leg is skipped when its identity is falsy - an empty
+    identity is not an identity, and matching on one matches everything, which is why
+    the marker leg tests `wanted_key and marker.get("key")` rather than the two sides
+    for equality (`test_asking_with_no_key_matches_no_project` is the only test that
+    asks with no key at all, so it is the only one that can see that guard). The fifth
+    field is a flag and not a standing behaviour: `Dedupe.assets` says whether this door
+    claims file containment, and only the bundle door sets it. Containment is an
+    identity the detection door holds - it is asking about the folder a scan registered,
+    and a hand-made project over those same files IS the answer - and the archive door
+    does not, because what it holds is one click on one archive; giving it the leg was
+    measured to let any project that already carried the archive's files swallow the
+    Extract click, which is a merge no operator asked for. A door asks for the leg
+    rather than supplying ids, because the ids are the member set this module is about
+    to write and a door that recomputed them could compute them differently.
+
+    **Which kinds a create attaches is a PARAMETER, never a test inside a door.**
+    The archive door passes nothing: every entry the operator ticked is a member,
+    because what it read WAS the file set, not a guess about one. The bundle door
+    passes `bundle_detect.MODEL_SUFFIXES`, named by the door that owns detection and
+    handed down to the seam, because the app attaches models and support files follow
+    other rules. Neither `bundle_service._create_one` nor
+    `archive_project_service.create_project_from_extract` contains a kind test any
+    more, and `tests/test_bundle_service.py`'s
+    `test_the_member_set_seam_is_the_only_place_a_create_filters_by_kind` pins that at
+    the source rather than at a verdict: it reads both door bodies and refuses a
+    `_suffix` call, a comparison against a `.stl` literal, a `MODEL_SUFFIXES` read that
+    is not the value of a `kinds=` argument handed to the seam, and any `kinds`
+    argument at all from the archive door - then it pins the seam's own signature,
+    `candidates` plus a keyword-only `kinds` defaulting to `None`, which is what lets
+    the archive door ask the no-question question. The ticket that makes that answer
+    stop being a suffix is `Mf-wsdo`, and the pin exists
+    so that it changes ONE body: a filter left behind in a door would go on answering
+    the old question in silence. (`_report_row`'s containment set is not inside this
+    rule - the report is not a create, and its model filter stays where the row is
+    built.)
+
+    **The archive door asks with two identities, and asks with no name.** Its
+    `Dedupe` is `Dedupe(key=twin_rel, archive=normalized)`: the archive it was told to
+    extract, and the directory its bytes were promised to. The twin is asked as a KEY
+    because a detection create records the folder it made as its marker key, and that
+    leg is what makes a folder the detector had already turned into a project answer
+    `already_created` here instead of becoming a second project -
+    `test_a_project_created_from_the_bundle_is_the_project_its_twin_archive_would_have_made`
+    runs both real doors over the live tower and pins one `Project` row, the same id,
+    and the full `planned`/`resolved` 20/20 the door computed before it decided to
+    write nothing. **There is no name leg, and that is a rule rather than an
+    omission.** The two doors name the same product differently on purpose -
+    `bundle_detect.display_name()` drops a leading ordinal, this door names the twin
+    after the archive - so a name leg here would merge `a/thing.zip` with
+    `b/thing.zip` and call two products one. In `tests/test_archive_project.py`,
+    `test_two_archives_that_share_a_basename_in_different_folders_are_two_projects`
+    pins the two archives as two projects, and it records the thing this ticket's
+    wording missed: the two projects cannot BOTH be called `thing`, because
+    `idx_project_name_unique` is a `NOCASE` UNIQUE index and the second INSERT is
+    refused with a 409 - by the name index, not by the dedupe. That is the refusal this
+    door owes, and `already_created` would be the wrong one. A 409 says "two things are
+    called `thing`", which the operator settles by typing a second name;
+    `already_created` would be the dedupe claiming two products are one, which no
+    operator can undo.
+
+    **The create-time belt stayed a bundle rule; only its answer moved.** The
+    `contains_bundles` reason is still computed in `bundle_service._create_one`, from
+    `INFERRED_CONFIDENCES` and the row's own `assets` against `own_assets`, with
+    neither list filtered by the exclusion and the compound row not exempt -
+    Decision 24's paragraph above stands word for word. What moved is where it is
+    answered: the reason is handed to the primitive as `refuse`, and the primitive
+    asks it AFTER the dedupe and BEFORE the write. A row that both already exists and
+    would be refused therefore reports `already_created` - the operator has the
+    project already, and that is the more useful sentence than one about a create that
+    never happens - while a refusal still writes nothing, so "the refusal comes before
+    the project row" survives the move intact.
+
+    **The create door asks the report's ownership question.** `_create_one`'s attach
+    set now comes from the same `_own_assets` / `_claimed_assets` pair `_report_row`
+    calls, narrowed by the report-wide one-owner map `_claim_owners` built from the
+    same walk (`Mf-quv4` introduced that map for the report alone; this is the first
+    time the create door reads it), and an absorbed group re-offered as its own row is
+    served `claims=None` exactly as the report serves it - a row that owns nothing may
+    neither take a path away nor have one taken from it. Before this the report
+    stamped each model with one owner while the create asked its own question off its
+    own prefix, so the row that said `ready` over fifteen files could attach a
+    different fifteen than the fifteen it showed. `ready` and the attach set are one
+    answer now.
+
+    **One `_bundle` namespace, discriminated by an `origin` field.** This is still
+    the single marker key Decision 3 pinned; `origin` says which door wrote it -
+    `detection` or `archive_extract`, while `manual` names `POST /projects`, which
+    writes no marker at all. A detection marker keeps the flat top-level field list
+    Decision 3 listed plus `origin`, because `bundle_drift.classify` and the
+    create-time belt read those names where they sit and Decision 3's rule forbids a
+    migration. The archive door's payload goes into `_bundle["archive_extract"]`,
+    named for its `origin`, because the two doors spell the same two field names to
+    mean different things: detection's `archive` is the twin it paired with
+    (provenance for `twin_verified`) while the archive door's is the archive it read,
+    and only the second is an identity the dedupe may read; detection's `groups` is
+    `{name, model_count, foreign, included, attached}` (Decision 24) while the archive
+    door's is `{name, count}`. A sub-block is what keeps the two shapes from ever
+    meeting in one dict. The door's twin is promoted to the marker's `rel_dir` on the
+    way in, so drift asks one question of both doors -
+    `test_a_project_created_from_the_archive_is_the_project_its_twin_folder_would_have_made`
+    stops the promotion and both drift keys go `unknown` / `None` while the match
+    stays `marker`. The legacy `_archive_project` block is still READ and never
+    written: `_read_marker` falls back to it, so a row written before the namespace is
+    still found by the dedupe and still answers `marker` rather than degrading to
+    `assets`. In `tests/test_bundle_service.py`,
+    `test_a_project_written_before_the_marker_namespace_is_still_found_by_the_dedupe`
+    writes one by hand, because no code path writes that shape and no migration is
+    allowed; `test_the_marker_records_the_archive_the_counts_the_groups_and_the_fingerprint`
+    pins the new shape and that no `_archive_project` is written. Nothing was
+    migrated. `bundle_service._bundle_marker` went with the door-private reader it
+    replaced: the report's readers call `project_service.bundle_marker_of` directly,
+    and the multi-shape read lives with the doors in `project_create_service`.
+
+    **An archive-extract `key` is an IDENTITY, and that is the load-bearing half.**
+    The key an archive create writes is `"archive:" + path`, because `key` is compared
+    against a candidate's storage path. Measured, dropping the prefix is what costs an
+    operator a door: the queue's own `.zip` row for that archive answers
+    `existing_project_match == "marker"`, the report's `counts.already_created` goes
+    0 -> 1 for it, and the web layer hides already_created rows behind the "Show
+    created" toggle - which is the only place the Extract door that `.zip` row exists
+    to offer is ever shown. A door lost is not a dedupe gained, and
+    `test_the_zip_row_keeps_its_extract_door_after_its_archive_became_a_project` mutates
+    exactly the prefix to prove it. `_report_row` also declines its twin leg for
+    candidates that are archives (`twin = None if candidate.is_archive else ...`), and
+    that guard is recorded honestly as the SECOND lock rather than the first: measured
+    on the same shape it changes nothing, because an `is_archive` candidate carries no
+    `archive_path` of its own, so the leg never fires for one. It stays because "a
+    `.zip` row is never asked with an archive identity" is the rule rather than a
+    coincidence of the current candidate shape. The prefix is the same trick Decision
+    26's `zip-project:` key uses for the same reason, and it borrows the same safety
+    argument: no `Asset.storage_path` can carry a `:`.
+
+    **The form door calls the same create with nothing to dedupe on.**
+    `POST /projects` passes no members, `marker=None`, `dedupe=None` and
+    `require_members=False`, and re-reads the row with
+    `project_service.get_project` rather than carrying one out of the primitive - a
+    `CreateOutcome` is scalars on purpose, so no caller can reach for a column the
+    session has expired. `marker=None` is load-bearing: a `_bundle` marker is what
+    makes `GET /project/{id}/bundle-drift` answer `known` rather than
+    `not_applicable`, and a hand-typed project has no detection to have drifted from,
+    so writing `origin: "manual"` into a marker there would hand every form-made
+    project a drift state it cannot support. In `tests/test_projects_api.py`,
+    `test_a_hand_made_project_reports_no_drift_question` pins both halves:
+    `metadata_json` still `{}`, drift still `not_applicable` with a null count.
+    `require_members=False` is the same fact read from the other side - a project made
+    from a form legitimately starts empty and gets its files through the membership
+    doors, so the empty set this door hands down is its own answer and not the refusal
+    the primitive exists to make for doors that promise files.
+
+    **A door that holds no identity must not match on one.** Every leg tests the
+    identity it was handed before it tests the row's - `wanted_key and`,
+    `wanted_archive and`, `wanted_name and`, and an empty containment set returns
+    `None` before the membership index is read. That is Decision 11's "an empty
+    containment set can never claim a bundle" generalised to all four identities, and
+    the key leg is the one that would have bitten first: `marker.get("key") ==
+    wanted_key` is `None == None` for a project whose marker records no key, which
+    hands every keyless candidate the first project in table order. It is also why
+    `POST /projects` passes `dedupe=None` outright rather than an empty `Dedupe`.
+
+    **The wire vocabulary did not grow.** `existing_project_match` still answers
+    `marker`, `source_url`, `name` or `assets`, and the archive door's twin leg
+    reports `marker` rather than a fifth value: it IS a marker match seen from the
+    other door, and a fifth value would be a fifth way to merge two products wearing a
+    new name. A fifth verdict belongs in the web layer's `blocking_reason` mapping,
+    never in the dedupe. `bundle_service` no longer restates the vocabulary at all -
+    it re-exports `MATCH_MARKER` from `project_create_service` and compares against
+    that, so a label cannot disagree with the answer it labels - and the archive door
+    maps a `refused` outcome onto its existing `nothing_resolved` verdict, because that
+    door's four words are the wire's and a fifth status was never on offer.
 
 ## Consequences
 
@@ -3439,7 +3687,7 @@ unchanged.
   scan-count/attach-set split with a real failure behind it);
   `test_an_explicit_project_target_gains_an_empty_cover_and_the_marker` (the
   `project_id` branch of the fill, which the other imports do not reach);
-  `test_the_readers_still_read_the_new_marker` (`_bundle_marker` returns it,
+  `test_the_readers_still_read_the_new_marker` (`bundle_marker_of` returns it,
   `_compound_splits` offers no split for it, `find_existing_project` cannot
   false-match the identity key, and `GET /projects` serves it as a dict);
   `test_the_whole_zip_as_one_asset_path_is_unchanged` and

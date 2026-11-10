@@ -597,36 +597,50 @@ def merge_project_marker(metadata_json: Optional[str], marker: dict) -> str:
     """Merge `_`-prefixed keys into a metadata object; anything but an object reads {}.
 
     The column is parsed here rather than through `routers.presenters`, because a
-    service importing a router's presenter would invert the layering. Anything
-    that is not a JSON object reads as {}, the same rule the presenter uses, and
-    a non-underscore key (real print settings) is never clobbered.
+    service importing a router's presenter would invert the layering - so it goes
+    through `metadata_of`, which is that same rule and lives on this side of the line.
+    A non-underscore key (real print settings) is never clobbered.
     """
-    try:
-        parsed = json.loads(metadata_json or "{}")
-    except (TypeError, ValueError):
-        parsed = {}
-    metadata = parsed if isinstance(parsed, dict) else {}
+    metadata = metadata_of(metadata_json)
     for key, value in marker.items():
         if key.startswith("_"):
             metadata[key] = value
     return json.dumps(metadata)
 
 
-def bundle_marker_of(metadata_json: Optional[str]) -> dict:
-    """The reserved `_bundle` object of one metadata column, or `{}`.
+def metadata_of(metadata_json: Optional[str]) -> dict:
+    """A project's whole metadata object, or ``{}``.
 
-    This is the one implementation. `bundle_service._bundle_marker` delegates
-    here, because `bundle_service` already imports THIS module - the arrow points
-    this way, so no cycle can form. The rule is the same one
-    `merge_project_marker` already applies to anything that is not a JSON object.
+    The one implementation of the rule every reader of that column obeys: anything that
+    is not a JSON object - malformed JSON, ``None``, a list, a bare string - reads as
+    ``{}`` rather than raising, because a reader of a project must not be taken down by
+    a row something else wrote. It is the same rule `merge_project_marker` applies on
+    the write side. `bundle_marker_of` is this rule one level down, and a reader that
+    needs more than the ``_bundle`` block (``project_create_service`` also reads the
+    legacy ``_archive_project`` one) starts here so the column is parsed once.
     """
     try:
         parsed = json.loads(metadata_json or "{}")
     except (TypeError, ValueError):
         return {}
-    if not isinstance(parsed, dict):
-        return {}
-    marker = parsed.get("_bundle")
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def bundle_marker_of(metadata_json: Optional[str]) -> dict:
+    """The reserved `_bundle` object of one metadata column, or `{}`.
+
+    This is the one implementation of the `_bundle` read - `metadata_of` one level down,
+    so a bad column means the same thing to both. Every reader of that block reaches it
+    through one of the two: the report and the compound belt call this, and the
+    door-aware reader in `project_create_service` calls `metadata_of` because it reads a
+    second block (`_archive_project`) out of the same column. `merge_project_marker`
+    writes through `metadata_of` too, so the bad-column rule is one function on this
+    side of the line; the one reader left parsing the column itself is
+    `routers.presenters.project_metadata`, which hands the WHOLE object to the API and
+    sits on the far side of the service/router boundary - a service importing a router
+    presenter to save three lines would invert the layering it exists to keep.
+    """
+    marker = metadata_of(metadata_json).get("_bundle")
     return marker if isinstance(marker, dict) else {}
 
 

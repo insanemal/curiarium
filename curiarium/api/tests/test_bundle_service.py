@@ -14,6 +14,7 @@ below prove the same core contract without the request layer.
 
 import ast
 import dataclasses
+import inspect
 import json
 import re
 import shutil
@@ -31,6 +32,7 @@ from PIL import Image
 from sqlalchemy import event
 from sqlmodel import Session, select
 
+import archive_project_service
 import asset_file_service
 import asset_service
 import audit
@@ -41,6 +43,7 @@ import db
 import import_resolvers
 import library_scan
 import main
+import project_create_service
 import project_service
 import settings_service
 import zip_service
@@ -1273,7 +1276,13 @@ def test_a_409_from_the_name_index_becomes_a_skip_not_a_500(
 
     # `_clean_name` runs before the NOCASE index, so a typed name that cleans to an
     # existing one slips the pre-check; only a race reaches this path otherwise.
-    monkeypatch.setattr(project_service, "create_project", refuse)
+    # Mf-yhjo re-points this at `create_project_with_members`: the door writes the
+    # project and its members through that one call now, in one commit, and
+    # `create_project` is no longer on the path at all. The verdict the test pins is
+    # unchanged - a 409 from the name index is a skip - and so is the stronger half:
+    # one commit is what makes "a refused name creates no row" true rather than a
+    # lucky ordering of two commits.
+    monkeypatch.setattr(project_service, "create_project_with_members", refuse)
 
     response = client.post("/bundles/create", json={"items": [{"key": MOAI}]}, headers=headers)
 
@@ -3573,11 +3582,11 @@ def test_service_an_empty_asset_list_never_claims_a_bundle(isolated_storage: Pat
     with Session(engine) as session:
         empty = project_service.create_project(session, "Empty Project", None, None, origin="own")
         projects = {empty.id: empty}
-        index = bundle_service.project_assets_index(session)
+        index = project_create_service.project_assets_index(session)
 
     assert index == {}, "a project that holds nothing contributes no membership"
-    assert bundle_service._asset_owner(index, (), projects) is None
-    assert bundle_service._asset_owner(index, ("asset-with-no-project",), projects) is None, (
+    assert project_create_service._asset_owner(index, (), projects) is None
+    assert project_create_service._asset_owner(index, ("asset-with-no-project",), projects) is None, (
         "an asset id with no membership contributes nothing, so nothing is contained"
     )
 
@@ -3623,7 +3632,7 @@ def test_service_the_four_identities_keep_their_precedence(isolated_storage: Pat
         holding_id = holding.id
 
     with Session(engine) as session:
-        marker = bundle_service.find_existing_project(
+        marker = project_create_service.find_existing_project(
             session,
             key="import/17_ClockworkMonster",
             source_url=THING_URL,
@@ -3631,7 +3640,7 @@ def test_service_the_four_identities_keep_their_precedence(isolated_storage: Pat
             assets=("asset-marker",),
             asset_index=_PoisonedAssetIndex(),
         )
-        source = bundle_service.find_existing_project(
+        source = project_create_service.find_existing_project(
             session,
             key="import/sourced",
             source_url=THING_URL,
@@ -3639,7 +3648,7 @@ def test_service_the_four_identities_keep_their_precedence(isolated_storage: Pat
             assets=("asset-source",),
             asset_index={"asset-source": (sourced_id,)},
         )
-        by_name = bundle_service.find_existing_project(
+        by_name = project_create_service.find_existing_project(
             session,
             key="import/named",
             source_url=None,
@@ -3647,7 +3656,7 @@ def test_service_the_four_identities_keep_their_precedence(isolated_storage: Pat
             assets=("asset-name",),
             asset_index={"asset-name": (named_id,)},
         )
-        by_assets = bundle_service.find_existing_project(
+        by_assets = project_create_service.find_existing_project(
             session,
             key="import/assets",
             source_url=None,
@@ -3658,19 +3667,19 @@ def test_service_the_four_identities_keep_their_precedence(isolated_storage: Pat
 
     assert marker is not None and (marker.project.id, marker.match) == (
         marked_id,
-        bundle_service.MATCH_MARKER,
+        project_create_service.MATCH_MARKER,
     ), "the marker is proof and never reads the membership index"
     assert source is not None and (source.project.id, source.match) == (
         sourced_id,
-        bundle_service.MATCH_SOURCE_URL,
+        project_create_service.MATCH_SOURCE_URL,
     ), "a source URL outranks both the name and the shared files"
     assert by_name is not None and (by_name.project.id, by_name.match) == (
         named_id,
-        bundle_service.MATCH_NAME,
+        project_create_service.MATCH_NAME,
     ), "a name outranks the shared files"
     assert by_assets is not None and (by_assets.project.id, by_assets.match) == (
         holding_id,
-        bundle_service.MATCH_ASSETS,
+        project_create_service.MATCH_ASSETS,
     ), "with nothing stronger, shared files are the identity"
 
 
@@ -4318,6 +4327,12 @@ def test_the_report_layer_imports_nothing_that_can_open_a_socket() -> None:
             "typing",
             "zip_service",
             "zipfile",
+            # Mf-yhjo: the dedupe and the create moved to their own module, which
+            # imports `project_service` and nothing that can reach the network. It
+            # is listed because it is a module-level import now; the assertion this
+            # test exists for - no socket, no resolver, and `fetch_thingiverse_thing_page`
+            # reachable only from `enrich_bundles` - is unchanged.
+            "project_create_service",
         }
     )
     forbidden = {"import_resolvers", "safe_http", "socket", "urllib", "http"}
@@ -5755,7 +5770,18 @@ def test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered(
     marker = project_marker(project_id)
     assert (marker["detector"], marker["confidence"]) == ("thingiverse-readme", "high")
     assert marker["key"] == mount_key()
-    assert set(marker) - {"enrichment"} == {"key", "detector", "confidence", "rel_dir", "archive", "twin_verified"}
+    assert set(marker) - {"enrichment"} == {
+        "key",
+        "detector",
+        "confidence",
+        "rel_dir",
+        "archive",
+        "twin_verified",
+        # Mf-yhjo: one `_bundle` namespace for every creating door, and `origin` is
+        # what tells the doors apart inside it. The other six keys are the shape
+        # `bundle_drift` and the create-time belt read, and they have not moved.
+        "origin",
+    }
 
     copy_key = f"import/{XBOX}-copy"
     shutil.copytree(isolated_storage / "import" / XBOX, isolated_storage / "import" / f"{XBOX}-copy")
@@ -5983,7 +6009,7 @@ def test_a_non_compound_marker_is_unchanged_in_both_directions(
     ordinary = project_marker(created["results"][0]["project_id"])
     compound = project_marker(created["results"][1]["project_id"])
     split_marker = project_marker(split["results"][0]["project_id"])
-    six = {"key", "detector", "confidence", "rel_dir", "archive", "twin_verified"}
+    six = {"key", "detector", "confidence", "rel_dir", "archive", "twin_verified", "origin"}
     assert set(ordinary) - {"enrichment"} == six
     assert set(split_marker) - {"enrichment"} == six
     assert set(compound) - {"enrichment"} == six | {"shape", "groups", "cover"}
@@ -8730,3 +8756,1082 @@ def test_no_blocked_reason_outside_the_published_vocabulary(
         ("Unresolved Thing", "blocked", "unresolved_directory"),
         ("Not Scanned Thing", "blocked", "not_scanned"),
     }, "all four arms answered by one corpus, in one report"
+
+
+# --- one dedupe for all three project-creation doors (Mf-yhjo) ----------------
+#
+# Three doors make a project: the typed form (``POST /projects``), the folder the
+# detector read (``POST /bundles/create``) and the archive that twins that folder
+# (``POST /import/archive/project``). Before this ticket each of them decided
+# SEPARATELY whether the thing already existed, and two of the three decided by
+# DIFFERENT rules - so the one live tower became TWO projects with TWO names
+# (``Fates End - Wizard Tower`` from the folder, ``01_Fates End - Wizard Tower`` from
+# the ``.zip`` beside it) and the operator was asked to confirm one product twice.
+#
+# What the doors now share is ``project_create_service``: one ``find_existing_project``,
+# one ``member_asset_ids``, one ``create_project_from_members``. So the witnesses here
+# put BOTH real doors on the disk at once, over the measured fixture, in both
+# directions. That is the whole point: each door has always deduped against its own
+# previous click, and that is worth nothing to an operator who clicked the other one.
+# The direction is load-bearing and both halves are pinned separately, because the two
+# directions are not the same read - a folder project is recognised from the archive
+# door through the twin the create recorded in its marker, and an archive project is
+# recognised from the report through the ``archive:``-prefixed key its own create wrote.
+
+
+def archive_project_create(client: TestClient, headers: dict, path: str = TOWER_ZIP) -> dict:
+    """The OTHER door: ``POST /import/archive/project`` over one library archive.
+
+    The archive door's own suite is ``tests/test_archive_project.py``; this file reaches
+    it because the ticket is about the two doors meeting, and a door imported through a
+    helper would be a door the HTTP layer is not really running.
+    """
+    response = client.post("/import/archive/project", json={"path": path}, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def bundle_drift_of(client: TestClient, headers: dict, project_id: str) -> dict:
+    """What ``GET /project/{id}/bundle-drift`` answers for one project, as the wire has it."""
+    response = client.get(f"/project/{project_id}/bundle-drift", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def add_project_members(client: TestClient, headers: dict, project_id: str, asset_ids: List[str]) -> dict:
+    """``POST /project/{id}/assets`` - the one action a ``known`` drift answer offers."""
+    response = client.post(f"/project/{project_id}/assets", json={"asset_ids": asset_ids}, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def project_rows() -> List[Project]:
+    """Every ``Project`` row in the database - the count a duplicated door would move."""
+    with Session(engine) as session:
+        return list(session.exec(select(Project)))
+
+
+def project_metadata(project_id: str) -> str:
+    """One project's raw ``metadata_json`` column, exactly as the database holds it.
+
+    The string, not a parsed dict: a reader under test is ``archive_extract_payload_of``,
+    and handing it a dict it was never written to read would test the test.
+    """
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+    assert project is not None, f"no project row for {project_id}"
+    return project.metadata_json or "{}"
+
+
+def archive_extract_payload_of_project(project_id: str) -> dict:
+    """One project's archive-door payload, through the ONE reader of it.
+
+    The reader is handed the ``metadata_json`` COLUMN, not a parsed dict: its whole
+    contract is "a metadata column a human may have edited", so it does its own
+    ``json.loads`` and answers ``{}`` for anything it cannot read. Handing it a dict
+    would ask it a question it was never written to answer.
+    """
+    return project_create_service.archive_extract_payload_of(project_metadata(project_id))
+
+
+def rewrite_metadata(project_id: str, metadata: dict) -> str:
+    """Replace one project's metadata column by hand, and hand back what was written.
+
+    This is how a pre-namespace row is built: written literally, by the test, because
+    no code path writes that shape any more and the ticket forbids a migration.
+    """
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        assert project is not None, f"no project row for {project_id}"
+        project.metadata_json = json.dumps(metadata)
+        session.add(project)
+        session.commit()
+    return project_metadata(project_id)
+
+
+def test_a_project_created_from_the_bundle_is_the_project_its_twin_archive_would_have_made(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The folder door's project IS the project the archive door would have made.
+
+    Measured on the real fixture through both real routes: the bundle create makes one
+    project (``Fates End - Wizard Tower``, 15 models out of ``01_Wizard``), and the
+    archive door asked about the very ``.zip`` that twins that folder answers
+    ``already_created`` carrying **the same project id**, with the full ``planned``/
+    ``resolved`` 20/20 it computed before it decided to write nothing. One ``Project``
+    row stands at the end, and the create attached nothing a second time.
+
+    The identity that answers is the twin the bundle create recorded in its marker
+    (``archive: import/...zip`` sits in the marker's ``archive`` field), which is the
+    dedupe's second leg seen from the other door - ``MATCH_MARKER``, not a fifth
+    verdict. The old door answered ``created`` with a second row named
+    ``01_Fates End - Wizard Tower`` and two ``Project`` rows; that is what this file
+    did not have before Mf-yhjo and what it must never lose.
+
+    Mutation (each of these is measured red, and each is a different half of the
+    answer). Drop ``key=twin_rel`` from ``archive_project_service``'s
+    ``Dedupe(key=twin_rel, archive=normalized)`` - the leg this direction runs on, since
+    the folder project's marker key IS the twin path - and the door answers ``created``
+    with a second row. Stop ``bundle_service._create_one`` writing ``"key": key`` into
+    its marker, and there is no identity left to find. Let ``create_project_from_members``
+    write through the dedupe answer (skip its ``find_existing_project`` call) and the
+    second project appears whatever the door asks. And the honest bound, stated because
+    it is not this witness: dropping ``archive=`` from the BUNDLE door's own ``Dedupe``
+    does NOT red this test - measured, it reds
+    ``test_an_archive_created_project_still_covers_the_folder_after_a_model_lands_in_it``
+    instead - because a detection marker deliberately exposes no ``archive`` identity at
+    all, so here the twin is matched on the key leg and never on the archive leg.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    created = create(client, headers, [{"key": TOWER_DIR}])
+
+    assert (created["created"], created["skipped"], created["blocked"], created["failed"]) == (
+        1,
+        0,
+        0,
+        0,
+    ), "the folder door creates once, which is the half the other door has to see"
+    bundle_result = created["results"][0]
+    assert (bundle_result["status"], bundle_result["reason"]) == ("created", None)
+    project_id = bundle_result["project_id"]
+    assert project_id is not None
+    assert bundle_result["name"] == "Fates End - Wizard Tower", "the detector's name, ordinal stripped"
+    assert bundle_result["assets_added"] == len(LIVE_MODEL_NAMES) == 15
+
+    body = archive_project_create(client, headers)
+
+    assert body["status"] == "already_created", (
+        "the `.zip` beside the folder this door already made into a project is not a "
+        "second product - the pre-Mf-yhjo door answered `created` here"
+    )
+    assert body["project"] is not None, "a refusal carries no project; an already-created answer carries THE one"
+    assert body["project"]["id"] == project_id, "the same project, not a second one with a second name"
+    assert body["project"]["name"] == "Fates End - Wizard Tower", "the folder's name survives, not the twin's"
+    assert (body["planned"], body["resolved"]) == (20, 20), (
+        "the door still read the listing and still resolved every entry - it refused "
+        "at the dedupe, after the comparison, so a changed archive cannot hide"
+    )
+
+    assert table_counts()["projects"] == 1, "TWO rows is the defect this ticket exists to close"
+    assert member_count(project_id) == 15, "an already-created answer attaches nothing a second time"
+
+
+def test_a_project_created_from_the_archive_is_the_project_its_twin_folder_would_have_made(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The same claim from the other door first - and the report has to say it out loud.
+
+    The archive door clicks first: ``created``, named ``01_Fates End - Wizard Tower``,
+    20 assets. Then the folder door is asked what it can make of ``TOWER_DIR``, and the
+    row answers ``ready`` carrying ``existing_project_id`` = that project,
+    ``existing_project_match`` = ``"marker"``, ``bundle_drift_state`` = ``"known"`` and
+    ``bundle_drift_count`` = ``0``; the report counts it once under
+    ``already_created``; and the create pass that follows answers ``skipped`` /
+    ``already_created`` with the SAME id and leaves one ``Project`` row.
+
+    The two drift keys are the new part, and they are the reason the archive door's
+    marker has to live in the same namespace as the detection door's: the drift walk
+    reads ``rel_dir``, and an archive-extract marker carries its twin there. A project
+    found on shared files (``assets``) reports ``not_applicable`` with a ``None`` count
+    because it proves the files and not the intent - so the pre-Mf-yhjo shape is
+    exactly what this row answered before: ``existing_project_match: "assets"``,
+    ``bundle_drift_state: "not_applicable"``, ``bundle_drift_count: None``. A row that
+    says "you already made this" while refusing to say whether the folder has grown is
+    the same defect wearing a different face, which is why the route shape is pinned
+    here too rather than only in ``test_projects_api.py``.
+
+    Mutation (measured red, one at a time). Stop ``create_project_from_members``
+    promoting the payload's ``twin`` to the marker's ``rel_dir`` and the match stays
+    ``marker`` while both drift keys go ``unknown``/``None`` - the walk root is the one
+    field the archive door does not write itself. Make ``bundle_drift.project_drift``
+    answer without consulting membership (``is_member=None``) and the count answers 1
+    where nothing is missing; the same refusal on the report side
+    (``_report_row``'s own ``is_member``) reds here too. Drop ``archive=twin`` from
+    ``_report_row``'s ``find_existing_project`` call and this direction loses its marker
+    leg outright - ``existing_project_id`` goes ``None`` and the create below answers
+    ``created`` with a second row over the same twenty files. And skip the dedupe inside
+    ``create_project_from_members`` and the row still says ``already_created`` while the
+    create makes a second project, which is what the last three assertions are for.
+
+    What this witness does NOT depend on, measured: the archive door's own ``key=`` leg.
+    The report asks with the CANDIDATE's key and the twin archive, so it is
+    ``_report_row``'s ``archive=twin`` that carries this direction; the door's ``key=``
+    leg is the one the other direction runs on, and it is pinned there.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    body = archive_project_create(client, headers)
+
+    assert body["status"] == "created", "the archive door goes first, so it really writes"
+    assert (body["planned"], body["resolved"]) == (20, 20)
+    project_id = body["project"]["id"]
+    assert body["project"]["name"] == "01_Fates End - Wizard Tower", "this door names the twin it wrote"
+    assert member_count(project_id) == 20, "every entry the listing promised, not the models only"
+
+    report = detect(client, headers)
+    row = row_for(report, TOWER_DIR)
+
+    assert (row["status"], row["blocked_reason"]) == ("ready", None), (
+        "the row is still creatable-looking - `already_created` is a fact about the "
+        "database, not a reason to hide the row from the operator"
+    )
+    assert row["existing_project_id"] == project_id
+    assert row["existing_project_name"] == "01_Fates End - Wizard Tower"
+    assert row["existing_project_match"] == "marker", (
+        "the archive create wrote a key this report can read - `assets` here would be "
+        "the pre-Mf-yhjo answer: two doors agreeing by accident of shared files"
+    )
+    assert (row["bundle_drift_state"], row["bundle_drift_count"]) == ("known", 0), (
+        "`known`, not `not_applicable`: the marker names a walk root, and nothing under "
+        "it is outside the project, because this door attached all twenty"
+    )
+    assert report["counts"]["already_created"] == 1
+
+    created = create(client, headers, [{"key": TOWER_DIR}])
+
+    assert (created["created"], created["skipped"], created["blocked"], created["failed"]) == (
+        0,
+        1,
+        0,
+        0,
+    ), "the folder door creates nothing over a project the archive door already made"
+    assert (created["results"][0]["status"], created["results"][0]["reason"]) == (
+        "skipped",
+        "already_created",
+    )
+    assert created["results"][0]["project_id"] == project_id
+    assert created["results"][0]["assets_added"] == 0
+    assert len(project_rows()) == 1, "TWO rows is the live complaint this ticket closes"
+    assert member_count(project_id) == 20, "a skip touches neither the project nor its members"
+
+    assert bundle_drift_of(client, headers, project_id) == {"state": "known", "count": 0, "asset_ids": []}, (
+        "the route answers the same question the row answered, and `known` with no "
+        "parts is a real answer here - not `not_applicable`, which is what a project "
+        "this door never made would have to say"
+    )
+
+
+def test_the_archive_door_never_answers_from_what_a_project_already_holds(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """Containment is not an identity a click on one ``.zip`` carries.
+
+    File containment - "some project already holds every one of these files" - is the
+    weakest of the four identities and the only one that can merge a product with
+    something a human assembled for another reason. Whether that is an answer depends
+    entirely on who is asking, which is why it is a flag on ``Dedupe`` and not a leg that
+    always runs. This is the half that says the archive door must not set it: a pile
+    someone made by hand over exactly the tower's 20 files must not eat the Extract
+    click, because the operator asked for the archive's own project and no marker can
+    undo a merge made on somebody else's file list.
+
+    Mutation: ``assets=True`` in ``archive_project_service``'s ``Dedupe`` - the shape the
+    bundle door uses - and the click answers ``already_created`` carrying the hand-made
+    id and one ``Project`` row stands. Its partner,
+    ``test_the_bundle_door_answers_from_what_a_project_already_holds``, is the half that
+    says the folder door must. Nothing else in the suite distinguishes the two doors:
+    every other cross-door test runs on marker identity, where both doors agree.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    with Session(engine) as session:
+        held = sorted(asset.path for asset in bundle_service.registered_assets(session, TOWER_DIR))
+
+    assert len(held) >= 15, held
+    hand_made_project("Someone else's wizard pile", held)
+
+    body = archive_project_create(client, headers)
+
+    assert body["status"] == "created", (
+        "the archive door answered from what a project already holds: containment is "
+        "not an identity a click on one .zip carries"
+    )
+    assert len(project_rows()) == 2, "the hand-made pile and the archive's project are two products"
+
+
+def test_the_bundle_door_answers_from_what_a_project_already_holds(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The other half of the flag: the folder door holds containment, and has to.
+
+    It is asking about a folder a scan registered, so a hand-made project over exactly
+    those files IS the product - the row says ``existing_project_match == "assets"`` and
+    the create is ``skipped`` / ``already_created`` carrying the hand-made id rather than
+    a second project over files the library already has.
+
+    Mutation: drop ``assets=True`` from ``bundle_service``'s ``Dedupe`` and both
+    assertions red - the row finds nothing and the create makes a duplicate.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    hand_made_project("Someone else's wizard pile", sorted(registered_model_paths(TOWER_DIR)))
+
+    row = row_for(detect(client, headers), TOWER_DIR)
+
+    assert row["existing_project_match"] == "assets", (
+        "containment is the only identity the folder row holds against a project with "
+        "no marker and no source URL; if it answers anything else the leg is not running"
+    )
+
+    created = create(client, headers, [{"key": TOWER_DIR}])
+
+    assert (created["created"], created["skipped"]) == (0, 1), (
+        "the folder door did not recognise the hand-made project over its own files - "
+        "drop `assets=True` from its `Dedupe` and this is the sentence"
+    )
+    assert created["results"][0]["reason"] == "already_created"
+    assert created["results"][0]["project_id"] is not None
+    assert len(project_rows()) == 1
+
+
+def test_an_archive_created_project_still_covers_the_folder_after_a_model_lands_in_it(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A late model in the folder does not make the folder a second product.
+
+    The harder half of the previous witness, and the shape the operator actually hits:
+    they extracted, pressed create, and only then dropped another STL into
+    ``01_Wizard``. The row must still name the archive door's project
+    (``existing_project_match`` still ``"marker"``, not demoted to ``"assets"`` and not
+    ``None``) and it must now say so with a number: ``bundle_drift_state`` ``known``,
+    ``bundle_drift_count`` ``1``. The create still answers ``skipped`` /
+    ``already_created`` with that id and there is still ONE ``Project`` row.
+
+    Before Mf-yhjo this row answered ``existing_project_id: None`` with
+    ``existing_project_match: None`` - the folder's file set no longer matched any
+    project's member set, so the assets leg missed and the marker leg did not exist -
+    and the create answered ``created`` with a SECOND project named
+    ``Fates End - Wizard Tower`` holding 16 models. That is the duplication the ticket
+    is about, and it is exactly the case a "same files" dedupe cannot see: the drift is
+    the whole point of the case, so the answer cannot come from the file set.
+
+    Mutation (measured red, one at a time). Drop ``archive=`` from
+    ``bundle_service._create_one``'s ``Dedupe(...)`` - the twin the folder row pairs with
+    - and the row keeps its ``ready`` badge while the create below answers ``created``
+    with the second project and its 16th model: the marker leg is the only thing that
+    still answers this case, and it answers through that field. Drop
+    ``archive=twin`` from ``_report_row``'s ``find_existing_project`` and the row itself
+    goes ``existing_project_id: None``, which is the ticket's original complaint. Drop
+    the membership filter from the report's drift call and the count answers 16 (every
+    model under the root, member or not) where this pins ``1``. And skip the dedupe in
+    ``create_project_from_members``: the row still tells the operator the project exists
+    and the create duplicates it anyway.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    body = archive_project_create(client, headers)
+
+    assert body["status"] == "created"
+    project_id = body["project"]["id"]
+
+    write_file(isolated_storage / TOWER_DIR / "01_Wizard" / "part-late.stl", b"s" * 4242)
+    scan()
+
+    row = row_for(detect(client, headers), TOWER_DIR)
+
+    assert row["existing_project_match"] == "marker", (
+        "the marker leg is what still answers once the folder no longer matches any "
+        "member set exactly - `assets` cannot answer this case, it is the case"
+    )
+    assert row["existing_project_id"] == project_id
+    assert (row["bundle_drift_state"], row["bundle_drift_count"]) == ("known", 1), (
+        "one part outside the project, said as a number, on a project the OTHER door made"
+    )
+
+    created = create(client, headers, [{"key": TOWER_DIR}])
+
+    assert (created["created"], created["skipped"]) == (0, 1), (
+        "a folder that has grown is not a new product - pre-Mf-yhjo this answered "
+        "`created` with a second project holding 16 models"
+    )
+    assert len(project_rows()) == 1
+    assert member_count(project_id) == 20, "the drift stays a question, it is not an attach"
+
+
+def test_an_archive_created_projects_drift_answer_is_membership_not_a_snapshot(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The drift answer is re-derived from membership, so it cannot be a stored count.
+
+    Same fixture, same late model, then the operator does the one thing the route
+    offers: ``POST /project/{id}/assets`` with exactly the id the drift answer named.
+    The count goes back to ``0`` and the id is gone from ``asset_ids``. Nothing about
+    the project's marker changed in between - the archive door wrote it before the file
+    existed, and it still names 20 planned and 20 resolved entries while the folder
+    holds 21 - so an answer that came from that payload could not possibly follow a
+    membership edit.
+
+    This is the intent behind condition 5 of the ticket, and it is why the marker stores
+    no member list: a member list in the marker would be a second source of truth for
+    "what is in this project", and the two would disagree the first time anyone added
+    a part by hand. The project's ``project_asset`` rows are the only member list, and
+    drift is a difference against them.
+
+    Mutation (measured). Make the drift answer ignore membership at the route -
+    ``bundle_drift.project_drift``'s ``is_member=members.__contains__`` replaced by
+    ``None`` - and the count stays ``1`` after the add below: THIS reds, together with
+    ``test_a_project_created_from_the_archive_is_the_project_its_twin_folder_would_have_made``.
+    The same mutation on the REPORT side (``_report_row``'s ``is_member``) leaves this
+    test green and reds the witness before it instead, because the row and the route
+    read membership through two different hands - the report's prebuilt asset index and
+    the route's correlated ``EXISTS`` flag - which is exactly why both witnesses exist.
+    Hand-writing a member list into the marker is the other way to satisfy a snapshot,
+    and there is no such field to hand-write: ``resolved`` stays 20 below whatever the
+    project's members become, which the last assertion states out loud.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    body = archive_project_create(client, headers)
+
+    assert body["status"] == "created"
+    project_id = body["project"]["id"]
+    assert bundle_drift_of(client, headers, project_id) == {"state": "known", "count": 0, "asset_ids": []}, (
+        "the zero before the late model, so the number below is a change and not a coincidence"
+    )
+
+    write_file(isolated_storage / TOWER_DIR / "01_Wizard" / "part-late.stl", b"s" * 4242)
+    scan()
+    late_id = asset_id_at(f"{TOWER_MEMBER_DIR}/part-late.stl")
+
+    drifted = bundle_drift_of(client, headers, project_id)
+
+    assert (drifted["state"], drifted["count"]) == ("known", 1)
+    assert drifted["asset_ids"] == [late_id], "the answer names the part, which is what the add below sends back"
+
+    added = add_project_members(client, headers, project_id, [late_id])
+
+    assert (added["added"], added["skipped"], added["failed"]) == ([late_id], [], [])
+    assert member_count(project_id) == 21
+
+    after = bundle_drift_of(client, headers, project_id)
+
+    assert (after["state"], after["count"]) == ("known", 0), (
+        "membership, not a snapshot: nothing in this project's marker was rewritten, "
+        "and the payload still says 20 planned / 20 resolved"
+    )
+    assert late_id not in after["asset_ids"]
+    assert archive_extract_payload_of_project(project_id)["resolved"] == 20, (
+        "the marker still counts the entries the listing promised - it is provenance, "
+        "and the drift answer demonstrably did not come from it"
+    )
+
+
+def test_a_project_written_before_the_marker_namespace_is_still_found_by_the_dedupe(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A pre-namespace row is still found - read, never migrated.
+
+    Rows written by the pre-Mf-yhjo archive door carry their whole payload in the
+    ``_archive_project`` block and no ``_bundle`` at all. This test writes one literally -
+    ``rewrite_metadata`` replaces the column with the exact old shape - and then asks
+    the two live questions: does the report still report that project for ``TOWER_DIR``
+    (``existing_project_id`` set, ``existing_project_match`` ``"marker"``) and does the
+    create still answer ``skipped`` / ``already_created`` with that id. Then the reader
+    half: ``archive_extract_payload_of`` still finds the ``archive`` path in a hand
+    written legacy block, and answers ``{}`` for a DETECTION marker row, which is the
+    same rule seen from the side that must NOT match - a detection row is not an
+    archive extract.
+
+    The "still a marker match" claim is the load-bearing one. Without the legacy
+    fallback in ``_read_marker`` the row falls to the assets leg and answers
+    ``"assets"`` - which LOOKS similar and is not: the two doors disagree on the name by
+    design, so an assets-only read is an answer that survives only while the files are
+    identical, and it also silently drops the drift question.
+
+    Mutation (measured). Rename or delete the ``LEGACY_ARCHIVE_MARKER`` block
+    ``_read_marker`` falls back to - the row stops being a marker and the
+    ``"marker"`` assertion above reds first, with the payload read below redding on the
+    same mutation. Stop ``_create_one`` writing ``"key"`` into its marker and the
+    detection row at the end loses the key that makes it a detection row. Skip the
+    dedupe in ``create_project_from_members`` and the create in the middle answers
+    ``created`` over a project the archive door already made. And for the ``{}`` at the
+    end, the honest statement is that its two guards are individually redundant on this
+    corpus and only the pair is load-bearing: flattening the ``archive_extract``
+    sub-block into the flat marker (so the two doors' two ``archive`` fields meet in one
+    dict) STILL answers ``{}`` while the origin check stands, and dropping the origin
+    check STILL answers ``{}`` while the sub-block holds the payload - doing BOTH, which
+    is what removing the namespace actually means, and the ``{}`` assertion reds with a
+    whole detection marker in its place.
+
+    What this test also pins, because it is the bound of "read, not migrated": the
+    legacy row keeps its DEDUPE but not its DRIFT number. ``bundle_drift.classify`` is
+    handed ``project_service.bundle_marker_of`` directly - the ``_bundle`` namespace and
+    nothing else - so a row with no ``_bundle`` is ``not_applicable``, not ``unknown``
+    and never a zero: there is no question to answer, and the module docstring's "no
+    migration" rule stops at the reader that has to name a walk root.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    body = archive_project_create(client, headers)
+
+    assert body["status"] == "created"
+    project_id = body["project"]["id"]
+
+    written = rewrite_metadata(
+        project_id,
+        {
+            "_archive_project": {
+                "archive": TOWER_ZIP,
+                "twin": TOWER_DIR,
+                "planned": 20,
+                "resolved": 20,
+                "fingerprint": "0" * 16,
+                "common_root": "01_Wizard",
+                "groups": [],
+            }
+        },
+    )
+
+    row = row_for(detect(client, headers), TOWER_DIR)
+
+    assert row["existing_project_id"] == project_id, "the row written before the namespace is still found"
+    assert row["existing_project_match"] == "marker", (
+        "`assets` here is the legacy fallback not being read: the two doors disagree on "
+        "the name on purpose, so only the block itself can prove this is that project"
+    )
+    assert (row["bundle_drift_state"], row["bundle_drift_count"]) == ("not_applicable", None), (
+        "the honest bound: the legacy row is found by the dedupe and cannot be drifted, "
+        "because the drift walk reads the `_bundle` namespace and this row has none"
+    )
+
+    created = create(client, headers, [{"key": TOWER_DIR}])
+
+    assert (created["created"], created["skipped"]) == (0, 1)
+    assert (created["results"][0]["status"], created["results"][0]["reason"]) == (
+        "skipped",
+        "already_created",
+    )
+    assert created["results"][0]["project_id"] == project_id
+    assert len(project_rows()) == 1, "no migration ran, and none was needed"
+
+    assert project_create_service.archive_extract_payload_of(written)["archive"] == TOWER_ZIP, (
+        "the door still tells its story from the block it wrote before the namespace existed "
+        "- and it is handed the raw column, because that is what a reader of a row gets"
+    )
+
+    # The mirror half: a DETECTION marker is not an archive extract, and the only
+    # reader of the archive payload must say so with `{}` rather than with the
+    # detection door's own `archive` field (which names the same `.zip`, for a
+    # different purpose, in a different shape).
+    generic_bundle(isolated_storage, "Plain Generic")
+    scan()
+    detection_create = create(client, headers, [{"key": "Plain Generic", "name_only": True}])
+
+    assert detection_create["created"] == 1, "a real bundle create, so the row below is a real detection marker"
+    detection_id = detection_create["results"][0]["project_id"]
+    assert project_marker(detection_id)["key"] == "Plain Generic"
+    assert project_create_service.archive_extract_payload_of(project_metadata(detection_id)) == {}, (
+        "the detection door's `archive` is provenance, not an archive-extract payload - "
+        "reading it here would hand every detected project an archive identity"
+    )
+
+
+def _callee_name(call: ast.Call) -> Optional[str]:
+    """The function one call names, spelled either way: ``f(...)`` or ``pkg.f(...)``.
+
+    The two doors reach the seam differently - ``bundle_service`` goes through the
+    module attribute, ``archive_project_service`` through ``project_create_service.`` -
+    and a pin that only saw one spelling would be a pin on one door.
+    """
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+def _top_level_function(module, name: str) -> ast.FunctionDef:
+    """``name``'s top-level definition, read out of the module's own source file.
+
+    Top level only on purpose: a body nested inside another function is not the door
+    the operator's click runs, and a helper could otherwise satisfy the pin from out of
+    sight. ``_local_imports`` reads the same way for the same reason.
+    """
+    for node in ast.parse(Path(module.__file__).read_text()).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"no top-level function named {name} in {module.__name__}")
+
+
+def _kinds_arguments(body: ast.AST) -> List[Tuple[Optional[str], ast.expr]]:
+    """Every ``kinds=`` argument in ``body``, with the callee it was handed to."""
+    handed: List[Tuple[Optional[str], ast.expr]] = []
+    for node in ast.walk(body):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "kinds":
+                handed.append((_callee_name(node), keyword.value))
+    return handed
+
+
+def _string_comparands(body: ast.AST) -> List[str]:
+    """Every string literal that sits on either side of a comparison in ``body``."""
+    literals: List[str] = []
+    for node in ast.walk(body):
+        if not isinstance(node, ast.Compare):
+            continue
+        for operand in [node.left, *node.comparators]:
+            literals.extend(
+                inner.value
+                for inner in ast.walk(operand)
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str)
+            )
+    return literals
+
+
+def test_the_member_set_seam_is_the_only_place_a_create_filters_by_kind() -> None:
+    """Mf-wsdo's seam, pinned at the source: one body changes, not two doors.
+
+    "Which KINDS does a create attach?" has exactly one answer today - models for the
+    folder door, everything for the archive door - and it is ``member_asset_ids``'
+    ``kinds`` parameter that carries it. The day that answer stops being a suffix is
+    Mf-wsdo, and the ticket's requirement is that it changes ONE body. So neither door
+    may own a kind test of its own, and this reads the two door bodies -
+    ``bundle_service._create_one`` and ``archive_project_service.create_project_from_extract``
+    - and refuses four things:
+
+    * a ``_suffix`` call in either body: that is ``project_create_service``'s private
+      extension reader, and a door calling it is a door filtering by kind;
+    * a comparison against a string literal ending in ``.stl``: the same refusal in the
+      shape a door would actually write when it grows its own filter
+      (``path.endswith(".stl")``, ``suffix == ".stl"``);
+    * a ``MODEL_SUFFIXES`` read that is not the value of a ``kinds=`` argument handed to
+      the seam. The folder door DOES name the table - that is the hand-down, and
+      ``_create_one``'s comment says so - so the pin is not "never mention it", it is
+      "mention it only in order to pass it to ``member_asset_ids`` /
+      ``create_project_from_members``", which is the sharper claim: count the reads,
+      count the hand-downs, require each handed value to be exactly
+      ``bundle_detect.MODEL_SUFFIXES``, and any fifth use (a membership test, a local
+      variable, a cover rule) unbalances it;
+    * an archive door that hands ``kinds`` down at all. It has none: what the operator
+      ticked IS the file set. ``handed`` is empty for that body, and if anyone ever
+      gives that door a suffix table the assertion says so out loud.
+
+    And the seam side: ``member_asset_ids(candidates, *, kinds=None)`` - exactly those
+    two parameters, ``kinds`` keyword-only, defaulting to ``None``. Keyword-only is what
+    stops a door passing a table positionally into ``candidates``, and ``None`` meaning
+    "everything" is what lets the archive door ask the no-question question.
+
+    Mutation: put ``if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES`` back into
+    ``_create_one`` (the pre-Mf-yhjo ``model_assets`` comprehension) and it reds three
+    ways at once - a ``_suffix`` call, a ``MODEL_SUFFIXES`` read outside a hand-down, and
+    the count mismatch. Move the filter to the archive door and the empty-``handed``
+    claim reds. Rename ``kinds``, drop the keyword-only star, or default it to a table
+    instead of ``None`` and the signature block reds. Deleting this test is the only
+    quiet way through, which is the usual reason a source pin is worth having.
+    """
+    seam_calls = {"member_asset_ids", "create_project_from_members"}
+    doors = (
+        (bundle_service, "_create_one", True),
+        (archive_project_service, "create_project_from_extract", False),
+    )
+
+    for module, function_name, hands_a_kind_table_down in doors:
+        body = _top_level_function(module, function_name)
+        label = f"{module.__name__}.{function_name}"
+
+        called = set()
+        for node in ast.walk(body):
+            if isinstance(node, ast.Call):
+                called.add(_callee_name(node))
+        assert "_suffix" not in called, f"{label} filters by kind itself"
+        assert not [text for text in _string_comparands(body) if text.endswith(".stl")], (
+            f"{label} compares against a model suffix literal"
+        )
+
+        reads = [
+            node
+            for node in ast.walk(body)
+            if isinstance(node, ast.Attribute) and node.attr == "MODEL_SUFFIXES"
+        ]
+        handed = _kinds_arguments(body)
+        if hands_a_kind_table_down:
+            assert handed, f"{label} is the door that owns the kind table - it must hand it down"
+        for callee, value in handed:
+            assert callee in seam_calls, f"{label} hands `kinds` to {callee!r}, which is not the seam"
+            assert (
+                isinstance(value, ast.Attribute)
+                and value.attr == "MODEL_SUFFIXES"
+                and isinstance(value.value, ast.Name)
+                and value.value.id == "bundle_detect"
+            ), f"{label} passes something other than `bundle_detect.MODEL_SUFFIXES` as `kinds`"
+        assert len(reads) == len(handed), (
+            f"{label} reads MODEL_SUFFIXES {len(reads)} time(s) but hands it down "
+            f"{len(handed)} time(s): the table is being used for something besides the seam"
+        )
+        if not hands_a_kind_table_down:
+            assert not handed and not reads, (
+                f"{label} must not answer the kinds question at all - the archive door's "
+                "file set is the listing the operator ticked"
+            )
+
+    signature = inspect.signature(project_create_service.member_asset_ids)
+
+    assert list(signature.parameters) == ["candidates", "kinds"], list(signature.parameters)
+    kinds = signature.parameters["kinds"]
+    assert kinds.kind is inspect.Parameter.KEYWORD_ONLY, kinds.kind
+    assert kinds.default is None, kinds.default
+
+    # The two `_suffix`es are the same line written twice, in two modules that must
+    # agree: `bundle_service` decides ownership with one and the seam decides
+    # membership with the other. Nothing but this pins them, and the file that shows a
+    # drift is a `.STL` - owned by the door under one rule and filtered out of the
+    # member set under the other, which reads as a bundle that created with no members.
+    for path in ("a/b.STL", "a/b.stl", "a/b", "a/b.tar.gz", "a/.stl", "", "a/b.PNG", "a/"):
+        assert bundle_service._suffix(path) == project_create_service._suffix(path), path
+
+
+def test_asking_with_no_key_matches_no_project(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A door that holds no key must not match a project whose marker has no key.
+
+    ``find_existing_project``'s marker leg reads ``wanted_key and marker.get("key")``,
+    and the ``wanted_key`` half is the whole defence: both sides are ``None`` for a
+    keyless ask over a keyless marker, and ``None == None`` is a match. A keyless marker
+    is not hypothetical - a row written before the key was required has one, and the zip
+    door's ``zip-project:<url>`` is a key no folder candidate can ever hold. Delete
+    ``wanted_key and`` and this reds while every other test stays green, because every
+    other test asks with a key.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    project_id = archive_project_create(client, headers)["project"]["id"]
+
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        marker = json.loads(project.metadata_json)[project_create_service.BUNDLE_MARKER]
+        marker.pop("key")
+        marker[project_create_service.ORIGIN_ARCHIVE_EXTRACT].pop("key", None)
+        project.metadata_json = json.dumps({project_create_service.BUNDLE_MARKER: marker})
+        session.add(project)
+        session.commit()
+
+        # The ask a door makes when it holds no identity of its own: every leg falsy.
+        assert project_create_service.find_existing_project(session) is None
+        assert project_create_service.find_existing_project(session, key=None) is None
+        # A real key finds nothing either - the marker has none to answer with.
+        assert project_create_service.find_existing_project(session, key=TOWER_DIR) is None
+
+
+def test_the_create_door_asks_the_ownership_map_the_report_answered_with(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mf-quv4's hand-off, closed: the door that ATTACHES reads the map REPORTS read.
+
+    Mf-quv4 gave the report a one-owner map (``_claim_owners``) and left ``_create_one``
+    building its attach set from ``_own_paths``, so a container could be shown owning
+    what a deeper child owns while the click handed those same files to the container.
+    Both sides now read through one expression (``_own_assets`` / ``_claimed_assets``).
+    The suite was not blind to that by accident, but it never discriminated it: a probe
+    over the whole 3012-test run measured ``_own_paths`` and ``_claim_owners`` disagreeing
+    ZERO times, which is why "they agree today" needed a witness rather than a belief.
+
+    The probe is the ``claims`` argument. Serve the create ``claims=None`` - the way the
+    inert re-offered row is served - and the third assertion reds: the door attaches
+    everything its snapshot named, which is the bug.
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+    assert row_for(detect(client, headers), TOWER_DIR)["status"] == "ready"
+
+    seen: List[tuple] = []
+    creating = {"inside": False}
+    real = bundle_service._claimed_assets
+    real_create_one = bundle_service._create_one
+
+    def spy(assets, *, key, claims):
+        seen.append((key, claims, creating["inside"]))
+        return real(assets, key=key, claims=claims)
+
+    def spy_create_one(*args, **kwargs):
+        creating["inside"] = True
+        try:
+            return real_create_one(*args, **kwargs)
+        finally:
+            creating["inside"] = False
+
+    monkeypatch.setattr(bundle_service, "_claimed_assets", spy)
+    monkeypatch.setattr(bundle_service, "_create_one", spy_create_one)
+
+    created = create(client, headers, [{"key": TOWER_DIR}])
+
+    assert created["created"] == 1
+    # `create_bundles` re-derives the report before it creates, so the key is asked
+    # about by `_report_row` too; only the calls made INSIDE the create are this
+    # witness. Serve the create `claims=None` - the way the inert re-offered row is
+    # served - and the second assertion reds.
+    from_create = [(key, claims) for key, claims, inside in seen if inside]
+    assert from_create, "the create door built a member set without consulting ownership"
+    assert [key for key, _ in from_create] == [TOWER_DIR]
+    assert all(claims is not None for _, claims in from_create), (
+        "the create door attached everything its snapshot named, ignoring the map that "
+        "decided which row owns each model"
+    )
+    # And what it attached is the models under the one key the report credited - not the
+    # previews, not the ``.txt``, not the twin's contents.
+    assert project_storage_paths(created["results"][0]["project_id"]) == registered_model_paths(
+        TOWER_DIR
+    )
+
+
+def test_no_member_create_leaves_an_empty_project_behind(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One transaction or none: an attach set that names a stranger cannot strand a project.
+
+    The bundle door, asked to create the tower row, with the member-set seam answering
+    ``["no-such-asset"]`` - one id no ``Asset`` row holds. The honest way to build that
+    state is to patch the seam itself for the duration of one real
+    ``POST /bundles/create``: the door still runs, the report still runs, and the create
+    dies inside ``project_service.create_project_with_members``, which checks every id
+    BEFORE it inserts. So the item answers ``failed`` and the ``Project`` table is still
+    empty.
+
+    The point is the single transaction, and what it replaced: the old door committed the
+    project row, then attached files in a SECOND session through
+    ``project_service.add_assets`` - a second door whose contract is per-id failure, so
+    one unknown id left a project that holds nothing, visible in the list, with no
+    members and no way to get them. ``create_project_from_members`` is the only write
+    path now and it is one commit, which is what an empty table here measures.
+
+    Mutation: make ``create_project_with_members`` insert first and check ids afterwards
+    (or split it back into ``create_project`` + ``add_assets``, the pre-Mf-yhjo shape)
+    and ``session.exec(select(Project)).all()`` returns a row. Make the door swallow the
+    404 into a ``skipped`` result and the status assertion reds - and that one matters,
+    because a skip that wrote a project is a project nobody asked for wearing the word
+    "skipped".
+    """
+    live_tower_extraction(isolated_storage)
+    scan()
+    headers = auth_header(client)
+    row = row_for(detect(client, headers), TOWER_DIR)
+
+    def only_a_bogus_id(_candidates, *, kinds=None):
+        return ["no-such-asset"]
+
+    monkeypatch.setattr(project_create_service, "member_asset_ids", only_a_bogus_id)
+
+    created = create(client, headers, [{"key": row["key"]}])
+
+    assert created["created"] == 0
+    assert created["failed"] == 1
+    item = created["results"][0]
+    assert (item["status"], item["project_id"]) == ("failed", None), (
+        "it 404s out of `create_project_with_members` before the insert, so the door "
+        "has nothing to report a project id for"
+    )
+    with Session(engine) as session:
+        assert session.exec(select(Project)).all() == [], (
+            "the whole create is one transaction: no project row, no member rows, "
+            "nothing for a later reader to find"
+        )
+
+
+def test_an_existing_project_is_answered_before_a_refusal_the_door_brought_with_it() -> None:
+    """Step 1 before step 2, pinned because three pieces of prose now claim it.
+
+    ``create_project_from_members`` asks the dedupe and only then honours ``refuse``, so
+    a row that BOTH already exists and would have been refused reports ``already_created``
+    carrying the project the operator can open, not ``failed/contains_bundles`` about a
+    create that never happens. That ordering is base's, not a new decision -
+    ``_create_one`` asked ``find_existing_project`` before its contains-bundles belt - and
+    the primitive inherits it, which is exactly the kind of fact that silently reverses
+    the first time someone moves a line. Every ``contains_bundles`` test in this file
+    runs the belt against a library with no project yet, so not one of them can see the
+    order; the group-exclusion refusal is the opposite case and must stay AHEAD of the
+    dedupe, which is where ``_create_one`` still answers it.
+
+    Mutation: move the ``refuse`` check above the dedupe in ``create_project_from_members``
+    and this reds - the operator is told a create was refused when the project is sitting
+    in the library.
+    """
+    with Session(engine) as session:
+        made = project_create_service.create_project_from_members(
+            session,
+            name="A tower the belt would have refused",
+            origin=project_create_service.ORIGIN_DETECTION,
+            members=(),
+            require_members=False,
+            marker={"key": "import/a tower", "rel_dir": "import/a tower"},
+        )
+        assert made.status == project_create_service.STATUS_CREATED
+
+        refused_by_belt = project_create_service.Dedupe(key="import/a tower")
+        answer = project_create_service.create_project_from_members(
+            session,
+            name="A tower the belt would have refused",
+            origin=project_create_service.ORIGIN_DETECTION,
+            members=(),
+            require_members=False,
+            dedupe=refused_by_belt,
+            refuse="contains_bundles",
+        )
+
+        assert (answer.status, answer.reason) == (
+            project_create_service.STATUS_ALREADY_CREATED,
+            None,
+        ), (
+            "the project exists and is returned; a refusal about a create that was never "
+            "attempted is the less useful sentence"
+        )
+        assert answer.project_id == made.project_id
+        assert answer.match == project_create_service.MATCH_MARKER
+
+
+def test_a_create_asked_for_no_members_refuses_instead_of_naming_an_empty_project() -> None:
+    """The primitive's own third step, tested at the primitive.
+
+    Neither door can reach this through its route today: the archive door checks its own
+    resolved list before calling, and a bundle row that is ``ready`` has models by
+    definition. That is exactly why it is pinned here rather than through a door - it is
+    the guarantee the doors are allowed to lean on ("a create cannot leave a project with
+    no files"), and a guarantee only reachable by a caller that forgets its own check is
+    not a guarantee. Delete step 3 of ``create_project_from_members`` and this reds while
+    every route-level test stays green.
+
+    ``require_members=False`` is the other half: ``POST /projects`` is a form with no
+    member list, and it must be allowed to make a project holding nothing at all.
+    """
+    with Session(engine) as session:
+        refused = project_create_service.create_project_from_members(
+            session,
+            name="A project that was never going to have files",
+            origin=project_create_service.ORIGIN_DETECTION,
+            members=(),
+        )
+
+        assert (refused.status, refused.project_id) == (
+            project_create_service.STATUS_REFUSED,
+            None,
+        )
+        assert refused.reason == "no member files resolved"
+        assert refused.members == ()
+
+        # The same call with the requirement lifted is a create, not a refusal.
+        allowed = project_create_service.create_project_from_members(
+            session,
+            name="A form, typed",
+            origin=project_create_service.ORIGIN_MANUAL,
+            members=(),
+            require_members=False,
+        )
+
+        assert allowed.status == project_create_service.STATUS_CREATED
+        assert allowed.members == ()
+        assert session.exec(select(Project)).all() != []
+
+
+def test_the_zip_row_keeps_its_extract_door_after_its_archive_became_a_project(
+    client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `.zip` row the Extract door already served must still be an Extract door.
+
+    Fates End ships a tower as one wrapper archive and nothing else, so the archive is
+    the row: detection offers ``01_Fates End - Wizard Tower.zip`` as
+    ``blocked``/``archive_only`` because the web Extract door opens on exactly that
+    reason (``ui/review/bundleRows.ts`` ``extractPathFor``). The operator extracts it,
+    the files register, the archive door makes its project - and then the twin directory
+    is deleted, which is the state that actually asks the question: a project now exists
+    whose marker names THIS archive, and the row that names the same path is still the
+    only place the operator can re-extract from.
+
+    So the row must keep its own answer. It does, because an archive-extract marker's
+    ``key`` is the archive's IDENTITY (``archive:`` + the path,
+    ``project_create_service.archive_identity``) and not the path: the marker leg
+    compares that field against a candidate's storage path, and a bare ``.zip`` path
+    sitting in it is the row matching its own project. Measured with the prefix
+    dropped, this row answers ``existing_project_match == "marker"``, the report's
+    ``already_created`` goes 0 -> 1 for it, and the web layer hides already_created
+    rows behind "Show created" (``BundleReviewView``'s own caption says so) - the door
+    is gone and the queue looks tidier. Same shape, same reasoning as the zip-project
+    door's ``zip-project:<url>`` key, and the same safety argument: no
+    ``Asset.storage_path`` can carry a ``:``.
+
+    Mutation: return ``normalised`` from ``archive_identity`` instead of the prefixed
+    form and the two assertions that read the row's identity red together -
+    ``existing_project_match`` becomes ``marker`` carrying that project id, and
+    ``counts.already_created`` goes 0 -> 1. The ``(status, blocked_reason)`` assertion
+    does NOT move, and saying so is the point: status is computed before the dedupe is
+    asked, and ``is_archive`` forces ``blocked``/``archive_only`` whatever the dedupe
+    says - which is exactly why the door survives the mutation while the web layer, that
+    filters on ``already_created`` and not on ``blocked_reason``, does not. Delete the
+    ``is_archive`` half of ``_report_row``'s twin leg too and the answer still does not
+    move, the other thing this test is for: the guard is the second lock and the prefix
+    is the load-bearing one, because an ``is_archive`` candidate carries no
+    ``archive_path`` of its own, so that leg never even fires for one. Recording that
+    beats leaving a comment that credits the wrong half.
+    """
+    monkeypatch.setattr(main, "start_scan", lambda: True)
+    zip_rel = "01_Fates End - Wizard Tower.zip"
+    twin_rel = "01_Fates End - Wizard Tower"
+    write_zip(
+        isolated_storage / zip_rel,
+        {
+            "01_Wizard/part-a.stl": b"s" * 44,
+            "01_Wizard/part-b.stl": b"s" * 45,
+            "01_Wizard/preview.jpg": b"j" * 200,
+            "01_Wizard/notes.txt": b"print at 0.2mm\n",
+        },
+    )
+    headers = auth_header(client)
+
+    extracted = client.post("/import/archive", json={"path": zip_rel}, headers=headers)
+    assert extracted.status_code == 200, extracted.text
+    assert extracted.json()["destination"] == twin_rel
+    scan()
+
+    made = client.post("/import/archive/project", json={"path": zip_rel}, headers=headers)
+    assert made.status_code == 200, made.text
+    body = made.json()
+    assert (body["status"], body["planned"], body["resolved"]) == ("created", 4, 4)
+    project_id = body["project"]["id"]
+
+    # The state that asks the question: the project stands, the twin it was built from
+    # is gone, and the archive the row names has not moved.
+    shutil.rmtree(isolated_storage / twin_rel)
+    scan()
+    report = detect(client, headers)
+
+    row = row_for(report, zip_rel)
+    assert (row["status"], row["blocked_reason"]) == ("blocked", "archive_only"), (
+        "the reason the web Extract door opens on, still offered for the archive that "
+        "already has a project - a dedupe that costs a door is not a dedupe gained"
+    )
+    assert (row["existing_project_id"], row["existing_project_match"]) == (None, None), (
+        "the row is not reported as a project that already became: its `key` is a "
+        "storage path, and the marker's `key` is an `archive:`-prefixed identity, so "
+        "the two key spaces never meet"
+    )
+    assert report["counts"]["already_created"] == 0, (
+        "counted from `existing_project_id`, so an identity that leaked into the path "
+        "space would hide this row behind 'Show created' and read as a tidy queue"
+    )
+    refused = create(client, headers, [{"key": zip_rel}])
+    assert refused["blocked"] == 1 and refused["results"][0]["reason"] == "archive_only", (
+        "the create door still refuses it for the same reason it refuses it today, "
+        "which is the sentence the web layer turns back into the Extract button"
+    )
+    listing = project_listing(client, headers)
+    assert list(listing) == [project_id] and listing[project_id]["name"] == twin_rel.rsplit("/", 1)[-1], (
+        "the archive's project is still there and still the only thing that was made"
+    )
