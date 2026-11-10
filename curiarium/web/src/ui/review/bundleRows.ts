@@ -65,6 +65,19 @@ export function isCreatable(row: BundleDetectItem): boolean {
   return !isBlocked(row) && !row.existing_project_id;
 }
 
+/** Whether THIS REPORT says the row's key holds registered files. It is a claim about one
+ *  dry-run report, never a promise about what is on disk when a button is clicked: the report
+ *  is a walk somebody asked for, and a later scan can register more files under the same key.
+ *  SO NO WRITE DECISION MAY READ THIS. A create, an extract or an attach keeps asking the
+ *  server, which re-reads disk inside its own transaction; `isCreatable` stays the server's
+ *  answer for exactly that reason, and this module never re-implements folder resolution or
+ *  the one-owner map. What this predicate may decide is only what the queue's words may claim
+ *  and which doors it may offer. An absent count is not a payload: a payload that omits the
+ *  field answers false, which is the behaviour this ticket starts from. */
+export function payloadOnDisk(row: BundleDetectItem): boolean {
+  return row.assets_total > 0;
+}
+
 /** Whether the row names a vendor page an enrichment could read. The server
  *  only issues an enrichable key when the row names a vendor id, so a LOW
  *  hash-named row carries no source at all. */
@@ -99,12 +112,68 @@ export function canEnrich(row: BundleDetectItem): boolean {
 export const NO_SOURCE_PAGE_REASON =
   "No source page: this bundle was matched from its files, not from a vendor page.";
 
+/** The sentence `noPayloadDoor` refuses the enrichment doors with - the refusal text of the
+ *  very predicate that gated them, on Mf-ny89 part C's pattern for the blocked-reason label.
+ *  It claims no remedy the queue does not offer, carries no digit, and says nothing about the
+ *  row's metadata: what it states is the two doors the row does not have.
+ *
+ *  One sentence, two mouths. It is read by the detail pane (`data-bundle-enrich-reason`, one
+ *  row) and by the bulk bar (`bulkEnrichNoneLine`, N rows), so it is worded to be true in both:
+ *  it speaks of the files rather than of "this row", and it states the two absent doors as a
+ *  fact about them, which is a claim a selection can also make of itself. */
+export const NO_PAYLOAD_DOOR_REASON =
+  "No door for these files: nothing here creates a project or extracts an archive, so the source page is left unread rather than offered as the only action.";
+
+/** Why a row offers no enrichment door. Both causes are decided by the very predicates that
+ *  gated the doors: the absent source page by `hasThingSource` (with the other three
+ *  `canEnrich` gates asked alongside it), and a payload no door can reach by `noPayloadDoor`,
+ *  which both offer predicates read. A sentence is therefore never a guess about a row it has
+ *  not looked at. */
 export function enrichUnavailableLine(row: BundleDetectItem): string | null {
-  if (hasThingSource(row)) return null;
-  if (!needsEnrichment(row)) return null;
-  if (row.enrichment) return null;
-  if (row.existing_project_id) return null;
-  return NO_SOURCE_PAGE_REASON;
+  if (!hasThingSource(row)) {
+    // The four-gate question, unchanged: this sentence is said only when the missing page is
+    // THE reason. Every other absent door stays silent, because another line already speaks it
+    // (`needsEnrichment` for a filled Creator or Licence, `enrichmentLine` for an answered
+    // page, `createdProjectLine` for a settled project), so it never decays into "something is
+    // missing".
+    if (!needsEnrichment(row) || row.enrichment || row.existing_project_id) return null;
+    return NO_SOURCE_PAGE_REASON;
+  }
+  // The row DOES name a page, so the only thing left that can refuse a door is the payload
+  // predicate. Same shape as the branch above: the sentence is decided by the predicate that
+  // gated the button, here `noPayloadDoor`, which both offer predicates read.
+  if ((canEnrich(row) || canRecheck(row)) && noPayloadDoor(row)) return NO_PAYLOAD_DOOR_REASON;
+  return null;
+}
+
+/** The bulk bar's single sentence when nothing in the selection is sendable, or null when the bar
+ *  has no honest sentence to speak. Two rules, both inherited from the paragraph this ticket
+ *  deleted rather than invented:
+ *
+ *  - ONE cause or silence. Each line is decided per row by `enrichUnavailableLine`, so a bar that
+ *    recites one row's sentence about a selection the same predicate answered differently is the
+ *    deleted paragraph back in miniature - `bulkEnrichTitle` was just reduced to a count for
+ *    exactly that reason. If the non-null lines disagree, nothing is said.
+ *  - no door claimed absent that the bar is holding open. The payload sentence asserts there is
+ *    no create and no extraction, so it may not be spoken while a selected row has either; the
+ *    page sentence asserts no vendor page, so it may not be spoken while a selected row names
+ *    one. A bar that is offering an action has no business explaining why it is not.
+ *
+ *  The row's own door absent (its line null) is not a cause and never speaks. */
+export function bulkEnrichNoneLine(rows: BundleDetectItem[]): string | null {
+  let spoken: string | null = null;
+  for (const row of rows) {
+    const line = enrichUnavailableLine(row);
+    if (line === null) continue;
+    if (spoken !== null && line !== spoken) return null;
+    spoken = line;
+  }
+  if (spoken === null) return null;
+  for (const row of rows) {
+    if (spoken === NO_PAYLOAD_DOOR_REASON && (isCreatable(row) || isArchiveOnly(row))) return null;
+    if (spoken === NO_SOURCE_PAGE_REASON && hasThingSource(row)) return null;
+  }
+  return spoken;
 }
 
 /** The detail pane's re-check door: the page answered before and the row is
@@ -157,18 +226,19 @@ export function enrichSelectionLabel(enrichable: number, selected: number): stri
   return `Enrich selected (${enrichable})`;
 }
 
-/** What the bulk bar says when none of the selected rows can be enriched. It is
- *  the disabled button's `title`, but a disabled control's title is not reliably
- *  surfaced as a tooltip, and the control is not focusable, so the same sentence
- *  is also rendered as visible text - and the count form `(0 of 3)` has to be
- *  honest on its own. */
-export const ENRICH_NONE_REASON =
-  "None of the selected bundles can be enriched: each either names no source page, already has a creator and a licence, was already read from its page, or is already a project. A bundle that was already read from its page, and is not already a project, can be re-checked one at a time with 'Re-check source page'.";
-
-/** The bulk button's hover sentence, or undefined when the label already says
- *  everything. It names all four `canEnrich` gates rather than the missing
- *  source alone, so it can never accuse an already-enriched row of having no
- *  page - the tooltip must not contradict the count it hangs on. */
+/** The bulk button's hover sentence, or undefined when the label already says everything. It
+ *  speaks the COUNT only. Which rows are missing and why is a fact about each row, and each
+ *  row already says it - `enrichUnavailableLine` is decided by the same predicates that gated
+ *  its door. A bulk sentence cannot know that, so the paragraph that used to sit here did the
+ *  opposite: one fixed multi-clause sentence listing every gate a row might fail, emitted
+ *  without reading a single selected row, so an operator whose one row failed one clause was
+ *  handed the whole list and none of it described their row. The count branch now stops at the
+ *  count, and the zero branch defers to `bulkEnrichNoneLine` - which says nothing at all rather
+ *  than recite one row's verdict about the rest.
+ *
+ *  The order below is load-bearing: the cap branch still outranks the shortfall, exactly as
+ *  `enrichSelectionLabel`'s branches do, and `sent === selected` still comes first, so
+ *  `(0, 0)` and `(25, 25)` stay silent. */
 export function bulkEnrichTitle(enrichable: number, selected: number): string | undefined {
   const sent = Math.min(enrichable, ENRICH_MAX_KEYS);
   if (sent === selected) return undefined;
@@ -176,12 +246,18 @@ export function bulkEnrichTitle(enrichable: number, selected: number): string | 
     // The cap outranks the shortfall, exactly as the label's branches do.
     return `The server takes at most ${ENRICH_MAX_KEYS} bundles per request, so it sends ${ENRICH_MAX_KEYS} of the ${enrichable} that can be enriched, leaving ${enrichable - ENRICH_MAX_KEYS} for a later pass.`;
   }
-  if (enrichable === 0) return ENRICH_NONE_REASON;
-  return `${enrichable} of the ${selected} selected can be enriched; the others either name no source page, already have a creator and a licence, were already read from their page, or are already a project.`;
+  // Nothing is sendable, so there is no count to explain. The bar renders the selected rows'
+  // own sentence instead (`enrichUnavailableLine`), which is decided per row by the predicates
+  // that refused each door - not a guess about all four gates at once.
+  if (enrichable === 0) return undefined;
+  return `${enrichable} of the ${selected} selected can be enriched`;
 }
 
 /** The one blocked reason that names an extraction instead of a create. */
 const ARCHIVE_ONLY = "archive_only";
+
+/** The one blocked reason that is a claim about what a scan registered. */
+const NOT_SCANNED = "not_scanned";
 
 /** Whether a row's path is an archive on disk. Case-insensitive on purpose: the
  *  server's own walk lowercases the suffix before comparing it
@@ -258,6 +334,44 @@ export function archiveExtractTitle(row: BundleDetectItem): string {
   return "Extract this archive in place (Enter)";
 }
 
+/** The row this ticket exists for: the report says its key holds registered files, and yet the
+ *  queue has nothing it can DO with them. Three facts, every one read off the report through
+ *  the predicate that already decides the door:
+ *
+ *  - `payloadOnDisk` - the report counts registered assets under the key;
+ *  - `!isCreatable` - the server's own answer is that this row creates no project (blocked,
+ *    or its payload already sits in one);
+ *  - `extractPathFor(row) === null` - and no archive is offered either, in place or one-step.
+ *
+ *  This is a CLIENT PRODUCT REFUSAL, not a server rule: the server would happily enrich such
+ *  a row and cache whatever the page said. The queue refuses to offer that action ALONE,
+ *  because reading a vendor page for a payload nothing here can act on reads to the operator
+ *  as the app refusing to do anything. Dismiss is always live and is deliberately NOT company
+ *  here: it hides the row, it does not act on the payload. */
+export function noPayloadDoor(row: BundleDetectItem): boolean {
+  return payloadOnDisk(row) && !isCreatable(row) && extractPathFor(row) === null;
+}
+
+/** The ONE enrichment offer predicate. The bulk bar's count, the bulk bar's disabled state and
+ *  the detail pane's door all read THIS, so a row the bulk bar counts is a row the detail pane
+ *  would offer, and neither can drift from the other. `canEnrich` stays the server-shaped
+ *  question (source page, a gap, no page record, not a project) and stays unchanged; the
+ *  refusal is layered here, once.
+ *
+ *  The layer leans on `canEnrich` and `canRecheck` each excluding `existing_project_id`: if
+ *  either ever stopped excluding it, a settled row could reach here with its payload claim
+ *  standing, and the detail pane's hidden Create button would become the hole in the theorem. */
+export function canOfferEnrich(row: BundleDetectItem): boolean {
+  return canEnrich(row) && !noPayloadDoor(row);
+}
+
+/** The detail pane's re-check door, offered under the same rule. A row whose payload no door
+ *  can reach is not re-fetched for metadata either, so the two doors cannot disagree about
+ *  which rows are work. */
+export function canOfferRecheck(row: BundleDetectItem): boolean {
+  return canRecheck(row) && !noPayloadDoor(row);
+}
+
 /** The two reveal toggles that widen what the queue shows. */
 export type VisibilityOptions = {
   showDismissed: boolean;
@@ -300,17 +414,39 @@ export function confidenceLabel(confidence: string): string {
  *  is, in the same "X only" voice as the zip sentence it sits beside. */
 export const ARCHIVE_ONLY_FOLDER_LABEL = "folder only - this row is a folder, not an archive";
 
+/** The `not_scanned` sentence for a row the report says is NOT empty - the shape Mf-quv4 left
+ *  behind, where the row lands in this arm because it owns no registered MODEL while a scan has
+ *  registered files under its key (a folder whose every model belongs to a deeper row, or one
+ *  that holds only images and text). `BLOCKED_REASON_LABELS.not_scanned`'s "no model file
+ *  registered by a scan" is true of it but reads as "there is nothing here", next to a counts
+ *  line that says otherwise. So this says which of the two it is: still no model of its own,
+ *  and files registered under it. Same "no X" voice as the string it replaces, no digit, and no
+ *  remedy - the arm offers none. */
+export const NOT_SCANNED_REGISTERED_LABEL =
+  "no model file of its own - a scan has registered files under it";
+
 /** The blocked reason's words for THIS row. `archive_only` is read through
  *  `isArchivePath` - the very predicate `extractPathFor` reads - so the door and
  *  the sentence cannot disagree about whether the row is a zip: a row the badge
  *  calls a zip is the only row the sentence calls a zip. Every other reason keeps
  *  the plain lookup, an unknown one still reads as its own name, and a row with
- *  no reason at all says `blocked` rather than nothing. */
+ *  no reason at all says `blocked` rather than nothing. `not_scanned` is read
+ *  through `payloadOnDisk` - the very predicate the door offers read - so the
+ *  sentence cannot call a row the report calls non-empty an unscanned one: a row
+ *  with registered files gets the sentence that says so, and a row with none
+ *  keeps the plain lookup byte for byte. */
 export function blockedReasonLabel(row: BundleDetectItem): string {
   if (row.blocked_reason === ARCHIVE_ONLY) {
     return isArchivePath(row.rel_path)
       ? BLOCKED_REASON_LABELS.archive_only
       : ARCHIVE_ONLY_FOLDER_LABEL;
+  }
+  if (row.blocked_reason === NOT_SCANNED) {
+    // The assets_total === 0 case keeps the plain lookup byte for byte; only a row the report
+    // calls non-empty gets the new sentence.
+    return payloadOnDisk(row)
+      ? NOT_SCANNED_REGISTERED_LABEL
+      : BLOCKED_REASON_LABELS.not_scanned;
   }
   if (!row.blocked_reason) return "blocked";
   return BLOCKED_REASON_LABELS[row.blocked_reason] ?? row.blocked_reason;
