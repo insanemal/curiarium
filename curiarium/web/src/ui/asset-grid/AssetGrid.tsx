@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-import { type Asset, type BatchFailure, type BatchMetaChange, type LibraryScanStatus, UnauthorizedError, deleteAsset, removeProjectAssets } from "../../lib/api";
+import { type Asset, type BatchFailure, type BatchMetaChange, type LibraryScanStatus, type Project, UnauthorizedError, deleteAsset, removeProjectAssets } from "../../lib/api";
 import { AssetNotFoundError } from "../../lib/api/assets";
 import { dropIds, failureLines } from "../../lib/bulkUi";
 import { chunkRows, colsForWidth } from "../../lib/virtualGrid";
@@ -77,6 +77,12 @@ type Props = {
    */
   onProjectsChanged?: () => void;
   /**
+   * The row the server returned for a project the picker created, passed straight
+   * through to it. The grid has no opinion about it: App owns the project list and
+   * appends, which is what keeps the new card reachable without a reload.
+   */
+  onProjectCreated?: (project: Project) => void;
+  /**
    * A single-card or bulk move landed. Moves are reconciled locally and never
    * bump `assetsVersion`, so App needs this signal to refresh `/assets/counts`.
    */
@@ -115,6 +121,7 @@ export default function AssetGrid({
   scrollElementRef,
   onNavigateFolder,
   onProjectsChanged,
+  onProjectCreated,
   onAssetsFiled,
   onScanStatus,
 }: Props) {
@@ -773,6 +780,7 @@ export default function AssetGrid({
           assetIds={projectPickerIds}
           onClose={() => setProjectPickerIds(null)}
           onChanged={onProjectsChanged}
+          onProjectCreated={onProjectCreated}
           onUnauthorized={onUnauthorized}
         />
       )}

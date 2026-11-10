@@ -40,6 +40,7 @@ import type {
   ArchiveExtractResult,
   ArchiveProjectResult,
 } from "../../lib/api/imports";
+import type { Project } from "../../lib/api/projects";
 import type { SettleOutcome } from "../../lib/scanSettle";
 import { planArchive, type ArchivePlan } from "../archive/archivePlan";
 
@@ -70,8 +71,17 @@ export type ExtractAndCreateOutcome =
   | { kind: "listing-failed"; detail: string | null }
   | { kind: "nothing-written"; cause: NothingWrittenCause; entries: number; detail: string | null }
   | { kind: "cancelled" }
-  | { kind: "created"; name: string | null }
-  | { kind: "already-created"; name: string | null }
+  /** The server's own re-read row for the project this run created
+   *  (`routers/imports.py` serialises it through `project_service.project_with_stats`
+   *  after the write). Carried as the wire carries it, `project` and nothing
+   *  derived from it: a second representation of the same fact - the `name`
+   *  field this variant used to hold - is how one wire fact grows two answers
+   *  and the two drift. It is also what lets the view hand App a real id instead
+   *  of a client-fabricated Project. */
+  | { kind: "created"; project: Project | null }
+  /** The project that already existed, again the server's row. This run wrote
+   *  nothing, which is why the view reports it and does not land on it. */
+  | { kind: "already-created"; project: Project | null }
   /** The listing promised N entries and fewer than that are registered assets. */
   | { kind: "partial"; planned: number; resolved: number; failed: string[] }
   /** None of the planned entries became a registered asset; `twin` is where they
@@ -120,9 +130,9 @@ function notify(action: () => void): void {
 function outcomeForResult(result: ArchiveProjectResult): ExtractAndCreateOutcome {
   switch (result.status) {
     case "created":
-      return { kind: "created", name: result.project?.name ?? null };
+      return { kind: "created", project: result.project };
     case "already_created":
-      return { kind: "already-created", name: result.project?.name ?? null };
+      return { kind: "already-created", project: result.project };
     case "partial":
       return { kind: "partial", planned: result.planned, resolved: result.resolved, failed: result.failed };
     case "nothing_resolved":
@@ -267,12 +277,14 @@ export function outcomeLine(outcome: ExtractAndCreateOutcome): string | null {
       return `Nothing was written: 0 of ${entryLabel(outcome.entries)} reached the library, because the archive held no extractable files. Nothing will register from it, so no project was created.`;
     }
     case "created": {
-      const name = (outcome.name ?? "").trim();
+      // The name is read from the row the server returned, never from a copy of
+      // it kept on the outcome.
+      const name = (outcome.project?.name ?? "").trim();
       if (!name) return "Created the project from this archive.";
       return `Created project ${name}.`;
     }
     case "already-created": {
-      const name = (outcome.name ?? "").trim();
+      const name = (outcome.project?.name ?? "").trim();
       if (!name) {
         return "This archive already has a project (its name is unavailable) - this run created no second project.";
       }

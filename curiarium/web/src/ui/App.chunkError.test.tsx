@@ -175,7 +175,8 @@ describe("App chunk load failure", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     expect(await screen.findByRole("alert")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Back to library" }));
+    // Files mode - the default boot, so the header control is "Back to files".
+    fireEvent.click(screen.getByRole("button", { name: "Back to files" }));
 
     expect(screen.queryByRole("alert")).toBeNull();
     expect(await screen.findByTestId("asset-grid")).toBeTruthy();

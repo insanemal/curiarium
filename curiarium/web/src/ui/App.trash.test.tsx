@@ -365,7 +365,9 @@ describe("App trash destination (ADR 0011 slice 4)", () => {
 
     expect(getTrashMock).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Back to library" }));
+    // Files mode: the queue was entered from the files pane, so that is what the
+    // header control is called.
+    fireEvent.click(screen.getByRole("button", { name: "Back to files" }));
     await waitFor(() =>
       expect(screen.queryByRole("heading", { name: "Trash" })).toBeNull(),
     );

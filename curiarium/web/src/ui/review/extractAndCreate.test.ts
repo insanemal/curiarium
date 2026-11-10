@@ -5,6 +5,7 @@ import type {
   ArchiveExtractResult,
   ArchiveProjectResult,
 } from "../../lib/api/imports";
+import type { Project } from "../../lib/api/projects";
 import type { SettleOutcome } from "../../lib/scanSettle";
 import {
   createPayload,
@@ -43,6 +44,34 @@ function extractResult(overrides: Partial<ArchiveExtractResult> = {}): ArchiveEx
   };
 }
 
+/** The row the create door hands back - the server's own re-read project, with a
+ *  fixed id and fixed timestamps so an identity assertion can be read against it.
+ *  One definition for both halves of this file: `verdict` embeds it, and the
+ *  `outcomeLine` block names it directly, so neither restates the other.
+ *
+ *  `asset_count` defaults to the count `verdict` defaults `resolved` to, so a bare
+ *  `projectRow()` is exactly the row the happy path answers with. */
+function projectRow(overrides: Partial<Project> = {}): Project {
+  return {
+    id: "project-1",
+    name: "Wizard v5.4",
+    description: null,
+    creator: null,
+    source_url: null,
+    licence: null,
+    licence_url: null,
+    origin: "own",
+    cover_asset_id: null,
+    cover_thumb_url: null,
+    asset_count: 21,
+    total_size: 4096,
+    metadata_json: {},
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
 /** One door verdict, in the shape `ArchiveProjectOut` serialises. The counts
  *  derive from the overrides, so a fixture cannot claim a `resolved` that its own
  *  `failed` list contradicts. */
@@ -60,23 +89,7 @@ function verdict(overrides: Partial<ArchiveProjectResult> = {}): ArchiveProjectR
     failed,
     project:
       status === "created" || status === "already_created"
-        ? {
-            id: "project-1",
-            name: "Wizard v5.4",
-            description: null,
-            creator: null,
-            source_url: null,
-            licence: null,
-            licence_url: null,
-            origin: "own",
-            cover_asset_id: null,
-            cover_thumb_url: null,
-            asset_count: resolved,
-            total_size: 4096,
-            metadata_json: {},
-            created_at: "2026-01-01T00:00:00Z",
-            updated_at: "2026-01-01T00:00:00Z",
-          }
+        ? projectRow({ asset_count: resolved })
         : null,
     ...overrides,
   };
@@ -167,7 +180,7 @@ describe("runExtractAndCreate", () => {
 
     const outcome = await runWith(h);
 
-    expect(outcome).toEqual({ kind: "created", name: "Wizard v5.4" });
+    expect(outcome).toEqual({ kind: "created", project: projectRow() });
     expect(h.phases).toEqual(["listing", "extracting", "scanning", "creating"]);
     expect(h.listCalls).toEqual([ARCHIVE]);
     expect(h.extractCalls).toEqual([{ path: ARCHIVE, entries: null }]);
@@ -194,7 +207,7 @@ describe("runExtractAndCreate", () => {
       },
     });
 
-    await expect(runWith(h)).resolves.toEqual({ kind: "created", name: "Wizard v5.4" });
+    await expect(runWith(h)).resolves.toEqual({ kind: "created", project: projectRow() });
   });
 
   it("claims no count and no create when the listing fails", async () => {
@@ -298,7 +311,7 @@ describe("runExtractAndCreate", () => {
       },
     });
 
-    await expect(runWith(h)).resolves.toEqual({ kind: "created", name: "Wizard v5.4" });
+    await expect(runWith(h)).resolves.toEqual({ kind: "created", project: projectRow() });
   });
 
   it("reports a partial extraction with the server's own counts", async () => {
@@ -375,9 +388,64 @@ describe("runExtractAndCreate", () => {
 
     const outcome = await runWith(h);
 
-    expect(outcome).toEqual({ kind: "already-created", name: "Wizard v5.4" });
+    expect(outcome).toEqual({ kind: "already-created", project: projectRow() });
     expect(outcomeLine(outcome)).toContain("Already created as project Wizard v5.4");
     expect(outcomeLine(outcome)).toContain("no second project");
+  });
+
+  // The hand-over, pinned as identity rather than equality. A `name` field of its
+  // own on these variants was a second representation of one wire fact - the row
+  // and the copy could drift, and the view could be handed a client-fabricated
+  // project instead of the id the server wrote. So: the very object the door's
+  // `create` returned, and nothing beside it.
+  it("hands the view the server's own row for a create, not a copy of it", async () => {
+    // The three fields this sentence and the view render all disagree with what
+    // the run itself measured - the extract reported 4096 bytes and the verdict
+    // counted 21 resolved assets - so a row built from the run's own data could
+    // not answer below.
+    const row = projectRow({
+      asset_count: 3,
+      cover_thumb_url: "/thumb/asset-7.jpg?v=2",
+      total_size: 987654,
+    });
+    const h = harness({ create: async () => verdict({ project: row }) });
+
+    const outcome = await runWith(h);
+
+    expect(outcome.kind).toBe("created");
+    if (outcome.kind !== "created") throw new Error("expected a created verdict");
+    expect(outcome.project).toBe(row);
+    expect(outcome.project?.asset_count).toBe(3);
+    expect(outcome.project?.cover_thumb_url).toBe("/thumb/asset-7.jpg?v=2");
+    expect(outcome.project?.total_size).toBe(987654);
+    // The deletion witness: the variant carries the wire's field and nothing else.
+    expect(Object.keys(outcome).sort()).toEqual(["kind", "project"]);
+    // And the sentence is read out of that row, not out of a copy of it.
+    expect(outcomeLine(outcome)).toBe("Created project Wizard v5.4.");
+  });
+
+  it("hands the view the server's own row for an already-created verdict", async () => {
+    const row = projectRow({ id: "project-0", asset_count: 8, total_size: 2048 });
+    const h = harness({ create: async () => verdict({ status: "already_created", project: row }) });
+
+    const outcome = await runWith(h);
+
+    expect(outcome.kind).toBe("already-created");
+    if (outcome.kind !== "already-created") throw new Error("expected an already-created verdict");
+    expect(outcome.project).toBe(row);
+    expect(outcome.project?.id).toBe("project-0");
+    expect(Object.keys(outcome).sort()).toEqual(["kind", "project"]);
+  });
+
+  it("counts a create the server answered with no row as a create", async () => {
+    // The branch the view falls back on: a verdict that says `created` but carries
+    // no row is still a create, and its sentence has to stand without a name in it.
+    const h = harness({ create: async () => verdict({ project: null }) });
+
+    const outcome = await runWith(h);
+
+    expect(outcome).toEqual({ kind: "created", project: null });
+    expect(outcomeLine(outcome)).toBe("Created the project from this archive.");
   });
 
   it("reports a failed create without pretending anything rolled back", async () => {
@@ -485,12 +553,16 @@ describe("outcomeLine", () => {
     ).toBe(
       "Nothing was written: the archive holds no entries at all, so nothing will register and no project was created.",
     );
-    expect(outcomeLine({ kind: "created", name: "Moai" })).toBe("Created project Moai.");
-    expect(outcomeLine({ kind: "created", name: null })).toBe("Created the project from this archive.");
-    expect(outcomeLine({ kind: "already-created", name: "Moai" })).toBe(
+    expect(outcomeLine({ kind: "created", project: projectRow({ name: "Moai" }) })).toBe(
+      "Created project Moai.",
+    );
+    expect(outcomeLine({ kind: "created", project: null })).toBe(
+      "Created the project from this archive.",
+    );
+    expect(outcomeLine({ kind: "already-created", project: projectRow({ name: "Moai" }) })).toBe(
       "Already created as project Moai - this run created no second project.",
     );
-    expect(outcomeLine({ kind: "already-created", name: null })).toBe(
+    expect(outcomeLine({ kind: "already-created", project: null })).toBe(
       "This archive already has a project (its name is unavailable) - this run created no second project.",
     );
     expect(outcomeLine({ kind: "cancelled" })).toBeNull();

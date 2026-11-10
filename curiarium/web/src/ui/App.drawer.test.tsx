@@ -95,7 +95,25 @@ vi.mock("./settings/Settings", () => ({
   default: () => <div>Settings view</div>,
 }));
 vi.mock("./AuditLog", () => ({ default: () => <div>Audit view</div> }));
-vi.mock("./ProjectView", () => ({ default: () => <div>Project view</div> }));
+// Stateful, but additive: every existing test here still finds the "Project view"
+// text. The read-outs exist so the picker hand-off below can say WHICH projects
+// the pane can see and whether one of them was opened - the `hidden` wrapper App
+// keeps an unvisited pane in is invisible to `getByRole`, so they are attributes.
+vi.mock("./ProjectView", () => ({
+  default: ({
+    projects,
+    selectedProjectId,
+  }: {
+    projects?: Array<{ id: string; name: string }> | null;
+    selectedProjectId?: string | null;
+  }) => (
+    <div>
+      Project view
+      <p data-testid="project-ids">{(projects ?? []).map(project => project.id).join(",")}</p>
+      <p data-testid="open-project">{selectedProjectId ?? "none"}</p>
+    </div>
+  ),
+}));
 vi.mock("./review/ReviewQueueTabs", () => ({ default: () => <div>Review view</div> }));
 vi.mock("./review/BundleReviewView", () => ({ default: () => null }));
 vi.mock("./review/ImportsReviewView", () => ({ default: () => null }));
@@ -109,6 +127,8 @@ import App from "./App";
 import {
   getAssetCounts,
   getAssetDeletePreview,
+  addProjectAssets,
+  createProject,
   getMe,
   listAssets,
   listCreators,
@@ -117,6 +137,7 @@ import {
   listTags,
   type Asset,
   type Folder,
+  type Project,
 } from "../lib/api";
 import { storeToken, type Role } from "../lib/auth";
 import { DRAWER_TABBABLE_SELECTOR, tabbableIn } from "../lib/focusTrap";
@@ -133,6 +154,8 @@ const listFoldersMock = vi.mocked(listFolders);
 const listCreatorsMock = vi.mocked(listCreators);
 const listTagsMock = vi.mocked(listTags);
 const listProjectsMock = vi.mocked(listProjects);
+const addProjectAssetsMock = vi.mocked(addProjectAssets);
+const createProjectMock = vi.mocked(createProject);
 const getMeMock = vi.mocked(getMe);
 const getAssetCountsMock = vi.mocked(getAssetCounts);
 const getAssetDeletePreviewMock = vi.mocked(getAssetDeletePreview);
@@ -999,7 +1022,8 @@ describe("App folder drawer", () => {
     // reproduce the state the fallback exists for: the Review entry lives in the
     // closed disclosure, so the fallback must land on the disclosure's trigger,
     // never on <body>.
-    const back = await screen.findByRole("button", { name: "Back to library" });
+    // Files mode - the control names the mode it returns to.
+    const back = await screen.findByRole("button", { name: "Back to files" });
     back.focus();
     fireEvent.click(back);
     expect(await screen.findByText("Asset 1")).toBeTruthy();
@@ -1026,5 +1050,110 @@ describe("App folder drawer", () => {
     expect(railEl.getAttribute("role")).toBeNull();
     expect(railEl.getAttribute("aria-modal")).toBeNull();
     expect(document.querySelector(".folder-drawer-scrim")).toBeNull();
+  });
+});
+
+describe("App project picker hand-off", () => {
+  // The Files-view half of the owner's report: "Same as when I create a project
+  // from the Files view. I have to refresh the whole thing." `AssetGrid` and
+  // `ProjectPickerDialog` are the REAL components here, so this is the App link
+  // of the chain tested end to end; the grid link is pinned in
+  // `AssetGrid.project.test.tsx` and the picker link in `ProjectPickerDialog.test.tsx`.
+  //
+  // `listProjects` is left UNRESOLVED for the whole test. The picker's own list
+  // therefore never paints and App's list effect never answers, so the only way a
+  // row can appear in the projects pane is the append App was given.
+
+  const serverRow: Project = {
+    id: "p-picker",
+    name: "Made from Files",
+    description: null,
+    creator: null,
+    source_url: null,
+    licence: null,
+    licence_url: null,
+    origin: "own",
+    cover_asset_id: "asset-9",
+    cover_thumb_url: "/api/assets/asset-9/thumb?v=4",
+    asset_count: 0,
+    total_size: 0,
+    metadata_json: {},
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+
+  function paneReadout(): { ids: string[]; open: string } {
+    const text = (testId: string): string =>
+      document.querySelector(`[data-testid="${testId}"]`)?.textContent ?? "";
+    const ids = text("project-ids");
+    return { ids: ids ? ids.split(",") : [], open: text("open-project") };
+  }
+
+  /** Tick one card and open the picker from the bulk bar. */
+  async function openPickerFromSelection(): Promise<HTMLElement> {
+    const boxes = screen.getAllByRole("checkbox", { name: "Select" }) as HTMLInputElement[];
+    fireEvent.click(boxes[0]);
+    const bar = within(screen.getByTestId("bulk-action-bar"));
+    fireEvent.click(bar.getByRole("button", { name: "Add to project…" }));
+    return screen.findByRole("dialog", { name: "Add to project" });
+  }
+
+  it("appends what the picker created, and lands on nothing", async () => {
+    listProjectsMock.mockReturnValue(new Promise<Project[]>(() => {}));
+    createProjectMock.mockResolvedValue(serverRow);
+    addProjectAssetsMock.mockResolvedValue({ added: ["asset-1"], skipped: [], failed: [] });
+    await renderFilesApp({ narrow: false });
+
+    const dialog = await openPickerFromSelection();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "New project name" }), {
+      target: { value: "Made from Files" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create and add" }));
+
+    await waitFor(() => expect(createProjectMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(addProjectAssetsMock).toHaveBeenCalledTimes(1));
+    expect(createProjectMock).toHaveBeenCalledWith({ name: "Made from Files" });
+
+    // No landing: the operator was mid-edit choosing which project to add to, so
+    // nothing may flip the mode or open a project and abandon that choice.
+    expect(screen.getByRole("radio", { name: "Projects" }).getAttribute("aria-checked")).toBe(
+      "false",
+    );
+    expect(screen.getByRole("radio", { name: "Files" }).getAttribute("aria-checked")).toBe("true");
+    // (`open-project` is unreadable while the pane has never mounted - which is
+    // itself proof nothing landed there. It is read after the mode visit below.)
+
+    // And still: the row reached App's list, from the append alone - the pane only
+    // mounts on the mode visit, and the request that could have replaced its
+    // contents is still outstanding.
+    fireEvent.click(screen.getByRole("radio", { name: "Projects" }));
+    await waitFor(() => expect(paneReadout().ids).toContain("p-picker"));
+    expect(paneReadout().open).toBe("none");
+    // The create asked for the server's row, not a client-side sketch of one.
+    expect(paneReadout().ids.filter(id => id === "p-picker")).toHaveLength(1);
+  });
+
+  it("never reports the picker's create as an import, even when the add fails", async () => {
+    listProjectsMock.mockReturnValue(new Promise<Project[]>(() => {}));
+    createProjectMock.mockResolvedValue(serverRow);
+    addProjectAssetsMock.mockRejectedValue(new Error("Editor or administrator access required"));
+    await renderFilesApp({ narrow: false });
+
+    const dialog = await openPickerFromSelection();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "New project name" }), {
+      target: { value: "Made from Files" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create and add" }));
+
+    await waitFor(() => expect(createProjectMock).toHaveBeenCalledTimes(1));
+    // The dialog survives the failed add (the operator retries it), so a landing
+    // here would be doubly wrong: it would tear the retry out of their hands.
+    expect(await screen.findByRole("dialog", { name: "Add to project" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "Files" }).getAttribute("aria-checked")).toBe("true");
+
+    fireEvent.click(screen.getByRole("radio", { name: "Projects" }));
+    // The project exists, so the list owns it - append only, no landing.
+    await waitFor(() => expect(paneReadout().ids).toContain("p-picker"));
+    expect(paneReadout().open).toBe("none");
   });
 });

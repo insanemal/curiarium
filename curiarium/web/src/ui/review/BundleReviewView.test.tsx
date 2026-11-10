@@ -43,8 +43,11 @@ vi.mock("../ModelViewer", () => ({
 
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
 import { createProjectFromExtract, type ArchiveProjectResult } from "../../lib/api/imports";
+import type { Project } from "../../lib/api/projects";
 import {
   ENRICH_MAX_KEYS,
+  type BundleCreateItemResult,
+  type BundleCreateResponse,
   type BundleDetectItem,
   type BundleDuplicateGroup,
   type BundleReport,
@@ -430,6 +433,51 @@ function scanFidelityPanel(): HTMLElement {
   return node as HTMLElement;
 }
 
+/** The row `POST /import/archive/project` sends back for a verdict that has one:
+ *  the server's OWN re-read `ProjectOut` (`routers/imports.py` serialises it
+ *  through `project_service.project_with_stats` after the write), which is the
+ *  only reason a door can hand App an id at all. Hoisted out of the extract block
+ *  so the project hand-off block reads one definition rather than a copy that can
+ *  drift from it. */
+function createdProjectRow(overrides: Partial<Project> = {}): Project {
+  return {
+    id: "p1",
+    name: "Moai zip",
+    description: null,
+    creator: null,
+    source_url: null,
+    licence: null,
+    licence_url: null,
+    origin: "own",
+    cover_asset_id: null,
+    cover_thumb_url: null,
+    asset_count: 2,
+    total_size: 2560,
+    metadata_json: {},
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+/** One door verdict, shaped the way `ArchiveProjectOut` answers. The project is
+ *  only present on the two verdicts that have one, so a fixture cannot claim a
+ *  created project alongside `partial`. */
+function makeVerdict(overrides: Partial<ArchiveProjectResult> = {}): ArchiveProjectResult {
+  const status = overrides.status ?? "created";
+  const hasProject = status === "created" || status === "already_created";
+  return {
+    status,
+    archive: "import/Moai.zip",
+    twin: "import/Moai",
+    planned: 2,
+    resolved: hasProject ? 2 : 0,
+    failed: [],
+    project: hasProject ? createdProjectRow() : null,
+    ...overrides,
+  };
+}
+
 function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectState {
   return {
     report: makeReport([moai, cableClip, legacyVase, moaiZip]),
@@ -442,7 +490,10 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
     showCreated: false,
     setShowCreated: vi.fn(),
     refresh: vi.fn(async () => {}),
-    create: vi.fn(async () => {}),
+    // `null` is "the server gave no verdict", which is what the create doors
+    // report nothing from. A fixture that wanted the hand-off to fire passes its
+    // own `create` - see the project list hand-off block.
+    create: vi.fn(async (): Promise<BundleCreateResponse | null> => null),
     dismiss: vi.fn(async () => {}),
     enrich: vi.fn(async () => {}),
     notice: null,
@@ -2951,42 +3002,6 @@ describe("BundleReviewView scan fidelity", () => {
 });
 
 describe("BundleReviewView extract and create", () => {
-  /** One door verdict, shaped the way `ArchiveProjectOut` answers. The project is
-   *  only present on the two verdicts that have one, so a fixture cannot claim a
-   *  created project alongside `partial`. */
-  function makeVerdict(overrides: Partial<ArchiveProjectResult> = {}): ArchiveProjectResult {
-    const status = overrides.status ?? "created";
-    const hasProject = status === "created" || status === "already_created";
-    return {
-      status,
-      archive: "import/Moai.zip",
-      twin: "import/Moai",
-      planned: 2,
-      resolved: hasProject ? 2 : 0,
-      failed: [],
-      project: hasProject
-        ? {
-            id: "p1",
-            name: "Moai zip",
-            description: null,
-            creator: null,
-            source_url: null,
-            licence: null,
-            licence_url: null,
-            origin: "own",
-            cover_asset_id: null,
-            cover_thumb_url: null,
-            asset_count: 2,
-            total_size: 2560,
-            metadata_json: {},
-            created_at: "2026-01-01T00:00:00Z",
-            updated_at: "2026-01-01T00:00:00Z",
-          }
-        : null,
-      ...overrides,
-    };
-  }
-
   /** The narration, found by the row key it belongs to. Its own attribute, so it
    *  cannot be confused with the button's. */
   function narration(key: string): HTMLElement | null {
@@ -3505,5 +3520,333 @@ describe("BundleReviewView new parts on an already-created row", () => {
     // U+2013, and the sentence counts nothing rather than claiming a zero.
     expect(newPartsSpan()?.textContent).toBe("\u2013 new parts since this was created");
     expect(newPartsSpan()?.textContent).not.toContain("0");
+  });
+});
+
+describe("BundleReviewView project list hand-off", () => {
+  // App owns the project list, and these two callbacks are the only way the queue
+  // can say "a project now exists that your list has never seen". The owner's
+  // gesture: create a project from the queue, then find the Projects list
+  // unchanged until a full page reload.
+  //
+  // `POST /bundles/create` answers one result per key, and `project_id` is
+  // non-null on the `already_created` skip too (`bundle_service.py:2990-2996`), so
+  // the doors' filter is on `status === "created"` alone - not on "has an id",
+  // which is the same question asked the wrong way (the name-collision skip at
+  // `:2987` answers `project_id: null`). The skip witnesses below therefore carry
+  // a REAL id: silence about a row that has one is the whole point, and a fixture
+  // that emptied `project_id` would test nothing.
+
+  function createdItem(overrides: Partial<BundleCreateItemResult> = {}): BundleCreateItemResult {
+    return {
+      key: "Moai",
+      status: "created",
+      project_id: "project-moai",
+      name: "Moai statue",
+      assets_added: 3,
+      skipped_assets: 0,
+      failed_assets: [],
+      reason: null,
+      ...overrides,
+    };
+  }
+
+  /** Counters derived from the rows, the way the server counts them, so a
+   *  fixture cannot state a total its own rows contradict. */
+  function createResponse(results: BundleCreateItemResult[]): BundleCreateResponse {
+    const count = (status: string) => results.filter(row => row.status === status).length;
+    return {
+      created: count("created"),
+      skipped: count("skipped"),
+      blocked: count("blocked"),
+      failed: count("failed"),
+      results,
+    };
+  }
+
+  /** Mount the view with the two hand-off props, and hand back the state the
+   *  doors actually hold - the spies have to be the ones the view calls. */
+  function handoff(
+    overrides: Partial<BundleDetectState> = {},
+    props: { onProjectsChanged?: () => void; onProjectImported?: (id: string) => void } = {},
+    report?: BundleReport,
+  ): BundleDetectState {
+    const state = makeState(report ? { report, ...overrides } : overrides);
+    render(
+      <BundleReviewView
+        state={state}
+        canContribute
+        onProjectsChanged={props.onProjectsChanged}
+        onProjectImported={props.onProjectImported}
+      />,
+    );
+    return state;
+  }
+
+  function tickRow(index: number): void {
+    fireEvent.keyDown(screen.getAllByRole("option")[index], { key: " " });
+  }
+
+  function createSelectedButton(): HTMLElement {
+    return screen.getByRole("button", { name: /^Create selected/ });
+  }
+
+  /** Let every queued microtask and timer callback run, so "nothing was reported"
+   *  is read after the doors had their turn rather than beside it. */
+  async function flush(): Promise<void> {
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+  }
+
+  async function oneStepDoor(): Promise<void> {
+    fireEvent.click(
+      within(detail()).getByRole("button", { name: "Extract and create project" }),
+    );
+  }
+
+  it("keeps working for a host that passes no callbacks at all", async () => {
+    // Both props are optional: every pre-existing caller (and the ~200 tests
+    // above) mounts without them, so pressing a create door must not throw.
+    const state = handoff({ create: vi.fn(async () => createResponse([createdItem()])) });
+    tickRow(0);
+    expect(createSelectedButton().textContent).toBe("Create selected (1)");
+    fireEvent.click(createSelectedButton());
+
+    await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
+    await flush();
+    // The payload is unchanged by the hand-off: one item per ticked row, the
+    // server's suggested name filled in, exactly as the doors sent it before.
+    expect(state.create).toHaveBeenCalledWith([{ key: "Moai", name: "Moai statue" }]);
+    // Re-walking the queue is the hook's own job (its `create` refetches), not the
+    // door's, so the view calls `refresh` for the extract door and never here.
+    expect(state.refresh).not.toHaveBeenCalled();
+  });
+
+  it("lands on the one project the bulk door created", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    const state = handoff(
+      { create: vi.fn(async () => createResponse([createdItem()])) },
+      { onProjectImported, onProjectsChanged },
+    );
+    tickRow(0);
+    fireEvent.click(createSelectedButton());
+
+    await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onProjectImported).toHaveBeenCalledTimes(1));
+    expect(onProjectImported).toHaveBeenCalledWith("project-moai");
+    // Landing already bumps `assetsVersion` (App's `handleProjectImported`), so a
+    // click that lands reports once, not twice.
+    expect(onProjectsChanged).not.toHaveBeenCalled();
+  });
+
+  it("lands only when one click made one project: five created is a bump, not a landing", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    const state = handoff(
+      {
+        create: vi.fn(async () =>
+          createResponse(
+            ["a", "b", "c", "d", "e"].map(letter =>
+              createdItem({ key: `K_${letter}`, project_id: `project-${letter}` }),
+            ),
+          ),
+        ),
+      },
+      { onProjectImported, onProjectsChanged },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    fireEvent.click(createSelectedButton());
+
+    await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
+    await flush();
+    await waitFor(() => expect(onProjectsChanged).toHaveBeenCalledTimes(1));
+    // Landing on an arbitrary one of five is worse than not landing at all: the
+    // list changes, the view does not.
+    expect(onProjectImported).not.toHaveBeenCalled();
+  });
+
+  it("asks the verdict, not the request: a create the server refused answers null and reports nothing", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    const state = handoff(
+      { create: vi.fn(async () => null) },
+      { onProjectImported, onProjectsChanged },
+    );
+    tickRow(0);
+    fireEvent.click(createSelectedButton());
+
+    await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
+    await flush();
+    expect(onProjectImported).not.toHaveBeenCalled();
+    expect(onProjectsChanged).not.toHaveBeenCalled();
+  });
+
+  it("reports nothing the click did not create: skips, blocked and failed rows stay silent", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    const state = handoff(
+      {
+        create: vi.fn(async () =>
+          createResponse([
+            // A real `project_id` on the already-created skip, exactly as
+            // `bundle_service.py:2990-2996` answers it: reporting this would append
+            // - or open - a project that already existed before the click.
+            createdItem({
+              status: "skipped",
+              project_id: "project-already-there",
+              reason: "already_created",
+            }),
+            createdItem({
+              key: "Cable_clip",
+              status: "blocked",
+              project_id: null,
+              reason: "unresolved_directory",
+            }),
+            createdItem({
+              key: "Legacy_vase",
+              status: "failed",
+              project_id: null,
+              reason: "the door refused",
+            }),
+          ]),
+        ),
+      },
+      { onProjectImported, onProjectsChanged },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    fireEvent.click(createSelectedButton());
+
+    await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
+    await flush();
+    expect(onProjectImported).not.toHaveBeenCalled();
+    expect(onProjectsChanged).not.toHaveBeenCalled();
+  });
+
+  it("does not land on a skip that carries an id, even for a single-row click", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    const state = handoff(
+      {
+        create: vi.fn(async () =>
+          createResponse([
+            createdItem({ status: "skipped", project_id: "project-already-there" }),
+          ]),
+        ),
+      },
+      { onProjectImported, onProjectsChanged },
+    );
+    tickRow(0);
+    fireEvent.click(createSelectedButton());
+
+    await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
+    await flush();
+    expect(onProjectImported).not.toHaveBeenCalled();
+    expect(onProjectsChanged).not.toHaveBeenCalled();
+  });
+
+  it("lands from the detail pane's Create project on the one row it asked for", async () => {
+    const onProjectImported = vi.fn();
+    const state = handoff(
+      { create: vi.fn(async () => createResponse([createdItem()])) },
+      { onProjectImported },
+    );
+    fireEvent.click(within(detail()).getByRole("button", { name: "Create project" }));
+
+    await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onProjectImported).toHaveBeenCalledWith("project-moai"));
+  });
+
+  it("treats the name-only bulk door as a change to the list, never a landing", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    const state = handoff(
+      {
+        create: vi.fn(async () =>
+          createResponse([
+            createdItem({ key: "Cable_clip", project_id: "project-cable" }),
+            createdItem({ key: "Sword_hilt", project_id: "project-sword" }),
+          ]),
+        ),
+      },
+      { onProjectImported, onProjectsChanged },
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Create low as name-only/ }));
+
+    await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
+    await flush();
+    await waitFor(() => expect(onProjectsChanged).toHaveBeenCalledTimes(1));
+    expect(onProjectImported).not.toHaveBeenCalled();
+  });
+
+  it("lands from the one-step door on the project the server created", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    createProjectFromExtractMock.mockResolvedValue(makeVerdict());
+    const state = handoff(
+      {},
+      { onProjectImported, onProjectsChanged },
+      makeReport([moaiZip]),
+    );
+    oneStepDoor();
+
+    // The id is the server's row's id (`routers/imports.py` re-reads the project
+    // after the write); the queue invents nothing.
+    await waitFor(() => expect(onProjectImported).toHaveBeenCalledWith("p1"));
+    expect(onProjectsChanged).not.toHaveBeenCalled();
+    // And it asks for NO re-walk: leaving Review deactivates the hook and bumps
+    // its request sequence, so a walk started from here fails its own newest-wins
+    // guard and its answer is discarded. Re-entering the queue walks properly.
+    await flush();
+    expect(state.refresh).not.toHaveBeenCalled();
+  });
+
+  it("bumps instead of landing when the create named no row", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    // A `created` verdict with no row is still a project that now exists; the
+    // queue cannot name it, so it says "something changed" and stays put.
+    createProjectFromExtractMock.mockResolvedValue(makeVerdict({ project: null }));
+    handoff({}, { onProjectImported, onProjectsChanged }, makeReport([moaiZip]));
+    oneStepDoor();
+
+    await waitFor(() => expect(onProjectsChanged).toHaveBeenCalledTimes(1));
+    expect(onProjectImported).not.toHaveBeenCalled();
+  });
+
+  it("reports nothing for the already-created verdict, because this run wrote no project", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    createProjectFromExtractMock.mockResolvedValue(makeVerdict({ status: "already_created" }));
+    const state = handoff(
+      {},
+      { onProjectImported, onProjectsChanged },
+      makeReport([moaiZip]),
+    );
+    oneStepDoor();
+
+    await waitFor(() => expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1));
+    await flush();
+    expect(onProjectImported).not.toHaveBeenCalled();
+    expect(onProjectsChanged).not.toHaveBeenCalled();
+    // The queue still re-walks, so the row reads as created: the skip above is
+    // scoped to the landing path alone.
+    await waitFor(() => expect(state.refresh).toHaveBeenCalled());
+  });
+
+  it("reports nothing for the verdicts that created nothing", async () => {
+    const onProjectImported = vi.fn();
+    const onProjectsChanged = vi.fn();
+    createProjectFromExtractMock.mockResolvedValue(
+      makeVerdict({ status: "partial", resolved: 1, failed: ["Moai.stl"], project: null }),
+    );
+    handoff({}, { onProjectImported, onProjectsChanged }, makeReport([moaiZip]));
+    oneStepDoor();
+
+    await waitFor(() => expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1));
+    await flush();
+    expect(onProjectImported).not.toHaveBeenCalled();
+    expect(onProjectsChanged).not.toHaveBeenCalled();
   });
 });

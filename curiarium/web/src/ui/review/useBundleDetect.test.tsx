@@ -21,6 +21,9 @@ import {
   enrichBundles,
   getBundleReport,
   setBundleDismissed,
+  type BundleCreateItem,
+  type BundleCreateItemResult,
+  type BundleCreateResponse,
   type BundleDetectItem,
   type BundleEnrichItemResult,
   type BundleEnrichResponse,
@@ -140,6 +143,40 @@ function enrichResponse(results: BundleEnrichItemResult[]): BundleEnrichResponse
     refused: count("refused"),
     unavailable: count("unavailable"),
     unknown: count("unknown"),
+    results,
+  };
+}
+
+/** One row of a create response, in the shape `POST /bundles/create` serialises
+ *  (`bundle_service._result`). A `skipped` row can carry a real `project_id` -
+ *  the already-created case is answered that way - which is why the doors filter
+ *  on `status` and the hook must hand the rows through untouched. */
+function createItemResult(
+  overrides: Partial<BundleCreateItemResult> = {},
+): BundleCreateItemResult {
+  return {
+    key: "Moai statue",
+    status: "created",
+    project_id: "project-1",
+    name: "Moai",
+    assets_added: 12,
+    skipped_assets: 0,
+    failed_assets: [],
+    reason: null,
+    ...overrides,
+  };
+}
+
+/** A whole create response. The counters derive from `results` exactly the way
+ *  the server counts them (`counters[result["status"]] += 1`), so a fixture cannot
+ *  claim a `created` its own rows do not contain. */
+function createResponse(results: BundleCreateItemResult[]): BundleCreateResponse {
+  const count = (status: string) => results.filter(result => result.status === status).length;
+  return {
+    created: count("created"),
+    skipped: count("skipped"),
+    blocked: count("blocked"),
+    failed: count("failed"),
     results,
   };
 }
@@ -713,20 +750,136 @@ describe("useBundleDetect", () => {
 });
 
 describe("useBundleDetect create", () => {
-  it("leaves the bulk create door returning nothing", async () => {
+  it("hands the bulk doors the server's verdict", async () => {
+    const items: BundleCreateItem[] = [{ key: "Moai statue", name: "Moai" }];
+    const answer = createResponse([
+      createItemResult({
+        key: "Moai statue",
+        status: "created",
+        project_id: "project-1",
+        name: "Moai",
+        assets_added: 12,
+      }),
+    ]);
+    createBundlesMock.mockResolvedValueOnce(answer);
+
     const { result } = renderHook(() => useBundleDetect({ enabled: true }));
     await waitFor(() => expect(result.current.report).toEqual(report));
 
-    let answer: unknown = "not called";
+    let verdict: BundleCreateResponse | null | undefined;
     await act(async () => {
-      answer = await result.current.create([{ key: "Moai statue" }]);
+      verdict = await result.current.create(items);
     });
 
-    // The bulk doors and `createActive` depend on this staying a void action.
-    // The one-step door no longer has a reporting create on the hook at all
-    // (Mf-0ck5): it calls the archive-project door itself, whose verdict is one
-    // object for one archive rather than a per-key result to match.
-    expect(answer).toBeUndefined();
-    expect(createBundlesMock).toHaveBeenCalledWith([{ key: "Moai statue" }]);
+    // The whole wire response - counters and per-key results - unchanged. Only
+    // the doors know what the click meant (one ticked row, or a whole page of
+    // them), so only they may decide which rows are worth reporting.
+    expect(verdict).toEqual(answer);
+    // The invariant, stated the other way round: a door that is handed nothing
+    // cannot say which of the operator's ticks became a project, which is exactly
+    // what this hook used to answer.
+    expect(verdict).not.toBeUndefined();
+    expect(createBundlesMock).toHaveBeenCalledWith(items);
+  });
+
+  it("hands a create that made no project back row for row, because filtering is the door's job", async () => {
+    // Both rows are the server's own "nothing was written" answers, and both
+    // come back `skipped`: `bundle_service._create_one` reports the already-
+    // created case as `skipped`/`already_created` carrying the EXISTING project's
+    // id, and a typed name that cleans onto an existing one as `skipped` with no
+    // id at all. A hook that dropped non-`created` rows - or handed any non-null
+    // id up - would be deciding for the operator what counts as a create.
+    const items: BundleCreateItem[] = [
+      { key: "Moai statue" },
+      { key: "Wizard Tower", name_only: true },
+    ];
+    const answer = createResponse([
+      createItemResult({
+        key: "Moai statue",
+        status: "skipped",
+        project_id: "project-1",
+        name: "Moai statue",
+        assets_added: 0,
+        reason: "already_created",
+      }),
+      createItemResult({
+        key: "Wizard Tower",
+        status: "skipped",
+        project_id: null,
+        name: "Wizard Tower",
+        assets_added: 0,
+        reason: "project name already exists",
+      }),
+    ]);
+    createBundlesMock.mockResolvedValueOnce(answer);
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    let verdict: BundleCreateResponse | null | undefined;
+    await act(async () => {
+      verdict = await result.current.create(items);
+    });
+
+    expect(verdict).toEqual(answer);
+    expect(verdict?.created).toBe(0);
+    expect(verdict?.skipped).toBe(2);
+    // Nothing was dropped, reordered or summarised on the way out - including the
+    // id a door must not report as landed-on.
+    expect(verdict?.results.map(row => [row.key, row.status, row.project_id])).toEqual([
+      ["Moai statue", "skipped", "project-1"],
+      ["Wizard Tower", "skipped", null],
+    ]);
+    expect(createBundlesMock).toHaveBeenCalledWith(items);
+  });
+
+  it("answers a create the server refused with null, so the doors stay silent", async () => {
+    createBundlesMock.mockRejectedValueOnce(new Error("only editors may create projects"));
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    let verdict: BundleCreateResponse | null | undefined;
+    await act(async () => {
+      verdict = await result.current.create([{ key: "Moai statue" }]);
+    });
+
+    // A failed create is not a verdict: the error line already speaks it, and a
+    // door that reported from `null` would be reporting a project that does not
+    // exist. The message and the no-refetch-over-an-error half are pinned by
+    // "turns a failed create into an error that keeps the server's message";
+    // what is pinned here is the value the door is handed.
+    expect(verdict).toBeNull();
+  });
+
+  it("clears the last enrichment's notice, because a create is a new decision", async () => {
+    // A notice in place the way the enrichment tests put one there.
+    enrichBundlesMock.mockResolvedValueOnce(
+      enrichResponse([enrichResult({ status: "cached", filled: [] })]),
+    );
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    await act(async () => {
+      await result.current.enrich(["Moai statue"]);
+    });
+
+    expect(result.current.notice).toBe("Already checked from the source page");
+    // Initial walk + the refetch the enrichment waited for.
+    expect(getBundleReportMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      await result.current.create([{ key: "Moai statue", name: "Moai" }]);
+    });
+
+    // The `mutate` contract the routed-through implementation had and the
+    // hand-written one keeps: the last enrichment's sentence no longer describes
+    // what the operator just did, so it is gone.
+    expect(result.current.notice).toBeNull();
+    // And it took exactly one fetch with it - the post-create refetch. The
+    // enrichment's own refetch is the second call counted above, so three is the
+    // honest number for "the create refetched once, and nothing refetched twice".
+    expect(getBundleReportMock).toHaveBeenCalledTimes(3);
   });
 });
