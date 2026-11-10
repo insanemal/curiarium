@@ -25,7 +25,11 @@ only module that owns either:
     everything.
   * `member_asset_ids` — the member set. Which kinds a door attaches is a parameter
     (`kinds`), never a test inside this module, so the day the bundle door stops
-    deciding kinds by suffix (Mf-wsdo) changes one body here and not two doors.
+    deciding kinds by suffix changes one body here and not two doors. It is ONE seam
+    asked TWO questions with TWO tables since Mf-wsdo — the ATTACH question
+    (`bundle_service.PROJECT_MEMBER_SUFFIXES`, what the project holds) and the MODEL
+    question (`bundle_detect.MODEL_SUFFIXES`, what gets printed and what containment
+    is asked with) — and neither table is named here.
   * `create_project_from_members` — one dedupe pass, then
     `project_service.create_project_with_members`, in one transaction. Either the
     project and every member row land, or nothing does.
@@ -133,7 +137,9 @@ class Dedupe(NamedTuple):
     letting it match on "some project already holds all these files" would let an
     unrelated hand-made project swallow an Extract click. The ids are this module's to
     compute (they are the member set it is about to write), so a door asks for the leg
-    rather than supplying ids it might compute differently.
+    rather than supplying ids it might compute differently - with ONE exception,
+    `containment` below, which exists because a door may legitimately ask the identity
+    with a narrower set than the one it writes.
     """
 
     key: Optional[str] = None
@@ -141,6 +147,25 @@ class Dedupe(NamedTuple):
     source_url: Optional[str] = None
     name: Optional[str] = None
     assets: bool = False
+    # The ids the containment identity is ASKED with, when a door knows that the set
+    # it is about to write is not the set it wants to be found by. `None` means "the
+    # member set", which is what it always was and what every door but one wants: the
+    # ids are this module's to compute, so a door does not supply them. The bundle
+    # door names them, because since Mf-wsdo the two questions have different answers
+    # - "does a project already hold this bundle's files" is a MODEL question (a
+    # hand-made project over a bundle's files holds the parts a human prints), while
+    # "what does the project hold" is the MEMBER question (those parts plus the
+    # previews the landing page renders). Ask the first with the second and every
+    # re-click over a hand-made project writes a duplicate.
+    #
+    # PRECONDITION: naming `containment` is only meaningful with `assets=True`, because
+    # these ids are what the assets leg is asked with and no other leg reads them. A
+    # door that sets one and forgets the other gets NO containment leg at all - the
+    # silence is why this is a `ValueError` at the top of `create_project_from_members`
+    # rather than a comment, and
+    # `tests/test_bundle_service.py::test_a_create_that_names_a_containment_set_without_the_assets_leg_raises`
+    # is the witness.
+    containment: Optional[Sequence[str]] = None
 
 
 class CreateOutcome(NamedTuple):
@@ -442,18 +467,31 @@ def member_asset_ids(
 ) -> List[str]:
     """THE member-set seam: which offered files a create attaches, as asset ids.
 
-    `kinds` is the whole question, and it is a parameter and never a test in here:
+    `kinds` is the whole question, and it is a parameter and never a test in here. ONE
+    seam, asked TWO questions by the bundle door with TWO tables (Mf-wsdo), and asked
+    no question at all by the archive door:
 
       * the archive door passes nothing — every entry it resolved is a member, because
         what it read WAS the file set, not a guess about one;
-      * the bundle door passes `bundle_detect.MODEL_SUFFIXES`, which its caller hands
-        down — models only, because support files are attached by other rules and the
-        detector's table is the thing that decides.
+      * the bundle door's ATTACH question is the write's `kinds=` argument,
+        `bundle_service.PROJECT_MEMBER_SUFFIXES` — models plus the images the landing
+        page can render as a cover, in a gallery, or in its cover picker. Text is out,
+        and so is any nested archive;
+      * the bundle door's MODEL question is the `kinds=` argument of this function as
+        its caller uses it, `bundle_detect.MODEL_SUFFIXES` — the parts a human prints,
+        which is what the compound marker's group counts and the dedupe's containment
+        are asked with.
 
-    So the day the bundle door stops answering "which kinds attach" by suffix
-    (Mf-wsdo) changes the argument at one call site and the body here, and neither
-    door grows a suffix test back. Order is the caller's, and first-seen order is
-    what `create_project_with_members` writes as `position`.
+    Both tables are named by the door that owns detection and handed down; this module
+    names neither (see the module docstring, and the import-closure pin in
+    `tests/test_archive_project.py`). Note which module owns which table: the ATTACH
+    table is `bundle_service`'s, not the detector's, because the detector's two tables
+    are hashed into `bundle_detect.rule_set_stamp()`.
+
+    So the day the bundle door stops answering "which kinds attach" by suffix changes
+    the argument at one call site and the body here, and neither door grows a suffix
+    test back. Order is the caller's, and first-seen order is what
+    `create_project_with_members` writes as `position`.
     """
     if kinds is None:
         return [candidate.asset_id for candidate in candidates]
@@ -511,7 +549,11 @@ def create_project_from_members(
          operator already has the project, and that is the more useful sentence;
       3. refuse an empty member set, so a door can never leave a project with no files
          and no way to get them;
-      4. write it — `project_service.create_project_with_members`, which is the only
+      4. refuse a cover the door's own member set does not hold — a door that attaches
+         a file set may only choose its face out of that set (see the guard, which is
+         the belt for the door that forgets; the manual door is exempt by the same
+         flag that makes an empty member set legal for it);
+      5. write it — `project_service.create_project_with_members`, which is the only
          place the Project row and its `project_asset` rows are committed, and they
          commit together.
 
@@ -524,17 +566,28 @@ def create_project_from_members(
     """
     if origin not in ORIGINS:
         raise ValueError(f"unknown create door {origin!r}")
+    if dedupe is not None and dedupe.containment is not None and not dedupe.assets:
+        # `containment` renames the ids the ASSETS leg is asked with, and no other leg
+        # reads it - so a door that names a containment set and leaves `assets` False
+        # asked no leg at all and would hear silence. That is a programming error, not a
+        # verdict for an operator: it raises instead of quietly creating.
+        raise ValueError("Dedupe.containment is set without Dedupe.assets")
 
     asset_ids = member_asset_ids(members, kinds=kinds)
 
     if dedupe is not None:
+        # Containment is asked with the door's `containment` when it named one and
+        # with the member set when it did not - today only the bundle door names one,
+        # because it is the only door whose member set is wider than the files that
+        # define the bundle (`Dedupe.containment`).
+        asked = asset_ids if dedupe.containment is None else list(dedupe.containment)
         existing = find_existing_project(
             session,
             key=dedupe.key,
             archive=dedupe.archive,
             source_url=dedupe.source_url,
             name=dedupe.name,
-            assets=asset_ids if dedupe.assets else (),
+            assets=asked if dedupe.assets else (),
             asset_index=asset_index,
         )
         if existing is not None:
@@ -551,6 +604,27 @@ def create_project_from_members(
     if require_members and not asset_ids:
         return CreateOutcome(
             status=STATUS_REFUSED, reason="no member files resolved", members=()
+        )
+    if cover_asset_id is not None and require_members and cover_asset_id not in set(asset_ids):
+        # A cover is a face, not a membership - but a door that attaches a file set
+        # may only pick its face out of that set. `project_service
+        # .create_project_with_members` checks the cover asset EXISTS and never that
+        # it is a member, which is how the live tower's project came out SET AND
+        # DANGLING: the row offered the largest preview, the create attached the
+        # models only, and nothing compared the two. The bundle door now picks its
+        # cover from the same owned set it attaches, so this cannot be reached by
+        # construction; it is the belt for the door that forgets to.
+        #
+        # The `require_members` gate is LOAD-BEARING, not conservative. `POST
+        # /projects` passes `require_members=False` with no members at all, and two
+        # witnesses of `tests/test_projects_api.py` are that door's contract:
+        # `test_create_project_rejects_an_unknown_cover_asset` expects a 404 from
+        # `get_asset` for an unknown cover, and
+        # `test_a_cover_needs_no_membership_and_survives_membership_removal` creates a
+        # project with a cover and ZERO members - "a cover is not a membership". A
+        # guard that ignored the flag would 409 both for the wrong reason.
+        return CreateOutcome(
+            status=STATUS_REFUSED, reason="cover asset is not a member of the project", members=()
         )
 
     stored = None

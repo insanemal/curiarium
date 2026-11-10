@@ -531,17 +531,20 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     own every unscanned bundle in the library.
 
     **What the containment set is, stated because it is a reading and not a
-    quotation.** The set is the models a create would actually attach - the
-    `models` local `_report_row` builds and the `model_assets` `_create_one`
-    attaches - and not every registered asset of the bundle. The ticket asks for
-    "every registered asset", and this is a deliberate reading of that sentence:
-    the app only ever attaches models to a project, so literal full-set
-    containment over the images and the text as well would report the owner's own
-    hand-made project as NOT owning the bundle it was made from, because a
-    bundle's previews and licence files are registered as assets by the scan and
-    never become project members. The acceptance criterion would then be false in
-    production, in exactly the case that motivated it. The alternative reading is
-    recorded in `## Alternatives considered`.
+    quotation.** The set is the models a create would print - the `models` local
+    `_report_row` builds, which `_create_one` hands to the dedupe as
+    `Dedupe.containment` - and not every registered asset of the bundle. The ticket asks
+    for "every registered asset", and this is a deliberate reading of that sentence:
+    containment is the MODEL question, and the project a human makes by hand over a
+    bundle's files holds the models, so literal full-set containment over the images and
+    the text as well would report the owner's own hand-made project as NOT owning the
+    bundle it was made from. (Since `Mf-wsdo` a created project also holds the previews -
+    Decision 30 - and containment did not widen with it; that is the two-questions
+    ruling, and the witnesses are
+    `test_service_a_project_holding_the_models_owns_a_bundle_that_also_has_images` and
+    `test_the_models_only_filter_is_still_the_answer_to_the_model_question`.) The
+    acceptance criterion would otherwise be false in production, in exactly the case that
+    motivated it. The alternative reading is recorded in `## Alternatives considered`.
 
     **Which identity is reported, and why it is on the wire.** The lookup answers
     `ExistingProject(project, match)` with `match` one of `marker`,
@@ -603,7 +606,8 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     report-wide one-owner map, so the row that says `ready` is the row that would
     attach those files. The containment set the report asks with and the attach set
     the create writes are two reads of one ownership expression now, instead of two
-    prefix reads free to disagree.
+    prefix reads free to disagree - two READS, not one set: since Decision 30 the
+    containment read is the models and the attach read is the models plus the images.
 
     The ordering of the create path is deliberate: exclusion validation
     (`_exclusion_prefixes`) runs before `find_existing_project`, so an
@@ -696,8 +700,9 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     is a guess, and a guess must never swallow a subtree, including a subtree
     made of other inferred candidates.
 
-    The attach set is unchanged: a created project still attaches exactly the
-    model files its own snapshot names. One limit is worth naming beside it: the
+    The attach set was unchanged by this Decision, and Decision 30 widened it: what a
+    created project attaches is what its own snapshot names - the models then, and the
+    images as well since Mf-wsdo. One limit is worth naming beside it: the
     belt compares a row's registered assets with the assets ITS OWN SNAPSHOT names,
     and a `folded`-fallback row (a claimed ancestor whose own view the claim
     emptied, Decision 28) has a snapshot built from the unclaimed FULL SUBTREE, so
@@ -829,7 +834,8 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `iter_bundle_candidates` exempts high-confidence candidates from the Mf-h0p8
     container skip. The exemption stays sound for the reason it was argued
     there - a high bundle's marker documents sit at depth 0, so it attaches only
-    its own models - and the container-rule tests are the regression signal for
+    its own files (its models, and since Decision 30 its own images too) and never
+    a child's - and the container-rule tests are the regression signal for
     that.
 
 17. **A nested archive is a member, never a candidate, and never evidence.**
@@ -1790,8 +1796,10 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     an offered one `member-of-bundle`, so a ledger-derived answer would make every
     group separable and `not_separable_group` dead code.
 
-    **The attach set.** It is every registered MODEL asset under the key that is
-    not under an excluded prefix. The prefix carries a trailing slash on purpose,
+    **The attach set.** It is every registered MODEL or IMAGE asset under the key that
+    is not under an excluded prefix - `bundle_service.PROJECT_MEMBER_SUFFIXES`, the
+    ATTACH table Decision 30 introduced; this sentence said MODEL only until then, and
+    nothing else about an exclusion changed. The prefix carries a trailing slash on purpose,
     so a FILE literally named `<key>/<name>` is never excluded - only what sits
     inside the group's directory is the group - and the tests compare sets of
     `Asset.storage_path` rather than counts, because a count can pass on the wrong
@@ -2657,23 +2665,31 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     **Which kinds a create attaches is a PARAMETER, never a test inside a door.**
     The archive door passes nothing: every entry the operator ticked is a member,
     because what it read WAS the file set, not a guess about one. The bundle door
-    passes `bundle_detect.MODEL_SUFFIXES`, named by the door that owns detection and
-    handed down to the seam, because the app attaches models and support files follow
-    other rules. Neither `bundle_service._create_one` nor
+    passes TWO tables down, both named by the door that owns detection -
+    `bundle_detect.MODEL_SUFFIXES` for the MODEL question (the `member_asset_ids` call
+    that builds `model_assets`, which feeds `attached` and the compound group counts)
+    and `bundle_service.PROJECT_MEMBER_SUFFIXES` for the ATTACH question (the
+    `create_project_from_members` call that decides what the project holds) - the
+    two-question ruling of Decision 30, which replaced this paragraph's earlier
+    "`MODEL_SUFFIXES`, because the app attaches models and support files follow other
+    rules". Neither `bundle_service._create_one` nor
     `archive_project_service.create_project_from_extract` contains a kind test any
     more, and `tests/test_bundle_service.py`'s
     `test_the_member_set_seam_is_the_only_place_a_create_filters_by_kind` pins that at
     the source rather than at a verdict: it reads both door bodies and refuses a
-    `_suffix` call, a comparison against a `.stl` literal, a `MODEL_SUFFIXES` read that
-    is not the value of a `kinds=` argument handed to the seam, and any `kinds`
-    argument at all from the archive door - then it pins the seam's own signature,
+    `_suffix` call, a comparison against a `.stl` literal, a `kinds=` value that is
+    neither of the two tables (a third answer to one question), a `MODEL_SUFFIXES` read
+    that is not the value of a `kinds=` argument handed to the seam, the ATTACH table
+    named through another namespace or more than once, and any `kinds` argument at all
+    from the archive door - then it pins the seam's own signature,
     `candidates` plus a keyword-only `kinds` defaulting to `None`, which is what lets
-    the archive door ask the no-question question. The ticket that makes that answer
-    stop being a suffix is `Mf-wsdo`, and the pin exists
-    so that it changes ONE body: a filter left behind in a door would go on answering
-    the old question in silence. (`_report_row`'s containment set is not inside this
-    rule - the report is not a create, and its model filter stays where the row is
-    built.)
+    the archive door ask the no-question question, and it pins where the ATTACH table
+    lives (`bundle_service` owns it by assignment; `bundle_detect` does not carry it).
+    `Mf-wsdo` is the ticket that changed that answer from one table to two, and the pin
+    exists so that such a change moves ONE body: a filter left behind in a door would go
+    on answering the old question in silence. (`_report_row`'s containment set is not
+    inside this rule - the report is not a create, and its model filter stays where the
+    row is built.)
 
     **The archive door asks with two identities, and asks with no name.** Its
     `Dedupe` is `Dedupe(key=twin_rel, archive=normalized)`: the archive it was told to
@@ -2808,6 +2824,201 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     that, so a label cannot disagree with the answer it labels - and the archive door
     maps a `refused` outcome onto its existing `nothing_resolved` verdict, because that
     door's four words are the wire's and a fifth status was never on offer.
+
+30. **A project made from a bundle holds its images as well as its models: the ATTACH
+    table, the MODEL table, and two questions that must never be merged** (`Mf-wsdo`).
+
+    **The complaint, and the correction to it.** The owner's sentence was "it didn't pull
+    in all the images from the zip/folder. I had to go back and add them so I could choose
+    the cover I wanted", and the live project `b8a5e66b` (`Fates End - Wizard Tower`)
+    measured it: fifteen STL members written at the create, then three PNG members added
+    by hand 87 seconds later, because the landing page's cover picker is
+    `members.filter(isImageAsset)` (`web/src/ui/ProjectLanding.tsx`) and it had nothing to
+    pick. One detail of the ticket's own telling is false and the measurement says so:
+    the cover was not NULL. It was SET - the largest preview, a registered asset - and
+    DANGLING, an `asset_id` no `project_asset` row backed, because
+    `project_service.create_project_with_members` checks that a cover asset EXISTS and
+    never that it is a member. `.plans/measurements/2026-11-10-bundle-members-mf-wsdo-before.json`
+    records `cover_is_member: false` beside `assets_added: 15`; the AFTER artifact records
+    `assets_added: 18` and `cover_is_member: true`, and the pair is diffed by
+    `2026-11-10-bundle-members-mf-wsdo-diff.txt`. A count could not have shown either of
+    those, which is why both artifacts name every member.
+
+    **What became a member.** `bundle_service.PROJECT_MEMBER_SUFFIXES =
+    bundle_detect.MODEL_SUFFIXES | bundle_detect.IMAGE_SUFFIXES` - the models a print
+    needs plus the images a project can be shown by. Text stays out, and the reason is
+    NOT "the page does not render it": the landing list renders every member it is given
+    (`web/src/lib/assetKinds.ts` classifies a member's type for the list whatever its
+    kind), and `typeLabelFor` will happily print `TXT`. The reason is that no cover,
+    gallery or preview affordance reads a text member - `cover_for_registered`, the
+    landing page's `imageMembers` and its model fallback are the only three kind-driven
+    readers a member has - so a text member is a row in a list and nothing else, while a
+    missing image is an empty cover picker. That is why the exclusion is PINNED rather
+    than left to taste: `test_a_promoted_tower_create_attaches_its_preview_images` names
+    `01_Wizard/Wizard_Dice_v5.4_fixes.txt` and the vendor's nested
+    `01_Wizard/01_Wizard_v5.4.zip` as registered-and-not-members on the real tower, so
+    adding `.txt` to the table later is a decision somebody has to take red-first. A
+    nested archive is a member of the bundle and never of the project - Decision 17
+    survives this ticket untouched.
+
+    **Two questions, two tables, one seam.** "Which files does the project HOLD?" is the
+    ATTACH question, answered with `PROJECT_MEMBER_SUFFIXES` and asked of
+    `create_project_from_members(kinds=...)`. "Which files are the MODELS of this
+    bundle?" is the MODEL question, answered with `bundle_detect.MODEL_SUFFIXES` and
+    asked twice - by `member_asset_ids` for `model_assets`, which feeds `attached` and
+    the compound marker's per-group counts, and by the dedupe through
+    `Dedupe.containment`. `_create_one` names both tables and holds no kind test of its
+    own; `member_asset_ids` remains the only body that reads a `kinds` table, and the
+    archive door still hands none down (Decision 29's paragraph was restated for this).
+    Keeping the two answers apart is the whole content of the ticket: they were one table
+    before, which is why widening the member set looked like a one-word edit and is not
+    one - see the containment paragraph below.
+
+    **Why the constant is not in `bundle_detect`.** `rule_set_stamp()` hashes
+    `MODEL_SUFFIXES` and `IMAGE_SUFFIXES` by value, so a member table parked beside them
+    could move the stamp and re-rank every cached report row the first time anyone tuned
+    what a project holds - a membership decision is not a detection rule. `PROJECT_MEMBER_SUFFIXES`
+    therefore lives in `bundle_service`, is assigned there, is imported from nowhere, and
+    is asserted absent from `bundle_detect` by
+    `test_the_member_table_is_models_plus_images_and_is_not_the_detector_table` and by the
+    source pin. Neither detector table was edited, and the stamp's literal in
+    `tests/test_bundle_detect.py` - untouched, and imported by the new witness rather than
+    copied - is what proves it.
+
+    **Three model tables, and the `.lbrn` / `.obj` ruling.** `bundle_detect.MODEL_SUFFIXES`
+    (`.stl .3mf .step .stp .lbrn .lbrn2`), `file_utils.MODEL_SUFFIXES` (`.stl .3mf
+    .step .stp .obj`, the table the web mirrors and `check_model_table.py` guards) and
+    this new ATTACH table are three different tables, and `file_utils`' is deliberately
+    NOT the member rule. Registration is not suffix-gated - `library_scan` accepts every
+    file - so both `.lbrn2` and `.obj` are registrable; what decides membership is
+    whether the DETECTOR calls the file a model, because members and facts must agree.
+    `classify_entry` answers `model` for `.lbrn2`, so it is a member; it answers `other`
+    for `.obj` (`other_count += 1`, `model_count += 0`), so an `.obj` is registered and is
+    not a member - a project holding a file its own row describes as "other" is the
+    disagreement this ruling refuses. `test_an_obj_file_is_registered_but_is_neither_a_member_nor_a_model`
+    pins both halves, including the cover: `.obj` is not in `PREVIEW_SUFFIXES` either, so
+    it can never be a face.
+
+    **The cover invariant: by construction, plus a belt.** The row's cover and the
+    create's cover are one expression now. `_report_row` answers
+    `_cover(owned_assets, facts)` over the ONE owned set it also derives `models` and the
+    containment ids from, and `_create_one` re-asks the same `_cover` over
+    `owned_assets` - the owned set minus any excluded group's prefix - when the operator
+    excluded a group. That sentence was first written too large, so here is the size it
+    actually has. `_cover`'s image leg is bounded to `IMAGE_SUFFIXES` and its model leg to
+    `PREVIEW_SUFFIXES`, a subset of `MODEL_SUFFIXES`; both sit inside the ATTACH table. So
+    every asset `_cover` answers an `asset_id` for is a file a create is willing to write,
+    and no cover can ever name the `.txt` or the nested `.zip` that sit in the very same
+    owned set. That is the whole guarantee, and it is a statement about the ATTACH TABLE,
+    not about the project: `owned_assets` is a SUPERSET of what a create attaches (the
+    row's own set still carries the text and the nested archive), and for a create that
+    EXCLUDES a group the row's cover - chosen exclusion-blind over the whole owned set -
+    is routinely NOT a member of the project that gets made.
+    `test_the_cover_never_picks_a_registered_image_under_an_excluded_group` is that shape
+    verbatim: the row's cover is `Inbox/foreign/cover.jpg` and the project it creates holds
+    only `Inbox/part-0.stl`. "A card cannot advertise a file the project it creates does
+    not hold" is therefore true of a create that excludes no group, and of an excluded
+    create only because the re-ask inside `_create_one` replaces the row's cover - not
+    because the row's own answer was confined to the member set. An excluded group's image
+    still cannot win the face, and that is the re-ask's doing
+    (`test_the_cover_never_picks_a_registered_image_under_an_excluded_group`, the
+    registered-image analogue of the unregistered witness beside it). Before this the
+    row picked from `own_assets`, which still names a model-preview the one-owner map had
+    handed to a deeper row. That last half is a CONSTRUCTION claim, and it is labelled as
+    such: a mutation that puts `own_assets` back under the row's cover was run over the
+    whole suite's cover/preview/marker/card selection - 113 tests, including the four
+    `reason == "model-preview"` assertions in this file and the one in
+    `tests/test_import_project.py` - and went GREEN. No fixture in the suite builds the
+    pathological parent (the walk keeps a parent's listing clean of its claimed children,
+    which is why the `Mf-quv4` probe measured `_own_paths` and `_claim_owners` disagreeing
+    ZERO times), so nothing can witness the narrowing today. It is kept because it costs
+    one identifier and makes the row unable to DISAGREE later; it is not claimed as a
+    behaviour anyone can observe yet. Construction is not the whole answer, because a cover is
+    supplied by a door that may not have an attach set at all: `create_project_from_members`
+    therefore refuses, BEFORE the write, a `cover_asset_id` outside the member set -
+    `test_a_project_create_refuses_a_cover_outside_its_member_set` pins `refused` with
+    ZERO `Project` rows.
+
+    **The guard refuses, and that was a ruling rather than a convenience.** The ticket's
+    own rule 3 is "a door that picks a cover outside its member set must not create", so
+    the alternative on the table - drop the cover and create anyway - was rejected. It
+    keeps the create green and silently loses the face the operator clicked for, which is
+    the defect class this ticket exists to end. The other half of that trade is the
+    reviewer's, and it is true: the guard converts a FUTURE divergence between a row's
+    cover and the create's member set from a silent cosmetic defect into a hard `failed`
+    the operator cannot retry. Three things stand between this ticket and that red create.
+    The report and the create ask ONE ownership map - `_claimed_assets`, shared since
+    `Mf-quv4`, and now pinned PER KEY by
+    `test_the_create_door_asks_the_ownership_map_the_report_answered_with`, which asserts
+    that a key is served `claims=None` in the create exactly when it is an absorbed
+    re-offer. `_cover`'s two legs stay bounded inside the ATTACH table, which is the
+    paragraph above. And the row a create answers from is re-derived INSIDE
+    `create_bundles`, from the same `scan_bundles` its candidate lookup uses, so a row and
+    its create can never be read out of two different walks. None of the three is a test
+    of the guard itself; together they are why the guard is expected to stay unreachable,
+    and why its being reachable would be news rather than weather.
+
+    The guard is gated on `require_members`, and that gate is
+    load-bearing rather than conservative: `POST /projects` passes `require_members=False`
+    with no members at all, and `tests/test_projects_api.py`'s
+    `test_create_project_rejects_an_unknown_cover_asset` (a 404 from `get_asset`) and
+    `test_a_cover_needs_no_membership_and_survives_membership_removal` (a cover with zero
+    members - "a cover is not a membership") are that door's contract. The manual door and
+    the archive door's cover rules are unchanged, including Mf-0ck5's first-model-by-extension
+    for an extract.
+
+    **The hazard this ticket created: one image, two projects.** `_claim_owners` indexes
+    MODELS only, so a path two rows' snapshots both name is narrowed away from neither of
+    them - each row keeps it, and since this ticket each row's project ATTACHES it. Two
+    projects can therefore hold one image and both can wear it as their cover. Before the
+    ticket that was unreachable: an image attached to nobody, so a shared image could be
+    advertised by two rows and was held by none. Nothing reaches it today, and that is
+    measured, not assumed - the `Mf-quv4` probe that found `_own_paths` and `_claim_owners`
+    disagreeing ZERO times is exactly the shape this hazard needs, because two rows naming
+    one path IS such a disagreement, so no fixture in the suite has two creatable rows over
+    one file at all. What it does change is what one existing sentence means:
+    `test_the_live_shape_has_no_container_bundle`'s "no asset belongs to two bundles" is
+    now a property of MODELS only. The assertion still walks every member of every project
+    its corpus creates and passes, but the rule that makes bundles disjoint is
+    `_claim_owners`, and a suffix outside `MODEL_SUFFIXES` is never in that map - for
+    images the witness reports a fact about its fixtures, not about the code. Widening the
+    map to close it is NOT part of this ticket and is not free: it makes a preview decide
+    which row owns a path, which re-opens `Mf-quv4`'s ownership bound, so it is deferred to
+    a decision and a ticket of its own (the `## Superseding conditions` list carries the
+    trigger).
+
+    **Containment stayed models-only, deliberately, and that is a field now.** `Dedupe` gained
+    `containment: Optional[Sequence[str]]`, `None` meaning "the member set" - which is what
+    it always was, and what every other door gets. Naming it is only meaningful with
+    `assets=True`, because those ids are what the assets leg is asked with and no other leg
+    reads them: a door that set one and forgot the other would ask no containment identity
+    at all and hear nothing back, so `create_project_from_members` raises `ValueError` on
+    that combination beside its `unknown create door` precondition -
+    `test_a_create_that_names_a_containment_set_without_the_assets_leg_raises` pins the
+    raise and the legal shape beside it. The bundle door passes
+    `containment=tuple(model_assets)`, because "does a project already hold this bundle's
+    files" is the MODEL question - the hand-made project over a bundle's files holds the
+    parts - while "what does the project hold" is the member question. Ask the first with
+    the second and Mf-yhjo's dedupe dies silently: a human's fifteen-model project would
+    no longer contain the eighteen-file set the create asks with, every re-click would
+    write a second project, and the report row would still say `assets`. The four
+    assertions that would have caught it - `test_service_a_create_for_an_asset_owned_bundle_is_a_skip`'s
+    `skipped == 1` / `reason == "already_created"` / `project_id ==` / `member_count == 12`,
+    and `test_the_bundle_door_answers_from_what_a_project_already_holds`'s
+    `existing_project_match == "assets"` / `(created, skipped) == (0, 1)` /
+    `reason == "already_created"` - were held as a do-not-retune group through the ticket
+    and are green, alongside the new witness that names the mechanism.
+
+    **What did not move.** The report's `model_count` / `image_count` / `other_count` /
+    `assets_total` are untouched, because no detector table changed: the tower row still
+    reads `15 / 3 / 0 / 20` while the create adds 18 members, and the Rocket's marker still
+    reads `(6, 6)` per group while its project holds 56 files. `assets_added` is a member
+    count and is not the row's fact count; where a witness had conflated them it was
+    re-expressed, never deleted. The archive door's member set is byte-identical across the
+    ticket, which the artifact pair `.plans/measurements/2026-11-10-bundle-members-mf-wsdo-archive-{before,after}.json`
+    shows file for file - twenty members including the `.txt` and the nested zip the
+    bundle door excludes - and `test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower`
+    pins it.
 
 ## Consequences
 
@@ -3034,13 +3245,18 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   an integrity claim.
 - **Literal full-set containment over every registered asset of the bundle**
   (models, images and text). Rejected, and this is the reading a reviewer has to
-  sign off on. A created project only ever holds the models, so an owner's
-  hand-made project over the bundle's files holds the models and not the previews
-  or the documents the scan also registered, and the rule would report that
-  project as NOT owning the bundle it was made from. It would be correct about
+  sign off on. Containment is the MODEL question: the project a human makes by hand
+  over a bundle's files holds the models, and not the previews or the documents the
+  scan also registered, so asking the identity with every registered file would report
+  that project as NOT owning the bundle it was made from. It would be correct about
   the wrong set, and the bug this ticket exists to fix would survive in exactly
-  the case that motivated it. The containment set is therefore the models a
-  create would attach, pinned by
+  the case that motivated it. The containment set is therefore the models the dedupe is
+  asked with - `Dedupe.containment`, pinned unchanged by `Mf-wsdo` at
+  `test_the_models_only_filter_is_still_the_answer_to_the_model_question` - even though
+  a created project now also holds the previews (Decision 30), which is exactly the
+  distinction a reviewer has to keep: "what does a project hold" and "does a project
+  already hold this bundle" are two questions. The original witness for the rejected
+  reading is
   `test_service_a_project_holding_the_models_owns_a_bundle_that_also_has_images`.
 - **The weaker intersection rule, where a project holding one of the bundle's
   files claims it.** Rejected: one shared file is enough to hide a bundle behind
@@ -3184,7 +3400,7 @@ unchanged.
   not the containment check is what refuses the generic roots; a real bundle
   (models + images + `notes.txt`) beside an archive rooted at its directory but
   named differently is an ordinary folder bundle with `twin_verified: true`, and
-  create attaches its two models and nothing from the archive; an archive that
+  create attaches its two models, its preview and nothing from the archive; an archive that
   also carries `__MACOSX/` AppleDouble cruft still pairs on its real entries,
   because both layers skip it through the one `is_macosx_artifact` predicate; a
   promoted directory holding a nested archive is one row with that archive as a
@@ -3587,8 +3803,9 @@ unchanged.
   equality over `Asset.storage_path` against every registered model, with the
   marker naming both groups 45/15 - attaching one group reds it);
   `test_the_row_counts_exactly_what_the_scan_registered`
-  (the Rocket's row counts 48 and attaches 48, six per group, and no `._` path is
-  in either set - the count-equals-registration invariant Decision 25 records);
+  (the Rocket's row counts 48 models and attaches 56 files - the same 48 plus the
+  eight group previews, Decision 30 - with `attached` still 6 per group, and no `._`
+  path is in either set - the count-equals-registration invariant Decision 25 records);
   `test_service_xbox360_shell_creates_one_project_with_all_31_parts` (27 own
   parts plus the foreign 4, cover `model-preview` on the mount's
   `bracket-0.stl` with `cover.group` naming the mount - the 40-byte tie broken by
@@ -3841,8 +4058,13 @@ This ADR is superseded if any of the following becomes true:
 - containment becomes an intersection - a project holding some of a bundle's
   files starts claiming it - or an empty containment set starts claiming a
   bundle, or a membership row whose project row is missing stops being ignored;
-- the containment set widens from the models a create would attach to every
-  registered asset of the bundle;
+- the containment set widens from the models containment is asked with (Decision 30's
+  MODEL question) to every registered asset of the bundle;
+- the ownership map widens past models - `_claim_owners` starts indexing image paths, so
+  two rows can contest a preview and a face starts deciding which row owns a path. This is
+  a SEPARATE decision from Decision 30, which widened what a project HOLDS and deliberately
+  left what is CLAIMABLE alone: it re-opens `Mf-quv4`'s one-owner bound, and it is deferred
+  to a ticket of its own rather than taken as a side effect of a membership change;
 - the tie-break between two projects holding the same files stops being
   `(lower(project.name), project.id)`;
 - the membership index starts being built per candidate instead of once per
