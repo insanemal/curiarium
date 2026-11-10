@@ -102,7 +102,16 @@ names the directory itself and never a descendant**, so it can never qualify one
 answer** (the archive is that directory's provenance, never a pairing), and **a
 stem twin whose directory no rule offers and whose payload fails containment is
 consumed** rather than retried under the weaker entry-root name. A refused pair
-stays visible rather than vanishing, which is why it keeps the archive-only row.
+still gets a row rather than silence, which is why it keeps the archive-only
+EXPLANATION; whether it is also creatable is a database answer, and Mf-quv4 moved
+it onto the same disk predicate every other row is judged by (ADR 0010 Decision 7).
+**A row on the report is not the same thing as a row in the queue**: the web list
+hides anything carrying ``existing_project_id`` behind its "show created" toggle
+(``ui/review/bundleRows.ts`` ``matchesVisibility``), and a refused row now reports
+the assets its key holds, so the assets leg can find a project for it and hide it
+that way - measured, ``import/Pile`` gained ``existing_project_match: assets``
+while staying ``blocked``/``archive_only``, and the report's ``already_created``
+count moved 3 -> 4 over the Mf-quv4 corpus.
 
 A zip with no extracted twin is still read, through
 ``zip_service.read_zip_text_entry`` (bounded, never extracted), so the report can
@@ -269,8 +278,10 @@ class BundleCandidate:
     subtree. It is never returned in a report row - the row carries the facts
     from its own detect call. ``entry_root`` is the archive entry root that
     paired this bundle's archive, ``None`` when the stem rule paired it.
-    ``pair_only`` means a paired directory the container rule refuses: it is
-    shown, never creatable. ``archive_owned`` means a verified pairing owns this
+    ``pair_only`` means a paired directory the container rule refused at the walk:
+    it is shown, and - since Mf-quv4 - its status is decided by the same disk
+    predicate as every other row (a resolved ``Folder`` and the models ``claims``
+    leaves it), not by this flag. ``archive_owned`` means a verified pairing owns this
     directory: the archive supplies its identity on the entry-root route or on the
     stem route, and the low confidence says the shape was inferred, so it is
     offered at LOW even when no rule offers the directory on its own and it is
@@ -296,11 +307,15 @@ class BundleCandidate:
 
     @property
     def offers_archive_only(self) -> bool:
-        """Whether the row is reported ``blocked``/``archive_only``.
+        """Whether this candidate's SHAPE is "an archive, or a directory paired with one".
 
-        An archive of its own, and a paired directory the container rule refuses,
-        are the same answer to the operator: there is nothing here to create, and
-        the remedy is the import door.
+        Since Mf-quv4 this is a SHAPE predicate for the two detection uses only -
+        the archive-containment ``contained_keys`` list (a row of this shape is a
+        bundle another folder must not be allowed to swallow) and the twin-attachment
+        loop (a row of this shape reports the archive it was built with and takes no
+        twin). ``_report_row`` no longer reads it: ``blocked``/``archive_only`` is a
+        database answer now, decided by the disk predicate, and a candidate whose
+        shape is archive-only is not thereby uncreatable.
         """
         return self.is_archive or self.pair_only
 
@@ -1018,9 +1033,15 @@ def _build_candidates(
             # other things' models. ``import/01_Fates End - Wizard Tower`` holds
             # nothing but ``01_Wizard``, which the folder pass offered for the vendor
             # ``.txt`` inside it - so the claim emptied the parent, the container rule
-            # made the parent a ``blocked``/``archive_only`` row with ``assets_total``
-            # 0 and nothing creatable, and the child that owns the models was refused
-            # ``member-of-bundle``: the pair stays visible and nobody can import it.
+            # left the parent as the pair-only row nobody could import (the child that
+            # owns the models was refused ``member-of-bundle``, so the pair stayed
+            # visible and nothing could be made from it), and at that build the row
+            # also answered ``assets_total`` 0 because an archive-only row skipped the
+            # asset lookup outright. Mf-quv4 removed that skip - and with it any claim
+            # that this flag decides a status - so what this branch is for is the
+            # answer it always gave: ONE promoted row keyed at the directory, with the
+            # child inside it as a group, rather than a pair-only fall-through that has
+            # no promotion argument behind it.
             # Such a parent is promoted instead - one READY row keyed at the
             # directory - and the child rides inside it as a group, dissolved exactly
             # the way R7 dissolves the rows a compound absorbs (``member-of-bundle``,
@@ -1254,9 +1275,14 @@ def _build_candidates(
     # `import/X/P/A`) the prune dropped the promoted `import/X/P` after its child
     # `import/X/P/A` had already been dissolved out, so the child lost its row, the
     # parent lost its row, NO ROW OWNED THE PAYLOAD, and the ledger wrote
-    # ``member-of-bundle`` for a path no row owns. Measured on that tree before the fix:
-    # one row (`import/X`, ``blocked``/``archive_only``, ``assets_total`` 0) and nothing
-    # creatable at all.
+    # ``member-of-bundle`` for a path no row owns. Measured on that tree before the
+    # fix: one row (`import/X`, ``blocked``/``archive_only``, and ``assets_total`` 0
+    # AT THAT BUILD - an archive-only row skipped the asset lookup, which Mf-quv4
+    # removed) and no project obtainable from it. Re-measured after Mf-quv4 the same
+    # eager build leaves `import/X` answering ``ready`` with ``assets_total`` 7, and
+    # its create still answers ``failed``/``contains_bundles`` with no Project row:
+    # the create-time belt is what refuses it now, which is exactly why the report
+    # must not answer this question from a flag.
     #
     # `survivors` is read from `found` BEFORE any removal, so a promoted row sitting
     # inside a surviving promoted parent still has its own children taken - they sit
@@ -2135,6 +2161,70 @@ def _cover_of(asset: RegisteredAsset, reason: str) -> dict:
     }
 
 
+def _claim_owners(candidates: Sequence[BundleCandidate], *, scope: str) -> Dict[str, str]:
+    """``path`` -> the ONE offered key that owns that registered model path.
+
+    One map for the whole report, built ONCE, so "does this row actually own this
+    model?" is a dict lookup per row instead of a second opinion per row. It is the
+    answer to the anti-fix ``_report_row`` used to be: a row whose key merely
+    PREFIXES a registered model used to claim it, which is how a container answered
+    ``ready`` over models a deeper row exists to attach.
+
+    Three rules decide a winner, and each one kills a specific wrong answer:
+
+    * Built from ``scan.candidates`` ONLY. An absorbed group re-offered as its own
+      row (``BundleScan.absorbed``) never writes anything, so it may not take a
+      path away from the row that does - that re-offer is served with ``claims``
+      set to ``None`` for exactly this reason.
+    * DEEPEST KEY FIRST, and the first writer wins. Two rows can name one path
+      (a parent's snapshot and a child's), and the deepest key is the row the
+      deepest-first walk claimed the path for, so it is the row the report credits.
+      The CREATE door still builds its attach set from ``_own_paths`` rather than
+      from this map (``_create_one``), so making the two agree is the dedupe work
+      ``Mf-yhjo`` owns, not this ticket's; what this map decides today is which row
+      the report says owns a model, and so which row ``find_existing_project``'s
+      assets leg can call already-created.
+    * Only ``bundle_detect.MODEL_SUFFIXES`` paths are claimable. The app attaches
+      MODELS and nothing else (``_create_one``'s ``model_assets``), so images and
+      text are not what decides ownership - letting a cover image decide it would
+      hand a path to a row that can never attach it.
+
+    ``is_archive`` rows are skipped: no registered file can live under a
+    ``<x>.zip/`` prefix, so an archive row is never an owner - it is only ever
+    provenance, and letting one claim a path would make the real row read
+    ``not_scanned``.
+    """
+    claims: Dict[str, str] = {}
+    ordered = sorted(
+        (candidate for candidate in candidates if not candidate.is_archive),
+        key=lambda candidate: (-_depth(candidate.key), candidate.key.casefold(), candidate.key),
+    )
+    for candidate in ordered:
+        key = _qualify(scope, candidate.key)
+        for rel_path in _own_paths(key, candidate):
+            if _suffix(rel_path) in bundle_detect.MODEL_SUFFIXES:
+                claims.setdefault(rel_path, key)
+    return claims
+
+
+def _offered_dirs(candidates: Sequence[BundleCandidate], *, scope: str) -> AbstractSet[str]:
+    """Every non-archive candidate key, qualified: the container evidence.
+
+    "Holds a row" is the container half of the predicate, and it is asked of the
+    walk's own candidate set - not of the refusal ledger, which names paths that
+    were never rows and would refuse a parent for a directory nobody can create
+    from either. It is also not literally the row set: a candidate whose own detect
+    answers ``None`` is dropped by ``_report_row`` and would still count here. That
+    is the honest wording rather than a live difference - measured, no candidate in
+    the bundle suite is dropped that way, so the two sets are one set in practice.
+    Archives are excluded because a zip is a file: a directory that holds a zip
+    holds a member, not a bundle (the nested-member rule).
+    """
+    return frozenset(
+        _qualify(scope, candidate.key) for candidate in candidates if not candidate.is_archive
+    )
+
+
 def _cover_none_fields(rel_path: Optional[str], reason: str) -> dict:
     """A cover with no registered asset: a named-but-unserved path, or nothing.
 
@@ -2156,6 +2246,8 @@ def _report_row(
     dismissals: Mapping[str, dict],
     enrichments: Mapping[str, dict],
     absorbed_keys: AbstractSet[str],
+    claims: Optional[Mapping[str, str]],
+    offered_dirs: AbstractSet[str],
 ) -> Optional[dict]:
     """One wire row for one candidate, or ``None`` when its own detect refuses it.
 
@@ -2182,34 +2274,82 @@ def _report_row(
     values, fields = bundle_enrich.fills(facts.creator, facts.licence, facts.licence_url, record)
     enrichment = bundle_enrich.provenance(record, fields) if fields else None
     suggestion = (facts.title or "").strip() or "bundle"
-    assets: List[RegisteredAsset] = []
-    own_assets: List[RegisteredAsset] = []
-    # The asset ids this row would attach: a row that offers nothing to create
-    # has nothing assets can claim, so its containment set stays empty.
-    containment: List[str] = []
-    if candidate.offers_archive_only:
-        # Nothing to create, so nothing is looked up: a pair-only directory does
-        # not even report the assets a scan may already hold under its key.
+    # Every row asks the database, including the archive-only ones. What a row
+    # ANSWERS is not a reason to leave its own files uncounted and unclaimable:
+    # ``assets_total`` and the cover are read-out of the same key the operator can
+    # see on disk, and skipping the lookup made a refused row describe a directory
+    # it had never read (ADR 0010 Decision 7).
+    assets = registered_assets(session, key)
+    # Only the candidate's OWN entries decide status and cover: a registered
+    # asset below a nested child bundle belongs to that bundle, not to this one.
+    own = _own_paths(key, candidate)
+    own_assets = [asset for asset in assets if asset.path in own]
+    models = [asset for asset in own_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
+    # The models this row OWNS, not merely the ones under its prefix. Two rows can
+    # name one path; ``claims`` settled which one the deepest-first walk gave it
+    # to, so a container no longer reports ready over a child's models.
+    # ``claims is None`` is the inert re-offered group: it owns nothing and
+    # forfeits nothing, so it keeps every model its own snapshot names.
+    mine = models if claims is None else [asset for asset in models if claims.get(asset.path) == key]
+    # Deliberate reading of "every registered asset": the app only ever
+    # attaches MODELS to a project (``_create_one``'s ``model_assets``), so
+    # literal full-set containment over images and text too would report the
+    # owner's own hand-made project as NOT owning the bundle. The models are
+    # the containment set.
+    containment = [asset.id for asset in mine]
+    # The container leg, read from the row OUTWARD: an INFERRED row that HOLDS one
+    # of the directories the report offers is a pile, not a bundle. Bounded to
+    # ``INFERRED_CONFIDENCES`` because that is the container rule this module has
+    # ALWAYS applied - ``_build_candidates`` refuses ``container-rule`` on
+    # ``facts.confidence in INFERRED_CONFIDENCES and rel_dir in claimed_ancestors``,
+    # and the archive-containment strip carries the same bound - so this is the
+    # published rule, not a new ranking. HIGH is exempt on purpose: a HIGH row's own
+    # documents sit at depth 0 and it attaches only its own models (ADR 0010
+    # Decision 15/18), so a HIGH parent over a HIGH child is two bundles. Measured:
+    # dropping the bound reds ``test_a_parent_attaches_only_its_own_models`` (that
+    # HIGH ``Parent Thing`` row goes ``blocked``, so its create answers
+    # ``created == 1`` where the witness pins ``2``) and
+    # ``test_a_bundle_attaches_only_its_own_files`` (the HIGH ``Unsorted`` parent
+    # loses the ``ready`` status its own loose model earned). ``claims is not None``
+    # keeps the leg off the inert re-offered rows: a group that owns nothing can
+    # never be the container that cancels somebody else either. And
+    # ``not candidate.compound`` keeps it off R7's rows, because the same Decision
+    # makes a compound row this rule's ONE bounded exception: a compound may hold a
+    # row it chose not to absorb (``_compound_pass`` never absorbs a pair-only row)
+    # and refusing it there would answer ``not_scanned`` - "no model file registered
+    # by a scan" - about a fully registered directory. Measured: deleting this clause
+    # alone is 0 red, because the suite builds no such compound; what makes it
+    # load-bearing is the pair - delete it AND let absorbed rows count as container
+    # evidence, and a compound self-cancels against its own re-offered group for 23
+    # red. ``test_an_excluded_group_row_and_its_compound_parent_are_mutually_inert``
+    # pins the whole five-mutation table, the three no-ops included.
+    #
+    # What the leg ACTUALLY refuses today is every row that carries a ``pair_only``
+    # answer: measured over the bundle suite it fires on nine keys (``import/Pile``,
+    # ``Q``, ``X``, ``Z``, ``D``, ``L``, ``M``, ``endorphin``, ``5390184_pile``) and
+    # all nine are pair-only. The other half of the bound is the walk's own
+    # guarantee, kept as the rule's shape rather than as live code: ``_relates_to_any``
+    # refuses a title candidate that HOLDS a row, and the folder pass refuses an
+    # inferred candidate in ``claimed_ancestors``, so neither can reach here.
+    parents = {key}
+    container = (
+        claims is not None
+        and candidate.confidence in bundle_detect.INFERRED_CONFIDENCES
+        and not candidate.compound
+        and any(_strictly_inside_any(other, parents) for other in offered_dirs)
+    )
+    if mine and not candidate.is_archive and not container and key.casefold() in folders:
+        status, blocked_reason = READY, None
+    elif candidate.is_archive or candidate.pair_only:
+        # BEFORE the folder leg, and the order is load-bearing: the web Extract door
+        # (``ui/review/bundleRows.ts`` ``extractPathFor``) opens only on
+        # ``blocked_reason === "archive_only"``, so a zip row that fell through to
+        # ``unresolved_directory`` would lose its only way into the library.
         status, blocked_reason = BLOCKED, ARCHIVE_ONLY
+    elif key.casefold() not in folders:
+        status, blocked_reason = BLOCKED, UNRESOLVED_DIRECTORY
     else:
-        assets = registered_assets(session, key)
-        # Only the candidate's OWN entries decide status and cover: a registered
-        # asset below a nested child bundle belongs to that bundle, not to this one.
-        own = _own_paths(key, candidate)
-        own_assets = [asset for asset in assets if asset.path in own]
-        models = [asset for asset in own_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
-        # Deliberate reading of "every registered asset": the app only ever
-        # attaches MODELS to a project (``_create_one``'s ``model_assets``), so
-        # literal full-set containment over images and text too would report the
-        # owner's own hand-made project as NOT owning the bundle. The models are
-        # the containment set.
-        containment = [asset.id for asset in models]
-        if key.casefold() not in folders:
-            status, blocked_reason = BLOCKED, UNRESOLVED_DIRECTORY
-        elif not models:
-            status, blocked_reason = BLOCKED, NOT_SCANNED
-        else:
-            status, blocked_reason = READY, None
+        status, blocked_reason = BLOCKED, NOT_SCANNED
     archive = None
     if candidate.archive_path:
         archive = {
@@ -2393,6 +2533,11 @@ def _report_from_scan(
         # and a dict lookup per row, never a per-candidate read.
         registered = registered_index(session)
         splits = _compound_splits(session)
+        # Two report-wide maps, built once from the walk's OWN candidate set, so
+        # every row answers ownership and containment against one settled answer
+        # rather than re-deriving it from its own prefix (see ``_claim_owners``).
+        claims = _claim_owners(scan.candidates, scope=scope)
+        offered_dirs = _offered_dirs(scan.candidates, scope=scope)
         for candidate in scan.candidates:
             row = _report_row(
                 session,
@@ -2405,6 +2550,8 @@ def _report_from_scan(
                 dismissals=dismissals,
                 enrichments=enrichments,
                 absorbed_keys=absorbed_keys,
+                claims=claims,
+                offered_dirs=offered_dirs,
             )
             if row is not None:
                 row["rule_set"] = rule_set["stamp"]
@@ -2431,6 +2578,16 @@ def _report_from_scan(
                     dismissals=dismissals,
                     enrichments=enrichments,
                     absorbed_keys=absorbed_keys,
+                    # INERT, deliberately. A re-offered group is a report courtesy
+                    # for a create the operator already made: it is not part of the
+                    # walk's candidate set, so it may neither take a model away from
+                    # the compound row that does write (``claims=None``) nor count as
+                    # a container against it (``offered_dirs`` empty) - a compound
+                    # that contained its own re-offered group would cancel itself.
+                    # Both legs off is also what keeps these rows byte-for-byte the
+                    # status HEAD gave them: no claim filter, no container leg.
+                    claims=None,
+                    offered_dirs=frozenset(),
                 )
                 if row is None:
                     continue

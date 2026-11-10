@@ -7226,7 +7226,13 @@ def test_service_a_verified_twin_of_a_claimed_ancestor_is_promoted_on_its_single
     no row, the archive answers ``twin-unverified``, the no-facts reason, and the only
     row left in the tree is the vendor's nested zip: the row Mf-wd3v removed. Delete
     the ``_single_claimed_child_subtree`` leg of the ``claimed_ancestors`` branch and
-    the row goes back to ``blocked``/``archive_only`` with ``assets_total`` 0.
+    the row stops being a promoted one. It does NOT go back to being uncreatable -
+    measured, that mutation leaves ``import/01_Fates End - Wizard Tower`` answering
+    ``(ready, None)`` with ``assets_total`` 14, all fourteen files under the tower - so
+    what reds here is ``candidate.pair_only is False``, the candidate's own flag. That
+    is the honest shape of the witness since Mf-quv4: the flag says "the container rule
+    refused this pairing", and the only thing that flag still decides in the report is
+    which EXPLANATION a refused row carries.
     """
     tower_extraction(isolated_storage, with_text=True)
     scan()
@@ -7450,9 +7456,14 @@ def test_service_the_measured_live_tower_is_promoted_at_its_real_counts(isolated
     reads to offer ``01_Wizard`` a row of its own, and the claim then strips all twenty
     files out of the parent's own view. That used to be the end of the parent's story -
     a claimed ancestor is a container, so the row came back ``blocked``/``archive_only``
-    with ``assets_total`` 0, nothing creatable, the cover not even a registered asset
-    (``largest-image-unregistered``), while the child that held every one of those
-    files was refused ``member-of-bundle``: one visible, unimportable line. It is not
+    and nothing creatable - and at that build it also answered ``assets_total`` 0 with
+    the cover not even a registered asset (``largest-image-unregistered``), because an
+    archive-only row skipped the asset lookup outright. Mf-quv4 removed that skip: the
+    same fall-through now measures ``(ready, None)``, ``assets_total`` 20 and a
+    ``largest-image`` cover backed by a registered asset, which is why this witness
+    pins the CANDIDATE flags (``pair_only is False``, ``archive_owned is True``) as the
+    thing the mutation breaks. While the child that held every one of those files was
+    refused ``member-of-bundle``: one visible, unimportable line. It is not
     the end of the story any more. Every file the parent owns sits inside that ONE
     child, so the parent is the child's wrapper and it is PROMOTED - the operator's
     answer is one ``ready`` row keyed at ``import/01_Fates End - Wizard Tower``, 15
@@ -7461,7 +7472,8 @@ def test_service_the_measured_live_tower_is_promoted_at_its_real_counts(isolated
 
     Mutation: delete the ``_single_claimed_child_subtree`` leg of the
     ``claimed_ancestors`` branch and this row is the blocked one again - ``pair_only``,
-    ``assets_total`` 0, no creatable row in the tree. Delete the
+    ``pair_only`` - measured ``ready`` with ``assets_total`` 20, not the blocked row of
+    that build - and the witness that breaks is the candidate's own flags. Delete the
     ``_holds_stronger_candidate`` leg beside it and ``import/Q``'s HIGH export child is
     swallowed by its parent (the ``:7136`` witness reds, not this one - a LOW child is
     exactly what this branch is for). Change any count here without changing the
@@ -7582,7 +7594,9 @@ def test_service_a_promoted_emptied_claimed_ancestor_holds_no_archive_row_of_its
     the claims, and an archive row survives below the promoted ancestor for its row to
     swallow - the "no archive row" assertion below is what catches it. Delete the
     ``_single_claimed_child_subtree`` leg and the ancestor goes back to ``pair_only``
-    with ``assets_total`` 0, and reverting either ``folded`` expression takes the
+    - measured ``(ready, None)`` with ``assets_total`` 6 on this tree, the count Mf-quv4
+    stopped skipping - and the assertion that breaks is the candidate's own flag triple.
+    Reverting either ``folded`` expression takes the
     ancestor's row away entirely.
     """
     for index, name in enumerate(EMPTY_CLAIMED_CHILD_MODELS):
@@ -7645,10 +7659,12 @@ def test_service_the_promoted_live_tower_dissolves_its_child_row_and_leaves_the_
     owns it - ``nested-member``, the word that says "a zip inside a detected bundle",
     not "a row that was taken into a bigger one".
 
-    Mutation: revert the ``claimed_ancestors`` branch and the tower is the blocked row
-    again - the ledger still reads ``member-of-bundle`` for the child, because the
-    archive-containment strip and the reconciliation used to write that word, but the
-    row comes back ``blocked`` with ``assets_total`` 0. Say what this witness does NOT
+    Mutation: revert the ``claimed_ancestors`` branch and the tower is the pair-only
+    row again - the ledger still reads ``member-of-bundle`` for the child, because the
+    archive-containment strip and the reconciliation used to write that word, while the
+    row itself comes back measuring ``(ready, None)`` with ``assets_total`` 20 (the
+    blocked/``assets_total`` 0 answer belongs to the build that skipped the lookup).
+    Say what this witness does NOT
     pin: deleting the dissolution ALONE reds nothing here, because in THIS tree the
     child is separately dropped by the archive-containment strip - the test below, whose
     child holds no archive at all, is the one that pins the dissolution ITSELF, and
@@ -7754,12 +7770,15 @@ def test_service_a_promotion_the_nested_member_prune_vetoes_takes_no_rows_at_all
     takes nothing: ``A`` keeps the ``low`` row its own trio earned and the operator can
     create from it. Committed at branch time, which was the defect, ``A`` was already
     gone when the veto arrived: no row for ``A``, no row for ``P``, one
-    ``blocked``/``archive_only`` row for ``X`` with ``assets_total`` 0 and NOTHING
-    creatable in the whole tree - measured, 1 row / 0 creatable rows before the fix, 2
-    rows / 1 creatable row after it. Five files that exist on disk and belong to nobody,
-    and a ledger writing ``member-of-bundle`` for a path whose owning row does not
-    exist: the P1 symptom (a directory described ``archive_only`` with ``assets_total`` 0
-    and nothing creatable) re-created one level up.
+    ``blocked``/``archive_only`` row for ``X`` and NOTHING obtainable from the whole
+    tree - measured, 1 row / 0 creatable rows before the fix, 2 rows / 1 creatable row
+    after it. Re-measured after Mf-quv4 the same eager build leaves ``import/X``
+    answering ``(ready, None)`` with ``assets_total`` 7 - every file under it, which the
+    row now counts - and its create still answers ``failed``/``contains_bundles`` with
+    no Project row: the report stopped inventing the refusal and the create-time belt is
+    what refuses it now. Five files that exist on disk and belong to nobody, and a
+    ledger writing ``member-of-bundle`` for a path whose owning row does not exist: the
+    P1 symptom (a directory nobody could import) re-created one level up.
 
     The invariant, stated once so it can be pointed at: **the ledger never carries
     ``member-of-bundle`` for a path that is neither a row nor strictly inside a row.**
@@ -8020,9 +8039,11 @@ def test_service_a_parent_whose_single_child_is_only_partly_claimed_is_not_promo
 # --- what the promotion is FOR: the operator creates the project (Mf-ny89) ----
 #
 # Everything above is about which rows the report offers. The ticket's complaint is
-# about what happens NEXT - "it won't let me create it as a project" - and a
-# ``blocked``/``archive_only`` row with ``assets_total`` 0 is a row the UI has nothing
-# to send for. So the promotion earns nothing until the real create pass makes a
+# about what happens NEXT - "it won't let me create it as a project" - and a row the
+# report refused while never reading its own directory is a row the UI has nothing to
+# send for. (Its ``assets_total`` 0 belongs to that skipped read, not to the disk: the
+# same pair-only shape measures 7 files under ``import/X`` and 20 under the tower now.)
+# So the promotion earns nothing until the real create pass makes a
 # project out of it, and the project has to be the CHILD's payload under the PARENT's
 # key: a ``ready`` row that creates 0 assets, or creates a project holding somebody
 # else's parts, leaves the operator exactly where the ticket found them.
@@ -8055,13 +8076,22 @@ def test_a_promoted_tower_creates_one_project_whose_parts_come_out_of_the_child(
     is a different defect from the one the promotion fixed, since the ``pair_only``
     ancestor this row replaced answered ``blocked``/``archive_only`` and created nothing.
 
-    Mutation (run): make the promotion answer "no wrapper" - ``_single_claimed_child_subtree``
-    returning ``None`` is the pre-Mf-ny89 fall-through - and this reds before the POST even
-    happens, with the row answering ``('blocked', 'archive_only', 'low')``; measured with
-    the row probe removed, the same create answers ``blocked``/``archive_only`` with
-    ``(created, blocked) == (0, 1)`` and no Project row at all - the owner's complaint in
-    its original form. This is the only test in the file that asks the CREATE question of
-    the promoted key, which is why that complaint is pinned here and nowhere else.
+    Mutation (run, and it moved): make the promotion answer "no wrapper" -
+    ``_single_claimed_child_subtree`` returning ``None`` is the pre-Mf-ny89
+    fall-through - and since Mf-quv4 THIS test no longer reds. Measured: the pair-only
+    row that mutation leaves answers ``(ready, None, 'low')`` with ``assets_total`` 20,
+    its snapshot is the unclaimed full subtree so the create belt passes, and the create
+    makes its one project of fifteen models exactly as pinned here. What the mutation
+    DOES red is four witnesses beside this one -
+    ``test_service_a_verified_twin_of_a_claimed_ancestor_is_promoted_on_its_single_child``,
+    ``test_service_the_measured_live_tower_is_promoted_at_its_real_counts``,
+    ``test_service_a_promoted_emptied_claimed_ancestor_holds_no_archive_row_of_its_own``
+    and ``test_service_a_tower_whose_child_holds_no_archive_of_its_own_is_still_one_row``
+    - each on the candidate's own ``pair_only``/``archive_owned`` flags. That is the
+    honest division of labour now: the flags prove the promotion happened, this test
+    proves the promotion creates. This is the only test in the file that asks the CREATE
+    question of the promoted key, which is why that complaint is pinned here and nowhere
+    else.
     """
     live_tower_extraction(isolated_storage)
     scan()
@@ -8126,12 +8156,15 @@ def test_a_created_promotion_answers_its_own_project_id_and_a_second_create_is_a
     """The answer a promoted key gives AFTER the create - new surface, not a re-run.
 
     Before Mf-ny89 this key was outside the create door, and that is why nothing here
-    covered it: the row was ``pair_only``, ``_report_row`` answers such a candidate
-    ``blocked``/``archive_only`` with its containment set deliberately left EMPTY ("nothing
-    to create, so nothing is looked up"), ``find_existing_project`` was therefore handed no
-    assets to prove the files with, and the row pinned ``existing_project_id`` to ``None``
-    however many projects the operator had made. The promotion put the key inside that
-    door, and the post-create contract came with it. Pinned here for the first time: the
+    covered it: the row was ``pair_only``, and ``_report_row`` answered such a candidate
+    from its flag ALONE - ``blocked``/``archive_only``, with the asset lookup skipped
+    entirely, so its containment set was empty by construction ("nothing to create, so
+    nothing is looked up"), ``find_existing_project`` was therefore handed no assets to
+    prove the files with, and the row pinned ``existing_project_id`` to ``None`` however
+    many projects the operator had made. Mf-quv4 removed that skip, so a pair-only row
+    is no longer able to hide its own files either: the flag decides which EXPLANATION a
+    refused row carries, never whether the report reads the directory. The promotion put
+    the key inside the create door, and the post-create contract came with it. Pinned here for the first time: the
     row reports the project it became - by MARKER, with the name read back from the
     project endpoint for that same id - the report counts it once under
     ``already_created``, and a second ``POST /bundles/create`` for the promoted key is a
@@ -8140,13 +8173,15 @@ def test_a_created_promotion_answers_its_own_project_id_and_a_second_create_is_a
     ``test_a_second_run_creates_nothing`` sets; what is new is that it now holds for a row
     whose assets are entirely a claimed child's.
 
-    Mutation (run): the same revert as the create witness - ``_single_claimed_child_subtree``
-    answering ``None`` - and this reds at its first assertion, ``assert first["created"] ==
-    1``, measured as ``0 == 1`` with counters ``(created, skipped, blocked, failed) == (0,
-    0, 1, 0)``: a ``pair_only`` row creates nothing, so it never has an
-    ``existing_project_id`` to report. The duplicate-project assertions are what a create
-    door without the existing-project check would break; they are here because a promotion
-    that hands the operator a row which creates twice is worse than one that creates never.
+    Mutation (run, and it moved): the same revert as the create witness -
+    ``_single_claimed_child_subtree`` answering ``None`` - no longer reds THIS test, and
+    the reason is the ticket's own point. Measured, the fall-through leaves the tower row
+    answering ``(ready, None, 'low')`` with its containment set populated, so it creates
+    once, answers its own project id and skips the second create exactly as pinned here.
+    What that mutation DOES red is the four promoted-row witnesses that read the
+    candidate's flags. The duplicate-project assertions below are still what a create door
+    without the existing-project check would break; they are here because a promotion that
+    hands the operator a row which creates twice is worse than one that creates never.
     """
     live_tower_extraction(isolated_storage)
     scan()
@@ -8186,3 +8221,512 @@ def test_a_created_promotion_answers_its_own_project_id_and_a_second_create_is_a
     assert len(project_listing(client, headers)) == 1, "no duplicate project over 15 shared files"
     assert table_counts()["projects"] == 1
     assert member_count(project_id) == 15, "a skip attaches nothing a second time"
+
+
+# --- every row asks the database (Mf-quv4) ------------------------------------
+#
+# An archive-only row used to be answered WITHOUT reading the database: the
+# candidate's SHAPE said "nothing to create", so ``registered_assets``, the
+# containment set, ``assets_total`` and the registered legs of the cover were all
+# skipped together. But status is not a shape question - ADR 0010 Decision 7 makes
+# it a database question (a resolved ``Folder`` row and registered models) - so the
+# short-circuit answered a database question from disk shape and left a refused row
+# describing a directory it had never opened. It is gone: every row asks, and ONE
+# predicate (own registered models the report's claim map leaves it, not an archive,
+# not a container of an offered directory, a resolved folder) decides every status.
+# The witnesses below are the ones the deleted line cannot satisfy: each asserts
+# something about the READ, not only about the verdict.
+
+
+def endorphin_pile(storage: Path) -> None:
+    """The AC-2b pile: ``endorphin``, its own loose model and render, two real child
+    bundles, and ``endorphin.zip`` holding exactly those two loose files.
+
+    This is the tree of
+    ``test_service_a_verified_stem_twin_does_not_promote_a_pile_of_bundles``,
+    restated rather than shared so that witness stays untouched. The twin verifies,
+    so only the container rule can refuse the promotion, and the pile stays the
+    blocked ``archive_only`` row - which is exactly what makes it the right row to
+    ask "and what do you say about the files under your own key?".
+    """
+    root = storage / "import" / "endorphin"
+    write_file(root / "loose.stl", STL_BYTES)
+    write_file(root / "render.png", b"p" * 70)
+    for name, model in (("Alpha", "a.stl"), ("Beta", "b.stl")):
+        write_file(root / name / model, b"s" * 41)
+        write_file(root / name / f"{name.lower()}.png", b"p" * 50)
+        write_text(root / name / "notes.txt", "print at 0.2mm")
+    write_zip(
+        storage / "import" / "endorphin.zip",
+        {"endorphin/loose.stl": STL_BYTES, "endorphin/render.png": b"p" * 70},
+    )
+
+
+def test_the_refused_endorphin_pile_reports_the_assets_its_key_holds(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-7: the refused pile counts and covers the files its key holds.
+
+    The pile's VERDICT is pinned elsewhere and is not the point here - it stays
+    ``blocked``/``archive_only`` because it holds two rows. The point is that the
+    verdict is no longer a reason to skip the read: eight files sit under
+    ``import/endorphin`` (the two children's six plus the pile's own loose model and
+    render), the library scan registered all eight, and the refused row now reports
+    them and covers itself with the largest registered image. Under the deleted
+    short-circuit all four assertions below were a lookup that never happened, so
+    the status was right and the read-out was invented.
+
+    Mutation (run): restore ``if candidate.offers_archive_only: status,
+    blocked_reason = BLOCKED, ARCHIVE_ONLY`` with the lookup in the ``else``, and
+    THIS reds on two of them - measured ``assert 0 == 8`` for ``assets_total`` and
+    ``assert None is not None`` for ``cover["asset_id"]`` - while the status and
+    ``blocked_reason`` assertions stay green. That is the whole reason the test is
+    written against the read: a shorter report that only pinned the status would
+    have survived the line it is meant to forbid.
+    """
+    endorphin_pile(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    files = files_under(isolated_storage, "import/endorphin")
+    assert len(files) == 8, "the two children's six files plus the pile's own model and render"
+    pile = row_for(report, "import/endorphin")
+    assert (pile["status"], pile["blocked_reason"]) == ("blocked", "archive_only"), (
+        "the verdict is unchanged: a pile that holds rows is still refused"
+    )
+    assert pile["assets_total"] == len(files) > 0, (
+        "the refused row counts every registered file under its key - the answer a "
+        "row that never asked the database could not give"
+    )
+    assert pile["cover"]["asset_id"] is not None, (
+        "the cover is backed by a registered asset, not by the unregistered leg"
+    )
+    assert pile["cover"]["reason"] == "largest-image", (
+        "and it won the registered-image leg like any other row's cover would"
+    )
+
+
+def test_a_pair_only_row_with_nothing_offered_under_it_is_ready_and_creates(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The secondary witness: ``pair_only`` is not a verdict, and here nothing is inside.
+
+    ``import/G`` holds ONE child, ``part family one``, which the folder pass claimed
+    as a ``low`` row - that claim is what makes ``import/G`` a claimed ancestor and
+    what makes it ``pair_only`` once its verified twin is paired with it. The child
+    does not survive the scan: it holds ``moai_export.zip``, so the archive-containment
+    strip refuses it as a container and the nested-member pass then refuses the zip.
+    ``import/G`` is therefore a ``pair_only`` row with NO offered row under it - it
+    holds no other bundle - and the disk predicate answers it ``ready``, which is the
+    whole ticket: the flag was never the reason the row could not be created.
+
+    The shape is reached, not hand-built: the candidate list and the flags below are
+    the detector's own answer, and the ledger says so too (the child
+    ``member-of-bundle``, the zip ``nested-member``, the twin ``twin-consumed``). The
+    create belt stays live on this ``low`` row and PASSES - the pair-only listing is
+    the unclaimed full subtree, so the six registered files and the six paths its
+    snapshot names are one set - and one project of three models comes out.
+
+    Mutation (run): the deleted short-circuit answers this row ``blocked`` from the
+    flag and this reds at the status assertion, measured ``('blocked',
+    'archive_only') == ('ready', None)``. Lift that assertion and the read-out reds
+    next - measured ``assert 0 == 6`` on ``assets_total`` - and lift that too and the
+    create follows, measured ``(created, skipped, blocked, failed) == (0, 0, 1, 0)``
+    against the pinned ``(1, 0, 0, 0)``: a row the flag refuses never reaches the
+    project row at all.
+    """
+    child = isolated_storage / "import" / "G" / "part family one"
+    write_file(child / "part0.stl", b"s" * 40)
+    write_file(child / "part1.stl", b"s" * 41)
+    write_file(child / "part2.stl", b"s" * 42)
+    write_file(child / "preview.png", b"p" * 70)
+    write_text(child / "notes.txt", "print at 0.2mm\n")
+    write_zip(child / "moai_export.zip", thingiverse_export_entries())
+    twin_archive_of(isolated_storage, "import/G", "import/G.zip")
+    scan()
+    headers = auth_header(client)
+
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+
+    assert truncated is False
+    assert [candidate.key for candidate in candidates] == ["import/G"], (
+        "the child the folder pass claimed did not survive the scan, so the pair-only "
+        "parent is the tree's only row - the shape the flag used to refuse by itself"
+    )
+    parent = candidates[0]
+    assert (parent.pair_only, parent.is_archive, parent.confidence) == (True, False, "low"), (
+        "the row IS a pair-only row: this is the shape the deleted line refused from "
+        "the flag, not a weaker reading of something else"
+    )
+    rules = refusal_rules(isolated_storage)
+    assert rules["import/G/part family one"] == bundle_service.REFUSAL_MEMBER_OF_BUNDLE
+    assert rules["import/G/part family one/moai_export.zip"] == bundle_service.REFUSAL_NESTED_MEMBER
+    assert rules["import/G.zip"] == bundle_service.REFUSAL_TWIN_CONSUMED
+
+    row = row_for(detect(client, headers), "import/G")
+
+    assert (row["status"], row["blocked_reason"]) == ("ready", None), (
+        "no offered row under it, a resolved folder and its own models: the same "
+        "predicate every other row is judged by"
+    )
+    assert row["assets_total"] == len(files_under(isolated_storage, "import/G")), (
+        "and it reports all six files under its key, the zip included"
+    )
+
+    created = create(client, headers, [{"key": "import/G"}])
+
+    assert (created["created"], created["skipped"], created["blocked"], created["failed"]) == (
+        1,
+        0,
+        0,
+        0,
+    ), "a pair-only row with nothing offered inside it creates exactly one project"
+    assert len(project_listing(client, headers)) == 1
+    assert created["results"][0]["assets_added"] == 3, "the three models of the payload it owns"
+
+
+def test_the_pile_holds_the_rows_that_refuse_it_and_claims_none_of_their_models(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-4 and the container leg, on the same ``import/Pile`` tree.
+
+    Three facts, all read off the report and the create pass:
+
+    * the two children are rows of their own INSIDE the pile's key, each ``ready``,
+      each owning its own single model;
+    * the pile is refused because it HOLDS those two rows - it is an inferred
+      (``low``) row, so the container leg applies to it - and its own claimed model
+      set is the loose ``loose.stl`` and nothing else. That is observed, not
+      asserted: a hand-made project holding the two children's models owns the two
+      children and does NOT own the pile, while a hand-made project holding only the
+      pile's own model DOES. Which half of the change earns that answer is worth
+      saying exactly: the pair-only listing is the post-claim view, which the folder
+      pass had already stripped of both children, so the claim map does no work on
+      THIS tree (measured: dropping the filter, ``mine = models``, leaves this test
+      green). ``test_a_parent_row_never_answers_a_project_built_only_from_its_childs_models``
+      is the witness for the filter, on the tree where a parent's listing IS its
+      child's files;
+    * the pile creates nothing.
+
+    Mutation (run, both directions): dropping the container leg
+    (``and any(_strictly_inside_any(other, {key}) for other in offered_dirs)``) makes
+    ``import/Pile`` ``ready`` and this reds at its status assertion, with
+    ``test_service_a_pile_of_bundles_and_a_zip_is_still_not_a_bundle`` red beside it;
+    restoring the deleted short-circuit reds the PILE'S ``existing_project_id``
+    assertion here - measured ``assert None == <the pile project's id>``, with the two
+    child assertions green, because a child is not an archive-only row - since a row
+    that never looked up its assets hands ``find_existing_project`` nothing to answer
+    with.
+    """
+    loose_stl, loose_png = STL_BYTES, b"p" * 70
+    write_file(isolated_storage / "import" / "Pile" / "loose.stl", loose_stl)
+    write_file(isolated_storage / "import" / "Pile" / "render.png", loose_png)
+    for name, model in (("Alpha", "a.stl"), ("Beta", "b.stl")):
+        write_file(isolated_storage / "import" / "Pile" / name / model, b"s" * 41)
+        write_file(isolated_storage / "import" / "Pile" / name / f"{name.lower()}.png", b"p" * 50)
+        write_text(isolated_storage / "import" / "Pile" / name / "notes.txt", "print at 0.2mm")
+    write_zip(
+        isolated_storage / "import" / "Pile Download.zip",
+        {"Pile/loose.stl": loose_stl, "Pile/render.png": loose_png},
+    )
+    scan()
+    children_project = hand_made_project(
+        "Project of the two children", ["import/Pile/Alpha/a.stl", "import/Pile/Beta/b.stl"]
+    )
+    pile_project = hand_made_project("Project of the pile's own part", ["import/Pile/loose.stl"])
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    pile = row_for(report, "import/Pile")
+    assert (pile["status"], pile["blocked_reason"]) == ("blocked", "archive_only"), (
+        "the container answer, and it is the CONTAINER leg that gives it: the pile is "
+        "low, and it holds two offered directories"
+    )
+    for name in ("Alpha", "Beta"):
+        child = row_for(report, f"import/Pile/{name}")
+        assert (child["status"], child["blocked_reason"]) == ("ready", None), (
+            "the row inside the pile is what makes the pile a pile, and it is creatable"
+        )
+        assert child["existing_project_id"] == children_project, (
+            "the child owns its own model: the project holding that one file is its owner"
+        )
+        assert child["existing_project_match"] == "assets"
+    assert pile["existing_project_id"] == pile_project, (
+        "the pile's containment is its OWN model only: the project holding just the "
+        "children's two models does not own it, which is AC-4 read through the report"
+    )
+    assert pile["existing_project_match"] == "assets"
+
+    created = create(client, headers, [{"key": key} for key in [row["key"] for row in report["bundles"]]])
+
+    assert (created["created"], created["skipped"], created["blocked"], created["failed"]) == (
+        0,
+        2,
+        1,
+        0,
+    ), (
+        "the two children SKIP - each is already the hand-made project above, which is the "
+        "containment answer working - and the pile is the one blocked row"
+    )
+    assert [result["key"] for result in created["results"] if result["status"] == "blocked"] == [
+        "import/Pile"
+    ]
+    names = {project["name"].casefold() for project in project_listing(client, headers).values()}
+    assert "pile" not in names, "the pile stays refused, read-out and all"
+
+    # The counter this ticket moves, recorded where the behaviour is pinned: a
+    # refused row that now reports its own assets can be FOUND by a project a human
+    # made over those assets, so `already_created` counts it while it stays
+    # `blocked`. Measured over the Mf-quv4 corpus: `already_created` 3 -> 4,
+    # `blocked` 9 -> 8, `ready` 14 -> 15. It is a consequence, not a bug - but the
+    # web queue hides any row carrying `existing_project_id` behind its "show
+    # created" toggle (`ui/review/bundleRows.ts` `matchesVisibility`), so a row that
+    # is refused AND still needs its Extract door now leaves the default REVIEW
+    # queue. That visibility rule is a web ticket, not this one.
+    report_after = detect(client, headers, include_dismissed=True)
+    assert report_after["counts"]["already_created"] == 3, (
+        "the two children, each owned by the hand-made project above, and the pile - "
+        "which only counts once the refused row is allowed to report its own assets"
+    )
+    assert row_for(report_after, "import/Pile")["existing_project_id"] == pile_project
+
+
+def test_a_parent_row_never_answers_a_project_built_only_from_its_childs_models(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-4, on the shape where it actually bites: the parent's listing is the child's.
+
+    ``import/Q`` owns nothing - its only content is the claimed HIGH export directory
+    ``import/Q/Moai_statue`` - so the ``folded`` fallback builds the parent's listing
+    off the CHILD'S files, and every model under the parent's prefix is a file the
+    deeper row owns. A hand-made project holding exactly those three models therefore
+    owns the CHILD row and must own nothing at the parent: the parent's containment is
+    the models ``_claim_owners`` leaves it, which here is none, and it answers no
+    project at all.
+
+    This is the witness for the claim filter itself. On the pile the parent's own
+    listing already excludes its children, so an unfiltered containment set is
+    indistinguishable from a filtered one; here the two differ, and measured, dropping
+    the filter (``mine = models``) makes ``import/Q`` answer the child's project with
+    ``existing_project_match == "assets"`` where this pins ``None``. It also reds
+    ``test_service_a_hand_made_project_owns_a_bundle_by_its_files``-style ownership
+    assertions elsewhere only when a row's listing names a deeper row's files, which
+    is why the shape, not just the assertion, is the point.
+    """
+    write_zip(isolated_storage / STRONG_CHILD_ZIP, thingiverse_export_entries())
+    write_file(isolated_storage / STRONG_PARENT_DIR / "a.stl", STL_BYTES)
+    twin_archive_of(isolated_storage, STRONG_PARENT_DIR, STRONG_PARENT_ZIP)
+    thingiverse_export_directory(isolated_storage, CLAIMED_CHILD_DIR)
+    twin_archive_of(isolated_storage, CLAIMED_PARENT_DIR, CLAIMED_PARENT_ZIP)
+    scan()
+    child_models = [f"{CLAIMED_CHILD_DIR}/part{index}.stl" for index in range(3)]
+    project_id = hand_made_project("A project over the child's three parts", child_models)
+    headers = auth_header(client)
+
+    report = detect(client, headers)
+
+    child = row_for(report, CLAIMED_CHILD_DIR)
+    assert (child["status"], child["blocked_reason"]) == ("ready", None)
+    assert child["existing_project_id"] == project_id, (
+        "the project holds every model the child's own listing names, so it owns the child"
+    )
+    assert child["existing_project_match"] == "assets"
+    parent = row_for(report, CLAIMED_PARENT_DIR)
+    assert (parent["status"], parent["blocked_reason"]) == ("blocked", "archive_only")
+    assert parent["assets_total"] == 6, (
+        "the pair-only row reports the six files under its key - all of them the child's"
+    )
+    assert parent["existing_project_id"] is None, (
+        "and it claims none of them: the project over the child's models does not own "
+        "the parent, because the parent owns no model of its own"
+    )
+    assert parent["existing_project_match"] is None
+
+
+def test_a_zip_key_cannot_answer_the_creatable_predicate_from_disk(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The double-create that cannot happen, pinned as a fact about rows and indexes.
+
+    Creation happens from registered assets under the key and from a ``Folder`` row
+    whose ``storage_path`` IS the key. Neither can exist for a ``.zip`` key:
+    ``registered_assets`` matches the prefix ``<key>/`` and no file lives inside a
+    file, and ``_folder_index`` indexes only rows whose ``storage_path`` is NOT NULL
+    - which is also why the extraction door cannot leave one behind:
+    ``zip_service.get_or_create_folder`` creates its ``Folder`` rows with
+    ``storage_path`` left NULL, so an extracted tree registers directories a zip key
+    can never match either.
+
+    The corpus is the twin pair from the ticket (``import/twin/`` beside
+    ``import/twin.zip``) PLUS ``import/lone_export.zip``, because the twin is
+    consumed as provenance and never becomes a row: only the lone archive answers
+    the second half of this pin, and it answers ``archive_only`` - never
+    ``unresolved_directory``, which would close the Extract door
+    (``ui/review/bundleRows.ts`` ``extractPathFor`` opens on ``archive_only`` alone).
+    That is the arm-order pin: the archive arm is tested before the folder arm.
+
+    Mutation (run): move the ``is_archive or pair_only`` arm BELOW the folder arm and
+    ``lone_export["blocked_reason"]`` becomes ``unresolved_directory`` - measured -
+    and this reds while every status assertion above stays green.
+    """
+    thingiverse_bundle(isolated_storage / "import", "twin", 616161)
+    write_zip(isolated_storage / "import" / "twin.zip", {"README.txt": b"x", "files/part.stl": STL_BYTES})
+    write_zip(isolated_storage / "import" / "lone_export.zip", thingiverse_export_entries())
+    scan()
+    headers = auth_header(client)
+
+    with Session(engine) as session:
+        folders = bundle_service._folder_index(session)
+        for zip_key in ("import/twin.zip", "import/lone_export.zip"):
+            assert bundle_service.registered_assets(session, zip_key) == [], (
+                f"{zip_key}: no registered asset can live under a zip prefix"
+            )
+            assert zip_key.casefold() not in folders, (
+                f"{zip_key}: no Folder row can resolve a zip key, least of all one an "
+                "extraction made (``storage_path`` stays NULL there)"
+            )
+
+    report = detect(client, headers)
+
+    assert [row["key"] for row in report["bundles"]] == ["import/lone_export.zip", "import/twin"], (
+        "the twin archive is provenance on the directory row, never a row of its own"
+    )
+    lone = row_for(report, "import/lone_export.zip")
+    assert (lone["status"], lone["blocked_reason"]) == ("blocked", "archive_only"), (
+        "the archive arm BEFORE the folder arm, or the Extract door closes on it"
+    )
+    assert lone["assets_total"] == 0, "the honest zero of a lookup that ran and found nothing"
+    assert row_for(report, "import/twin")["status"] == "ready", "the directory it twins is unaffected"
+
+
+def test_an_excluded_group_row_and_its_compound_parent_are_mutually_inert(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The re-offered group and the compound that absorbed it: neither may cancel the other.
+
+    A re-offered group is a report courtesy for a create the operator already made.
+    It is not part of the walk's candidate set, so it is served with ``claims=None``
+    and ``offered_dirs=frozenset()`` - it neither takes models from the rows that do
+    write nor counts as a container against them. Both halves are needed and they are
+    different halves:
+
+    * the compound row (``import/xbox360_shell``) must not be cancelled by the group
+      it re-offers - a compound that "contains" its own re-offered group would
+      self-cancel;
+    * the group row must not be told it owns nothing - it keeps every model its own
+      snapshot names, which is why it stays ``ready`` and creates.
+
+    Mutations (run, five of them - the four singles one at a time, plus one pair -
+    and three of them are NO-OPS, which is the honest half). Pass the real
+    ``claims`` to the re-offer site and the group row answers
+    ``('blocked', 'not_scanned')`` where this pins ``('ready', None)`` - measured,
+    this test plus seven compound witnesses. Passing the real
+    ``offered_dirs`` at the re-offer site ALONE is measured a no-op (214 passed): no
+    offered key lives strictly inside a re-offered group, so that leg is there to
+    keep the row from EVER becoming a container, not because a shape on disk needs it
+    today. Letting the absorbed rows count as CONTAINER evidence at all -
+    ``_offered_dirs([*scan.candidates, *scan.absorbed])`` - is ALSO measured a no-op
+    on its own (214 passed), because ``and not candidate.compound`` in the leg
+    already stops the self-cancel a compound would commit against its own re-offered
+    group. Delete BOTH - the one paired run - and the self-cancel lands immediately
+    and earlier than any status assertion: the compound answers ``blocked``, so the
+    exclusion create that opens this test answers ``0 == 1`` - measured, 23 rows red,
+    and every one of them a compound or re-offered-group witness. Deleting
+    ``not candidate.compound`` ALONE is the third no-op (0 red): the suite builds no
+    shape it exists for (a compound holding a row it did not absorb), which is why
+    that clause is stated as Decision 15's exemption kept as the rule's shape - and
+    this pair is what makes it load-bearing rather than decoration.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    insert_folder_row(XBOX_GROUP, mount_key())
+    scan()
+    headers = auth_header(client)
+    assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1, (
+        "the compound was created with the group excluded, which is what re-offers it"
+    )
+
+    report = detect(client, headers, limit=1000)
+
+    compound = row_for(report, f"import/{XBOX}")
+    group = row_for(report, mount_key())
+    assert (compound["status"], compound["blocked_reason"]) == ("ready", None), (
+        "the parent is not cancelled by the row it re-offers inside itself"
+    )
+    assert (group["status"], group["blocked_reason"]) == ("ready", None), (
+        "and the re-offered group is not stripped of the models its own snapshot names"
+    )
+
+    created = create(client, headers, [{"key": mount_key(), "name": "the excluded mount"}])
+
+    assert (created["created"], created["blocked"], created["failed"]) == (1, 0, 0), (
+        "the inert row is still a creatable row: one project, not a skip and not a block"
+    )
+    assert created["results"][0]["assets_added"] == XBOX_GROUP_MODELS
+
+
+def test_no_blocked_reason_outside_the_published_vocabulary(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """Mf-quv4 added a predicate and no vocabulary: four answers, all of them old.
+
+    A second door onto the same disk facts is where a new word sneaks in, so the
+    whole vocabulary is pinned over a corpus that reaches every arm at once: the
+    refused pile and the lone archive (``archive_only``, the arm the Extract door
+    needs), a high bundle whose folder row never got a ``storage_path``
+    (``unresolved_directory``), a registered folder with nothing registered under it
+    (``not_scanned``) and the ready rows beside them (``None``).
+
+    Mutation: any new ``blocked_reason`` literal in ``_report_row`` - a
+    ``contains_bundles`` or a ``claimed_elsewhere`` on ``blocked``, say - reds the
+    set equality here AND the per-row assertion, and ``test_bundle_serialize.py``'s
+    "no refusal names an offered path" reds if the predicate ever answers a row out
+    of existence instead of answering it ``blocked``.
+
+    The four arms, measured over this corpus: the pile and the archive answer
+    ``archive_only``, ``Unresolved Thing`` (a folder row with no ``storage_path``,
+    the flattened migration's shape) answers ``unresolved_directory``, ``Not Scanned
+    Thing`` (a registered folder with nothing registered under it) answers
+    ``not_scanned``, and every other row in the report answers ``ready`` with
+    ``None``.
+    """
+    assert {
+        bundle_service.ARCHIVE_ONLY,
+        bundle_service.UNRESOLVED_DIRECTORY,
+        bundle_service.NOT_SCANNED,
+    } == {"archive_only", "unresolved_directory", "not_scanned"}, (
+        "the three words this module has always answered with - nothing added"
+    )
+
+    endorphin_pile(isolated_storage)
+    write_zip(isolated_storage / "import" / "lone_export.zip", thingiverse_export_entries())
+    scan()
+    # The two database-shaped arms need rows the scan never made: the flattened
+    # migration's folder row with no ``storage_path``, and a folder row whose assets
+    # were never registered. Both are written AFTER the scan, which is what makes
+    # them the honest shapes of those two refusals rather than a fixture trick.
+    legacy_bundle(isolated_storage, "Unresolved Thing")
+    insert_folder_row("Unresolved Thing")
+    generic_bundle(isolated_storage, "Not Scanned Thing")
+    insert_folder_row("Not Scanned Thing", "Not Scanned Thing")
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    reasons = {row["blocked_reason"] for row in report["bundles"]}
+    assert reasons <= {None, "archive_only", "unresolved_directory", "not_scanned"}, reasons
+    for row in report["bundles"]:
+        assert (row["status"] == "blocked") == (row["blocked_reason"] is not None), row["key"]
+    assert {
+        (row["key"], row["status"], row["blocked_reason"])
+        for row in report["bundles"]
+        if row["status"] == "blocked"
+    } == {
+        ("import/endorphin", "blocked", "archive_only"),
+        ("import/lone_export.zip", "blocked", "archive_only"),
+        ("Unresolved Thing", "blocked", "unresolved_directory"),
+        ("Not Scanned Thing", "blocked", "not_scanned"),
+    }, "all four arms answered by one corpus, in one report"

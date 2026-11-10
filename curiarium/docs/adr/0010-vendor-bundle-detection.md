@@ -385,8 +385,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 
 7. **Confidence and creatability are orthogonal.** The report has a `status`
    (`ready` / `blocked`) with a `blocked_reason` (`unresolved_directory`,
-   `not_scanned`, `archive_only`), and it is computed from the database, never
-   from the rule that matched:
+   `not_scanned`, `archive_only`), and it is computed from the database, never from
+   *which* rule matched: no detector name, no rule string and no confidence value
+   opens a status. The one rule-shaped input `Mf-quv4` added can only ever REFUSE -
+   Decision 15's container leg, an inferred-confidence row that HOLDS a directory the
+   report offers - it promotes nothing and names no bundle, and its bound is the
+   walk's own (an inferred confidence is a guess and a guess must not swallow a
+   subtree):
 
    * the folder is resolved by `bundle_service._folder_index`, which indexes
      every `Folder` row by its `storage_path` casefolded: a bundle is resolved
@@ -397,6 +402,18 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    * `ready` also needs at least one *registered model* asset under the key, so
      a resolved folder a scan has not reached yet is `blocked`/`not_scanned`
      rather than a project with no members.
+   * **and, since `Mf-quv4`, the read-out is not skipped either.** An
+     archive-only row - an archive of its own, or a directory a verified pairing
+     left `pair_only` - used to short-circuit this decision from its own shape
+     flag and take the asset lookup with it: `registered_assets` was never called
+     for such a row, so its `assets_total` was a fabricated `0` and its cover was
+     whatever the unregistered leg could name, while the files sat registered under
+     its key. The flag now decides the `archive_only` EXPLANATION and nothing else;
+     the lookup runs for every row, and the arms this Decision names - `ready` plus
+     the three `blocked_reason`s above - decide every status.
+     `offers_archive_only` survives as the SHAPE predicate its two detection uses
+     need (the archive-containment strip and the twin attachment), never as a
+     verdict.
 
    So a legacy R2 bundle reports `detector: thingiverse-sibling-docs`,
    `confidence: high` **and** `status: blocked`. That combination is the point:
@@ -643,7 +660,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     made of other inferred candidates.
 
     The attach set is unchanged: a created project still attaches exactly the
-    model files its own snapshot names. Independently of detection, `_create_one`
+    model files its own snapshot names. One limit is worth naming beside it: the
+    belt compares a row's registered assets with the assets ITS OWN SNAPSHOT names,
+    and a `folded`-fallback row (a claimed ancestor whose own view the claim
+    emptied, Decision 28) has a snapshot built from the unclaimed FULL SUBTREE, so
+    for that one shape `len(assets) == len(own_assets)` and the belt is SILENT -
+    the report's own predicate is the only thing standing between such a row and a
+    project made of its child's models. Independently of detection, `_create_one`
     refuses a candidate of inferred confidence whose registered assets under the
     key outnumber the assets its own snapshot names (the `len(assets) >
     len(own_assets)` difference *is* another bundle's assets), returning `failed`
@@ -919,8 +942,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 
     The bound is on the promotion, not on the ordering: the refusal sits after
     the `claimed_ancestors` branch deliberately, so a directory holding a
-    *claimed* child keeps its blocked `archive_only` row - the container rule at
-    its existing site - and both the pile row and the child stay visible. One
+    *claimed* child keeps its blocked `archive_only` row - the container rule, which
+    `Mf-quv4` now enforces at BOTH sites (the walk's own, and the row's) - and both
+    the pile row and the child stay visible. Deleting the row-site leg alone reds
+    `test_service_a_claimed_ancestor_with_a_file_of_its_own_is_not_promoted` and
+    `test_service_a_parent_whose_single_child_is_only_partly_claimed_is_not_promoted`
+    among ten witnesses, so the row-site copy is not decoration. One
     honesty note: the swallow also corrupted duplicate reporting, because
     `_without_nested_members` removed a duplicate group containing a row that
     should not have been a member; the reachable shapes now report the group
@@ -1123,7 +1150,10 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     writes its own loose model beside `Child_A` and `Child_B` - the verified stem
     twin records the directory in `pair_only_specs` instead of `found`: a
     `blocked` / `archive_only` row that is visible, creates nothing, and whose
-    facts read `low` / `generic-bundle`. **A refusal is never stamped with the id
+    facts read `low` / `generic-bundle`. **Since `Mf-quv4` the refusal is the
+    container leg's doing, not the flag's**: the directory holds two offered rows,
+    and that is what makes it uncreatable; the `pair_only` flag is left holding the
+    explanation alone (Decision 7). **A refusal is never stamped with the id
     provenance it was refused for** - we refused the row *because* we decided it
     is a pile and not a bundle, so the row says nothing about a Thingiverse id.
     A pile by this document's own definition - two or more unnamed model-bearing
@@ -2357,7 +2387,8 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     because its subtree held an archive-only row, and `bundle_service._reconcile_refusals`
     relabelled the drop `member-of-bundle` because the directory sat strictly inside
     the row that survived. What was wrong was the ownership, not the vocabulary -
-    the payload belonged to no row (the parent was `blocked` with `assets_total` 0),
+    the payload belonged to no row (the parent was `blocked` with `assets_total` 0
+    at that build - `Mf-quv4` has since taken that read-off out of the flag's hands),
     so the ledger named a bundle that did not exist and pointed at nothing a create
     could attach. Now it names the row that really owns those files. Archive rows
     below the parent are deliberately NOT dissolved: a zip inside a detected bundle
@@ -2373,7 +2404,8 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     whose pairing is gone. Dissolving at branch time therefore let a promotion that
     was going to be unwound take a row with it: the child lost its row, the parent
     lost its row, and no row owned the payload - the `assets_total` 0 / nothing
-    creatable symptom this ticket was filed about, re-created one level up, with the
+    creatable symptom `Mf-quv4` was filed about (re-created one level up at that
+    build), with the
     ledger naming a bundle that no longer existed. The invariant the commit point
     enforces is **no `member-of-bundle` entry may name a row that does not exist**,
     and applying it after the prune is what makes that structural rather than lucky;
@@ -2494,8 +2526,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     open residual under observation, and the thing to look for is a compound row
     whose absorbed set contains an `archive_owned` key.
 
-    **The measured before/after, on the live-shape fixture.** Before: ONE row keyed
-    at the directory, `blocked` / `archive_only`, `assets_total` **0** (while its own
+    **The measured before/after, on the live-shape fixture, AT THE BUILD BEFORE
+    `Mf-quv4` took the status off the flag.** Before (that build only - restoring the
+    deleted short-circuit does NOT reproduce these numbers today, it reds four
+    flag-reading witnesses and leaves the row `ready` with `assets_total` 20; see the
+    mutation paragraph below): ONE row keyed at the directory, `blocked` /
+    `archive_only`, `assets_total` **0** (while its own
     `model_count`/`image_count`/`text_count` already read 15/3/1 off the unclaimed
     listing - a row advertising parts it could not attach), cover reason
     `largest-image-unregistered` with `asset_id: null`, and the child refused
@@ -2512,11 +2548,18 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `import/01_Fates End - Wizard Tower.zip`; it is named here because an ADR reader
     who starts from 21 will otherwise spend an afternoon chasing a file that is not
     inside the tower. The mutation that reproduces the bug is deleting the
-    `_single_claimed_child_subtree` leg of the branch - the row goes back to
-    `blocked` / `archive_only` with `assets_total` 0 and nothing creatable in the
-    tree. Deleting the `_holds_stronger_candidate` leg beside it is Decision 18's
-    swallow in new clothes, and it reds the two strength witnesses, not the tower
-    one: a LOW child is exactly what this branch exists to promote.
+    `_single_claimed_child_subtree` leg of the branch - and since `Mf-quv4` that
+    mutation is no longer visible in the ROW: the fall-through leaves a `pair_only`
+    candidate which the disk predicate answers `ready` with `assets_total` 20, and
+    whose create still makes the one 15-model project (the child never becomes a row
+    to make the parent a container, because the archive-containment strip refuses it
+    for holding the vendor's nested zip). What reds is the four witnesses that read
+    the CANDIDATE FLAGS, which is where a promotion is decided; the row-level
+    `assets_total` 0 / nothing-creatable symptom this paragraph used to quote is
+    gone from the product, which is the whole point of `Mf-quv4`. Deleting the
+    `_holds_stronger_candidate` leg beside it is Decision 18's swallow in new
+    clothes, and it reds the two strength witnesses, not the tower one: a LOW child
+    is exactly what this branch exists to promote.
 
 ## Consequences
 
@@ -2553,7 +2596,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   README, models plus images - is now offered at `low` when an archive beside it
   verifies, and a directory that holds a claimed child bundle and still carries
   a model at its own depth gains a visible `blocked` / `archive_only` row where
-  it previously vanished: visible, not creatable. A pile of flat depth-0 models
+  it previously vanished: visible, and - since `Mf-quv4` - judged for creatability
+  by the same disk predicate as every other row, so the pairing flag buys it the
+  explanation while a directory that holds no offered row of its own is
+  `ready` (measured: `import/G`, `blocked`/`archive_only` to `ready`, 0 registered
+  files reported to 6). A pile of flat depth-0 models
   with a matching twin would now be promoted, because the archive proves it is
   one thing. That is this ticket's accepted trade, stated rather than hidden; the
   own-depth/cardinality guard still refuses every pile of unnamed model-bearing
@@ -2571,11 +2618,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
 * **A container whose own payload an archive verifies is still refused, and
   stays visible when it has a model of its own to judge.** The bullet above - a
   container directory is no longer offered - still holds: a verified pairing
-  makes such a directory visible as a blocked `archive_only` row rather than
-  creatable, and only when the directory still carries a model at its own depth,
-  because that bound is the only shape guard the promotion has (Decision 18); a
-  container with no model at its own depth is absent, not blocked. `Mf-6b82`'s
-  generic-root refusal is untouched for the route that uses the entry root to
+  makes such a directory visible with the `archive_only` explanation, and since
+  `Mf-quv4` that explanation is all the flag decides - the refusal belongs to the
+  container leg (an inferred row that HOLDS a row the report offers is a pile,
+  Decision 15) and a paired directory holding no offered row is `ready` like any
+  other LOW row. Only a directory that still carries a model at its own depth gets
+  the row at all, because that bound is the only shape guard the promotion has
+  (Decision 18); a container with no model at its own depth is absent, not blocked.
+  `Mf-6b82`'s generic-root refusal is untouched for the route that uses the entry root to
   name a directory.
 * **A title containing a sentence boundary loses its leading part.** `Dr. No
   Replica` is reported as `No Replica`, because the trim that keeps a preceding
