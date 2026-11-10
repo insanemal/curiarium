@@ -30,15 +30,15 @@ import ErrorBoundary from "../ErrorBoundary";
 import { ModelSnapshot } from "../ModelViewer";
 import {
   BUNDLE_FILTERS,
-  ENRICH_NONE_REASON,
   EXTRACT_AND_CREATE_HINT,
   EXTRACT_AND_CREATE_LABEL,
   archiveExtractTitle,
   archiveLine,
+  bulkEnrichNoneLine,
   bulkEnrichTitle,
-  canEnrich,
   canExtractAndCreate,
-  canRecheck,
+  canOfferEnrich,
+  canOfferRecheck,
   confidenceLabel,
   countLabel,
   countsLine,
@@ -170,10 +170,11 @@ function extractTargets(rows: BundleDetectItem[]): ExtractTarget[] {
 
 /** The detail pane's one enrichment door: a row with a gap gets the first
  *  pass, and a row the page already answered can only be re-checked. Returns
- *  null when neither applies, so the button is not rendered at all. */
+ *  null when neither applies, so the button is not rendered at all. The bulk
+ *  bar's count and its disabled state read the same pair of offer predicates. */
 function enrichActionLabel(row: BundleDetectItem): string | null {
-  if (canEnrich(row)) return "Enrich from source page";
-  if (canRecheck(row)) return "Re-check source page";
+  if (canOfferEnrich(row)) return "Enrich from source page";
+  if (canOfferRecheck(row)) return "Re-check source page";
   return null;
 }
 
@@ -427,7 +428,23 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   const selected = visible.filter(row => selectedKeys.includes(row.key));
   const creatableSelected = selected.filter(isCreatable);
   const extractableSelected = selected.filter(isArchiveOnly);
-  const enrichableSelected = selected.filter(canEnrich);
+  // The bulk count, the bulk disabled state and the detail pane's door are one
+  // predicate: `canOfferEnrich` is the single answer to "would this row be sent",
+  // so a row the bar counts is a row the detail pane offers, and neither drifts.
+  const enrichableSelected = selected.filter(canOfferEnrich);
+  // Nothing sendable: the bar says why in the selected rows' own words. Each row's sentence is
+  // decided by the predicates that refused its doors (`enrichUnavailableLine`), and
+  // `bulkEnrichNoneLine` is what turns those per-row lines into ONE bar sentence under two
+  // rules, both inherited from the paragraph this ticket deleted: it speaks ONE cause or it
+  // stays silent (a bar reciting one row's verdict about a selection the same predicate answered
+  // differently is that deleted paragraph in miniature), and it claims no door absent that the
+  // bar is itself holding open (no payload sentence while a selected row can create or extract,
+  // no page sentence while a selected row names a page). A row whose own line is null is not a
+  // cause and never speaks, so a wholly-silent selection renders no sentence at all.
+  const enrichNoneLine =
+    selected.length > 0 && enrichableSelected.length === 0
+      ? bulkEnrichNoneLine(selected)
+      : null;
   // Deliberately `low` only, never `medium`: the bulk bar sends `name_only: true`,
   // which writes no source URL, and a medium row's whole point is the URL derived
   // from the id in its folder name. A medium row is created from the detail panel,
@@ -668,7 +685,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
   // and its tests see.
   const enrichActive = () => {
     if (!activeRow) return;
-    if (canRecheck(activeRow)) {
+    if (canOfferRecheck(activeRow)) {
       void state.enrich([activeRow.key], { refresh: true });
       return;
     }
@@ -1009,7 +1026,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
                 ? "No bundles selected"
                 : `${countLabel(selected.length, "bundle", "bundles")} selected`}
             </span>
-            {selected.length > 0 && enrichableSelected.length === 0 && (
+            {selected.length > 0 && enrichableSelected.length === 0 && enrichNoneLine !== null && (
               // A disabled control's title is not reliably surfaced as a
               // tooltip, and the control is not focusable, so the button's
               // `title` alone is unreachable and the same sentence is rendered
@@ -1019,7 +1036,7 @@ export default function BundleReviewView({ state, canContribute, theme = "light"
               // through `.review-selection`, and a polite region here would
               // re-announce this same sentence on every selection change.
               <span className="review-detail-reason basis-full" data-bundle-enrich-none-reason="true">
-                {ENRICH_NONE_REASON}
+                {enrichNoneLine}
               </span>
             )}
           </div>

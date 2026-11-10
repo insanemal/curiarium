@@ -54,11 +54,12 @@ import { getToasts, resetToasts } from "../../lib/toast";
 import Toaster from "../Toaster";
 import BundleReviewView from "./BundleReviewView";
 import {
-  ENRICH_NONE_REASON,
   EXTRACT_AND_CREATE_HINT,
   EXTRACT_AND_CREATE_ROW_TITLE,
+  NO_PAYLOAD_DOOR_REASON,
   NO_SOURCE_PAGE_REASON,
   bulkEnrichTitle,
+  isArchiveOnly,
   needsDecision,
 } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
@@ -1264,8 +1265,11 @@ describe("BundleReviewView source-page enrichment", () => {
     expect(mixed.getAttribute("title")).toContain("1 of the 3");
     expect(mixed.disabled).toBe(false);
     // The visible sentence belongs to the wholly-unenrichable case only: a
-    // partial shortfall is spoken by the counts, not by a paragraph.
-    expect(screen.queryByText(ENRICH_NONE_REASON)).toBeNull();
+    // partial shortfall is spoken by the counts, not by a paragraph. And now that
+    // the sentence is per row, a selection that HAS a sendable row speaks nothing:
+    // neither of the two refusal sentences may appear while a request is live.
+    expect(screen.queryByText(NO_SOURCE_PAGE_REASON)).toBeNull();
+    expect(screen.queryByText(NO_PAYLOAD_DOOR_REASON)).toBeNull();
 
     fireEvent.click(mixed);
     expect(state.enrich).toHaveBeenCalledWith(["Dragon_5390184"]);
@@ -1280,9 +1284,14 @@ describe("BundleReviewView source-page enrichment", () => {
     renderView(state);
 
     // Nothing is selected yet: the bar says so, and the sentence that explains a
-    // wholly-unenrichable selection must not speak while the count says none.
+    // wholly-unenrichable selection must not speak while the count says none. The
+    // sentence is per row now, so neither of the two causes speaks in the bar
+    // either - the scoped query is what separates the bar from the detail pane,
+    // which has been saying `NO_SOURCE_PAGE_REASON` about the active row all along.
     expect(screen.getByText("No bundles selected")).toBeTruthy();
-    expect(screen.queryByText(ENRICH_NONE_REASON)).toBeNull();
+    const bar = () => screen.getByRole("group", { name: "Bundle actions" });
+    expect(within(bar()).queryByText(NO_SOURCE_PAGE_REASON)).toBeNull();
+    expect(within(bar()).queryByText(NO_PAYLOAD_DOOR_REASON)).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
 
@@ -1290,13 +1299,20 @@ describe("BundleReviewView source-page enrichment", () => {
       name: "Enrich selected (0 of 3)",
     }) as HTMLButtonElement;
     expect(none.disabled).toBe(true);
-    expect(none.getAttribute("title")).toBe(ENRICH_NONE_REASON);
+    // The paragraph this ticket deleted is gone from the disabled button too: the
+    // title speaks a count or nothing, and here there is no count to speak - so
+    // the attribute is not merely empty, it is absent (`bulkEnrichTitle` returned
+    // undefined and React rendered no attribute at all).
+    expect(none.getAttribute("title")).toBeNull();
+    expect(none.hasAttribute("title")).toBe(false);
 
     // A disabled control's title is not reliably surfaced as a tooltip, and the
     // control is not focusable, so the same sentence is also rendered visibly -
     // but as plain text: `.review-selection` already speaks the count, and this
-    // must not become a live region too.
-    const reason = screen.getByText(ENRICH_NONE_REASON);
+    // must not become a live region too. The three rows name no source page, so
+    // the honest per-row sentence is the one about the page - which is also what
+    // the detail pane says about the active row, hence the scoped query.
+    const reason = within(bar()).getByText(NO_SOURCE_PAGE_REASON);
     expect(reason.getAttribute("data-bundle-enrich-none-reason")).toBe("true");
     expect(reason.getAttribute("aria-live")).toBeNull();
     expect(reason.getAttribute("role")).toBeNull();
@@ -1400,6 +1416,459 @@ describe("BundleReviewView source-page enrichment", () => {
     expect(notice.getAttribute("role")).toBe("status");
     expect(notice.className).toBe("review-notice");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/** --------------------------------------------------------------------------
+ *  MEASURED FIXTURES for this file's ticket specimen. POINTER: `bundleRows.test.ts`
+ *  transcribes the same measured rows for the unit-level pins - a shared module is
+ *  outside this ticket's touch-set, so the two blocks are kept in step by hand.
+ *
+ *  Every field is quoted from
+ *  the recorded reports in the lane at `.plans/measurements/` -
+ *  `2026-11-10-bundles-mfquv4-rows-after.json` (`rel_path`, `status`,
+ *  `blocked_reason`, `assets_total`, `model_count`, `detector`, `confidence`,
+ *  `cover_reason`, `cover_asset`, `existing_project_match`) and
+ *  `2026-11-10-bundles-mfquv4-after.json` (`counts.image|text|other`, `shape`,
+ *  `twin_verified`, `existing_project_name`) - and each fixture names its row.
+ *  `creator`/`licence`/`licence_url`/`description_excerpt` are null on a
+ *  `generic-bundle` row because that detector is a folder-shape guess no vendor
+ *  page ever answered; `title`/`name_suggestion` are the measured `rel_path`'s
+ *  basename; a row whose measured `existing_project_match` implies an id carries
+ *  `MEASURED_PROJECT_ID`, which the measurement itself does not print. */
+const MEASURED_PROJECT_ID = "3f2a6c1e-8f4b-4c7d-9a1e-2b5c8d0f4a61";
+
+/** `import/endorphin` - `blocked`/`archive_only`, `assets_total 8`, counts 1/1/0/0,
+ *  `generic-bundle`, `low`, shape `generic`, verified twin
+ *  `import/endorphin.zip`, `source_url` null, registered `largest-image` cover
+ *  (`cover_asset: true`, `cover_reason: "largest-image"` - the builder's cover
+ *  already is that shape). */
+function endorphinRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return makeBundle({
+    key: "import/endorphin",
+    rel_path: "import/endorphin",
+    title: "endorphin",
+    name_suggestion: "endorphin",
+    creator: null,
+    licence: null,
+    licence_url: null,
+    description_excerpt: null,
+    source_url: null,
+    detector: "generic-bundle",
+    confidence: "low",
+    metadata_shape: "generic",
+    model_count: 1,
+    image_count: 1,
+    text_count: 0,
+    other_count: 0,
+    assets_total: 8,
+    status: "blocked",
+    blocked_reason: "archive_only",
+    archive: { rel_path: "import/endorphin.zip", twin_verified: true },
+    ...overrides,
+  });
+}
+
+/** `import/Q` - `archive_only`, `assets_total 6`, counts 3/1/2/0,
+ *  `generic-bundle`, `low`, shape `generic`, verified twin `import/Q.zip`. */
+function queueQRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return makeBundle({
+    key: "import/Q",
+    rel_path: "import/Q",
+    title: "Q",
+    name_suggestion: "Q",
+    creator: null,
+    licence: null,
+    licence_url: null,
+    description_excerpt: null,
+    source_url: null,
+    detector: "generic-bundle",
+    confidence: "low",
+    metadata_shape: "generic",
+    model_count: 3,
+    image_count: 1,
+    text_count: 2,
+    other_count: 0,
+    assets_total: 6,
+    status: "blocked",
+    blocked_reason: "archive_only",
+    archive: { rel_path: "import/Q.zip", twin_verified: true },
+    ...overrides,
+  });
+}
+
+/** `import/X` - `archive_only`, `assets_total 7`, counts 1/0/0/0,
+ *  `generic-bundle`, `low`, shape `generic`, twin `import/X.zip` NOT verified. */
+function queueXRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return makeBundle({
+    key: "import/X",
+    rel_path: "import/X",
+    title: "X",
+    name_suggestion: "X",
+    creator: null,
+    licence: null,
+    licence_url: null,
+    description_excerpt: null,
+    source_url: null,
+    detector: "generic-bundle",
+    confidence: "low",
+    metadata_shape: "generic",
+    model_count: 1,
+    image_count: 0,
+    text_count: 0,
+    other_count: 0,
+    assets_total: 7,
+    status: "blocked",
+    blocked_reason: "archive_only",
+    archive: { rel_path: "import/X.zip", twin_verified: false },
+    ...overrides,
+  });
+}
+
+/** `import/Pile` - `archive_only` with the verified twin
+ *  `import/Pile Download.zip`, `assets_total 8`, counts 1/1/0/0,
+ *  `generic-bundle`, `low`, shape `generic`, AND claimed by a project through
+ *  shared files (`existing_project_match: "assets"`,
+ *  `existing_project_name: "Project of the pile's own part"`, id
+ *  `MEASURED_PROJECT_ID`). Rendered with Show created on, which is the only way
+ *  this row reaches the queue at all. */
+function pileRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return makeBundle({
+    key: "import/Pile",
+    rel_path: "import/Pile",
+    title: "Pile",
+    name_suggestion: "Pile",
+    creator: null,
+    licence: null,
+    licence_url: null,
+    description_excerpt: null,
+    source_url: null,
+    detector: "generic-bundle",
+    confidence: "low",
+    metadata_shape: "generic",
+    model_count: 1,
+    image_count: 1,
+    text_count: 0,
+    other_count: 0,
+    assets_total: 8,
+    status: "blocked",
+    blocked_reason: "archive_only",
+    archive: { rel_path: "import/Pile Download.zip", twin_verified: true },
+    existing_project_id: MEASURED_PROJECT_ID,
+    existing_project_name: "Project of the pile's own part",
+    existing_project_match: "assets",
+    ...overrides,
+  });
+}
+
+/** `import/xbox360_shell` - `ready` with `assets_total 33`, `compound-bundle`,
+ *  `low`, shape `compound`, counts 31/0/2/0, and an existing project claimed by
+ *  the app's own marker (`existing_project_match: "marker"`,
+ *  `existing_project_name: "xbox360 shell"`, id `MEASURED_PROJECT_ID`). The
+ *  measured compound group is left out - no words here read it. Transcribed from
+ *  `bundleRows.test.ts`. */
+function xbox360Row(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return makeBundle({
+    key: "import/xbox360_shell",
+    rel_path: "import/xbox360_shell",
+    title: "xbox360_shell",
+    name_suggestion: "xbox360_shell",
+    source_url: null,
+    detector: "compound-bundle",
+    confidence: "low",
+    metadata_shape: "compound",
+    model_count: 31,
+    image_count: 0,
+    text_count: 2,
+    other_count: 0,
+    assets_total: 33,
+    status: "ready",
+    blocked_reason: null,
+    archive: null,
+    existing_project_id: MEASURED_PROJECT_ID,
+    existing_project_name: "xbox360 shell",
+    existing_project_match: "marker",
+    ...overrides,
+  });
+}
+
+/** `import/Pile/Alpha` - `ready` with `assets_total 3`, `generic-bundle`, `low`,
+ *  shape `generic`, counts 1/1/1/0, claimed by a project through shared files
+ *  (`existing_project_name: "Project of the two children"`, id
+ *  `MEASURED_PROJECT_ID`). Transcribed from `bundleRows.test.ts`. */
+function pileAlphaRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return makeBundle({
+    key: "import/Pile/Alpha",
+    rel_path: "import/Pile/Alpha",
+    title: "Alpha",
+    name_suggestion: "Alpha",
+    creator: null,
+    licence: null,
+    licence_url: null,
+    description_excerpt: null,
+    source_url: null,
+    detector: "generic-bundle",
+    confidence: "low",
+    metadata_shape: "generic",
+    model_count: 1,
+    image_count: 1,
+    text_count: 1,
+    other_count: 0,
+    assets_total: 3,
+    status: "ready",
+    blocked_reason: null,
+    archive: null,
+    existing_project_id: MEASURED_PROJECT_ID,
+    existing_project_name: "Project of the two children",
+    existing_project_match: "assets",
+    ...overrides,
+  });
+}
+
+/** THE ORPHAN SHAPE HAS NO MEASURED INSTANCE: no recorded report of this corpus
+ *  ever produced a `not_scanned` row the report calls non-empty. This fixture is
+ *  the DECLARED union of the named measured rows, field by field:
+ *
+ *  - `status` "blocked", `blocked_reason` "not_scanned", `archive` null, counts
+ *    1/1/1/0 and `metadata_shape` "generic" from `import/Not Scanned Thing`;
+ *  - `detector` "thingiverse-readme", `confidence` "high" and `source_url`
+ *    `https://www.thingiverse.com/thing:2493386` from `import/Q/Moai_statue`;
+ *  - `assets_total: 8` and the registered `largest-image` cover from
+ *    `import/endorphin`;
+ *  - `creator`/`licence`/`licence_url` null, because the ticket's specimen is a
+ *    row the server would still happily enrich. */
+function orphanRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return makeBundle({
+    key: "import/Not Scanned Thing",
+    rel_path: "import/Not Scanned Thing",
+    title: "Not Scanned Thing",
+    name_suggestion: "Not Scanned Thing",
+    creator: null,
+    licence: null,
+    licence_url: null,
+    description_excerpt: null,
+    source_url: "https://www.thingiverse.com/thing:2493386",
+    detector: "thingiverse-readme",
+    confidence: "high",
+    metadata_shape: "generic",
+    model_count: 1,
+    image_count: 1,
+    text_count: 1,
+    other_count: 0,
+    status: "blocked",
+    blocked_reason: "not_scanned",
+    archive: null,
+    assets_total: 8,
+    cover: {
+      asset_id: "asset-1",
+      rel_path: "images/hero.jpg",
+      reason: "largest-image",
+      url: "/file/asset-1/hero.jpg",
+      thumb_url: "/thumb/asset-1.jpg?v=1",
+    },
+    ...overrides,
+  });
+}
+
+/** The first words of the paragraph this ticket deleted. Hard-coded rather than
+ *  imported, because the constant is gone from the module and only a verbatim
+ *  fragment can witness that neither bar nor pane still speaks it. */
+const DELETED_BULK_PARAGRAPH = "None of the selected bundles can be enriched";
+
+describe("BundleReviewView offers only the actions that can succeed", () => {
+  function bulkBar(): HTMLElement {
+    return screen.getByRole("group", { name: "Bundle actions" });
+  }
+
+  function enrichButton(): HTMLButtonElement {
+    return screen.getByRole("button", {
+      name: /^Enrich selected/,
+    }) as HTMLButtonElement;
+  }
+
+  it("refuses to offer enrichment as the only live action on an on-disk row", () => {
+    const orphan = orphanRow();
+    renderView(makeState({ report: makeReport([orphan]) }));
+
+    // The row is in the queue and the report says its key holds files.
+    expect(rowKeys()).toContain(orphan.key);
+    // No enrichment door of either kind, so no click can reach a refusal.
+    expect(detail().querySelector("[data-bundle-enrich]")).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: "Enrich from source page" })).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: "Re-check source page" })).toBeNull();
+    // The reason span speaks the refusal of the very predicate that gated the
+    // button - not the old universal paragraph about four gates this row fails none of.
+    const reason = detail().querySelector<HTMLElement>("[data-bundle-enrich-reason]");
+    expect(reason?.textContent).toBe(NO_PAYLOAD_DOOR_REASON);
+    expect(screen.queryByText(DELETED_BULK_PARAGRAPH)).toBeNull();
+    // Not a live region, exactly as the other refusal sentence: the queue already
+    // speaks through the selection count and the notice.
+    expect(reason?.getAttribute("aria-live")).toBeNull();
+    expect(reason?.getAttribute("role")).toBeNull();
+  });
+
+  it("keeps the create shut and the extract door absent on that same row", () => {
+    renderView(makeState({ report: makeReport([orphanRow()]) }));
+
+    // Blocked, so the primary door is the row's honest state: present, disabled.
+    const create = within(detail()).getByRole("button", {
+      name: "Create project",
+    }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    // And no extraction in place, no one-step: `extractPathFor` answers null, so
+    // neither control renders. The row really has no door for its files.
+    expect(detail().querySelector("[data-extract-and-create]")).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: /^Extract/ })).toBeNull();
+  });
+
+  it("counts nothing in the bulk bar, disables the button, and says why in the row's words", () => {
+    const orphan = orphanRow();
+    renderView(makeState({ report: makeReport([orphan]) }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+
+    const button = enrichButton();
+    expect(button.textContent).toBe("Enrich selected (0 of 1)");
+    expect(button.disabled).toBe(true);
+    // The deleted paragraph is gone from the title too: a count or nothing.
+    expect(button.hasAttribute("title")).toBe(false);
+
+    const none = within(bulkBar()).getByText(NO_PAYLOAD_DOOR_REASON);
+    expect(none.getAttribute("data-bundle-enrich-none-reason")).toBe("true");
+    expect(none.getAttribute("aria-live")).toBeNull();
+    expect(none.getAttribute("role")).toBeNull();
+    expect(none.className).toContain("basis-full");
+    // Last in the bar, so nothing is pushed down with it.
+    expect(none.parentElement?.lastElementChild).toBe(none);
+    // And the sentence is not the page one: this row DOES name a page.
+    expect(within(bulkBar()).queryByText(NO_SOURCE_PAGE_REASON)).toBeNull();
+  });
+
+  it("says nothing in the bar when the selected rows do not agree on a cause", () => {
+    // THE MIS-ATTRIBUTION WITNESS, rendered. `Legacy_vase` names no page, so its own sentence
+    // is the page one; the orphan DOES name a page whose payload no door can reach, so its own
+    // sentence is the payload one. Each is true of its row and false of the other, so a bar that
+    // recites the first one it found in queue order is the paragraph this ticket deleted in
+    // miniature. Both queue orders are asked because which sentence such a bar would have spoken
+    // is exactly what the order decided - and neither order is saved by the two guards, since
+    // neither row is creatable or extractable and only the orphan names a page.
+    const noPage = legacyVase;
+    const withPage = orphanRow();
+    for (const rows of [[noPage, withPage], [withPage, noPage]]) {
+      const view = renderView(makeState({ report: makeReport(rows) }));
+
+      fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+
+      const button = enrichButton();
+      expect(button.textContent).toBe("Enrich selected (0 of 2)");
+      expect(button.disabled).toBe(true);
+      // No node at all - not an empty span, and not one row's verdict about both. The two
+      // single-row cases above pin that each of these rows DOES speak on its own.
+      expect(bulkBar().querySelector("[data-bundle-enrich-none-reason]")).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it("renders no sentence node at all when every selected row is silent", () => {
+    // The branch a "first non-null line" cannot distinguish: two settled rows - 
+    // `import/Pile/Alpha` and `import/xbox360_shell`, each with real measured fields. Nothing is
+    // sendable, so the bar is in its explain-the-refusal state, and every row in it has no
+    // sentence of its own (a settled project says itself in `createdProjectLine`). The honest
+    // answer is that the bar has nothing to say, so it renders nothing - while the button stays
+    // where it was, still disabled, still counting the selection.
+    const rows = [pileAlphaRow(), xbox360Row()];
+    renderView(makeState({ report: makeReport(rows), showCreated: true }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+
+    expect(bulkBar().querySelector("[data-bundle-enrich-none-reason]")).toBeNull();
+    expect(bulkBar().querySelector(".review-detail-reason")).toBeNull();
+    const button = enrichButton();
+    expect(button.textContent).toBe("Enrich selected (0 of 2)");
+    expect(button.disabled).toBe(true);
+    // The title stays absent too: `bulkEnrichTitle` has no count to speak here either.
+    expect(button.hasAttribute("title")).toBe(false);
+  });
+
+  it("keeps Dismiss live - hiding the row is never company for the refusal", () => {
+    const orphan = orphanRow();
+    const state = makeState({ report: makeReport([orphan]) });
+    renderView(state);
+
+    const dismiss = within(detail()).getByRole("button", {
+      name: "Dismiss",
+    }) as HTMLButtonElement;
+    expect(dismiss.disabled).toBe(false);
+    fireEvent.click(dismiss);
+    expect(state.dismiss).toHaveBeenCalledWith([orphan.key], true);
+
+    // The bulk Dismiss is live too, while the Enrich button beside it stays shut.
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    expect(enrichButton().disabled).toBe(true);
+    const dismissSelected = screen.getByRole("button", {
+      name: "Dismiss selected (1)",
+    }) as HTMLButtonElement;
+    expect(dismissSelected.disabled).toBe(false);
+  });
+
+  it("gives the Enrich door back to the same row the report calls empty", () => {
+    // THE DISCRIMINATOR: one field, `assets_total`, from the measured
+    // `import/Not Scanned Thing` value of 0 to `import/endorphin`'s 8. Everything
+    // else - page, gap, status, reason - is identical to the row above, and the
+    // door returns.
+    const empty = orphanRow({ assets_total: 0 });
+    renderView(makeState({ report: makeReport([empty]) }));
+
+    expect(within(detail()).getByRole("button", { name: "Enrich from source page" })).toBeTruthy();
+    expect(detail().querySelector("[data-bundle-enrich-reason]")).toBeNull();
+    expect(screen.queryByText(NO_PAYLOAD_DOOR_REASON)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    const button = enrichButton();
+    expect(button.textContent).toBe("Enrich selected (1)");
+    expect(button.disabled).toBe(false);
+    // Nothing sendable means nothing to explain, so the bar renders no span at all
+    // rather than an empty one.
+    expect(bulkBar().querySelector("[data-bundle-enrich-none-reason]")).toBeNull();
+  });
+
+  it("keeps every measured on-disk archive_only row extractable and never enrichable", () => {
+    // The four rows the corpus really produced with files AND `archive_only`.
+    // Their Extract door stays live - the twin is a real action - and none of them
+    // names a page, so the enrichment door is refused by the page gate with the
+    // sentence that says so, never by the payload rule. The expected sentence is
+    // part of the table: `import/Pile` is already settled, and a settled project
+    // says so in `createdProjectLine`, so its enrichment line stays silent.
+    const cases: [BundleDetectItem, string | null][] = [
+      [endorphinRow(), NO_SOURCE_PAGE_REASON],
+      [queueQRow(), NO_SOURCE_PAGE_REASON],
+      [queueXRow(), NO_SOURCE_PAGE_REASON],
+      [pileRow(), null],
+    ];
+    // `import/Pile` measured an existing project match, so it needs the created
+    // rows revealed to be in the queue at all.
+    renderView(
+      makeState({ report: makeReport(cases.map(([row]) => row)), showCreated: true }),
+    );
+
+    expect(rowKeys()).toEqual(cases.map(([row]) => row.key));
+    for (const [row, expectedReason] of cases) {
+      expect(isArchiveOnly(row)).toBe(true);
+      fireEvent.click(rowElement(row.key));
+
+      // The detail pane's AT-safe extract button, named for this row's title.
+      expect(within(detail()).getByRole("button", { name: `Extract ${row.title}` })).toBeTruthy();
+      // No enrichment door for a row whose files a door can reach.
+      expect(detail().querySelector("[data-bundle-enrich]")).toBeNull();
+      const reason = detail().querySelector<HTMLElement>("[data-bundle-enrich-reason]");
+      if (expectedReason === null) {
+        expect(reason).toBeNull();
+      } else {
+        // The cause that really applies is the missing page - the payload refusal
+        // would have accused a row that HAS a door of having none.
+        expect(reason?.textContent).toBe(expectedReason);
+      }
+    }
   });
 });
 
