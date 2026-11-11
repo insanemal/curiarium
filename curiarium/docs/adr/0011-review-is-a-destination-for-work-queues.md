@@ -418,6 +418,58 @@ destination model, the count rule, the role threshold and the fetch policy.
     `created` and `already-created` verdicts and on nothing else, because this door
     writes no bundle report of its own.
 
+    **Amended by `Mf-rt27` (2026-11-08).** The bulk bar gained the many-archive
+    form of the same door: *Extract and create (N)*, immediately after *Extract
+    selected archives*, sharing `extractableSelected` for its label, its count and
+    its `disabled` state - so one predicate decides both buttons and they cannot
+    disagree about who may extract when. The click plans first and writes
+    nothing: one listing per archive through `planArchive`, the same classifier
+    the plain Extract panel and the one-step door use, aggregated into a single
+    sentence and an inline confirm in the bulk bar
+    (`data-bulk-extract-and-create-confirm`) that is derived stale against the
+    path list it snapshotted, so a selection that moved under the summary is
+    refused rather than written behind it. Confirming awaits `runExtractAndCreate`
+    once per archive, in queue order, never in parallel, and breaks for exactly
+    one outcome - `cancelled` - because that is the operator leaving and
+    continuing would POST projects nobody is left to read. One archive's failure
+    is a verdict, not an abort: the next archive still runs. `already_created` is
+    success-with-no-write - counted, named, and never an error. The queue is
+    re-walked exactly once at the end because `afterExtract` is the settle PLUS a
+    whole-library walk, so N of it would be N+1 walks for one click; the bulk door
+    therefore settles through the new `useBundleDetect.waitAfterExtract` (the
+    settle alone) and the view issues the one `state.refresh()`. Landing is
+    narrower than the single door's: `targets.length === 1 && created === 1`, so a
+    many-archive click bumps the project list instead of landing on an arbitrary
+    member of it. `useBundleDetect.create` is still untouched, there is no server
+    change and no new dependency.
+
+    The new proofs, by file: `ui/review/extractAndCreate.test.ts` -
+    "runs one archive at a time: no create starts before the previous one
+    resolves", "reads each archive's listing once across the plan and the run",
+    "names each archive in its own verdict and keeps going", "a listing that
+    failed is named, skips its write, and the rest still run", "an extract that
+    threw is named as nothing-written and the rest still run", "stops when the
+    queue is gone and says how many it never touched", "never lands on an
+    arbitrary one of many", "does not land on a one-archive already-created
+    click", "says the aggregate payload before anything is written", "reports a
+    clean archive, a partial one and an already-extracted one in one queue";
+    `ui/review/useBundleDetect.test.tsx` - "waits for the scan without re-walking
+    the queue"; `ui/review/BundleReviewView.test.tsx` - "states the aggregate
+    payload and writes nothing until confirmed", "moves both bulk archive buttons
+    together", "gives a viewer neither bulk archive button", "stays in the queue
+    and reports Created 2 projects when the click named two archives", "lands on
+    the project when the click named exactly one archive", "the notice names every
+    archive it acted on", "derives the confirm stale when the selection changes
+    under it".
+
+    One measured correction to the shapes above: a click on an archive that
+    already became a project answers `already_created` with `planned: 0,
+    resolved: 0`, not `partial`, because
+    `curiarium/api/archive_project_service.py:181-196` runs the idempotency lookup
+    by archive path before the archive is ever opened. `partial` is therefore
+    reachable only on a first run, and the three-archive notice fixture is a
+    clean archive, a partial one and an already-extracted one accordingly.
+
     **Amended by `Mf-0ck5` (2026-11-07).** `ArchiveExtractAction` is no longer the
     untouched neighbour this paragraph describes. Its first sentence survives
     byte-for-byte - "N files, X — extract into a new folder beside the

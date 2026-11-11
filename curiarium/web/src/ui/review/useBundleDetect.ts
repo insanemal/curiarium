@@ -50,6 +50,11 @@ export type BundleDetectState = {
   /** A line about the last enrichment that is news rather than a failure. */
   notice: string | null;
   afterExtract: (results: ArchiveExtractResult[]) => Promise<SettleOutcome>;
+  /** The settle alone: waits for the library walk to register the extracted files
+   *  and refetches nothing. The bulk door runs one per archive and re-walks once
+   *  at the end, so per-archive use of `afterExtract` would walk the report N+1
+   *  times. */
+  waitAfterExtract: (results: ArchiveExtractResult[]) => Promise<SettleOutcome>;
 };
 
 /** What an enrichment response means to the operator.
@@ -129,15 +134,21 @@ function savedThingiverseCookie(): string | undefined {
  * exists to avoid. Created rows are permanently done, so hiding them is the
  * default the ticket settles on.
  *
- * `afterExtract` exists because the view used to refresh *immediately* after the
- * extraction POST (`BundleReviewView.tsx:530`), which cannot work: on the server
- * `archive_service` ends with `scan_started = bool(seams.start_scan())` and
- * `library_scan.start_scan()` only starts a daemon thread and returns at once, so
- * a row turns `ready` only once the walk finds the twin folder with registered
- * models (`bundle_service.py:1079-1095`). Nothing in the tree ever proved that
- * fixed; waiting for the walk to settle is a new mechanism, not a repair of one.
- * It is a plain async callback, never an effect - an effect would re-run under
- * StrictMode and would need a dependency on the results array.
+ * `waitAfterExtract` exists because the view used to refresh *immediately* after
+ * the extraction POST (`BundleReviewView.tsx:530`), which cannot work: on the
+ * server `archive_service` ends with `scan_started = bool(seams.start_scan())`
+ * and `library_scan.start_scan()` only starts a daemon thread and returns at
+ * once, so a row turns `ready` only once the walk finds the twin folder with
+ * registered models (`bundle_service.py:1079-1095`). Nothing in the tree ever
+ * proved that fixed; waiting for the walk to settle is a new mechanism, not a
+ * repair of one. It is a plain async callback, never an effect - an effect would
+ * re-run under StrictMode and would need a dependency on the results array.
+ *
+ * It is the single waiter in the tree. `afterExtract` is that same wait followed
+ * by one refetch, which is the right shape for the doors that write one archive
+ * and then want the queue repainted. The bulk door writes N archives and re-walks
+ * the whole library once at the end, so it takes the wait alone: N of
+ * `afterExtract` would be N whole-library walks for a single click.
  */
 export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetectState {
   const [report, setReport] = React.useState<BundleReport | null>(null);
@@ -299,13 +310,22 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     [enabled, onUnauthorized, refresh],
   );
 
-  const afterExtract = React.useCallback(
+  // The settle alone. See the hook's doc comment: this is the one waiter, and
+  // `afterExtract` below is it plus a refetch.
+  const waitAfterExtract = React.useCallback(
     async (results: ArchiveExtractResult[]): Promise<SettleOutcome> => {
       if (!enabledRef.current) return "cancelled";
-      const outcome = await settleAfterExtract(results, {
+      return settleAfterExtract(results, {
         cancelled: () => !enabledRef.current,
         onUnauthorized,
       });
+    },
+    [onUnauthorized],
+  );
+
+  const afterExtract = React.useCallback(
+    async (results: ArchiveExtractResult[]): Promise<SettleOutcome> => {
+      const outcome = await waitAfterExtract(results);
       // Leaving the queue cancels: nothing is mounted to paint the new report.
       if (!enabledRef.current) return "cancelled";
       // Through `refresh` rather than `getBundleReport` directly so its `seq`
@@ -313,7 +333,7 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
       await refresh();
       return outcome;
     },
-    [onUnauthorized, refresh],
+    [waitAfterExtract, refresh],
   );
 
   return {
@@ -334,5 +354,6 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetec
     enrich,
     notice,
     afterExtract,
+    waitAfterExtract,
   };
 }

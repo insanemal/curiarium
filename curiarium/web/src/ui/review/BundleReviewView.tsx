@@ -71,7 +71,21 @@ import {
   duplicateToggleLabel,
   showsDuplicateReport,
 } from "./duplicateArchives";
-import { outcomeLine, phaseLine, runExtractAndCreate } from "./extractAndCreate";
+import {
+  bulkPhaseLine,
+  bulkPlanLines,
+  bulkStopLine,
+  bulkSummaryLine,
+  bulkVerdictLines,
+  outcomeLine,
+  phaseLine,
+  planExtractAndCreateMany,
+  runExtractAndCreate,
+  runExtractAndCreateMany,
+  type BulkArchiveTarget,
+  type BulkPlan,
+  type BulkRunResult,
+} from "./extractAndCreate";
 import ReviewQueueView from "./ReviewQueueView";
 import ScanFidelityNotice from "./ScanFidelityNotice";
 import type { BundleDetectState } from "./useBundleDetect";
@@ -168,6 +182,33 @@ function extractTargets(rows: BundleDetectItem[]): ExtractTarget[] {
     return path ? [{ path, label: row.title }] : [];
   });
 }
+
+/** The many-archive door's snapshot of the rows it was clicked on: one target per
+ *  extractable row, in queue order, carrying the label a verdict has to name and
+ *  the operator's typed name (null when they typed nothing). Taken once, at the
+ *  click, so the confirm step describes the click that opened it rather than a
+ *  selection that moved underneath. */
+function bulkTargets(
+  rows: BundleDetectItem[],
+  names: Record<string, string>,
+): BulkArchiveTarget[] {
+  return rows.flatMap(row => {
+    const path = extractPathFor(row);
+    return path ? [{ path, label: row.title, name: typedName(names, row) || null }] : [];
+  });
+}
+
+/** The many-archive door's three faces, and nothing else is ever in flight. */
+type BulkExtractState =
+  | { phase: "planning"; rows: BundleDetectItem[]; targets: BulkArchiveTarget[]; line: string }
+  | {
+      phase: "confirm";
+      rows: BundleDetectItem[];
+      targets: BulkArchiveTarget[];
+      plan: BulkPlan;
+      lines: string[];
+    }
+  | { phase: "running"; rows: BundleDetectItem[]; targets: BulkArchiveTarget[]; line: string };
 
 /** The detail pane's one enrichment door: a row with a gap gets the first
  *  pass, and a row the page already answered can only be re-checked. Returns
@@ -402,10 +443,32 @@ export default function BundleReviewView({
   // operator learns the models were inside a nested archive (Mf-0ck5). Same
   // classifier, and the same three lines, as `ArchiveExtractAction`'s panel.
   const [extractPlan, setExtractPlan] = React.useState<{ key: string; lines: string[] } | null>(null);
+  // The many-archive form of the same door. Planning writes nothing, so the
+  // click reads every listing first and renders the aggregate payload inline in
+  // the bulk bar before anything is extracted; confirming then runs one archive
+  // at a time. `rows` and `targets` are the click's own snapshot, which is what
+  // the stale check below is derived from.
+  const [bulkExtract, setBulkExtract] = React.useState<BulkExtractState | null>(null);
+  // The bulk door's verdicts, at queue level: every successful create hides its
+  // own row, so a per-row notice would vanish with the row it describes - the same
+  // reason the one-step door's line lives in the notices slot.
+  const [bulkNotice, setBulkNotice] = React.useState<{
+    summary: string | null;
+    stop: string | null;
+    verdicts: string[];
+  } | null>(null);
+  // Where the caret goes when the confirm is cancelled: back where the click was.
+  const bulkExtractButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  // Set by the cancel, consumed by the effect below once the lock is gone.
+  const bulkReturnFocus = React.useRef(false);
   const extractAndCreateRunning = extractAndCreate?.running === true;
-  // One gate on every MUTATING door in the queue: the five bulk buttons, the
-  // detail pane's create/dismiss/enrich, the detail pane's own extract action,
-  // the blocked-reason cell and Enter on a zip-only row. `busy` alone reports
+  // A confirm step is a door held open on a snapshot, so it holds the queue's
+  // writes exactly as an in-flight run does.
+  const bulkLocking = bulkExtract !== null;
+  // One gate on every MUTATING door in the queue: the five bulk buttons, the bulk
+  // door's own button and its confirm, the detail pane's create/dismiss/enrich,
+  // the detail pane's own extract action, the blocked-reason cell and Enter on a
+  // zip-only row. `busy` alone reports
   // only the final `creating` phase, while a one-step run owns the queue's
   // writes across all four of its phases, from the listing to the create - so
   // its own `running` flag locks its siblings for the whole of it. The run is
@@ -419,8 +482,11 @@ export default function BundleReviewView({
   // starts. It does shut two things that write nothing on their own - the
   // extract action's listing trigger and its confirm panel's `Cancel` - and
   // that is the action's own contract: every control of an instance whose
-  // write would race the run refuses.
-  const actionsLocked = busy || extractAndCreateRunning;
+  // write would race the run refuses. `bulkLocking` is the same rule for the
+  // many-archive door: planning, confirming and running all hold the queue, so no
+  // other write can land between the summary the operator read and the writes it
+  // described.
+  const actionsLocked = busy || extractAndCreateRunning || bulkLocking;
   const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
   // Where the active row sat before a refetch reordered or removed it. A key
   // survives a reorder; the remembered index is only the fallback for a row
@@ -451,6 +517,18 @@ export default function BundleReviewView({
   const selected = visible.filter(row => selectedKeys.includes(row.key));
   const creatableSelected = selected.filter(isCreatable);
   const extractableSelected = selected.filter(isArchiveOnly);
+  // Whether the open confirm still describes the selection it was opened on. It
+  // is derived every render, against the SNAPSHOT's path list, so a selection
+  // that moved underneath cannot be written under an older summary: the confirm
+  // either describes exactly what will be written, or it refuses.
+  const bulkLivePaths = extractableSelected.flatMap(row => {
+    const path = extractPathFor(row);
+    return path ? [path] : [];
+  });
+  const bulkConfirmStale =
+    bulkExtract?.phase === "confirm" &&
+    (bulkLivePaths.length !== bulkExtract.targets.length ||
+      bulkLivePaths.some((path, index) => path !== bulkExtract.targets[index].path));
   // The bulk count, the bulk disabled state and the detail pane's door are one
   // predicate: `canOfferEnrich` is the single answer to "would this row be sent",
   // so a row the bar counts is a row the detail pane offers, and neither drifts.
@@ -761,6 +839,129 @@ export default function BundleReviewView({
     });
   };
 
+  // The many-archive door, step one: read every listing and say what the whole
+  // click would write. Nothing is extracted or created here, so an abandoned
+  // confirm costs one listing per archive and no bytes. The rows and targets are
+  // snapshotted now; the plan pass only ever adds the listings to them.
+  const startBulkExtractAndCreate = (): void => {
+    if (!canContribute || actionsLocked) return;
+    const rows = extractableSelected.slice();
+    const targets = bulkTargets(rows, names);
+    if (targets.length === 0) return;
+    setBulkNotice(null);
+    setBulkExtract({ phase: "planning", rows, targets, line: "Reading the archives' file lists…" });
+    void planExtractAndCreateMany({
+      targets,
+      listEntries: listArchiveEntries,
+      // A function of the current state, so a plan that answered after the
+      // confirm was cancelled never resurrects it.
+      onProgress: line =>
+        setBulkExtract(current =>
+          current && current.phase === "planning" ? { ...current, line } : current,
+        ),
+    }).then(plan => {
+      setBulkExtract(current =>
+        current && current.phase === "planning"
+          ? { phase: "confirm", rows, targets, plan, lines: bulkPlanLines(plan) }
+          : current,
+      );
+    });
+  };
+
+  const cancelBulkExtractAndCreate = React.useCallback((): void => {
+    bulkReturnFocus.current = true;
+    setBulkExtract(null);
+  }, []);
+
+  // The bulk button is disabled while the confirm is open (`bulkLocking` holds
+  // every mutating door), and a disabled control takes no focus - so the caret is
+  // returned after the commit that clears the lock rather than inside the
+  // handler, where the focus call would be swallowed.
+  React.useEffect(() => {
+    if (bulkExtract !== null || !bulkReturnFocus.current) return;
+    bulkReturnFocus.current = false;
+    bulkExtractButtonRef.current?.focus();
+  }, [bulkExtract]);
+
+  // Escape is the cancel for both open phases of the bulk door: the planning
+  // pass and the confirm. Neither has written anything - planning is N listing
+  // round-trips and the confirm is a snapshot - so leaving is free, which is
+  // exactly why it must be one keystroke. `running` is deliberately not bound:
+  // that run is already writing projects and is not cancellable.
+  React.useEffect(() => {
+    const phase = bulkExtract?.phase;
+    if (phase !== "planning" && phase !== "confirm") return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      cancelBulkExtractAndCreate();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [bulkExtract?.phase, cancelBulkExtractAndCreate]);
+
+  // Step two: the confirmed click. One archive at a time, in queue order, then
+  // ONE re-walk of the report - the bulk door settles through
+  // `state.waitAfterExtract`, which is the settle alone, because `afterExtract`
+  // also walks the whole library and N of those would be N+1 walks for one click.
+  const confirmBulkExtractAndCreate = (): void => {
+    if (bulkExtract?.phase !== "confirm" || bulkConfirmStale) return;
+    const { rows, targets, plan } = bulkExtract;
+    setBulkExtract({
+      phase: "running",
+      rows,
+      targets,
+      line: bulkPhaseLine(1, targets.length, "listing"),
+    });
+    void runExtractAndCreateMany({
+      plan,
+      deps: {
+        extract: extractArchive,
+        create: payload => createProjectFromExtract(payload),
+        settle: results => state.waitAfterExtract(results),
+      },
+      // A cover is cosmetic and must never block or fail a write, exactly as the
+      // other create doors treat it.
+      beforeCreate: archive => {
+        const row = rows.find(item => extractPathFor(item) === archive.path);
+        if (row) void primeModelCovers([row], { mediaUrl: fileUrl });
+      },
+      onProgress: line =>
+        setBulkExtract(current =>
+          current && current.phase === "running" ? { ...current, line } : current,
+        ),
+      // Each verdict is said as it lands, so a long queue narrates itself. The
+      // final list below replaces these with the same lines in full.
+      onVerdict: verdict => {
+        const line = bulkVerdictLines([verdict])[0];
+        if (line) {
+          setBulkNotice(current => ({
+            summary: null,
+            stop: null,
+            verdicts: [...(current?.verdicts ?? []), line],
+          }));
+        }
+      },
+    }).then((result: BulkRunResult) => {
+      setBulkExtract(null);
+      setBulkNotice({
+        summary: bulkSummaryLine(result),
+        stop: bulkStopLine(result),
+        verdicts: bulkVerdictLines(result.verdicts),
+      });
+      // A landing is single-archive parity: land, no bump, no walk. Anything else
+      // reports the change, and re-walks the queue at most once.
+      if (result.landing && onProjectImported) {
+        onProjectImported(result.landing.id);
+        return;
+      }
+      if (result.created > 0) onProjectsChanged?.();
+      if (!result.stopped && (result.created > 0 || result.alreadyCreated > 0)) {
+        void state.refresh();
+      }
+    });
+  };
+
   const dismissActive = () => {
     if (activeRow) void state.dismiss([activeRow.key], !activeRow.dismissed);
   };
@@ -984,6 +1185,24 @@ export default function BundleReviewView({
           {extractAndCreate.line}
         </p>
       )}
+      {/* The many-archive door's verdicts. ONE live container: the summary, then
+          the named verdicts in queue order, each naming its own archive. Queue
+          level for the same reason the one-step line is: a successful create
+          hides its own row, so a per-row sentence would vanish with the row. */}
+      {bulkNotice !== null && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="review-notice flex flex-col gap-1"
+          data-bulk-extract-and-create-notice="true"
+        >
+          {bulkNotice.summary !== null && <p>{bulkNotice.summary}</p>}
+          {bulkNotice.stop !== null && <p>{bulkNotice.stop}</p>}
+          {bulkNotice.verdicts.map((line, index) => (
+            <p key={`${index}-${line}`}>{line}</p>
+          ))}
+        </div>
+      )}
     </>
   );
 
@@ -1089,6 +1308,20 @@ export default function BundleReviewView({
             >
               {`Extract selected archives (${extractableSelected.length})`}
             </button>
+            {/* The many-archive form of the same door: it reads the same
+                `extractableSelected` array and the same `actionsLocked`
+                expression, so one predicate decides both buttons' labels,
+                counts and disabled states. */}
+            <button
+              type="button"
+              ref={bulkExtractButtonRef}
+              className={SECONDARY_BUTTON}
+              data-bulk-extract-and-create="true"
+              disabled={actionsLocked || extractableSelected.length === 0}
+              onClick={startBulkExtractAndCreate}
+            >
+              {`Extract and create (${extractableSelected.length})`}
+            </button>
             <button
               type="button"
               className={SECONDARY_BUTTON}
@@ -1124,6 +1357,75 @@ export default function BundleReviewView({
               <span className="review-detail-reason basis-full" data-bundle-enrich-none-reason="true">
                 {enrichNoneLine}
               </span>
+            )}
+            {/* The many-archive door, inline in the bar it was clicked from:
+                the aggregate payload while planning, then the confirm. `basis-full`
+                gives it a line of its own whatever the buttons beside it do. */}
+            {bulkExtract !== null && (
+              <div
+                className="basis-full flex flex-col gap-1"
+                data-bulk-extract-and-create-bar="true"
+              >
+                {bulkExtract.phase === "planning" && (
+                  <span
+                    className="review-detail-reason"
+                    data-bulk-extract-and-create-progress="true"
+                  >
+                    {bulkExtract.line}
+                  </span>
+                )}
+                {bulkExtract.phase === "running" && (
+                  <span
+                    className="review-detail-reason"
+                    data-bulk-extract-and-create-progress="true"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {bulkExtract.line}
+                  </span>
+                )}
+                {bulkExtract.phase === "confirm" && (
+                  <div
+                    className="basis-full flex flex-col gap-1"
+                    data-bulk-extract-and-create-confirm="true"
+                  >
+                    {bulkExtract.lines.map((line, index) => (
+                      <p key={`${index}-${line}`} className="review-detail-reason">
+                        {line}
+                      </p>
+                    ))}
+                    {/* The summary was built from the snapshot the click made,
+                        so a selection that moved since is refused rather than
+                        written under these words. */}
+                    {bulkConfirmStale && (
+                      <p
+                        className="review-detail-reason"
+                        data-bulk-extract-and-create-stale="true"
+                      >
+                        The selection changed since this summary was read - cancel and choose
+                        again.
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        className={PRIMARY_BUTTON}
+                        disabled={bulkConfirmStale}
+                        onClick={confirmBulkExtractAndCreate}
+                      >
+                        {`Extract and create ${bulkExtract.targets.length} ${bulkExtract.targets.length === 1 ? "project" : "projects"}`}
+                      </button>
+                      <button
+                        type="button"
+                        className={SECONDARY_BUTTON}
+                        onClick={cancelBulkExtractAndCreate}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         )}

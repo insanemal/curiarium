@@ -334,3 +334,394 @@ function namedFailures(failed: string[]): string {
   const more = failed.length > 3 ? ` and ${failed.length - 3} more` : "";
   return ` (${shown}${more})`;
 }
+
+// ---------------------------------------------------------------------------
+// Many archives, one click.
+//
+// The bulk door is the same run repeated in queue order, plus the aggregate
+// sentence that has to be spoken before the first byte is written. Two rules
+// shape all of it:
+//
+// - One archive at a time, never in parallel. The extract door writes one tree
+//   per archive and the settle waits on a library-wide walk, so overlapping two
+//   archives would race two walks and leave "which archive did this file come
+//   from" unanswerable in the one place the operator reads it - their own queue.
+//   A `for` loop awaiting one run at a time is therefore the contract, not a
+//   conservative choice; parallelism is forbidden by rule 1 of the ticket.
+// - One classifier. Every listing goes through `planArchive`, the same one the
+//   single-archive confirm step uses. `archivePlanLines` is per-archive prose
+//   (sizes, roots, junk) and summing it would lie, so the aggregate line is built
+//   from the summed `ArchivePlan` numbers instead - and `archivePlanLines` is
+//   never called from here.
+//
+// The listing is the expensive read (it opens the zip on the server) and it is
+// needed twice: once to say what the click would write, once by the run itself.
+// `planExtractAndCreateMany` keeps the entries it read on the listed member, and
+// `runExtractAndCreateMany` hands those back through the memoised `listEntries`
+// rather than reading again. The client cannot see an archive change under it
+// between confirm and run either way - the server re-reads the listing inside the
+// door, which is the only readiness authority this flow has.
+
+/** One row of the confirmed queue: the archive path the door is keyed on, the
+ *  label the queue already shows, and the operator's typed name (null when they
+ *  typed nothing, so the server's twin-derived default names the project).
+ *
+ *  The label is carried beside the path because a verdict has to name the archive
+ *  the operator ticked, and a bucket-relative path is a poor name in a sentence
+ *  about many of them. */
+export type BulkArchiveTarget = { path: string; label: string; name: string | null };
+
+/** One archive after the plan pass: either its listing and its plan, or the
+ *  reason neither exists. The union is what stops a failed read from being summed
+ *  as a zero - there is no `plan` to add, so there is nothing to count. */
+export type BulkListedArchive = BulkArchiveTarget &
+  (
+    | { entries: ArchiveEntry[]; plan: ArchivePlan; detail: null }
+    | { entries: null; plan: null; detail: string | null }
+  );
+
+/** The readable archives' plans, added member by member. Bytes are summed for the
+ *  same reason `ArchivePlan.bytes` exists: it is what the click spends, not what
+ *  the library will hold. */
+export type BulkPlanTotals = {
+  files: number;
+  bytes: number;
+  models: number;
+  images: number;
+  documents: number;
+  nestedArchives: number;
+  junk: number;
+  unregistered: number;
+};
+
+/** The confirmed click: every target, in queue order, with the aggregate of the
+ *  ones that could be read. */
+export type BulkPlan = { archives: BulkListedArchive[]; totals: BulkPlanTotals };
+
+/** What one archive's turn in the queue came to. Reuses the single-archive
+ *  outcome whole, so no sentence here can disagree with the one that door already
+ *  speaks. */
+export type BulkArchiveVerdict = BulkArchiveTarget & { outcome: ExtractAndCreateOutcome };
+
+export type BulkRunResult = {
+  /** The confirmed targets, in order - the plan's rows without their listings, so
+   *  the caller can describe the click without carrying the plan around. */
+  targets: BulkArchiveTarget[];
+  /** One per archive visited, in order. The tail after a `cancelled` has none:
+   *  it was never touched, which is exactly what `stopped` reports. */
+  verdicts: BulkArchiveVerdict[];
+  created: number;
+  alreadyCreated: number;
+  /** The targets whose extraction measurably wrote files, which is not the same
+   *  as the targets that were visited: an archive can be read, extracted and still
+   *  create nothing. */
+  written: BulkArchiveTarget[];
+  /** The created project, ONLY when the click named exactly one archive and it
+   *  created one. Landing on an arbitrary member of a many-archive click would
+   *  hide the others behind one row. */
+  landing: Project | null;
+  /** The queue was gone mid-run: the loop broke on `cancelled` and never visited
+   *  the tail. */
+  stopped: boolean;
+};
+
+/** `1 model` / `3 models`, or nothing at all when the count is zero - the same
+ *  shape `archivePlan`'s own `part` uses, restated here rather than imported so
+ *  the only imports from that module stay `planArchive` and `ArchivePlan`. */
+function counted(count: number, one: string, many: string): string | null {
+  if (count === 0) return null;
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/** The readable archives' plans, added up. An unreadable archive contributes
+ *  nothing at all - not a zero, which would be a claim that it holds nothing. */
+function sumPlans(archives: readonly BulkListedArchive[]): BulkPlanTotals {
+  const totals: BulkPlanTotals = {
+    files: 0,
+    bytes: 0,
+    models: 0,
+    images: 0,
+    documents: 0,
+    nestedArchives: 0,
+    junk: 0,
+    unregistered: 0,
+  };
+  for (const archive of archives) {
+    const plan = archive.plan;
+    if (plan === null) continue;
+    totals.files += plan.files;
+    totals.bytes += plan.bytes;
+    totals.models += plan.models;
+    totals.images += plan.images;
+    totals.documents += plan.documents;
+    totals.nestedArchives += plan.nestedArchives;
+    totals.junk += plan.junk;
+    totals.unregistered += plan.unregistered;
+  }
+  return totals;
+}
+
+/**
+ * Reads every archive's listing, one at a time, and says what the whole click
+ * would write.
+ *
+ * The catch is per archive on purpose: one unreadable zip must not cost the
+ * operator the other two, and the queue has to be able to name the one that
+ * failed rather than say "the plan failed". Nothing is written here - this is the
+ * confirm step's read, so a plan that is never confirmed costs one listing per
+ * archive and no bytes.
+ *
+ * Never rejects: a listing failure is a value, not an exception, and the cosmetic
+ * progress line is dropped if it throws.
+ */
+export async function planExtractAndCreateMany(run: {
+  targets: readonly BulkArchiveTarget[];
+  listEntries: (path: string) => Promise<{ path: string; entries: ArchiveEntry[] }>;
+  onProgress?: (line: string) => void;
+}): Promise<BulkPlan> {
+  const archives: BulkListedArchive[] = [];
+  const total = run.targets.length;
+
+  for (let index = 0; index < run.targets.length; index += 1) {
+    const target = run.targets[index];
+    let listed: BulkListedArchive;
+    try {
+      const listing = await run.listEntries(target.path);
+      // The entries are kept, not just counted: the run hands them back through
+      // its `listEntries`, so the confirm and the write read the same zip once.
+      listed = { ...target, entries: listing.entries, plan: planArchive(listing.entries), detail: null };
+    } catch (err) {
+      listed = { ...target, entries: null, plan: null, detail: errorDetail(err) };
+    }
+    archives.push(listed);
+    // 1-based and counting archives *attempted*, so a failed read still advances
+    // the line: the operator is being told where the pass has got to, not how
+    // much of it succeeded.
+    notify(() => run.onProgress?.(`Reading ${index + 1} of ${total} archive file lists…`));
+  }
+
+  return { archives, totals: sumPlans(archives) };
+}
+
+/**
+ * The confirm step's aggregate sentence, plus one line per archive that needs
+ * saying. Never a claim the listings do not support: an archive that could not be
+ * read is named and excluded, not counted as empty.
+ */
+export function bulkPlanLines(plan: BulkPlan): string[] {
+  const total = plan.archives.length;
+  if (total === 0) return [];
+
+  const lines: string[] = [];
+  const readable = plan.archives.filter(archive => archive.plan !== null).length;
+  if (readable === 0) {
+    // Nothing readable means nothing to promise, and no partial sum may stand in
+    // for the payload: the click would write nothing at all.
+    lines.push(`None of the ${total} archives could be read, so this click would write nothing.`);
+  } else {
+    const parts = [
+      counted(plan.totals.models, "model", "models"),
+      counted(plan.totals.images, "image", "images"),
+      counted(plan.totals.nestedArchives, "nested archive", "nested archives"),
+      counted(plan.totals.documents, "document", "documents"),
+      counted(plan.totals.files, "file", "files"),
+    ].filter((part): part is string => part !== null);
+    if (parts.length === 0) {
+      // Every readable archive holds only junk or directory members, so there
+      // is no count to promise: the same truth `bulkArchiveLine` tells per
+      // archive, told once for the click. Without this the header would render
+      // its colon and then nothing. The subject counts readable archives, not
+      // targets: in a mixed plan an unreadable archive is unread, not empty,
+      // and it gets its own failure line below - counting it here would claim
+      // it holds nothing extractable, which the listing never said.
+      const subject = readable === 1 ? "this archive" : `these ${readable} archives`;
+      lines.push(`Nothing in ${subject} can be extracted, so this click would write nothing.`);
+    } else {
+      lines.push(`Extracting ${total} ${total === 1 ? "archive" : "archives"}: ${parts.join(", ")} in all.`);
+    }
+  }
+
+  // Archive order, so the lines read in the same order as the queue above them.
+  for (const archive of plan.archives) {
+    const line = bulkArchiveLine(archive);
+    if (line !== null) lines.push(line);
+  }
+  return lines;
+}
+
+/** What one archive needs said before it is written, or null when the header
+ *  already told the truth about it.
+ *
+ *  `files === 0` comes first because it is the loudest: the click would hand the
+ *  library nothing and make no project from this row. The nested-archive warning
+ *  is the same one `archivePlanLines` gives in the single-archive confirm step,
+ *  in the same shape - it is the moment the operator can still choose differently,
+ *  and it must not be said differently here than there. */
+function bulkArchiveLine(archive: BulkListedArchive): string | null {
+  if (archive.plan === null) {
+    // The detail is the server's own sentence; the parentheses keep it from
+    // running into the one this module writes around it.
+    const detail = archive.detail ? ` (${archive.detail})` : "";
+    return `Could not read the file list of "${archive.label}"${detail} - it will be skipped and nothing in it will be written.`;
+  }
+  if (archive.plan.files === 0) {
+    return `"${archive.label}" holds nothing extractable, so extracting it writes nothing and no project will be made from it.`;
+  }
+  if (archive.plan.modelsOnlyInsideNestedArchive) {
+    return nestedOnlyLine(archive.label, archive.plan.nestedArchivePaths);
+  }
+  return null;
+}
+
+/** `"a.zip"` / `"a.zip" and "b.zip"` / `"a.zip" and "b.zip" and 3 more`, named by
+ *  basename the way the single-archive warning names them: the operator recognises
+ *  the file, not its bucket-relative path. */
+function nestedOnlyLine(label: string, paths: readonly string[]): string {
+  const named = paths
+    .slice(0, 2)
+    .map(path => `"${path.split("/").pop()}"`)
+    .join(" and ");
+  const more = paths.length > 2 ? ` and ${paths.length - 2} more` : "";
+  const subject = paths.length === 1 ? "the only archive inside is" : "the only archives inside are";
+  return `"${label}" packs no model of its own: ${subject} ${named}${more}, which extraction releases whole.`;
+}
+
+/**
+ * Runs the confirmed queue, one archive at a time, and reports what each one came
+ * to.
+ *
+ * Everything the single-archive run decided still decides: the same
+ * `runExtractAndCreate` is awaited once per archive, so the phases, the settle
+ * skip, the all-or-nothing extract and the door's own verdict are unchanged. This
+ * function only supplies the per-archive wiring and carries the failure forward
+ * instead of out - a failed archive is a verdict, and the next archive still runs.
+ *
+ * It breaks for exactly one outcome: `cancelled`. That verdict means the queue is
+ * gone (the session was left or the response never arrived), so continuing would
+ * POST projects whose verdicts nobody is left to read.
+ *
+ * Never rejects: every dependency failure is already an outcome, and the cosmetic
+ * callbacks are wrapped in `notify` so a paint cannot derail a write.
+ */
+export async function runExtractAndCreateMany(run: {
+  plan: BulkPlan;
+  /** The single-archive dependencies, minus the listing: the listing was read by
+   *  the plan pass and is handed back below, so the run makes zero listing calls. */
+  deps: Pick<ExtractAndCreateDeps, "extract" | "settle" | "create">;
+  /** Fire-and-forget cover prime, per archive, exactly as the create doors do. */
+  beforeCreate?: (archive: BulkArchiveTarget) => void;
+  onProgress?: (line: string) => void;
+  onVerdict?: (verdict: BulkArchiveVerdict) => void;
+}): Promise<BulkRunResult> {
+  const archives = run.plan.archives;
+  const total = archives.length;
+  const targets: BulkArchiveTarget[] = archives.map(archive => ({
+    path: archive.path,
+    label: archive.label,
+    name: archive.name,
+  }));
+
+  const verdicts: BulkArchiveVerdict[] = [];
+  const written: BulkArchiveTarget[] = [];
+  let created = 0;
+  let alreadyCreated = 0;
+  let landing: Project | null = null;
+  let stopped = false;
+
+  for (let index = 0; index < archives.length; index += 1) {
+    const archive = archives[index];
+    const target: BulkArchiveTarget = { path: archive.path, label: archive.label, name: archive.name };
+    let outcome: ExtractAndCreateOutcome;
+
+    if (archive.plan === null) {
+      // The listing already failed in the plan pass, so there is nothing to
+      // extract and nothing to ask the door: one listing call, zero writes.
+      outcome = { kind: "listing-failed", detail: archive.detail };
+    } else {
+      const entries = archive.entries;
+      // Per-archive, because "did this run write anything here" is a fact about
+      // this archive: the extract reports `files: 0` for an archive that was
+      // already fully present, which is a visit, not a write.
+      let wrote = false;
+      outcome = await runExtractAndCreate({
+        archivePath: archive.path,
+        item: { name: archive.name },
+        deps: {
+          extract: async payload => {
+            const result = await run.deps.extract(payload);
+            if (result.files > 0) wrote = true;
+            return result;
+          },
+          settle: run.deps.settle,
+          create: run.deps.create,
+          // The memoised listing: the file list the operator confirmed is the file
+          // list this run plans from, so the run makes no listing call of its own.
+          listEntries: async path => ({ path, entries }),
+          beforeCreate: () => notify(() => run.beforeCreate?.(target)),
+          onPhase: phase => notify(() => run.onProgress?.(bulkPhaseLine(index + 1, total, phase))),
+        },
+      });
+      if (wrote) written.push(target);
+    }
+
+    const verdict: BulkArchiveVerdict = { ...target, outcome };
+    verdicts.push(verdict);
+    if (outcome.kind === "created") {
+      created += 1;
+      // One archive, one project: that is the only shape where "the project this
+      // click made" has a single answer. Otherwise the caller stays in the queue.
+      if (total === 1) landing = outcome.project;
+    } else if (outcome.kind === "already-created") {
+      alreadyCreated += 1;
+    }
+    notify(() => run.onVerdict?.(verdict));
+
+    if (outcome.kind === "cancelled") {
+      // The queue is gone. The untouched tail gets no verdict, because nothing was
+      // visited there and a verdict is a claim about what happened.
+      stopped = true;
+      break;
+    }
+  }
+
+  return { targets, verdicts, created, alreadyCreated, written, landing, stopped };
+}
+
+/** `"<label> - <outcomeLine>"` per verdict, in queue order. `outcomeLine` is used
+ *  verbatim - the bulk door must not re-word a verdict the single door already
+ *  speaks - and a `cancelled` verdict contributes no line, exactly as it does
+ *  there. */
+export function bulkVerdictLines(verdicts: readonly BulkArchiveVerdict[]): string[] {
+  const lines: string[] = [];
+  for (const verdict of verdicts) {
+    const line = outcomeLine(verdict.outcome);
+    if (line === null) continue;
+    lines.push(`${verdict.label} - ${line}`);
+  }
+  return lines;
+}
+
+/** The one-line total, or null when nothing was created: a bulk click that made
+ *  no project says so per archive, and a summary claiming "Created 0 projects"
+ *  would read as a failure of the run rather than as its verdicts. */
+export function bulkSummaryLine(result: Pick<BulkRunResult, "created">): string | null {
+  if (result.created === 0) return null;
+  return result.created === 1 ? "Created 1 project." : `Created ${result.created} projects.`;
+}
+
+/** How much of the queue a stopped run never reached, or null when it ran to the
+ *  end. The count is measured against the confirmed targets, not the live
+ *  selection: the operator is owed the size of the click they made. */
+export function bulkStopLine(
+  result: Pick<BulkRunResult, "stopped" | "targets" | "verdicts">,
+): string | null {
+  if (!result.stopped) return null;
+  const untouched = result.targets.length - result.verdicts.length;
+  return `Stopped with ${result.verdicts.length} of ${result.targets.length} archives done - ${untouched} ${untouched === 1 ? "archive was" : "archives were"} never touched.`;
+}
+
+/** One archive's phase, said over the existing phase line so the bulk narration
+ *  and the single-archive narration cannot drift apart. */
+export function bulkPhaseLine(index: number, total: number, phase: ExtractAndCreatePhase): string {
+  return `Archive ${index} of ${total} - ${phaseLine(phase)}`;
+}
