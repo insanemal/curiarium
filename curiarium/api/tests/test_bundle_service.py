@@ -7242,9 +7242,168 @@ EMPTY_CLAIMED_NESTED_ENTRIES = {
     "vendor/render.png": b"j" * 90,
 }
 
+# --- the promotion guard replaces the claimed-ancestor branch (Mf-8acz) ------
+
+# The deletion witness. Mf-8acz removed ``_single_claimed_child_subtree`` and put the
+# inverted question - ``_promotion_would_double_own``, True meaning REFUSE - at the
+# single decision site in ``_build_candidates``. The structural tests below are the
+# witness that the old helper is gone by every spelling, that the new guard is asked
+# exactly once, and that Decision 18's ``_holds_stronger_candidate`` guard survived the
+# deletion: an over-deletion that took the second guard with the first reds four
+# behavioural witnesses elsewhere in this file, and this one names it in one line.
+
+
+def _calls_named(root: ast.AST, name: str) -> List[ast.Call]:
+    """Every direct call of ``name`` anywhere in ``root``'s subtree."""
+    return [
+        node
+        for node in ast.walk(root)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+    ]
+
+
+def test_the_promotion_guard_replaces_the_claimed_ancestor_branch() -> None:
+    """AC-1 (structural): the helper is deleted, and Decision 18 is still asked.
+
+    Four questions, one mutation each: re-adding
+    ``_single_claimed_child_subtree`` as a definition or as a call reds the first
+    three; asking ``_promotion_would_double_own`` from anywhere but the one decision
+    site (or twice there) reds the count; re-adding the ``if folder in
+    claimed_ancestors:`` branch the guard replaced reds the last walk. The
+    anti-over-deletion half is the ``_holds_stronger_candidate`` count: variant B
+    deleted that guard along with the helper and reds four behavioural witnesses, and
+    this test says so in one line rather than four.
+
+    ``claimed_ancestors`` legitimately still exists inside ``_build_candidates`` - the
+    set is built for the claim and read for the ``INFERRED_CONFIDENCES`` skip against
+    ``rel_dir`` - so this walk forbids only a comparison of ``folder`` against it. An
+    absent name would be the wrong pin; a decision site that branches on a claimed
+    folder is the right one.
+    """
+    assert not hasattr(bundle_service, "_single_claimed_child_subtree"), (
+        "the claimed-ancestor helper is deleted, not deprecated - re-adding it as a "
+        "module attribute is the mutation this witness exists for"
+    )
+
+    tree = ast.parse(Path(bundle_service.__file__).read_text())
+
+    definitions = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_single_claimed_child_subtree"
+    ]
+    assert definitions == [], (
+        "a definition of ``_single_claimed_child_subtree`` anywhere in the module - "
+        "nested ones included - is the helper coming back"
+    )
+
+    stale_calls = _calls_named(tree, "_single_claimed_child_subtree")
+    assert stale_calls == [], (
+        "a call site outlives the definition it names: re-adding one reds here even "
+        "when the function itself is gone"
+    )
+
+    build_candidates = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_candidates":
+            build_candidates = node
+    assert build_candidates is not None, (
+        "``_build_candidates`` is the one decision site this ticket changed; if it is "
+        "gone from the module body, every count below would pass vacuously"
+    )
+
+    assert len(_calls_named(build_candidates, "_promotion_would_double_own")) == 1, (
+        "the promotion guard is asked exactly once at the decision site - a second call "
+        "is a second answer to 'may this twin take the disk', the defect the single "
+        "guard was written to end"
+    )
+    assert len(_calls_named(build_candidates, "_holds_stronger_candidate")) == 1, (
+        "Decision 18's guard survives the deletion (ADR 0010): deleting it with the old "
+        "helper reds four promoted-row witnesses, and it reds here first"
+    )
+
+    claimed_folder_comparisons = [
+        node
+        for node in ast.walk(build_candidates)
+        if isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "folder"
+        and any(
+            isinstance(comparator, ast.Name) and comparator.id == "claimed_ancestors"
+            for comparator in node.comparators
+        )
+    ]
+    assert claimed_folder_comparisons == [], (
+        "the pairing decision site no longer branches on a claimed folder - "
+        "``if folder in claimed_ancestors:`` is the branch the promotion guard "
+        "replaced, and re-adding it puts two answers back at the same site"
+    )
+
+
+@pytest.mark.parametrize(
+    ("rel_dir", "owned_keys", "work_entries", "expected"),
+    [
+        pytest.param("import/plain", (), {}, False, id="nothing-below"),
+        pytest.param(
+            "import/Pile",
+            ("import/Pile/files",),
+            {"import/Pile": (bundle_detect.BundleEntry(rel_path="own.stl", size=10),)},
+            True,
+            id="own-file-beside-claim",
+        ),
+        pytest.param(
+            "import/Pile",
+            ("import/Pile/files", "import/Pile/models"),
+            {},
+            True,
+            id="two-children",
+        ),
+        pytest.param("import/wrapper", ("import/wrapper/child",), {}, False, id="one-child"),
+    ],
+)
+def test_the_promotion_guard_refuses_only_a_disk_a_row_below_already_owns(
+    rel_dir: str,
+    owned_keys: Tuple[str, ...],
+    work_entries: Mapping[str, Tuple[bundle_detect.BundleEntry, ...]],
+    expected: bool,
+) -> None:
+    """AC-2: the guard's four answers, pinned without a single file on disk.
+
+    The table is the four shapes the corpora reach, and every one of them is a unit
+    question: nothing offered below (the twin owns the disk alone), a file of the
+    directory's own beside the claim, two first-segment children (two products), and
+    one first-segment child (a wrapper). ``True`` means REFUSE - the promotion guard
+    is the inverted replacement for the deleted helper - so the polarity is pinned
+    here rather than inferred from a behavioural witness.
+
+    Mutation: drop the ``work`` leg and ``own-file-beside-claim`` reds; drop the
+    first-segment count and ``two-children`` reds; invert the initial ``not
+    owned_below`` return and ``nothing-below`` reds. A corpus cannot pin any of the
+    four alone, which is why this table exists beside the behavioural tests.
+    """
+    owned_below = [
+        bundle_service.BundleCandidate(
+            key=key,
+            snapshot=bundle_detect.BundleSnapshot(
+                bundle_name=key.rsplit("/", 1)[-1], rel_dir=key, entries=()
+            ),
+            archive_path=None,
+            is_archive=False,
+            confidence="low",
+        )
+        for key in owned_keys
+    ]
+    work = dict(work_entries)
+
+    assert bundle_service._promotion_would_double_own(rel_dir, owned_below, work) is expected, (
+        f"{rel_dir} with rows below {owned_keys} and a work view of {sorted(work)} answers "
+        f"{expected}; True means the twin must NOT be promoted"
+    )
+
+
 # Mf-ny89's three parents, each the promoted live shape with exactly one thing
-# changed, so the ONLY thing that can decide them is ``_single_claimed_child_subtree``
-# and the ``_holds_stronger_candidate`` leg beside it. Every child below them is a
+# changed, so the ONLY thing that can decide them is ``_promotion_would_double_own``
+# and the ``_holds_stronger_candidate`` guard that follows it. Every child below them is a
 # ``low_export_directory`` - models, a preview and a ``notes.txt``, no vendor markers -
 # because a HIGH child would be refused promotion by the stronger-candidate leg and
 # prove nothing about the shape question. ``import/M``'s one child is the exception on
@@ -7659,8 +7818,8 @@ def test_service_a_verified_twin_of_a_claimed_ancestor_is_promoted_on_its_single
     Mutation: read the pairing and the promotion off ``work`` (the pre-fix reading) and
     the emptied listing asks the shape question of nothing - the tower itself renders
     no row, the archive answers ``twin-unverified``, the no-facts reason, and the only
-    row left in the tree is the vendor's nested zip: the row Mf-wd3v removed. Delete
-    the ``_single_claimed_child_subtree`` leg of the ``claimed_ancestors`` branch and
+    row left in the tree is the vendor's nested zip: the row Mf-wd3v removed. Make
+    ``_promotion_would_double_own`` refuse this directory and
     the row stops being a promoted one. It does NOT go back to being uncreatable -
     measured, that mutation leaves ``import/01_Fates End - Wizard Tower`` answering
     ``(ready, None)`` with ``assets_total`` 14, all fourteen files under the tower - so
@@ -7905,13 +8064,13 @@ def test_service_the_measured_live_tower_is_promoted_at_its_real_counts(isolated
     models / 3 images / 1 text, with ``01_Wizard`` shown inside it: the cover's own
     ``rel_path`` runs through the child, because the child's payload IS the row.
 
-    Mutation: delete the ``_single_claimed_child_subtree`` leg of the
-    ``claimed_ancestors`` branch and this row is the blocked one again - ``pair_only``,
+    Mutation: make ``_promotion_would_double_own`` refuse this directory and this row
+    is the blocked one again - ``pair_only``,
     ``pair_only`` - measured ``ready`` with ``assets_total`` 20, not the blocked row of
     that build - and the witness that breaks is the candidate's own flags. Delete the
     ``_holds_stronger_candidate`` leg beside it and ``import/Q``'s HIGH export child is
     swallowed by its parent (the ``:7136`` witness reds, not this one - a LOW child is
-    exactly what this branch is for). Change any count here without changing the
+    exactly what the promotion is for). Change any count here without changing the
     fixture, or drop the ``.txt``, and the row stops being this shape at all - the
     document-less tree is the AC-1 test's job, not this one's.
     """
@@ -7996,11 +8155,12 @@ def test_service_a_promoted_emptied_claimed_ancestor_holds_no_archive_row_of_its
 
     Why THIS ancestor is promoted and ``import/Q`` is not is the load-bearing detail.
     ``W``'s single child earns ``low`` from the shape trio; ``Q``'s earns ``high`` from
-    a vendor document pair. One claimed child is the shape question, and it is answered
-    by ``_single_claimed_child_subtree``; the child's STRENGTH is a separate question,
-    answered by ``_holds_stronger_candidate``, and it is a leg of the same branch - so
-    ``Q`` falls through to the pair-only container answer untouched. The two tests
-    together are what stops either leg from being "tidied" into the other.
+    a vendor document pair. One claimed child is the OWNERSHIP question, and it is
+    answered by ``_promotion_would_double_own``; the child's STRENGTH is a separate
+    question, answered by ``_holds_stronger_candidate``, the next guard at the same
+    decision site - so ``Q`` falls through to the pair-only container answer untouched.
+    The two tests together are what stops either guard from being "tidied" into the
+    other.
 
     What is pinned here is still not the row, it is the interlock that makes the
     promotion safe. ``_forget_claimed_subtree`` has exactly ONE call site, and it runs
@@ -8027,10 +8187,11 @@ def test_service_a_promoted_emptied_claimed_ancestor_holds_no_archive_row_of_its
 
     Mutation: exempt nested archives from membership, or move the zip-only pass before
     the claims, and an archive row survives below the promoted ancestor for its row to
-    swallow - the "no archive row" assertion below is what catches it. Delete the
-    ``_single_claimed_child_subtree`` leg and the ancestor goes back to ``pair_only``
-    - measured ``(ready, None)`` with ``assets_total`` 6 on this tree, the count Mf-quv4
-    stopped skipping - and the assertion that breaks is the candidate's own flag triple.
+    swallow - the "no archive row" assertion below is what catches it. Make
+    ``_promotion_would_double_own`` refuse this directory and the ancestor goes back to
+    ``pair_only`` - measured ``(ready, None)`` with ``assets_total`` 6 on this tree, the
+    count Mf-quv4 stopped skipping - and the assertion that breaks is the candidate's own
+    flag triple.
     Reverting either ``folded`` expression takes the
     ancestor's row away entirely.
     """
@@ -8287,21 +8448,22 @@ def test_service_a_single_medium_child_keeps_its_own_row_and_its_parent_stays_pa
     """AC-4, the guard direction: ONE child is the shape; the child's STRENGTH still rules.
 
     ``import/M`` holds nothing but ``5390184_ARTICULATED_ice_dragon__fixed_``, whose own
-    model and id-bearing name buy it a MEDIUM row from R4. So ``_single_claimed_child_subtree``
-    answers YES - one child, nothing else - and the answer that decides is
-    ``_holds_stronger_candidate``, sitting as a leg of the same test: a name-derived
+    model and id-bearing name buy it a MEDIUM row from R4. So ``_promotion_would_double_own``
+    answers NO - one child, nothing else - and the answer that decides is
+    ``_holds_stronger_candidate``, the next guard at the same decision site: a name-derived
     statement about which thing a directory IS outranks a shape inference about a zip
     beside it (ADR 0010 Decision 18), so the parent is refused the promotion and falls
     through to the ``pair_only`` container answer it always gave, and the dragon keeps
     its own ``medium`` ``ready`` row.
 
-    This is the witness that the guard is a LEG and not a gate: hoist it above the
-    ``claimed_ancestors`` branch and the parent does not merely lose the promotion, it
-    loses the pair-only row too, which is a different (and worse) answer for the
-    operator. Delete it and the parent is promoted on the dragon's model while the
-    dragon is refused ``member-of-bundle`` - the Decision 18 swallow, now wearing the
-    shape rule's clothes. The single-LOW-child witnesses above are what stop the
-    opposite edit.
+    This is the witness that the ownership guard BOUNDS the promotion rather than
+    gating it: when it refuses, the directory still gets its visible ``pair_only`` row,
+    so the operator keeps something to act on. The ``_holds_stronger_candidate`` guard
+    that follows is what refuses the promotion on STRENGTH alone, and it keeps that
+    same pair-only row wherever rows below already own the disk. Delete either and the
+    parent is promoted on the dragon's model while the dragon is refused
+    ``member-of-bundle`` - the Decision 18 swallow, now wearing the ownership rule's
+    clothes. The single-LOW-child witnesses above are what stop the opposite edit.
     """
     write_file(isolated_storage / MEDIUM_CHILD_DIR / MEDIUM_CHILD_MODEL, STL_BYTES)
     twin_archive_of(isolated_storage, MEDIUM_PARENT_DIR, MEDIUM_PARENT_ZIP)
@@ -8379,12 +8541,12 @@ def test_service_a_claimed_ancestor_holding_two_claimed_children_is_not_promoted
     and ``D.zip`` declares exactly their payload, so the pairing verifies. The names are
     the load-bearing choice: ``R3_MODEL_DIRS`` counts the models under ``files/`` as
     own-depth, so ``_own_depth_model_count`` passes the listing and the inherited
-    cardinality bound NEVER reaches this branch - the archive is refused
+    cardinality bound NEVER reaches this decision site - the archive is refused
     ``twin-consumed``, not ``promotion:no-own-depth-model``, which is what proves the
-    refusal here came from ``_single_claimed_child_subtree`` reading two first segments
-    off ``folded``. The ``pile_fixture`` witnesses do not test this helper at all: their
-    ``alpha/`` and ``beta/`` are UNCLAIMED and the inherited bound refuses the pairing
-    before the shape question is asked.
+    refusal here came from ``_promotion_would_double_own`` reading two first segments
+    off the rows already offered below. The ``pile_fixture`` witnesses do not test this
+    helper at all: their ``alpha/`` and ``beta/`` are UNCLAIMED and the inherited bound
+    refuses the pairing before the ownership question is asked.
 
     Mutation: read the single segment off ``work`` (empty, so no segments at all) or
     drop the cardinality test, and ``import/D`` becomes a creatable ``archive_owned``
@@ -8514,7 +8676,7 @@ def test_a_promoted_tower_creates_one_project_whose_parts_come_out_of_the_child(
     ancestor this row replaced answered ``blocked``/``archive_only`` and created nothing.
 
     Mutation (run, and it moved): make the promotion answer "no wrapper" -
-    ``_single_claimed_child_subtree`` returning ``None`` is the pre-Mf-ny89
+    ``_promotion_would_double_own`` answering ``True`` is the pre-Mf-ny89
     fall-through - and since Mf-quv4 THIS test no longer reds. Measured: the pair-only
     row that mutation leaves answers ``(ready, None, 'low')`` with ``assets_total`` 20,
     its snapshot is the unclaimed full subtree so the create belt passes, and the create
@@ -8782,7 +8944,7 @@ def test_a_created_promotion_answers_its_own_project_id_and_a_second_create_is_a
     whose assets are entirely a claimed child's.
 
     Mutation (run, and it moved): the same revert as the create witness -
-    ``_single_claimed_child_subtree`` answering ``None`` - no longer reds THIS test, and
+    ``_promotion_would_double_own`` answering ``True`` - no longer reds THIS test, and
     the reason is the ticket's own point. Measured, the fall-through leaves the tower row
     answering ``(ready, None, 'low')`` with its containment set populated, so it creates
     once, answers its own project id and skips the second create exactly as pinned here.
