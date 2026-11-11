@@ -452,63 +452,36 @@ def _holds_stronger_candidate(rel_dir: str, candidates: Sequence[BundleCandidate
     )
 
 
-def _single_claimed_child_subtree(
+def _promotion_would_double_own(
     rel_dir: str,
+    owned_below: Sequence[BundleCandidate],
     work: Mapping[str, Sequence[bundle_detect.BundleEntry]],
-    folded: Mapping[str, Sequence[bundle_detect.BundleEntry]],
-) -> Optional[str]:
-    """The ONE child directory ``rel_dir``'s entire payload sits in, or ``None``.
+) -> bool:
+    """Whether a verified twin at ``rel_dir`` would create a disk a row already owns.
 
-    A vendor extraction keeps everything in one child - ``01_Wizard`` holds all
-    twenty files of ``import/01_Fates End - Wizard Tower`` - and the folder pass
-    then offers that child for a document of its own and strips every one of those
-    files out of the parent's view. The question this answers is whether that is
-    the shape on disk: one child, and nothing else beside it. It is asked of a
-    claimed ancestor only, and it is a pure read of two listings already built - no
-    walk, no stat, no store.
+    ``owned_below`` is every row already offered STRICTLY below ``rel_dir``. One disk
+    is never created twice, so the twin may take the directory only while those rows own
+    the whole payload: nothing offered below (the twin owns the disk alone), or every
+    row hanging under ONE child of it (a wrapper, whose child is a member rather than a
+    second product). Rows under two children are two products, and a row that leaves a
+    file of the directory's own beside it is a payload only partly claimed. Promoting
+    either would put other products' files under this row as well, so the twin refuses
+    and keeps its pair-only row - creatability and double ownership decide, never a
+    candidate's confidence.
 
-    **``work`` is asked only "empty?", never "what shape?".** ``work[rel_dir]`` is
-    the post-claim view ``_forget_claimed_subtree`` has already emptied, so asking
-    it WHAT the directory holds is the Mf-wd3v trap ``_compound_pass`` and the pairing
-    loop both name: an emptied listing answers "nothing" to every shape question and a
-    verified pair with real models behind it is refused for want of facts. Emptiness is
-    the one question the emptied view answers honestly - it is exactly what the claim
-    leaves behind, and it is the same fact that put ``rel_dir`` in ``claimed_ancestors``.
-
-    **``folded`` is asked only "one first segment?".** It is the unclaimed
-    full-subtree listing, so it is the only listing that says what the directory
-    actually holds; it is read for the name of the single child and for nothing
-    else, because the counts, cover and roles it would also describe are the
-    caller's own decision, not evidence for this one.
-
-    The two negatives are why the question is asked at all. The PILE - a parent whose
-    two children are each a claimed bundle of their own, one of them named ``files/``
-    so the own-depth bound lets the pairing through - has two first segments, so two
-    things' payloads are never promoted as one thing because an archive happened to
-    ship both. The LOOSE FILE of its own - one file at the parent's own depth next to
-    the claimed child - leaves ``work`` non-empty as well as ``folded`` with two
-    segments, so a directory that is not purely a wrapper keeps the container answer it
-    always gave. The two legs overlap on both negatives, and neither is redundant:
-    ``work`` is the only one that sees a single child which is only PARTLY claimed (its
-    own leftover files still stand under one first segment), and that is exactly where
-    promoting the parent would swallow a claimed grandchild.
-
-    One limit, stated rather than glossed: ``folded`` lists FILES, so an EMPTY sibling
-    directory is invisible here and a parent with one claimed child beside an empty
-    directory answers "one child" and promotes. That is accepted - an empty directory
-    holds no payload for a row to own, and it is refused ``member-of-bundle`` like any
-    other path inside the promoted key - so "one child, and no other FILE beside it"
-    is what this predicate actually decides.
+    ``work`` is asked only "empty?", never "what shape?" - the Mf-wd3v trap. It is the
+    post-claim view, so a non-empty one means the claim left files of the directory's
+    OWN standing beside the ones it took: the split payloads ``import/L`` and
+    ``import/Z`` are exactly that.
     """
+    if not owned_below:
+        return False
     if work.get(rel_dir):
-        return None
-    entries = folded.get(rel_dir) or ()
-    if not entries:
-        return None
-    segments = {entry.rel_path.split("/", 1)[0] for entry in entries}
-    if len(segments) != 1:
-        return None
-    return next(iter(segments))
+        return True
+    first_segments = {
+        candidate.key[len(rel_dir) + 1 :].split("/", 1)[0] for candidate in owned_below
+    }
+    return len(first_segments) != 1
 
 
 def _basename(rel_dir: str) -> str:
@@ -1057,102 +1030,52 @@ def _build_candidates(
             for zip_rel in pair_zips:
                 _refuse(refusals, zip_rel, _refusal_of(detection), override=True)
             continue
-        if folder in claimed_ancestors:
-            # The vendor-extraction answer (owner ruling, Mf-ny89): an ancestor whose
-            # WHOLE payload sits in ONE child is that child's wrapper, not a pile of
-            # other things' models. ``import/01_Fates End - Wizard Tower`` holds
-            # nothing but ``01_Wizard``, which the folder pass offered for the vendor
-            # ``.txt`` inside it - so the claim emptied the parent, the container rule
-            # left the parent as the pair-only row nobody could import (the child that
-            # owns the models was refused ``member-of-bundle``, so the pair stayed
-            # visible and nothing could be made from it), and at that build the row
-            # also answered ``assets_total`` 0 because an archive-only row skipped the
-            # asset lookup outright. Mf-quv4 removed that skip - and with it any claim
-            # that this flag decides a status - so what this branch is for is the
-            # answer it always gave: ONE promoted row keyed at the directory, with the
-            # child inside it as a group, rather than a pair-only fall-through that has
-            # no promotion argument behind it.
-            # Such a parent is promoted instead - one READY row keyed at the
-            # directory - and the child rides inside it as a group, dissolved exactly
-            # the way R7 dissolves the rows a compound absorbs (``member-of-bundle``,
-            # and the override is what puts a ledger entry under a path that was a row
-            # until the commit took it). The commit is NOT this branch's act: it runs
-            # at the APPLY SITE below, after the nested-member prune. Why, and what it
-            # enforces, is B-1.
-            #
-            # ``_holds_stronger_candidate`` stays a LEG of this test and must not be
-            # hoisted above it or dropped: one child is not automatically a weaker one
-            # (a claimed Thingiverse export earns HIGH from its vendor document pair),
-            # and a strong child has to lose the promotion while still answering as the
-            # pair-only container it always answered as - the fall-through below is that
-            # answer, and it is what keeps Decision 18 intact. The archive rows below
-            # are deliberately NOT dissolved: a zip inside the bundle is a member, and
-            # the nested-member pass owns that answer. Measured, dropping the
-            # ``not candidate.is_archive`` filter moves nothing in the suite -
-            # ``_reconcile_refusals`` relabels any zip inside a bundle directory
-            # ``nested-member`` whatever was written here - so the filter is kept to
-            # keep this dissolution writing refusals only for rows it really took.
-            #
-            # **The dissolution is a deferred commit, not an act of this branch (B-1).**
-            # The rows below are only RECORDED as taken; the refusal and the removal
-            # happen at the apply site after the nested-member prune. Dissolving here
-            # was the defect: a later pass can veto the very promotion this branch
-            # built - the prune empties `pairs[folder]` and the promoted candidate is
-            # then dropped as no longer archive-owned - and the child dissolution was
-            # never rolled back. The child had lost its row, the parent lost its row,
-            # and NO ROW OWNED THE PAYLOAD. The invariant the apply site enforces is
-            # that no ``member-of-bundle`` entry may name a row that does not exist,
-            # and it is only enforceable where the final row set is known: after the
-            # prune. Applying it there makes "a refusal that names a row that does not
-            # exist" structurally impossible rather than rare - the eager dissolve is
-            # exactly what made it possible, because it committed at a point where the
-            # promotion that justified it could still be undone. Nothing else about
-            # this branch changes; see the apply site for the whole argument.
-            single_child = _single_claimed_child_subtree(folder, work, folded)
-            if single_child is not None and not _holds_stronger_candidate(folder, found):
-                promoted_dissolutions[folder] = [
-                    candidate.key
-                    for candidate in found
-                    if candidate.key.startswith(folder + "/") and not candidate.is_archive
-                ]
-                found.append(
-                    BundleCandidate(
-                        key=folder,
-                        snapshot=snapshot,
-                        archive_path=None,
-                        is_archive=False,
-                        confidence=facts.confidence,
-                        archive_owned=True,
-                    )
-                )
-                for zip_rel in pair_zips:
-                    _refuse(refusals, zip_rel, REFUSAL_TWIN_CONSUMED, override=True)
-                continue
+        # ONE DISK, ONE ROW (Mf-8acz). A verified twin is a row at its own key: the
+        # archive's own entry listing proved this directory is the wrapper, so no
+        # parent/child question is left to rank. The one question is OWNERSHIP - would
+        # this row create a disk a row already offered below it owns? - and it is asked
+        # of the rows, never of a candidate's confidence.
+        #
+        # * Nothing offered below: the twin owns the disk alone and is promoted. That is
+        #   an ordinary extraction, and it is also the vendor-extraction shape Mf-ny89
+        #   promoted by hand (``import/01_Fates End - Wizard Tower`` over
+        #   ``01_Wizard``), which this path must keep creatable.
+        # * Every row below hanging under ONE child of it: those rows are members, not
+        #   second products. The twin takes the disk and the apply site refuses them
+        #   ``member-of-bundle`` - one disk, one row.
+        # * Anything else - rows under two children, or a file of the directory's own
+        #   beside them: the pile, or a payload only partly claimed. The twin would
+        #   create other products' files a second time, so it is REFUSED and keeps the
+        #   pair-only row the operator can see and act on.
+        #
+        # An ARCHIVE row below is deliberately not counted: an archive inside a bundle
+        # is a member of whatever owns it, never a second owner (the nested-member pass
+        # and the apply site answer those; ``import/X``'s ``P.zip`` is the witness).
+        owned_below = [
+            candidate
+            for candidate in found
+            if candidate.key.startswith(folder + "/") and not candidate.is_archive
+        ]
+        if _promotion_would_double_own(folder, owned_below, work):
             pair_only_specs[folder] = (snapshot, facts)
             for zip_rel in pair_zips:
                 _refuse(refusals, zip_rel, REFUSAL_TWIN_CONSUMED, override=True)
             continue
-        # A promoted LOW row must never swallow a bundle a STRONGER rule produced
-        # (ADR 0010 Decision 18, owner decision 2026-11-04). The parent gets NO row
-        # at all - deliberately not `pair_only_specs`: a pair-only key joins
-        # `bundle_dirs`, which makes `_nested_archives` mark the strong child a
-        # member, i.e. the swallow again by a different route. The residual is
-        # silence for the parent, the same silence this function already documents
-        # for a pruned promotion (a directory simply not offered is never a wrong
-        # project and never a delete invitation), and the archive of the refused
-        # pair attaches to no row because the zip-only pass has already run. The
-        # child keeps its `blocked`/`archive_only` archive row, whose remedy is the
-        # import door, exactly like any other archive-only row. The guard bounds
-        # the PROMOTION and nothing else: it sits after the `claimed_ancestors`
-        # branch on purpose, so a directory holding a CLAIMED child keeps its
-        # blocked pair-only row (the container rule at its existing site) and the
-        # ordering must not be "tidied" later. A weaker candidate below - a LOW
-        # archive, e.g. a member zip inside the Clockwork directory - does not
-        # refuse the promotion; that is the discriminator.
+        # The second refusal is Decision 18 (ADR 0010, owner decision 2026-11-04) and it
+        # is not this ticket's to change: a LOW shape inference must never swallow a
+        # bundle a stronger rule produced ("I will sometimes extract a file and copy the
+        # zip in"). A directory that already owns rows keeps its visible pair-only row;
+        # one that owns none is refused SILENTLY, because a pair-only key joins
+        # ``bundle_dirs`` and would make the strong child a member of it - the swallow
+        # again by a different route.
         if _holds_stronger_candidate(folder, found):
-            for zip_rel in pair_zips:
-                _refuse(refusals, zip_rel, REFUSAL_CONTAINER, override=True)
+            if owned_below:
+                pair_only_specs[folder] = (snapshot, facts)
+            else:
+                for zip_rel in pair_zips:
+                    _refuse(refusals, zip_rel, REFUSAL_CONTAINER, override=True)
             continue
+        promoted_dissolutions[folder] = [candidate.key for candidate in owned_below]
         found.append(
             BundleCandidate(
                 key=folder,
