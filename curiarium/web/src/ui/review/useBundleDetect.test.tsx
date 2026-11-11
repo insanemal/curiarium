@@ -698,6 +698,37 @@ describe("useBundleDetect", () => {
     expect(outcome).toBe("settled");
   });
 
+  // The bulk door's half of the contract: this member waits and does nothing
+  // else. A walk here would be paid once per archive by the many-archive click,
+  // which re-walks the library itself exactly once when the queue is done.
+  it("waits for the scan without re-walking the queue", async () => {
+    const settle = deferred<SettleOutcome>();
+    settleAfterExtractMock.mockReturnValueOnce(settle.promise);
+
+    const { result } = renderHook(() => useBundleDetect({ enabled: true }));
+    await waitFor(() => expect(result.current.report).toEqual(report));
+
+    let outcome!: Promise<SettleOutcome>;
+    act(() => {
+      outcome = result.current.waitAfterExtract([extractResult]);
+    });
+
+    expect(settleAfterExtractMock).toHaveBeenCalledTimes(1);
+    expect(settleAfterExtractMock).toHaveBeenCalledWith(
+      [extractResult],
+      expect.objectContaining({ cancelled: expect.any(Function) }),
+    );
+
+    await act(async () => {
+      settle.resolve("settled");
+      await outcome;
+    });
+
+    expect(await outcome).toBe("settled");
+    // Still the activation's one walk: the settle alone refetches nothing.
+    expect(getBundleReportMock).toHaveBeenCalledTimes(1);
+  });
+
   // Proves the settle loop reads the live open/closed state: the `cancelled`
   // predicate it was handed flips when the queue closes, and a closed queue
   // paints no refetch.

@@ -281,6 +281,39 @@ const betaZip = makeBundle({
   blocked_reason: "archive_only",
   archive: null,
 });
+/** A third archive of the identical shape, so the many-archive notice can name
+ *  more than two verdicts - and so the three verdicts it names (created,
+ *  partial, already-created) are one render's worth of the same door. */
+const GAMMA_KEY = "Gamma.zip";
+const gammaZip = makeBundle({
+  key: GAMMA_KEY,
+  rel_path: GAMMA_KEY,
+  title: "Gamma",
+  name_suggestion: "Gamma",
+  creator: null,
+  licence: null,
+  licence_url: null,
+  source_url: null,
+  detector: "generic-bundle",
+  confidence: "low",
+  metadata_shape: "generic",
+  description_excerpt: null,
+  model_count: 0,
+  image_count: 0,
+  text_count: 0,
+  other_count: 1,
+  cover: {
+    asset_id: null,
+    rel_path: null,
+    reason: "largest-image-unregistered",
+    url: null,
+    thumb_url: null,
+  },
+  assets_total: 1,
+  status: "blocked",
+  blocked_reason: "archive_only",
+  archive: null,
+});
 
 /** A medium row: the folder name carried a Thingiverse id, so the source URL is
  *  derived from it and no creator or licence is known. */
@@ -498,6 +531,7 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
     enrich: vi.fn(async () => {}),
     notice: null,
     afterExtract: vi.fn(async (): Promise<SettleOutcome> => "settled"),
+    waitAfterExtract: vi.fn(async (): Promise<SettleOutcome> => "settled"),
     ...overrides,
   };
 }
@@ -3848,5 +3882,322 @@ describe("BundleReviewView project list hand-off", () => {
     await flush();
     expect(onProjectImported).not.toHaveBeenCalled();
     expect(onProjectsChanged).not.toHaveBeenCalled();
+  });
+});
+
+describe("BundleReviewView bulk extract and create", () => {
+  /** The two bulk archive doors, read as the operator sees them: the same count
+   *  and the same gate, from the same `extractableSelected` array. */
+  function bothDoors(): { disabled: [boolean, boolean]; counts: [string, string] } {
+    const plain = screen.getByRole("button", {
+      name: /^Extract selected archives \(/,
+    }) as HTMLButtonElement;
+    const bulk = screen.getByRole("button", {
+      name: /^Extract and create \(/,
+    }) as HTMLButtonElement;
+    const count = (node: HTMLButtonElement) => node.textContent?.match(/\((\d+)\)$/)?.[1] ?? "";
+    return { disabled: [plain.disabled, bulk.disabled], counts: [count(plain), count(bulk)] };
+  }
+
+  /** The inline confirm, found by its own attribute: it is not a landmark and not
+   *  a dialog - it lives in the bulk bar it was opened from. */
+  function confirmPanel(): HTMLElement | null {
+    return document.querySelector<HTMLElement>("[data-bulk-extract-and-create-confirm]");
+  }
+
+  /** The queue-level verdicts: one live region holding the summary and the named
+   *  verdicts. Its own attribute, so it cannot be confused with the one-step door's
+   *  `data-extract-and-create-notice`. */
+  function bulkNotice(): HTMLElement | null {
+    return document.querySelector<HTMLElement>("[data-bulk-extract-and-create-notice]");
+  }
+
+  it("states the aggregate payload and writes nothing until confirmed", async () => {
+    installArchiveListings();
+    const state = makeState({ report: makeReport([alphaZip, betaZip]) });
+    renderView(state);
+
+    fireEvent.click(selectionCheck(ALPHA_KEY));
+    fireEvent.click(selectionCheck(BETA_KEY));
+
+    const open = screen.getByRole("button", {
+      name: "Extract and create (2)",
+    }) as HTMLButtonElement;
+    expect(open.disabled).toBe(false);
+    fireEvent.click(open);
+
+    await waitFor(() => expect(confirmPanel()).toBeTruthy());
+
+    // ALPHA holds 1 model and 1 document; BETA 1 model, 1 image and 1 document.
+    // One sentence, from the summed plans of the same classifier the plain
+    // Extract panel uses - never a sum of per-archive prose.
+    expect((confirmPanel() as HTMLElement).textContent).toContain(
+      "Extracting 2 archives: 2 models, 1 image, 2 documents, 5 files in all.",
+    );
+    // One listing per archive, read once, before anything is written.
+    expect(listArchiveEntriesMock).toHaveBeenCalledTimes(2);
+    expect(extractArchiveMock).not.toHaveBeenCalled();
+    expect(createProjectFromExtractMock).not.toHaveBeenCalled();
+    expect(state.waitAfterExtract).not.toHaveBeenCalled();
+  });
+
+  it("moves both bulk archive buttons together", () => {
+    renderView(makeState({ report: makeReport([moai, moaiZip, cableClip]) }));
+
+    expect(bothDoors()).toEqual({ disabled: [true, true], counts: ["0", "0"] });
+
+    fireEvent.click(selectionCheck(moaiZip.key));
+    expect(bothDoors()).toEqual({ disabled: [false, false], counts: ["1", "1"] });
+
+    // A ready row beside the archive is selected too, but it is not extractable:
+    // the count and the gate follow `isArchiveOnly`, not the selection length.
+    fireEvent.click(selectionCheck(moai.key));
+    expect(bothDoors()).toEqual({ disabled: [false, false], counts: ["1", "1"] });
+
+    // Ready rows alone: the same zero, and the same shut door, on both.
+    fireEvent.click(selectionCheck(moaiZip.key));
+    fireEvent.click(selectionCheck(cableClip.key));
+    expect(bothDoors()).toEqual({ disabled: [true, true], counts: ["0", "0"] });
+  });
+
+  it("gives a viewer neither bulk archive button", () => {
+    renderView(makeState({ report: makeReport([moaiZip]) }), false);
+
+    expect(screen.queryByRole("button", { name: /^Extract selected archives/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Extract and create \(/ })).toBeNull();
+  });
+
+  it("stays in the queue and reports Created 2 projects when the click named two archives", async () => {
+    installArchiveListings();
+    createProjectFromExtractMock.mockImplementation(async payload =>
+      makeVerdict({
+        status: "created",
+        archive: payload.path,
+        project:
+          payload.path === ALPHA_KEY
+            ? createdProjectRow({ id: "p-alpha", name: "Alpha" })
+            : createdProjectRow({ id: "p-beta", name: "Beta" }),
+      }),
+    );
+    const onProjectsChanged = vi.fn();
+    const onProjectImported = vi.fn();
+    const state = makeState({ report: makeReport([alphaZip, betaZip]) });
+    render(
+      <BundleReviewView
+        state={state}
+        canContribute
+        onProjectsChanged={onProjectsChanged}
+        onProjectImported={onProjectImported}
+      />,
+    );
+
+    fireEvent.click(selectionCheck(ALPHA_KEY));
+    fireEvent.click(selectionCheck(BETA_KEY));
+    fireEvent.click(screen.getByRole("button", { name: "Extract and create (2)" }));
+    await waitFor(() => expect(confirmPanel()).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Extract and create 2 projects" }));
+
+    await waitFor(() => expect(bulkNotice()?.textContent).toContain("Created 2 projects."));
+
+    // Two archives is never a landing: there is no single project to land on, so
+    // the list is bumped and the operator stays in the queue.
+    expect(onProjectImported).not.toHaveBeenCalled();
+    expect(onProjectsChanged).toHaveBeenCalledTimes(1);
+    // Exactly one whole-library walk at the end, and the per-archive waiter did
+    // the settling: `afterExtract` would have walked the report once per archive.
+    expect(state.refresh).toHaveBeenCalledTimes(1);
+    expect(state.afterExtract).not.toHaveBeenCalled();
+    expect(state.waitAfterExtract).toHaveBeenCalledTimes(2);
+    // The bulk path never goes through the hook's void `create`.
+    expect(state.create).not.toHaveBeenCalled();
+  });
+
+  it("lands on the project when the click named exactly one archive", async () => {
+    installArchiveListings();
+    createProjectFromExtractMock.mockResolvedValue(
+      makeVerdict({
+        status: "created",
+        archive: ALPHA_KEY,
+        project: createdProjectRow({ id: "p-alpha", name: "Alpha" }),
+      }),
+    );
+    const onProjectsChanged = vi.fn();
+    const onProjectImported = vi.fn();
+    const state = makeState({ report: makeReport([alphaZip]) });
+    render(
+      <BundleReviewView
+        state={state}
+        canContribute
+        onProjectsChanged={onProjectsChanged}
+        onProjectImported={onProjectImported}
+      />,
+    );
+
+    fireEvent.click(selectionCheck(ALPHA_KEY));
+    fireEvent.click(screen.getByRole("button", { name: "Extract and create (1)" }));
+    await waitFor(() => expect(confirmPanel()).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Extract and create 1 project" }));
+
+    // Single-archive parity: the id is the server's own re-read row's id.
+    await waitFor(() => expect(onProjectImported).toHaveBeenCalledWith("p-alpha"));
+    // Landing already bumps the list (`handleProjectImported`), and leaving the
+    // queue would throw a walk away, so neither the bump nor the walk happens.
+    expect(onProjectsChanged).not.toHaveBeenCalled();
+    expect(state.refresh).not.toHaveBeenCalled();
+  });
+
+  it("the notice names every archive it acted on", async () => {
+    installArchiveListings();
+    createProjectFromExtractMock.mockImplementation(async payload => {
+      if (payload.path === ALPHA_KEY) {
+        return makeVerdict({
+          status: "created",
+          archive: ALPHA_KEY,
+          project: createdProjectRow({ id: "p-alpha", name: "Alpha" }),
+        });
+      }
+      if (payload.path === BETA_KEY) {
+        // The server's own counts: the listing promised three entries and two are
+        // registered, so this run wrote nothing.
+        return makeVerdict({
+          status: "partial",
+          archive: BETA_KEY,
+          planned: 3,
+          resolved: 2,
+          failed: ["beta_foot.stl"],
+          project: null,
+        });
+      }
+      // The idempotency lookup runs by archive path before the archive is opened
+      // (`archive_project_service.py:181-196`), so a repeat click answers this -
+      // and it is success-with-no-write, not an error.
+      return makeVerdict({
+        status: "already_created",
+        archive: GAMMA_KEY,
+        planned: 0,
+        resolved: 0,
+        project: createdProjectRow({ id: "p-gamma", name: "Gamma" }),
+      });
+    });
+    const state = makeState({ report: makeReport([alphaZip, betaZip, gammaZip]) });
+    renderView(state);
+
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    fireEvent.click(screen.getByRole("button", { name: "Extract and create (3)" }));
+    await waitFor(() => expect(confirmPanel()).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Extract and create 3 projects" }));
+
+    await waitFor(() => expect(bulkNotice()?.textContent).toContain("Created 1 project."));
+
+    // ONE container: a summary, then one line per archive, in queue order - not
+    // one live region per verdict, which would interrupt itself.
+    expect(document.querySelectorAll("[data-bulk-extract-and-create-notice]")).toHaveLength(1);
+    const notice = bulkNotice() as HTMLElement;
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.getAttribute("aria-live")).toBe("polite");
+    // The already-created verdict wrote nothing, which is a notice, not an alarm.
+    expect(notice.getAttribute("role")).not.toBe("alert");
+
+    const text = notice.textContent ?? "";
+    expect(text).toContain("Alpha - Created project Alpha.");
+    expect(text).toContain("Beta - ");
+    expect(text).toContain("1 entry never arrived");
+    expect(text).toContain("Gamma - Already created as project Gamma");
+
+    expect(state.create).not.toHaveBeenCalled();
+    expect(state.waitAfterExtract).toHaveBeenCalledTimes(3);
+    expect(state.afterExtract).not.toHaveBeenCalled();
+    expect(state.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("derives the confirm stale when the selection changes under it", async () => {
+    installArchiveListings();
+    renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
+
+    fireEvent.click(selectionCheck(ALPHA_KEY));
+    const bulk = screen.getByRole("button", {
+      name: "Extract and create (1)",
+    }) as HTMLButtonElement;
+    fireEvent.click(bulk);
+    await waitFor(() => expect(confirmPanel()).toBeTruthy());
+
+    expect(document.querySelector("[data-bulk-extract-and-create-stale]")).toBeNull();
+    expect(
+      (screen.getByRole("button", { name: "Extract and create 1 project" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+
+    // A second archive ticked under the open summary: the words on screen no
+    // longer describe what the button would write.
+    fireEvent.click(selectionCheck(BETA_KEY));
+
+    expect(document.querySelector("[data-bulk-extract-and-create-stale]")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Extract and create 1 project" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    // Escape is the confirm's keyboard cancel, and nothing has been written.
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(confirmPanel()).toBeNull());
+    expect(document.activeElement).toBe(bulk);
+  });
+
+  it("does not let Escape abandon a run that is already writing", async () => {
+    installArchiveListings();
+    createProjectFromExtractMock.mockResolvedValue(
+      makeVerdict({
+        status: "created",
+        archive: ALPHA_KEY,
+        project: createdProjectRow({ id: "p-alpha", name: "Alpha" }),
+      }),
+    );
+    // The settle is held open, so the run is mid-flight: the archive is being
+    // written and the progress line is the only door state on screen.
+    let settle: (outcome: SettleOutcome) => void = () => {};
+    const waitAfterExtract = vi.fn(
+      () =>
+        new Promise<SettleOutcome>(resolve => {
+          settle = resolve;
+        }),
+    );
+    const onProjectImported = vi.fn();
+    const state = makeState({ report: makeReport([alphaZip]), waitAfterExtract });
+    render(
+      <BundleReviewView
+        state={state}
+        canContribute
+        onProjectImported={onProjectImported}
+      />,
+    );
+
+    fireEvent.click(selectionCheck(ALPHA_KEY));
+    fireEvent.click(screen.getByRole("button", { name: "Extract and create (1)" }));
+    await waitFor(() => expect(confirmPanel()).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Extract and create 1 project" }));
+
+    await waitFor(() =>
+      expect(document.querySelector("[data-bulk-extract-and-create-progress]")).toBeTruthy(),
+    );
+    // The confirm is gone because the click was answered, not cancelled: there is
+    // no Cancel left in the bar to take the write back.
+    expect(confirmPanel()).toBeNull();
+    const bar = document.querySelector<HTMLElement>("[data-bulk-extract-and-create-bar]");
+    expect(bar).toBeTruthy();
+    expect(within(bar as HTMLElement).queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(state.waitAfterExtract).toHaveBeenCalledTimes(1);
+
+    // Escape belongs to the confirm and the planning pass; a run that is already
+    // writing projects is deliberately not cancellable.
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(document.querySelector("[data-bulk-extract-and-create-progress]")).toBeTruthy();
+    expect(state.refresh).not.toHaveBeenCalled();
+
+    settle("settled");
+    await waitFor(() => expect(bulkNotice()?.textContent).toContain("Created project Alpha."));
+    // One archive is a landing: the id goes to the host and the queue is not
+    // re-walked, exactly as the one-archive bulk landing pins.
+    expect(onProjectImported).toHaveBeenCalledWith("p-alpha");
+    expect(state.refresh).not.toHaveBeenCalled();
   });
 });
