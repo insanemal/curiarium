@@ -8,7 +8,7 @@
 
 <p align="center">
   <img alt="status" src="https://img.shields.io/badge/status-pre--release-orange" />
-  <img alt="version" src="https://img.shields.io/badge/version-5.2.0--rc.1-blue" />
+  <img alt="version" src="https://img.shields.io/badge/version-5.2.0-blue" />
   <img alt="licence" src="https://img.shields.io/badge/licence-MIT-green" />
   <img alt="images" src="https://img.shields.io/badge/images-ghcr.io%2Finsanemal-2496ed" />
 </p>

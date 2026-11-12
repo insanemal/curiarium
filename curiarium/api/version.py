@@ -4,4 +4,4 @@ It is mirrored into curiarium/web/package.json and package-lock.json and
 the copies are compared by curiarium/scripts/check_version.py (Mf-cvoo).
 """
 
-__version__ = "5.2.0-rc.1"
+__version__ = "5.2.0"

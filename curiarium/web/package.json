@@ -1,7 +1,7 @@
 {
   "name": "curiarium-web",
   "private": true,
-  "version": "5.2.0-rc.1",
+  "version": "5.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host",
