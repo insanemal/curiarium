@@ -164,7 +164,9 @@ writable. `PUBLIC_URL` is the only value that matters behind a reverse proxy; le
 
 Image tags: `edge` (tip of `main`), `sha-<short>` (pin this for reproducible
 deploys), and semver tags from `v*` git tags. Pin a `sha-` tag if you want an
-upgrade to be a decision rather than a side effect.
+upgrade to be a decision rather than a side effect. The current release is
+[5.2.0](CHANGELOG.md); what changed in it, and in every release after, is in
+[CHANGELOG.md](CHANGELOG.md).
 
 Each of those has a `-zfs` twin (`edge-zfs`, `sha-<short>-zfs`, `5.2.0-zfs`, …):
 the same API image with the `zfs` userspace baked in, for a deployment whose
@@ -216,6 +218,8 @@ file.
 
 **Product documentation**
 
+- [CHANGELOG.md](CHANGELOG.md) — what each release changed, with the upgrade notes, so a
+  deployment that skipped a version can see what it is getting before it pulls.
 - [curiarium/docs/README.md](curiarium/docs/README.md) — the documentation index: what is
   authoritative, what is historical, and what to read when.
 - [curiarium/docs/ARCHITECTURE_RUNBOOK.md](curiarium/docs/ARCHITECTURE_RUNBOOK.md) — how the
@@ -356,7 +360,7 @@ with is described in [docs/TICKET_WORKFLOW.md](docs/TICKET_WORKFLOW.md).
 
 ## Project status — honestly
 
-Working and tested (API **1841** tests, web **1037**): folders-as-directories, scanning,
+Working and tested (API **2820** tests, web **2568**): folders-as-directories, scanning,
 trash, projects, snapshots (CephFS/ZFS providers, BTRFS via sidecar), users/roles, OIDC,
 MFA, sessions, signed grants, audit, imports, previews, uploads, ZIP in/out, slicer handoff.
 
