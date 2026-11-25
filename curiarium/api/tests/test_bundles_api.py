@@ -920,3 +920,80 @@ def test_the_committed_openapi_fixture_declares_the_match_and_shape_fields() -> 
     create_item = fixture["BundleCreateItemIn"]
     assert "shape" not in create_item.get("required", []), "the field is additive, never required"
     assert create_item["properties"]["shape"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+
+
+# --- the create follows the chosen shape (Mf-ao6r) --------------------------
+
+
+def test_a_create_over_http_records_the_chosen_shape(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """The operator's shape crosses the router; the marker says `manual`, not the row's pick.
+
+    Mutation: drop `shape=item.shape` from the router's ``BundleCreateItem`` and the
+    field is accepted and silently discarded - the Mf-ao6r no-op - so the marker
+    records `root-docs` and this reds.
+    """
+    moai_bundle(isolated_storage)
+    scan()
+    row = report_for(client, contributor)["bundles"][0]
+    assert row["metadata_shape"] == "root-docs", "the recommendation is the other outcome, not this one"
+    assert "manual" in [match["shape"] for match in row["matches"]]
+
+    response = client.post(
+        "/bundles/create",
+        json={"items": [{"key": MOAI, "shape": "manual"}]},
+        headers=bearer(contributor.token),
+    )
+
+    assert response.status_code == 200, response.text
+    created = response.json()
+    assert created["created"] == 1 and created["failed"] == 0, created
+    project_id = created["results"][0]["project_id"]
+    marker = project_by_id(client, contributor, project_id)["metadata_json"]["_bundle"]
+    assert marker["shape"] == "manual", "the chosen shape is what the marker records"
+    assert marker["rule"] == "manual", "the rule is the word that offered the manual scope"
+
+
+def test_a_shape_less_create_over_http_records_the_recommended_shape(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """`shape` is an optional forward: omitting it still creates, on the row's shape."""
+    stagetop_bundle(isolated_storage)
+    scan()
+    row = row_for(report_for(client, contributor), STAGETOP_KEY)
+    assert row["metadata_shape"] == "compound"
+
+    response = client.post(
+        "/bundles/create",
+        json={"items": [{"key": STAGETOP_KEY}]},
+        headers=bearer(contributor.token),
+    )
+
+    assert response.status_code == 200, response.text
+    created = response.json()
+    assert created["created"] == 1 and created["failed"] == 0, created
+    project_id = created["results"][0]["project_id"]
+    marker = project_by_id(client, contributor, project_id)["metadata_json"]["_bundle"]
+    assert marker["shape"] == "compound", "no shape sent means the recommendation, exactly as before"
+
+
+def test_an_unoffered_shape_over_http_fails_and_creates_nothing(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """A shape the row never offered is a per-item failure over HTTP, not a silent pick."""
+    moai_bundle(isolated_storage)
+    scan()
+
+    response = client.post(
+        "/bundles/create",
+        json={"items": [{"key": MOAI, "shape": "bogus"}]},
+        headers=bearer(contributor.token),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["created"] == 0 and body["failed"] == 1, body
+    assert body["results"][0]["status"] == "failed"
+    assert body["results"][0]["reason"] == "unknown shape"
+    assert project_ids(client, contributor) == [], "an unoffered shape writes nothing"

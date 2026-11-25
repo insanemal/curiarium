@@ -88,6 +88,7 @@ def create_bundles(
             name=item.name,
             name_only=item.name_only,
             exclude_groups=tuple(item.exclude_groups),
+            shape=item.shape,
         )
         for item in body.items
     ]
