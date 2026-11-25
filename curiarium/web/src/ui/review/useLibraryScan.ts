@@ -9,7 +9,11 @@ import { getLibraryScanStatus, startLibraryScan, type LibraryScanStatus } from "
 import type { MissingScanOutcome } from "../asset-grid/assetGridMeta";
 
 type Props = {
-  /** Whether the missing queue is open. Nothing is fetched on app load. */
+  /**
+   * The missing queue is open, OR the shell has already armed a scan from a
+   * surface outside the queue (the library header / a detection row). Nothing is
+   * fetched on app load and nothing polls while idle.
+   */
   enabled: boolean;
   onUnauthorized?: () => void;
   /**
@@ -57,10 +61,19 @@ export function scanOutcome(scan: LibraryScanStatus | null): MissingScanOutcome 
  * The storage scan as the Missing files queue needs it: what the last scan said,
  * whether one is walking right now, and the rescan action.
  *
- * The queue owns the hook, so it reads once per activation and then polls only
- * while a scan is running. That entry read is the point of this hook: the old
- * settings-owned version never fetched an initial status, so the missing-flag
- * set was `unknown` until somebody pressed Rescan.
+ * The SHELL owns the single instance now: one poller, one announcement, one
+ * `adopt` target shared by four write-gated mounts (the library header, the
+ * missing queue's panel, its empty state and a detection row). The entry read is
+ * still once per activation and the poll loop is still `enabled`-gated: that
+ * entry read is the point of this hook, because the old settings-owned version
+ * never fetched an initial status, so the missing-flag set was `unknown` until
+ * somebody pressed Rescan.
+ *
+ * Named consequence: the shell's arm flag is sticky, so once a scan has been
+ * started from a surface outside the queue the hook stays enabled and a later
+ * re-entry into the missing queue does not re-read the status. It keeps the
+ * session's last known status, which is fresher-or-equal anyway. Before that
+ * first shell use, the queue's re-entry re-read is unchanged.
  *
  * A scan the per-card Re-scan starts is invisible to this hook, so the grid
  * reports its statuses through `adopt`: the panel and the outcome follow that

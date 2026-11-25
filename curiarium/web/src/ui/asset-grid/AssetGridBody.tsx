@@ -1,4 +1,4 @@
-import { useMemo, type RefObject } from "react";
+import { useMemo, type ReactNode, type RefObject } from "react";
 
 import { type Asset, type Folder } from "../../lib/api";
 import { GRID_GAP_PX } from "../../lib/virtualGrid";
@@ -33,6 +33,8 @@ type AssetGridBodyProps = {
   missingOnly?: boolean;
   /** What the last scan said about the flag set, for the empty-state copy. */
   missingScan?: MissingScanOutcome;
+  /** The missing queue's empty-state action, supplied only to a writer. */
+  missingEmptyAction?: ReactNode;
   subfolders: Folder[];
   loading: boolean;
   /** Retryable first-load failure; null when the listing loaded or was never attempted. */
@@ -71,6 +73,7 @@ export default function AssetGridBody({
   scopeKind,
   missingOnly,
   missingScan,
+  missingEmptyAction,
   subfolders,
   loading,
   error,
@@ -161,6 +164,7 @@ export default function AssetGridBody({
           ) : (
             <p>Nothing is flagged as missing yet. A scan is what finds files that disappeared, and no completed scan is known for this session.</p>
           )}
+          {missingEmptyAction && <div className="mt-2">{missingEmptyAction}</div>}
         </div>
       )}
 

@@ -47,6 +47,7 @@ import { BACK_TO_MODE_LABEL, type ActiveView, type ReviewQueueKey } from "./view
 import BundleReviewView from "./review/BundleReviewView";
 import ImportsReviewView from "./review/ImportsReviewView";
 import MissingFilesReviewView from "./review/MissingFilesReviewView";
+import ScanStorageAction from "./review/ScanStorageAction";
 import TrashQueueView from "./review/TrashQueue";
 import { useBundleDetect } from "./review/useBundleDetect";
 import { useImportRuns } from "./review/useImportRuns";
@@ -198,6 +199,11 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
   // A review destination is `(review, queue)`; the mode-shaped views ignore the
   // queue. A URL/history model for either is a separate follow-up.
   const [activeQueue, setActiveQueue] = React.useState<ReviewQueueKey>("bundles");
+  // Sticky once the shell starts a scan from a surface outside the missing
+  // queue (the library header or a detection row). This is load-bearing: the
+  // poll loop is `enabled`-gated, so a header-started scan would never be polled
+  // and the status line would sit on "Scan in progress" forever.
+  const [scanArmed, setScanArmed] = React.useState(false);
   const [settings, setSettings] = React.useState<AppSettings>(() => loadSettings());
   const [confirmingLogout, setConfirmingLogout] = React.useState(false);
   // Scroll container for the asset grid's virtualization (see useVirtualRows).
@@ -365,16 +371,29 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
   }, []);
 
   // Declared after its callbacks: it registers them for the finish signal, and
-  // a hook argument list cannot read a not-yet-initialised `const`. `GET
-  // /library/scan` is READ, so a viewer may read the queue and the status; only
-  // the rescan button is WRITE and the panel hides it below editor. Entry
-  // fetches once, never on app load, and polls only while a scan is walking.
-  const missingReview = useLibraryScan({
-    enabled: canRead && reviewOpen && resolvedQueue === "missing",
+  // a hook argument list cannot read a not-yet-initialised `const`. The SHELL
+  // owns this single instance: one poller, one announcement and one `adopt`
+  // target shared by four write-gated mounts. `GET /library/scan` is READ, so a
+  // viewer may read the queue and the status; only the rescan button is WRITE
+  // and every mount hides it below editor. The entry read happens once per
+  // activation - opening the missing queue or arming a shell scan - never on app
+  // load, and the poll loop runs only while a scan is walking.
+  const libraryScan = useLibraryScan({
+    enabled: canRead && ((reviewOpen && resolvedQueue === "missing") || scanArmed),
     onUnauthorized: handleUnauthorized,
     onAssetsChanged: handleAssetsChanged,
     onFoldersChanged: handleFoldersChanged,
   });
+
+  // Held in a local so the callback depends on the hook's stable `run` rather
+  // than on a member expression of a fresh object each render.
+  const runLibraryScan = libraryScan.run;
+  const scanFromShell = React.useCallback(() => {
+    // Arming is sticky and happens BEFORE run(): the poll loop only exists while
+    // `enabled`, and the header/detail mounts are outside the missing queue.
+    setScanArmed(true);
+    void runLibraryScan();
+  }, [runLibraryScan]);
 
   // Whole-library counts for the sidebar's rows and the review badges: total,
   // root and flagged-missing. Deliberately unfiltered,
@@ -765,6 +784,14 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
               />
             )}
             <div className="flex flex-wrap items-center gap-3">
+              {activeView === "library" && canDelete && (
+                <ScanStorageAction
+                  state={libraryScan}
+                  canWrite={canDelete}
+                  surface="header"
+                  onScan={scanFromShell}
+                />
+              )}
               {/* Uploads always land in a files folder, so projects mode hides the bar. */}
               {activeView === "library" && mode === "files" && (
                 <UploadBar
@@ -883,6 +910,9 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                       <BundleReviewView
                         state={bundleReview}
                         canContribute={canContribute}
+                        scan={libraryScan}
+                        canScan={canDelete}
+                        onScan={scanFromShell}
                         onProjectsChanged={handleAssetsChanged}
                         onProjectImported={handleProjectImported}
                       />
@@ -899,7 +929,7 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                     )}
                     {resolvedQueue === "missing" && (
                       <MissingFilesReviewView
-                        state={missingReview}
+                        state={libraryScan}
                         canWrite={canDelete}
                         canContribute={canContribute}
                         canDelete={canDelete}

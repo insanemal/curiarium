@@ -911,6 +911,53 @@ describe("App missing queue roles (Mf-1tx3)", () => {
   });
 });
 
+describe("App missing queue empty-state scan action (Mf-7mio)", () => {
+  it("offers the scan inside the empty state for a writer", async () => {
+    getAssetCountsMock.mockResolvedValue({ total: 4, unfiled: 0, missing: 0 });
+    listAssetsMock.mockImplementation(async () => ({ items: [], hasMore: false }));
+
+    await renderApp();
+    await openQueue();
+    await queueReady();
+
+    const block = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>("[data-missing-empty]");
+      if (!found) throw new Error("the empty-state is not rendered");
+      return found;
+    });
+
+    // One action in the empty state, with the same wording as every other
+    // surface, and clicking it runs the queue's own scan.
+    const action = within(block).getByRole("button", { name: "Rescan storage folder" });
+    expect(block.querySelector('[data-scan-surface="empty"]')).toBeTruthy();
+    expect(within(block).getAllByRole("button", { name: "Rescan storage folder" })).toHaveLength(1);
+
+    fireEvent.click(action);
+    await waitFor(() => expect(startQueueScanMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows a viewer the empty-state copy and no scan button", async () => {
+    getMeMock.mockResolvedValue(me("viewer"));
+    getAssetCountsMock.mockResolvedValue({ total: 4, unfiled: 0, missing: 0 });
+    listAssetsMock.mockImplementation(async () => ({ items: [], hasMore: false }));
+
+    await renderApp();
+    await openQueue();
+    await queueReady();
+
+    const block = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>("[data-missing-empty]");
+      if (!found) throw new Error("the empty-state is not rendered");
+      return found;
+    });
+
+    expect(block.textContent).toMatch(/No missing files flagged/);
+    expect(within(block).queryByRole("button", { name: /rescan storage folder/i })).toBeNull();
+    expect(block.querySelector('[data-scan-surface="empty"]')).toBeNull();
+    expect(startQueueScanMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("App missing queue virtualisation (Mf-d8vc)", () => {
   it("reaches the final rows of a 47-asset missing queue", async () => {
     const missingAssets: Asset[] = Array.from({ length: 47 }, (_, index) => ({

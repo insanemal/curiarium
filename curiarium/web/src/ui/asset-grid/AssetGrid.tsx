@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { type Asset, type BatchFailure, type BatchMetaChange, type LibraryScanStatus, type Project, UnauthorizedError, deleteAsset, removeProjectAssets } from "../../lib/api";
 import { AssetNotFoundError } from "../../lib/api/assets";
@@ -50,6 +50,8 @@ type Props = {
    * empty-state copy is chosen from it.
    */
   missingScan?: MissingScanOutcome;
+  /** Rendered inside the missing-queue empty state, after its explanation. */
+  missingEmptyAction?: ReactNode;
   /** When set, the grid shows this project's assets and hides all folder chrome. */
   projectId?: string | null;
   /** Display-only context for project mode (the caller renders the heading). */
@@ -106,6 +108,7 @@ export default function AssetGrid({
   unfiled = false,
   missingOnly = false,
   missingScan,
+  missingEmptyAction,
   projectId,
   projectName,
   foldersVersion = 0,
@@ -700,6 +703,7 @@ export default function AssetGrid({
         scopeKind={scope.kind}
         missingOnly={missingOnly}
         missingScan={missingScan}
+        missingEmptyAction={missingEmptyAction}
         collapsedGroups={collapsedGroups}
         expandedGroups={expandedGroups}
         toggleGroup={toggleGroup}

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 // The queue renders the REAL AssetGrid, so this barrel mock has to carry every
 // name that grid's import graph reaches (AssetGrid, useAssetActions,
@@ -272,13 +272,19 @@ describe("MissingFilesReviewView write permission", () => {
   // The rescan is `POST /library/scan` (WRITE); the queue itself is a READ
   // surface, so a viewer reads it and only loses the button.
   it("offers the rescan only to a writer", async () => {
-    const { rerender } = render(<MissingFilesReviewView {...viewProps({ canWrite: false })} />);
+    const { container, rerender } = render(
+      <MissingFilesReviewView {...viewProps({ canWrite: false })} />,
+    );
 
     expect(screen.queryByRole("button", { name: "Rescan storage folder" })).toBeNull();
     expect(screen.getByText("Files added from outside Curiarium")).toBeTruthy();
 
     rerender(<MissingFilesReviewView {...viewProps({ canWrite: true })} />);
 
-    expect(screen.getByRole("button", { name: "Rescan storage folder" })).toBeTruthy();
+    // The empty state also carries an action now, so scope this to the panel:
+    // the assertion is that the panel owns its own writer-gated control.
+    const panel = container.querySelector<HTMLElement>("[data-library-scan]");
+    if (!panel) throw new Error("the scan panel is not rendered");
+    expect(within(panel).getByRole("button", { name: "Rescan storage folder" })).toBeTruthy();
   });
 });

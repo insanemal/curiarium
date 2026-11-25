@@ -266,6 +266,18 @@ export function bulkEnrichTitle(enrichable: number, selected: number): string | 
 /** The one blocked reason that names an extraction instead of a create. */
 export const BLOCKED_REASON_ARCHIVE_ONLY = "archive_only";
 
+/** The blocked reason that says the row's folder is not registered on disk. */
+export const BLOCKED_REASON_UNRESOLVED = "unresolved_directory";
+
+/**
+ * The row's folder is not registered on disk, so the one action that can change
+ * the verdict is a storage scan. Pinned by name: a fourth blocked reason must
+ * not silently inherit this affordance.
+ */
+export function needsStorageScan(row: BundleDetectItem): boolean {
+  return row.blocked_reason === BLOCKED_REASON_UNRESOLVED;
+}
+
 /** The one blocked reason that is a claim about what a scan registered. */
 const NOT_SCANNED = "not_scanned";
 

@@ -5,6 +5,7 @@ import AssetGrid from "../asset-grid/AssetGrid";
 import type { MissingScanOutcome } from "../asset-grid/assetGridMeta";
 import LibraryScanPanel from "./LibraryScanPanel";
 import ReviewQueueView from "./ReviewQueueView";
+import ScanStorageAction from "./ScanStorageAction";
 import { describeQueueCount } from "./useReviewCounts";
 import { scanOutcome, type LibraryScanState } from "./useLibraryScan";
 
@@ -91,6 +92,16 @@ export default function MissingFilesReviewView({
         canContribute={canContribute}
         canDelete={canDelete}
         assetsVersion={assetsVersion}
+        missingEmptyAction={
+          canWrite ? (
+            <ScanStorageAction
+              state={state}
+              canWrite={canWrite}
+              surface="empty"
+              onScan={() => void state.run()}
+            />
+          ) : undefined
+        }
         onAssetsFiled={onAssetsFiled}
         onScanStatus={state.adopt}
         onUnauthorized={onUnauthorized}

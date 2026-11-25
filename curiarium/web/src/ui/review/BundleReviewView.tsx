@@ -58,6 +58,7 @@ import {
   isCreatable,
   matchesFilter,
   matchesVisibility,
+  needsStorageScan,
   newPartsLine,
   rowBucket,
   rowStateChip,
@@ -93,7 +94,9 @@ import {
 } from "./extractAndCreate";
 import ReviewQueueView from "./ReviewQueueView";
 import ScanFidelityNotice from "./ScanFidelityNotice";
+import ScanStorageAction from "./ScanStorageAction";
 import type { BundleDetectState } from "./useBundleDetect";
+import type { LibraryScanState } from "./useLibraryScan";
 import { bundleBadgeCount, describeQueueCount, formatReviewCount } from "./useReviewCounts";
 
 const PRIMARY_BUTTON = "text-xs px-2.5 py-1.5 rounded-md bg-accent disabled:opacity-60";
@@ -259,6 +262,15 @@ type Props = {
   /** Only reaches the derived cover's renderer, which reads its colours from the
    *  `--mv-*` variables; App does not thread it yet, so light is the default. */
   theme?: ResolvedTheme;
+  /** The shell's single storage-scan instance, so a detection row can start and
+   *  follow a scan without a second poller. */
+  scan: LibraryScanState;
+  /** The WRITE rank (`canDelete` in App), deliberately NOT `canContribute`:
+   *  `POST /library/scan` is WRITE. */
+  canScan: boolean;
+  /** Starts the shell's scan. The report is not auto-refreshed after a scan
+   *  (the queue's own Refresh stays) - a named boundary, not an omission. */
+  onScan: () => void;
 };
 
 /**
@@ -413,6 +425,9 @@ function DuplicateArchivesPanel({ report }: { report: BundleReport }): React.Rea
 export default function BundleReviewView({
   state,
   canContribute,
+  scan,
+  canScan,
+  onScan,
   onProjectsChanged,
   onProjectImported,
   theme = "light",
@@ -1558,6 +1573,18 @@ export default function BundleReviewView({
                     <span data-bundle-new-parts="true">{activeNewPartsLine}</span>
                   )}
                 </div>
+                {/* An unregistered folder is the one verdict a scan can change,
+                    so this row's action lives in the detail pane: the option in
+                    the list must keep NO focusable control, and the listbox
+                    keeps exactly one tab stop - like the import-shape chooser. */}
+                {canScan && needsStorageScan(activeRow) && (
+                  <ScanStorageAction
+                    state={scan}
+                    canWrite={canScan}
+                    surface="detail"
+                    onScan={onScan}
+                  />
+                )}
                 {/* What this row may be imported as, when there is a choice to
                     make. One chooser, in the detail pane: the option in the list
                     must stay free of focusable controls, and the choice belongs

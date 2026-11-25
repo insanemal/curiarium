@@ -1,5 +1,5 @@
-import { type LibraryScanStatus } from "../../lib/api/settings";
 import LibraryScanFailures from "./LibraryScanFailures";
+import ScanStorageAction from "./ScanStorageAction";
 import type { LibraryScanState } from "./useLibraryScan";
 
 type Props = {
@@ -12,19 +12,15 @@ type Props = {
   canWrite: boolean;
 };
 
-/** What the last scan reported, in one line; the panel never invents a number. */
-function scanLine(scan: LibraryScanStatus): string {
-  if (scan.running) return "Scan in progress";
-  return `Last scan: ${scan.registered} new, ${scan.known} known, ${scan.missing} missing, ${scan.failed} failed`;
-}
-
 /**
  * The storage rescan, moved out of Settings into the Missing files queue. It is
  * work on the library, not configuration, and it is the only way the operator
- * can refresh the flag set the queue lists.
+ * can refresh the flag set the queue lists. The action row itself is shared with
+ * the header, the empty state and a detection row, so the wording lives in
+ * `ScanStorageAction`.
  */
 export default function LibraryScanPanel({ state, canWrite }: Props) {
-  const { scan, busy, error, run } = state;
+  const { scan, run } = state;
 
   return (
     <div className="rounded-lg border border-panel bg-panel-soft p-4 flex flex-col gap-3" data-library-scan>
@@ -36,19 +32,7 @@ export default function LibraryScanPanel({ state, canWrite }: Props) {
           Files that have disappeared are counted and flagged in the grid, but never removed from the library.
         </p>
       </div>
-      <div className="flex items-center gap-3 flex-wrap">
-        {canWrite && (
-          <button
-            className="text-sm px-3 py-2 rounded-md border border-panel-strong disabled:opacity-60"
-            disabled={busy || Boolean(scan?.running)}
-            onClick={() => void run()}
-          >
-            {scan?.running ? "Scanning..." : "Rescan storage folder"}
-          </button>
-        )}
-        {scan && <span className="text-xs opacity-80">{scanLine(scan)}</span>}
-        {error && <span className="text-xs text-red-400">{error}</span>}
-      </div>
+      <ScanStorageAction state={state} canWrite={canWrite} surface="panel" onScan={() => void run()} />
       {scan && <LibraryScanFailures failed={scan.failed} errors={scan.errors} />}
     </div>
   );

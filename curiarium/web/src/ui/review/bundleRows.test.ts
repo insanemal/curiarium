@@ -11,6 +11,7 @@ import {
   ARCHIVE_ONLY_FOLDER_LABEL,
   BLOCKED_REASON_LABELS,
   BLOCKED_REASON_ARCHIVE_ONLY,
+  BLOCKED_REASON_UNRESOLVED,
   EXTRACT_AND_CREATE_HINT,
   EXTRACT_AND_CREATE_LABEL,
   EXTRACT_AND_CREATE_ROW_TITLE,
@@ -53,6 +54,7 @@ import {
   matchesVisibility,
   needsDecision,
   needsEnrichment,
+  needsStorageScan,
   newPartsLine,
   noPayloadDoor,
   payloadOnDisk,
@@ -2322,5 +2324,33 @@ describe("enrichment is never the sole live action on an on-disk row", () => {
     expect(isCreatable(withPage)).toBe(true);
     expect(extractPathFor(withPage)).toBeNull();
     expect(noPayloadDoor(withPage)).toBe(false);
+  });
+});
+
+describe("needsStorageScan", () => {
+  // Pinned by name: a scan is the one action that can change an unregistered
+  // folder's verdict, and no other blocked reason may inherit the affordance.
+  it("asks for a scan only for an unresolved directory", () => {
+    expect(
+      needsStorageScan(
+        makeBundle({ status: "blocked", blocked_reason: BLOCKED_REASON_UNRESOLVED }),
+      ),
+    ).toBe(true);
+    expect(BLOCKED_REASON_UNRESOLVED).toBe("unresolved_directory");
+  });
+
+  it("refuses every other reason, including a fourth one it does not know", () => {
+    expect(
+      needsStorageScan(
+        makeBundle({ status: "blocked", blocked_reason: BLOCKED_REASON_ARCHIVE_ONLY }),
+      ),
+    ).toBe(false);
+    expect(
+      needsStorageScan(makeBundle({ status: "blocked", blocked_reason: "not_scanned" })),
+    ).toBe(false);
+    expect(needsStorageScan(makeBundle({ status: "ready", blocked_reason: null }))).toBe(false);
+    expect(
+      needsStorageScan(makeBundle({ status: "blocked", blocked_reason: "future-reason" })),
+    ).toBe(false);
   });
 });

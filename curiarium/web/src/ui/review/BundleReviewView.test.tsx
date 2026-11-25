@@ -44,6 +44,7 @@ vi.mock("../ModelViewer", () => ({
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
 import { createProjectFromExtract, type ArchiveProjectResult } from "../../lib/api/imports";
 import type { Project } from "../../lib/api/projects";
+import type { LibraryScanStatus } from "../../lib/api/settings";
 import {
   ENRICH_MAX_KEYS,
   type BundleCreateItemResult,
@@ -69,6 +70,7 @@ import {
   needsDecision,
 } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
+import type { LibraryScanState } from "./useLibraryScan";
 
 const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
 const extractArchiveMock = vi.mocked(extractArchive);
@@ -569,8 +571,48 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
   };
 }
 
-function renderView(state: BundleDetectState, canContribute = true): RenderResult {
-  return render(<BundleReviewView state={state} canContribute={canContribute} />);
+function renderView(
+  state: BundleDetectState,
+  canContribute = true,
+  options: { canScan?: boolean; onScan?: () => void } = {},
+): RenderResult {
+  return render(
+    <BundleReviewView
+      state={state}
+      canContribute={canContribute}
+      scan={makeScanState()}
+      canScan={options.canScan ?? false}
+      onScan={options.onScan ?? vi.fn()}
+    />,
+  );
+}
+
+/** A sanitised scan state for the detail-pane action; no test here reads it. */
+function makeScanState(): LibraryScanState {
+  const scan: LibraryScanStatus = {
+    running: false,
+    started_at: 1_700_000_000,
+    finished_at: 1_700_000_010,
+    registered: 3,
+    known: 1,
+    ignored: 0,
+    missing: 0,
+    failed: 0,
+    errors: [],
+  };
+  return {
+    scan,
+    busy: false,
+    error: null,
+    loaded: true,
+    run: vi.fn(async () => {}),
+    adopt: vi.fn(),
+  };
+}
+
+/** The scan props a direct render needs; no writer, so no action renders. */
+function scanProps(): { scan: LibraryScanState; canScan: boolean; onScan: () => void } {
+  return { scan: makeScanState(), canScan: false, onScan: vi.fn() };
 }
 
 function listbox(): HTMLElement {
@@ -647,6 +689,7 @@ function VisibilityHarness({ initial }: { initial: BundleDetectState }) {
   const [showCreated, setShowCreated] = React.useState(initial.showCreated);
   return (
     <BundleReviewView
+      {...scanProps()}
       state={{
         ...initial,
         showDismissed,
@@ -780,6 +823,7 @@ describe("BundleReviewView states", () => {
   it("counts stale dismissals in the singular and the plural", () => {
     const { unmount } = render(
       <BundleReviewView
+        {...scanProps()}
         state={makeState({ report: makeReport([moai], { stale_dismissals: ["Gone"] }) })}
         canContribute
       />,
@@ -2426,7 +2470,7 @@ describe("BundleReviewView archive extraction", () => {
           return "settled";
         }),
       });
-      return <BundleReviewView state={state} canContribute />;
+      return <BundleReviewView state={state} canContribute {...scanProps()} />;
     }
     render(<RefetchHarness />);
 
@@ -2479,6 +2523,7 @@ describe("BundleReviewView archive extraction", () => {
     const view = render(
       <>
         <BundleReviewView
+          {...scanProps()}
           state={makeState({ report: makeReport([alphaZip, betaZip]) })}
           canContribute
         />
@@ -2515,7 +2560,7 @@ describe("BundleReviewView archive extraction", () => {
     // left of that press, and it must not go away with the row.
     view.rerender(
       <>
-        <BundleReviewView state={makeState({ report: makeReport([alphaZip]) })} canContribute />
+        <BundleReviewView state={makeState({ report: makeReport([alphaZip]) })} canContribute {...scanProps()} />
         <Toaster />
       </>,
     );
@@ -2578,7 +2623,7 @@ describe("BundleReviewView keyboard and focus", () => {
 
   it("moves focus to the row that replaces a vanished one on a programmatic refetch", () => {
     const { rerender } = render(
-      <BundleReviewView state={makeState({ report: makeReport([moai, cableClip]) })} canContribute />,
+      <BundleReviewView state={makeState({ report: makeReport([moai, cableClip]) })} canContribute {...scanProps()} />,
     );
 
     rowElement("Moai").focus();
@@ -2589,6 +2634,7 @@ describe("BundleReviewView keyboard and focus", () => {
     // operator's focus - it is the case where the row vanishes without one.
     rerender(
       <BundleReviewView
+        {...scanProps()}
         state={makeState({ report: makeReport([cableClip, legacyVase]) })}
         canContribute
       />,
@@ -2608,7 +2654,7 @@ describe("BundleReviewView keyboard and focus", () => {
           setBundles(bundles.filter(row => !keys.includes(row.key)));
         }),
       });
-      return <BundleReviewView state={state} canContribute />;
+      return <BundleReviewView state={state} canContribute {...scanProps()} />;
     }
     render(<RefetchHarness />);
 
@@ -2631,7 +2677,7 @@ describe("BundleReviewView keyboard and focus", () => {
           return "settled";
         }),
       });
-      return <BundleReviewView state={state} canContribute />;
+      return <BundleReviewView state={state} canContribute {...scanProps()} />;
     }
     render(<EmptyingHarness />);
 
@@ -2661,7 +2707,7 @@ describe("BundleReviewView keyboard and focus", () => {
           return "settled";
         }),
       });
-      return <BundleReviewView state={state} canContribute />;
+      return <BundleReviewView state={state} canContribute {...scanProps()} />;
     }
     render(<RefetchHarness />);
 
@@ -3023,7 +3069,7 @@ describe("BundleReviewView covers", () => {
       thumb_url: "/thumb/asset-7.jpg?v=3",
     });
     const { container } = render(
-      <BundleReviewView state={makeState({ report: makeReport([row]) })} canContribute />,
+      <BundleReviewView state={makeState({ report: makeReport([row]) })} canContribute {...scanProps()} />,
     );
 
     const images = Array.from(container.querySelectorAll("img"));
@@ -3069,7 +3115,7 @@ describe("BundleReviewView covers", () => {
       thumb_url: null,
     });
     const { container } = render(
-      <BundleReviewView state={makeState({ report: makeReport([row]) })} canContribute />,
+      <BundleReviewView state={makeState({ report: makeReport([row]) })} canContribute {...scanProps()} />,
     );
 
     expect(container.querySelector("img")).toBeNull();
@@ -3413,6 +3459,7 @@ describe("BundleReviewView extract and create", () => {
     // leaves a sentence behind even when the row it was about is gone.
     view.rerender(
       <BundleReviewView
+        {...scanProps()}
         state={makeState({
           report: makeReport([
             moai,
@@ -3906,6 +3953,7 @@ describe("BundleReviewView project list hand-off", () => {
     const state = makeState(report ? { report, ...overrides } : overrides);
     render(
       <BundleReviewView
+        {...scanProps()}
         state={state}
         canContribute
         onProjectsChanged={props.onProjectsChanged}
@@ -4282,6 +4330,7 @@ describe("BundleReviewView bulk extract and create", () => {
     const state = makeState({ report: makeReport([alphaZip, betaZip]) });
     render(
       <BundleReviewView
+        {...scanProps()}
         state={state}
         canContribute
         onProjectsChanged={onProjectsChanged}
@@ -4324,6 +4373,7 @@ describe("BundleReviewView bulk extract and create", () => {
     const state = makeState({ report: makeReport([alphaZip]) });
     render(
       <BundleReviewView
+        {...scanProps()}
         state={state}
         canContribute
         onProjectsChanged={onProjectsChanged}
@@ -4463,6 +4513,7 @@ describe("BundleReviewView bulk extract and create", () => {
     const state = makeState({ report: makeReport([alphaZip]), waitAfterExtract });
     render(
       <BundleReviewView
+        {...scanProps()}
         state={state}
         canContribute
         onProjectImported={onProjectImported}
@@ -4497,5 +4548,56 @@ describe("BundleReviewView bulk extract and create", () => {
     // re-walked, exactly as the one-archive bulk landing pins.
     expect(onProjectImported).toHaveBeenCalledWith("p-alpha");
     expect(state.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("BundleReviewView storage scan on an unresolved row", () => {
+  // The row's folder is not registered, so a scan is the one action that can
+  // change the verdict. The control lives in the detail pane: the listbox keeps
+  // exactly one tab stop and no option gains a focusable control.
+  it("offers the scan in the detail pane for an unregistered folder", () => {
+    const onScan = vi.fn();
+    renderView(makeState({ report: makeReport([legacyVase]) }), true, {
+      canScan: true,
+      onScan,
+    });
+
+    fireEvent.click(rowElement("Legacy_vase"));
+
+    const action = within(detail()).getByRole("button", { name: "Rescan storage folder" });
+    expect(detail().querySelector('[data-scan-surface="detail"]')).toBeTruthy();
+    expect(within(detail()).getAllByRole("button", { name: "Rescan storage folder" })).toHaveLength(
+      1,
+    );
+
+    fireEvent.click(action);
+    expect(onScan).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the list row free of controls and the listbox at one tab stop", () => {
+    renderView(makeState({ report: makeReport([legacyVase]) }), true, { canScan: true });
+
+    const rows = Array.from(listbox().querySelectorAll("[data-bundle-row]"));
+    expect(rows).toHaveLength(1);
+    for (const row of rows) {
+      expect(row.querySelectorAll("button, input, select, textarea, a[href]")).toHaveLength(0);
+    }
+
+    // The one-tab-stop invariant this file pins everywhere: a single roving
+    // option carries tabindex 0.
+    const options = Array.from(listbox().querySelectorAll("[role='option']"));
+    expect(options.filter(option => option.getAttribute("tabindex") === "0")).toHaveLength(1);
+
+    // The action is in the pane, not absent.
+    expect(within(detail()).getByRole("button", { name: "Rescan storage folder" })).toBeTruthy();
+  });
+
+  it("shows a contributor no scan action, because the scan is WRITE", () => {
+    renderView(makeState({ report: makeReport([legacyVase]) }), true, { canScan: false });
+
+    fireEvent.click(rowElement("Legacy_vase"));
+
+    expect(within(detail()).queryByRole("button", { name: "Rescan storage folder" })).toBeNull();
+    expect(detail().querySelector('[data-scan-surface="detail"]')).toBeNull();
   });
 });
