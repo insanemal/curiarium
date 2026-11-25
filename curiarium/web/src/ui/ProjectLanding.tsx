@@ -44,7 +44,13 @@ import { saveResponseToDisk } from "../lib/download";
 import { getProjectBundleDrift, type ProjectBundleDrift } from "../lib/api/projects";
 import { primeGrants } from "../lib/fileGrants";
 import { formatBytes, formatDate } from "../lib/format";
-import { is3mfAsset, isImageAsset, isModelAsset, typeLabelFor } from "../lib/assetKinds";
+import {
+  classifyMemberRole,
+  is3mfAsset,
+  isImageAsset,
+  isModelAsset,
+  typeLabelFor,
+} from "../lib/assetKinds";
 import { sourceHostLabel } from "../lib/provenance";
 import {
   slicerLabelFor,
@@ -161,6 +167,13 @@ function metadataEntries(metadata: Record<string, unknown>): MetadataEntry[] {
     });
 }
 
+/** The per-kind line's nouns: the same singular/plural rule the review queue's
+ *  `countLabel` uses. Kept local on purpose - this page must not depend on the
+ *  review queue. */
+function kindCount(value: number, one: string, many: string): string {
+  return `${value} ${value === 1 ? one : many}`;
+}
+
 const FOCUS_VISIBLE =
   "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2";
 const BUTTON_PRIMARY = `inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-2 text-sm font-semibold transition-colors hover:bg-accent-strong disabled:opacity-60 ${FOCUS_VISIBLE}`;
@@ -189,6 +202,23 @@ function GalleryLink({ rel, children }: { rel: string; children: ReactNode }): R
       className={`block rounded-md ${FOCUS_VISIBLE}`}
     >
       {children}
+    </a>
+  );
+}
+
+/** A document's link to its file. Same live-grant keeper as `GalleryLink`: an
+ *  `<a href>` holds the signed URL string itself, so a re-mint must repaint it. */
+function DocumentLink({ asset }: { asset: Asset }): ReactElement {
+  useLiveFileGrants([asset.url]);
+  return (
+    <a
+      href={fileUrl(asset.url)}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`inline-flex min-w-0 items-center gap-2 text-sm text-accent hover:underline ${FOCUS_VISIBLE}`}
+    >
+      <span className="truncate">{asset.filename}</span>
+      <span className="shrink-0 text-muted">{formatBytes(asset.size)}</span>
     </a>
   );
 }
@@ -334,6 +364,42 @@ export default function ProjectLanding({
   // --- Derived hero data ---------------------------------------------------
 
   const imageMembers = useMemo(() => members.filter(isImageAsset), [members]);
+
+  // The backend's TEXT role, through the same classifier as the count below -
+  // `isDocumentAsset` would answer the same today, but one reader is what keeps
+  // the list and the count from ever disagreeing.
+  const documentMembers = useMemo(
+    () => members.filter(member => classifyMemberRole(member) === "text"),
+    [members],
+  );
+
+  // The per-kind line is only honest when the loaded member window IS the whole
+  // project: the grid pages independently, so a partial window would report its
+  // first page's mix as the project's. Roles come from the backend's own
+  // classifier (`classifyMemberRole`, extension-only), so the line agrees with
+  // the rows the same project was created from. An `archive` member folds into
+  // the fourth part: the line has four parts, and an archive is a supporting
+  // file, not a model, image or document.
+  const kindMixLine = useMemo(() => {
+    if (members.length !== project.asset_count) return null;
+    let models = 0;
+    let images = 0;
+    let documents = 0;
+    let other = 0;
+    for (const member of members) {
+      const role = classifyMemberRole(member);
+      if (role === "model") models += 1;
+      else if (role === "image") images += 1;
+      else if (role === "text") documents += 1;
+      else other += 1;
+    }
+    return [
+      kindCount(models, "model", "models"),
+      kindCount(images, "image", "images"),
+      kindCount(documents, "document", "documents"),
+      kindCount(other, "other file", "other files"),
+    ].join(", ");
+  }, [members, project.asset_count]);
 
   // Gallery order: the cover first, then the API's order (the sort only
   // compares the cover flag, so it is stable for everything else).
@@ -1117,6 +1183,11 @@ export default function ProjectLanding({
             <span className="text-xs text-muted">
               {project.asset_count} file{project.asset_count === 1 ? "" : "s"} in this project
             </span>
+            {kindMixLine !== null && (
+              <span className="text-xs text-muted" data-testid="project-kind-mix">
+                {kindMixLine}
+              </span>
+            )}
             {canContribute && <AttachFilesControl attacher={attacher} />}
           </div>
         </div>
@@ -1145,6 +1216,25 @@ export default function ProjectLanding({
           />
         </div>
       </section>
+
+      {/* Documents are the TEXT-role members. Deliberately after Files and
+          deliberately NOT a drop target: they are readable here, not attachable.
+          A project with no documents renders no node at all, so no layout and no
+          existing region/heading lookup is disturbed. */}
+      {documentMembers.length > 0 && (
+        <section aria-labelledby="project-documents-heading" className="min-w-0">
+          <h2 id="project-documents-heading" className={EYEBROW}>
+            Documents
+          </h2>
+          <ul className="mt-2 space-y-1">
+            {documentMembers.map(member => (
+              <li key={member.id} className="min-w-0">
+                <DocumentLink asset={member} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {confirm && (
         <ConfirmDialog

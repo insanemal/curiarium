@@ -615,12 +615,25 @@ export function countLabel(value: number, one: string, many: string): string {
   return `${value} ${value === 1 ? one : many}`;
 }
 
+/** The archive part of the counts line. An absent `archive_count` predates the
+ *  field, so the number is the one formatter's en dash - never a zero - while
+ *  the noun still says what role the count belongs to. */
+function archiveCountLabel(value: number | undefined): string {
+  if (typeof value === "number") return countLabel(value, "archive", "archives");
+  return `${formatReviewCount(null)} archives`;
+}
+
 export function countsLine(row: BundleDetectItem): string {
+  // Five roles in the order the detector walks them: the text role is a
+  // DOCUMENT to a human reader, and the archive role is the zip the folder
+  // holds. Every part is always present; only the archive's number can be a
+  // dash, when the payload never carried `archive_count`.
   const parts = [
     countLabel(row.model_count, "model", "models"),
     countLabel(row.image_count, "image", "images"),
-    countLabel(row.text_count, "text file", "text files"),
+    countLabel(row.text_count, "document", "documents"),
     countLabel(row.other_count, "other file", "other files"),
+    archiveCountLabel(row.archive_count),
   ];
   return `${parts.join(", ")} - ${countLabel(row.assets_total, "registered asset", "registered assets")}`;
 }

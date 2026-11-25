@@ -251,22 +251,31 @@ def _member_artifact(
     row: Optional[Mapping],
     result: Optional[Mapping],
 ) -> None:
-    """Write the Mf-wsdo measurement artifact, when this run asked for one.
+    """Write the member-set measurement artifact, when this run asked for one.
 
     Everything is read off the database and the disk AFTER the create, in the same
-    shape the witnesses assert on: ``members`` is every member's ``storage_path``
-    with its suffix, ``excluded`` names every registered-but-not-a-member file
-    rather than counting them, ``cover_storage_path`` names the project's own cover
+    shape the witnesses assert on: ``members`` is every member's ``storage_path`` with
+    its suffix AND its ROLE (``bundle_detect.classify_entry`` over the bundle-relative
+    path, the one classifier), ``counts`` carries the per-role tally beside the
+    registered/member totals, ``cover_storage_path`` names the project's own cover
     file (an asset id cannot be read by a human diffing two artifacts), and
-    ``cover_is_member`` is the boolean the ticket turns from ``False`` to ``True``.
-    The ``build`` block is the code identity, so the BEFORE and the AFTER cannot be
+    ``cover_is_member`` is the boolean Mf-wsdo turned from ``False`` to ``True``. The
+    ``build`` block is the code identity, so the BEFORE and the AFTER cannot be
     confused for one another.
+
+    ``excluded`` is kept as a key and is ALWAYS empty since Mf-7oow: a bundle project
+    holds every registered file under its key, so "registered but not a member" is a
+    state the create can no longer produce. It is written out anyway so an older
+    artifact and a newer one diff into the same shape rather than into a missing key.
     """
     destination = os.environ.get(MEMBER_ARTIFACT_ENV, "").strip()
     if not destination:
         return
     with Session(engine) as session:
-        registered = {asset.path for asset in bundle_service.registered_assets(session, key)}
+        registered_rows = {
+            asset.path: asset for asset in bundle_service.registered_assets(session, key)
+        }
+        registered = set(registered_rows)
         member_ids: set = set()
         cover_asset_id: Optional[str] = None
         cover_storage_path: Optional[str] = None
@@ -289,6 +298,22 @@ def _member_artifact(
                 cover = session.get(Asset, cover_asset_id)
                 cover_storage_path = cover.storage_path if cover is not None else None
     entries = sorted(registered | member_paths)
+
+    def role_of(path: str) -> str:
+        """The one classifier's answer for one member, over its BUNDLE-relative path."""
+        asset = registered_rows.get(path)
+        return bundle_detect.classify_entry(path[len(key) + 1 :], asset.size if asset is not None else 0)
+
+    role_tally = {
+        role: sum(1 for path in member_paths if role_of(path) == role)
+        for role in (
+            bundle_detect.MODEL,
+            bundle_detect.IMAGE,
+            bundle_detect.TEXT,
+            bundle_detect.OTHER,
+            bundle_detect.ARCHIVE,
+        )
+    }
     payload = {
         "artifact": "bundle-members",
         "ticket": "Mf-wsdo",
@@ -304,7 +329,12 @@ def _member_artifact(
         "library_state": _library_state(storage),
         "row": {name: (row or {}).get(name) for name in ARTIFACT_ROW_KEYS},
         "members": [
-            {"storage_path": path, "suffix": bundle_service._suffix(path), "member": True}
+            {
+                "storage_path": path,
+                "suffix": bundle_service._suffix(path),
+                "role": role_of(path),
+                "member": True,
+            }
             for path in entries
             if path in member_paths
         ],
@@ -316,7 +346,8 @@ def _member_artifact(
         "counts": {
             "registered": len(registered),
             "members": len(member_paths),
-            "excluded": len(registered - member_paths),
+            "excluded": 0,
+            "roles": role_tally,
         },
         "result": dict(result) if result is not None else None,
         "cover_asset_id": cover_asset_id,
@@ -518,12 +549,12 @@ def test_the_moai_bundle_becomes_one_project(client: TestClient, isolated_storag
     assert project["licence_url"] == "https://creativecommons.org/licenses/by-nc/4.0/"
     assert project["source_url"] == THING_URL
     assert project["origin"] == "imported"
-    # Mf-wsdo: a created project holds the ATTACH table - the three models a print
-    # needs PLUS the five previews the landing page can render - while the row above
-    # still counts ten files (three models, five images, two documents): the member
-    # set and the fact counts are two questions, and the documents answer neither.
-    assert len(project_asset_ids(client, headers, project_id)) == 8
-    assert created["results"][0]["assets_added"] == 8
+    # Mf-7oow: a created project holds EVERY registered file under its key - the
+    # three models, the five previews AND the two documents - and the row above counts
+    # the same ten. The two numbers agreeing is the point: membership is one rule and
+    # the role each file plays is the detector's own classifier.
+    assert len(project_asset_ids(client, headers, project_id)) == 10
+    assert created["results"][0]["assets_added"] == 10
 
 
 def test_the_twin_zip_is_provenance_only(client: TestClient, isolated_storage: Path) -> None:
@@ -552,9 +583,10 @@ def test_the_twin_zip_is_provenance_only(client: TestClient, isolated_storage: P
 
     assert created["created"] == 1
     project_id = created["results"][0]["project_id"]
-    assert len(project_asset_ids(client, headers, project_id)) == 8, (
-        "the archive attaches nothing - eight is the DIRECTORY's three models plus its "
-        "five previews (Mf-wsdo), not the twin zip's copies, which are never members"
+    assert len(project_asset_ids(client, headers, project_id)) == 10, (
+        "the archive attaches nothing - ten is the DIRECTORY's own ten registered files "
+        "(three models, five previews, two documents), not the twin zip's copies, which "
+        "are never members"
     )
 
     # The same stem, different content: surfaced as unverified, still one project.
@@ -618,9 +650,9 @@ def test_an_edited_project_is_never_overwritten(client: TestClient, isolated_sto
     with Session(engine) as session:
         hand_added = [
             session.exec(select(Asset).where(Asset.storage_path == f"{MOAI}/images/0.jpg")).one().id,
-            # The one hand-add the ATTACH table can never produce: `POST
-            # /project/{id}/assets` is not kind-filtered, so a text member is legal by
-            # hand, and `.txt` is the suffix a bundle create will never attach.
+            # Both hand-adds name files the create attaches itself since Mf-7oow (a
+            # bundle project holds every registered file under its key), so this call
+            # is a no-op over existing members - which is exactly the point below.
             session.exec(select(Asset).where(Asset.storage_path == f"{MOAI}/README.txt")).one().id,
         ]
     assert client.post(f"/project/{project_id}/assets", json={"asset_ids": hand_added}, headers=headers).status_code == 200
@@ -638,14 +670,12 @@ def test_an_edited_project_is_never_overwritten(client: TestClient, isolated_sto
     projects = project_listing(client, headers)
     assert len(projects) == 1
     assert projects[project_id]["name"] == "Edited Moai"
-    assert member_count(project_id) == 9, (
-        "nine is the eight the create attaches (three models plus five previews, "
-        "Mf-wsdo) PLUS the text member a human added by hand, so the number witnesses "
-        "what the pre-ticket `== 4` used to witness: a member a human put there survives "
-        "the skip. `images/0.jpg` is hand-added here too and is a SKIP now - the create "
-        "attaches it itself since Mf-wsdo - which is exactly why the README is the half "
-        "that bites. Re-clicking neither adds nor removes what a human put there, and a "
-        "text file is the file a bundle create will never attach"
+    assert member_count(project_id) == 10, (
+        "ten is every file the scan registered under the key, because a bundle create "
+        "holds every one of them (Mf-7oow) - the hand-adds below are all members "
+        "already, so the number witnesses that re-clicking neither adds nor removes "
+        "what a human put there, and that a text file is a member of a bundle project "
+        "now (it was the file a create used to skip)"
     )
 
 
@@ -871,25 +901,39 @@ def test_a_bundle_attaches_only_its_own_files(client: TestClient, isolated_stora
     assert parent["confidence"] == "high"
     assert parent["status"] == "ready", "the parent owns a model of its own"
     with Session(engine) as session:
-        loose = {
+        own = {
             asset.storage_path: asset.id
             for asset in session.exec(
                 select(Asset).where(
-                    Asset.storage_path.in_(["Unsorted/loose.stl", "Unsorted/loose.jpg"])
+                    Asset.storage_path.in_(
+                        [
+                            "Unsorted/README.txt",
+                            "Unsorted/LICENSE.txt",
+                            "Unsorted/loose.stl",
+                            "Unsorted/loose.jpg",
+                            "Unsorted/notes.txt",
+                        ]
+                    )
                 )
             )
         }
 
-    assert set(loose) == {"Unsorted/loose.stl", "Unsorted/loose.jpg"}, "both are registered"
+    assert set(own) == {
+        "Unsorted/README.txt",
+        "Unsorted/LICENSE.txt",
+        "Unsorted/loose.stl",
+        "Unsorted/loose.jpg",
+        "Unsorted/notes.txt",
+    }, "every one of the parent's own files is registered"
 
     created = create(client, headers, [{"key": "Unsorted", "name_only": True}])
 
     assert created["created"] == 1
     project_id = created["results"][0]["project_id"]
-    assert set(project_asset_ids(client, headers, project_id)) == set(loose.values()), (
-        "never a child bundle's files - and the parent's own pair is now its model AND "
-        "its preview, because the ATTACH table holds the images a project can render "
-        "(Mf-wsdo); the documents stay out"
+    assert set(project_asset_ids(client, headers, project_id)) == set(own.values()), (
+        "never a child bundle's files - and the parent's own set is now EVERY registered "
+        "file under its key, its model, its preview and its three documents alike "
+        "(Mf-7oow); the two child bundles' ten files each stay out"
     )
 
 
@@ -989,13 +1033,15 @@ def test_a_single_model_directory_bundle_is_offered_and_creates(
 
     assert created["created"] == 1
     with Session(engine) as session:
-        # The ATTACH table, not the model table: the three claws plus the preview the
-        # landing page can render (Mf-wsdo). `notes.txt` is registered and is not a
-        # member, which is the half of the ruling the docstring above calls made-up.
+        # Every registered file under the key, `notes.txt` included (Mf-7oow): the
+        # three claws plus the preview and the document are one member set, and the
+        # role each plays is the detector's own classifier.
         expected = {
             asset.id
             for asset in session.exec(
-                select(Asset).where(Asset.storage_path.in_([*model_paths, "LittleTup/preview.jpg"]))
+                select(Asset).where(
+                    Asset.storage_path.in_([*model_paths, "LittleTup/preview.jpg", "LittleTup/notes.txt"])
+                )
             )
         }
     assert set(project_asset_ids(client, headers, created["results"][0]["project_id"])) == expected
@@ -1093,11 +1139,13 @@ def test_a_parent_attaches_only_its_own_models(client: TestClient, isolated_stor
 
     assert created["created"] == 2
     parent_project, child_project = (result["project_id"] for result in created["results"])
-    assert len(project_asset_ids(client, headers, parent_project)) == 1
-    assert len(project_asset_ids(client, headers, child_project)) == 8, (
-        "the child's own files only, and its own file set is now the ATTACH table: "
-        "three models plus the five previews it ships (Mf-wsdo) - the parent still "
-        "attaches one model, so the ownership split this witness exists for is intact"
+    assert len(project_asset_ids(client, headers, parent_project)) == 3, (
+        "the parent's own registered files only: its `.stl` and the two marker "
+        "documents beside it (Mf-7oow attaches every one of them)"
+    )
+    assert len(project_asset_ids(client, headers, child_project)) == 10, (
+        "the child's own files only - all ten of them (three models, five previews, two "
+        "documents) - so the ownership split this witness exists for is intact"
     )
 
 
@@ -1263,11 +1311,12 @@ def test_the_live_shape_has_no_container_bundle(client: TestClient, isolated_sto
     assert "import" not in {project["name"] for project in project_listing(client, headers).values()}
     members: List[str] = []
     for row, result in zip(report["bundles"], created["results"], strict=True):
-        # Models PLUS images (Mf-wsdo): the ATTACH table is what a project holds, and
-        # the row's own counts are the same two tables over the same snapshot, so the
-        # witness still says "each project holds exactly its own bundle's files".
-        assert member_count(result["project_id"]) == row["model_count"] + row["image_count"], (
-            f"{row['key']}: one project, its own models and its own images only"
+        # EVERY registered file under the key (Mf-7oow), which is what the row's own
+        # `assets_total` counts over the same subtree - so the witness still says
+        # "each project holds exactly its own bundle's files", now with text and
+        # archives in the set.
+        assert member_count(result["project_id"]) == row["assets_total"], (
+            f"{row['key']}: one project, every one of its own bundle's files"
         )
         members.extend(project_asset_ids(client, headers, result["project_id"]))
     assert len(members) == len(set(members)), "no asset belongs to two bundles"
@@ -1419,9 +1468,9 @@ def test_service_a_second_run_and_an_edited_project_are_untouched(isolated_stora
     first = bundle_service.create_bundles([bundle_service.BundleCreateItem(key=MOAI)], ctx)
     assert first["created"] == 1
     project_id = first["results"][0]["project_id"]
-    assert first["results"][0]["assets_added"] == 8, (
-        "the three models plus the five previews the attach table gives a created "
-        "project (Mf-wsdo); the second run below still creates nothing"
+    assert first["results"][0]["assets_added"] == 10, (
+        "every registered file under the key - three models, five previews and the two "
+        "marker documents (Mf-7oow); the second run below still creates nothing"
     )
     with Session(engine) as session:
         project = project_service.get_project(session, project_id)
@@ -1444,13 +1493,12 @@ def test_service_a_second_run_and_an_edited_project_are_untouched(isolated_stora
         projects = session.exec(select(Project)).all()
         assert len(projects) == 1
         assert projects[0].name == "Edited Moai"
-    assert member_count(project_id) == 9, (
+    assert member_count(project_id) == 10, (
         "the service-level twin of the witness above: re-running the create over an "
-        "edited project adds nothing, and nine is the eight the ATTACH table gives a "
-        "created project (models plus previews, Mf-wsdo) PLUS the hand-added "
-        "`README.txt` - a member a human put there survives the skip, and it survives "
-        "being counted only because a text file is what no create will ever attach "
-        "(`images/0.jpg` is added alongside and is a skip)"
+        "edited project adds nothing, and ten is every registered file under the key - "
+        "the create attaches them all itself since Mf-7oow, so this number witnesses "
+        "that a member a human put there survives the skip (and that re-adding one the "
+        "create already attached changes nothing)"
     )
     report = bundle_service.build_report()
     assert report["counts"]["already_created"] == 1
@@ -1685,9 +1733,9 @@ def test_a_swapped_cat_bundle_is_high_ready_and_creates_one_project(client: Test
     assert project["licence_url"] == "https://creativecommons.org/licenses/by-nc-sa/4.0/"
     assert project["source_url"] == CAT_URL
     assert project["description"] == CAT_CREATED_BY.strip()
-    assert member_count(project_id) == 2, (
-        "the cat's one model AND its one preview - the ATTACH table (Mf-wsdo), not the "
-        "model table; the two swapped documents stay out of the project"
+    assert member_count(project_id) == 4, (
+        "the cat's model, its preview AND the two swapped documents (Mf-7oow): every "
+        "registered file under the key, whatever role the detector gives it"
     )
 
 
@@ -1781,10 +1829,10 @@ def test_a_swapped_legacy_sibling_bundle_detects_and_creates(client: TestClient,
     project = project_listing(client, headers)[project_id]
     assert project["creator"] == "nervoussystem"
     assert project["source_url"] == CAT_URL
-    assert member_count(project_id) == 2, (
-        "``part.stl`` AND ``preview.jpg``: the attach table is models plus images "
-        "(Mf-wsdo), while the flattened sibling DOCUMENTS remain the detector's "
-        "business only"
+    assert member_count(project_id) == 4, (
+        "``part.stl``, ``preview.jpg`` AND the two flattened sibling documents: a bundle "
+        "project holds every registered file under its key (Mf-7oow), and the documents "
+        "are ``text`` members rather than exclusions"
     )
 
 
@@ -2039,9 +2087,9 @@ def test_service_a_bundle_pairs_with_its_entry_root_archive_and_attaches_nothing
 
     assert created["created"] == 1
     project_id = created["results"][0]["project_id"]
-    assert len(project_asset_ids(client, headers, project_id)) == 3, (
-        "the archive attaches nothing: three is the directory's two models plus its one "
-        "preview (Mf-wsdo), never the zip's copies, and ``notes.txt`` stays out"
+    assert len(project_asset_ids(client, headers, project_id)) == 4, (
+        "the archive attaches nothing: four is the directory's own registered set - two "
+        "models, one preview and ``notes.txt`` (Mf-7oow) - never the zip's copies"
     )
 
 
@@ -2293,10 +2341,10 @@ def test_service_a_paired_extraction_inside_a_bundle_is_not_a_second_row(
     assert created["created"] == 1
     assert created["failed"] == 0
     project_id = created["results"][0]["project_id"]
-    assert len(project_asset_ids(client, headers, project_id)) == 3, (
-        "the parent's own model, the unclaimed extraction's model and the extraction's "
-        "render: the whole subtree is one project's file set now that images attach too "
-        "(Mf-wsdo) - one project, never two, and the nested archive is still not a member"
+    assert len(project_asset_ids(client, headers, project_id)) == 6, (
+        "the parent's own two documents and its model, the unclaimed extraction's model "
+        "and render, and the nested archive itself: every registered file under the key "
+        "is a member (Mf-7oow) - one project, never two"
     )
 
 
@@ -2442,19 +2490,20 @@ def test_service_a_verified_stem_twin_promotes_an_offered_nowhere_directory(
 
     assert truncated is False
     sets = [
-        # (directory, MODEL files, IMAGE files) - the member count is the sum, because
-        # a created project holds the ATTACH table (models plus images, Mf-wsdo) while
-        # the two models-only pairs above keep proving the shape rule without an image.
-        (SNVB623, 2, 0),
-        (SNVD623, 2, 0),
-        (CARD_BOX, 1, 0),
-        (CINDERWING, 2, 1),
+        # (directory, MODEL files, IMAGE files, TEXT files) - the member count is the
+        # sum, because a created project holds every registered file under its key
+        # (Mf-7oow) while the two models-only pairs above keep proving the shape rule
+        # without an image.
+        (SNVB623, 2, 0, 0),
+        (SNVD623, 2, 0, 0),
+        (CARD_BOX, 1, 0, 1),
+        (CINDERWING, 2, 1, 0),
     ]
     by_key = {candidate.key: candidate for candidate in candidates}
-    assert sorted(by_key) == sorted(f"import/{name}" for name, _models, _images in sets), (
+    assert sorted(by_key) == sorted(f"import/{name}" for name, _models, _images, _text in sets), (
         "four promoted directories and nothing else"
     )
-    for name, _models, _images in sets:
+    for name, _models, _images, _text in sets:
         candidate = by_key[f"import/{name}"]
         assert candidate.archive_owned is True, f"the verified stem pairing owns {name}"
         assert candidate.entry_root is None, "the stem route names no entry root"
@@ -2465,23 +2514,23 @@ def test_service_a_verified_stem_twin_promotes_an_offered_nowhere_directory(
     report = detect(client, headers)
 
     assert sorted(row["key"] for row in report["bundles"]) == sorted(by_key)
-    for name, _models, _images in sets:
+    for name, _models, _images, _text in sets:
         row = row_for(report, f"import/{name}")
         assert row["confidence"] == "low", f"{name} is a shape inference"
         assert row["detector"] == "generic-bundle"
         assert row["status"] == "ready"
         assert row["archive"] == {"rel_path": f"import/{name}.zip", "twin_verified": True}
 
-    created = create(client, headers, [{"key": f"import/{name}"} for name, _models, _images in sets])
+    created = create(client, headers, [{"key": f"import/{name}"} for name, _models, _images, _text in sets])
 
     assert created["created"] == 4
     assert created["blocked"] == 0
     assert created["failed"] == 0
     assert len(project_listing(client, headers)) == 4
-    for result, (name, models, images) in zip(created["results"], sets, strict=True):
-        assert member_count(result["project_id"]) == models + images, (
-            f"{name} attaches only its own files - its models and its images; the "
-            "archive attaches nothing, and its documents stay out"
+    for result, (name, models, images, text) in zip(created["results"], sets, strict=True):
+        assert member_count(result["project_id"]) == models + images + text, (
+            f"{name} holds only its own files - its models, its images and its documents "
+            "(Mf-7oow); the archive attaches nothing"
         )
     assert member_count(created["results"][0]["project_id"]) == 2, "the models-only pair is exactly two"
 
@@ -5190,6 +5239,11 @@ ROCKET_MODELS_PER_GROUP = 6
 
 XBOX_OWN_MODELS = 27
 XBOX_GROUP_MODELS = 4
+# The group's own README.txt and LICENSE.txt. A create holds every registered file
+# under its key (Mf-7oow), so the member count is the models PLUS these two - while
+# every `attached`/`model_count` number below stays models-only.
+XBOX_GROUP_DOCS = 2
+XBOX_MEMBERS = XBOX_OWN_MODELS + XBOX_GROUP_MODELS + XBOX_GROUP_DOCS
 XBOX_THING = 5461913
 
 ENDORPHIN = "endorphin"
@@ -5483,7 +5537,160 @@ def test_service_a_compound_row_creates_one_project_with_every_part(
 
     assert created["created"] == 1
     assert created["failed"] == 0
-    assert member_count(created["results"][0]["project_id"]) == XBOX_OWN_MODELS + XBOX_GROUP_MODELS
+    assert member_count(created["results"][0]["project_id"]) == XBOX_MEMBERS, (
+        "the 27 own parts, the foreign group's 4 parts AND the group's two marker "
+        "documents: a bundle project holds every registered file under its key (Mf-7oow)"
+    )
+
+
+def test_attaching_backups_and_a_document_does_not_move_the_model_count(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A backup and a PDF are MEMBERS; they are not models, and the row still says so.
+
+    Mf-7oow's rule has two halves and this witness pins both directions at once:
+
+    * membership moved - the two ``.stlbak`` backups and the vendor ``.pdf`` are in the
+      created project, because a bundle project holds every registered file under its
+      key, and the exact member set is asserted rather than a count;
+    * the ROLE did not - ``classify_entry`` answers ``other`` for a ``.stlbak`` and
+      ``text`` for a ``.pdf``, so ``row["model_count"]`` is the two STLs and nothing
+      more, while ``other_count``/``text_count`` account for the rest. The backup is
+      also made the LARGEST file on disk, so a cover rule that had let one in would
+      have picked it.
+
+    Mutation (both run, then restored): make ``_members_of`` return only the MODEL
+    entries (or re-add any suffix filter) and the member-set assertion reds with the
+    two backups and the PDF missing; make the row's ``model_count`` read the member
+    count and the ``(2, 1, 1, 2)`` block reds at 6.
+    """
+    bundle = isolated_storage / "Backup Kit"
+    write_file(bundle / "part-a.stl", STL_BYTES)
+    write_file(bundle / "part-b.stl", STL_BYTES)
+    write_file(bundle / "cover.jpg", b"j" * 50)
+    # Larger than the preview on purpose: a `.stlbak` must never win the cover.
+    write_file(bundle / "part-a.stlbak", b"b" * 500)
+    write_file(bundle / "part-b.stlbak", b"b" * 501)
+    write_text(bundle / "docs.pdf", "the vendor's assembly guide\n")
+    scan()
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), "Backup Kit")
+
+    assert (
+        row["model_count"],
+        row["image_count"],
+        row["text_count"],
+        row["other_count"],
+    ) == (2, 1, 1, 2), (
+        "the two STLs are the only models: a `.stlbak` is `other` and a `.pdf` is `text`, "
+        "and the row counts the roles the one classifier answers"
+    )
+    assert row["assets_total"] == 6
+    assert (row["cover"]["reason"], row["cover"]["rel_path"]) == ("largest-image", "Backup Kit/cover.jpg"), (
+        "the cover legs are IMAGE_SUFFIXES and PREVIEW_SUFFIXES, so the 500-byte `.stlbak` "
+        "is never even a candidate - it is not an image and not a renderable model"
+    )
+
+    created = create(client, headers, [{"key": "Backup Kit"}])
+
+    assert created["created"] == 1
+    project_id = created["results"][0]["project_id"]
+    assert created["results"][0]["assets_added"] == 6
+    assert project_storage_paths(project_id) == {
+        "Backup Kit/part-a.stl",
+        "Backup Kit/part-b.stl",
+        "Backup Kit/cover.jpg",
+        "Backup Kit/part-a.stlbak",
+        "Backup Kit/part-b.stlbak",
+        "Backup Kit/docs.pdf",
+    }, "every one of them is a member: backups and document included"
+    with Session(engine) as session:
+        member_set = bundle_service._members_of(
+            "Backup Kit", bundle_service.registered_assets(session, "Backup Kit")
+        )
+
+    assert [entry.rel_path for entry in member_set.by_role(bundle_detect.MODEL)] == [
+        "part-a.stl",
+        "part-b.stl",
+    ], "the MODEL view - what `attached` and `Dedupe.containment` are asked with - is the two STLs"
+    assert {entry.rel_path: entry.role for entry in member_set.entries}[
+        "part-a.stlbak"
+    ] == bundle_detect.OTHER
+    assert {entry.rel_path: entry.role for entry in member_set.entries}[
+        "docs.pdf"
+    ] == bundle_detect.TEXT
+    assert registered_model_paths("Backup Kit") == {"Backup Kit/part-a.stl", "Backup Kit/part-b.stl"}
+
+
+def test_attaching_backups_creates_no_group_members(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """A compound create writes every file, but only MODELS count as a group's `attached`.
+
+    The probe is one product in two parts: two family-named groups (``Bracket Set
+    Alpha``, ``Bracket Set Beta``), three STLs spread across them, four ``.stlbak``
+    backups and one root PDF - eight registered files, three models. Creating the row
+    as ``compound`` must hold all eight in the project while the marker's per-group
+    ``attached`` stays the MODEL answer: 2 and 1, summing to the row's ``model_count``.
+
+    Mutation (run, then restored): count ``models_by_group`` from the member set
+    instead of from ``model_assets`` and Alpha's ``attached`` reads 4 (its two STLs
+    plus its two backups) and Beta's 3 - the marker then claims a group attached a
+    backup, and the sum of ``attached`` no longer equals ``model_count``.
+    """
+    key = "import/backup_compound"
+    root = isolated_storage / "import" / "backup_compound"
+    alpha = root / "Bracket Set Alpha"
+    beta = root / "Bracket Set Beta"
+    write_file(alpha / "alpha-0.stl", STL_BYTES)
+    write_file(alpha / "alpha-1.stl", STL_BYTES)
+    write_file(alpha / "alpha-0.stlbak", b"b" * 40)
+    write_file(alpha / "alpha-1.stlbak", b"b" * 41)
+    write_file(beta / "beta-0.stl", STL_BYTES)
+    write_file(beta / "beta-0.stlbak", b"b" * 42)
+    write_file(beta / "beta-1.stlbak", b"b" * 43)
+    write_text(root / "docs.pdf", "the vendor's assembly guide\n")
+    insert_folder_row("backup_compound", key)
+    scan()
+    headers = auth_header(client)
+
+    row = row_for(detect(client, headers), key)
+
+    assert (row["detector"], row["metadata_shape"]) == ("compound-bundle", "compound")
+    assert row["model_count"] == 3, "three STLs - the four backups are `other`, the PDF is `text`"
+    assert row["assets_total"] == 8
+
+    created = create(client, headers, [{"key": key, "shape": "compound"}])
+
+    assert created["created"] == 1
+    result = created["results"][0]
+    project_id = result["project_id"]
+    assert result["assets_added"] == 8, "every registered file under the key is a member"
+    assert project_storage_paths(project_id) == registered_asset_paths(key) == {
+        f"{key}/{name}"
+        for name in (
+            "Bracket Set Alpha/alpha-0.stl",
+            "Bracket Set Alpha/alpha-1.stl",
+            "Bracket Set Alpha/alpha-0.stlbak",
+            "Bracket Set Alpha/alpha-1.stlbak",
+            "Bracket Set Beta/beta-0.stl",
+            "Bracket Set Beta/beta-0.stlbak",
+            "Bracket Set Beta/beta-1.stlbak",
+            "docs.pdf",
+        )
+    }
+
+    marker = project_marker(project_id)
+
+    assert marker["groups"] == [
+        {"name": "Bracket Set Alpha", "model_count": 2, "foreign": False, "included": True, "attached": 2},
+        {"name": "Bracket Set Beta", "model_count": 1, "foreign": False, "included": True, "attached": 1},
+    ], (
+        "`attached` is the group's MODEL count: the four backups and the PDF created no "
+        "group members, even though all eight files are in the project"
+    )
+    assert sum(group["attached"] for group in marker["groups"]) == row["model_count"] == 3
 
 
 def test_service_a_folder_with_one_model_bearing_group_is_not_compound(
@@ -5689,22 +5896,23 @@ def registered_model_paths(rel_dir: str) -> set:
         }
 
 
-def registered_member_paths(rel_dir: str) -> set:
-    """Every registered file under ``rel_dir`` a bundle create ATTACHES, by path.
+def registered_asset_paths(rel_dir: str) -> set:
+    """Every registered file under ``rel_dir``, as storage-relative paths.
 
-    The ATTACH question, written as the seam writes it -
-    ``bundle_service.PROJECT_MEMBER_SUFFIXES`` (models plus images), not
-    ``bundle_detect.MODEL_SUFFIXES``. It sits beside ``registered_model_paths`` and
-    replaces it in the assertions about what a created project HOLDS; a witness that
-    still means "the models" must still call ``registered_model_paths``, because the
-    two tables answering one question is precisely the confusion Mf-wsdo removes.
+    THE membership question since Mf-7oow: a created bundle project holds EVERY
+    registered asset under its own key, so this is a plain read of what the scan
+    registered - there is no suffix filter, because there is no member table left to
+    filter with. The role each of those files plays in the project is the detector's
+    own ``classify_entry`` answer, decided once in ``bundle_service._members_of``.
+
+    It sits beside ``registered_model_paths``, which is the MODEL question and stays
+    the one a containment or `attached` witness must call: "does a project already
+    hold this bundle's parts" is a narrower question than "what does the project
+    hold", and the two answering each other is the confusion this pair exists to
+    keep apart.
     """
     with Session(engine) as session:
-        return {
-            asset.path
-            for asset in bundle_service.registered_assets(session, rel_dir)
-            if bundle_service._suffix(asset.path) in bundle_service.PROJECT_MEMBER_SUFFIXES
-        }
+        return {asset.path for asset in bundle_service.registered_assets(session, rel_dir)}
 
 
 def mount_key() -> str:
@@ -5773,12 +5981,13 @@ def test_service_creating_from_a_compound_row_makes_one_project_with_every_part(
     assert created["created"] == 1
     assert created["failed"] == 0
     result = created["results"][0]
-    assert result["assets_added"] == 71, (
-        "the 60 parts AND the eleven group previews a Stagetop project can render: "
-        "Mf-wsdo made the ATTACH table models plus images, while the row's "
-        "`model_count` below stays 60 - two questions, two numbers"
+    assert result["assets_added"] == 82, (
+        "the 60 parts, the eleven group previews AND the eleven group ``notes.txt``: "
+        "a bundle project holds every registered file under its key (Mf-7oow), while "
+        "the row's `model_count` below stays 60 - membership and role are two answers, "
+        "and only the role one is a count of models"
     )
-    assert project_storage_paths(result["project_id"]) == registered_member_paths(f"import/{STAGETOP}")
+    assert project_storage_paths(result["project_id"]) == registered_asset_paths(f"import/{STAGETOP}")
 
     row = service_row(f"import/{STAGETOP}")
     assert row["model_count"] == 60
@@ -5834,11 +6043,11 @@ def test_the_row_counts_exactly_what_the_scan_registered(
 
     assert created["created"] == 1
     result = created["results"][0]
-    assert result["assets_added"] == 56, (
-        "the 48 real models plus the eight group ``cover.jpg`` previews: the ATTACH "
-        "table is models plus images (Mf-wsdo) while `model_count` below stays 48 and "
-        "every group's `attached` below stays 6 - an image counted as a model would "
-        "move one of those three numbers"
+    assert result["assets_added"] == 64, (
+        "the 48 real models, the eight group ``cover.jpg`` previews AND the eight group "
+        "``notes.txt`` documents: a bundle project holds every registered file under its "
+        "key (Mf-7oow) while `model_count` below stays 48 and every group's `attached` "
+        "stays 6 - a document or an image counted as a model would move those numbers"
     )
 
     row = service_row(f"import/{ROCKET}")
@@ -5858,16 +6067,17 @@ def test_the_row_counts_exactly_what_the_scan_registered(
         for index in range(ROCKET_MODELS_PER_GROUP)
     }
     previews = {f"import/{ROCKET}/{group}/cover.jpg" for group in ROCKET_GROUPS}
+    documents = {f"import/{ROCKET}/{group}/notes.txt" for group in ROCKET_GROUPS}
     attached = project_storage_paths(result["project_id"])
-    assert attached == real | previews, (
-        "the project holds the real `.stl` files and their group previews and nothing "
-        "else - no `._*` sidecar, no `notes.txt`, and the eight previews are the whole "
-        "difference Mf-wsdo makes to this tree"
+    assert attached == real | previews | documents, (
+        "the project holds the real `.stl` files, their group previews and their group "
+        "documents - and no `._*` sidecar: every registered file under the key is a "
+        "member (Mf-7oow), the sidecars are not registered at all"
     )
     # The load-bearing assertion: this reads the REGISTERED rows, so it reds if a
     # `._*` sidecar ever registers (the walk-built `real` set could not say that) - and
-    # it reads them through the ATTACH table, which is the question a member set answers.
-    assert attached == registered_member_paths(f"import/{ROCKET}")
+    # it reads them through the membership question, which is every registered file.
+    assert attached == registered_asset_paths(f"import/{ROCKET}")
 
 
 def test_the_stagetop_row_still_reads_60_with_no_appledouble_on_disk(
@@ -5916,11 +6126,16 @@ def test_service_xbox360_shell_creates_one_project_with_all_31_parts(
 
     assert created["created"] == 1
     result = created["results"][0]
-    assert result["assets_added"] == XBOX_OWN_MODELS + XBOX_GROUP_MODELS
-    expected = {f"import/{XBOX}/shell-{index}.stl" for index in range(XBOX_OWN_MODELS)} | {
-        f"{mount_key()}/bracket-{index}.stl" for index in range(XBOX_GROUP_MODELS)
-    }
-    assert project_storage_paths(result["project_id"]) == expected
+    assert result["assets_added"] == XBOX_MEMBERS
+    expected = (
+        {f"import/{XBOX}/shell-{index}.stl" for index in range(XBOX_OWN_MODELS)}
+        | {f"{mount_key()}/bracket-{index}.stl" for index in range(XBOX_GROUP_MODELS)}
+        | {f"{mount_key()}/README.txt", f"{mount_key()}/LICENSE.txt"}
+    )
+    assert project_storage_paths(result["project_id"]) == expected, (
+        "every registered file under the key, the foreign group's two documents included "
+        "(Mf-7oow) - the group's PARTS are still what the marker counts as `attached`"
+    )
 
     marker = project_marker(result["project_id"])
     assert marker["groups"] == [
@@ -6242,7 +6457,10 @@ def test_a_second_create_of_a_compound_row_is_already_created(
     with Session(engine) as session:
         assert session.get(Project, project_id).metadata_json == metadata_before
     assert table_counts()["projects"] == 1
-    assert member_count(project_id) == XBOX_OWN_MODELS + XBOX_GROUP_MODELS
+    assert member_count(project_id) == XBOX_MEMBERS, (
+        "the skip attached nothing a second time; the project still holds every "
+        "registered file the first create gave it (Mf-7oow)"
+    )
 
     # The compound shape is still on offer (`matches`), and choosing it explicitly
     # validates the exclusion again. Post-create the group has no absorbed row
@@ -7085,17 +7303,16 @@ def test_service_a_fresh_bundle_project_reports_no_new_parts(
 ) -> None:
     """AC-4: creation attaches every member, so both surfaces answer the honest zero.
 
-    The measured compound shape: eight models in four part folders, each folder
-    also holding the ``cover.jpg`` and ``notes.txt`` the scan registers. Since
-    Mf-wsdo the create attaches the eight models AND the four covers, so twelve of
-    the sixteen registered files are members; the queue row and the project route
-    both answer ``known``/0, and the naive all-asset difference would answer 4 - the
-    four ``notes.txt`` that no cover, gallery or preview affordance can read. Before
-    this ticket the naive number was 8, the model count; the previews moving into the
-    member set moved the number, not the point, which is that it is NON-ZERO while
-    both honest answers are zero.
-    Mutation: count every registered asset and both answers read 4, prompting on
-    the very files creation deliberately skipped (re-measured for Mf-wsdo).
+    The measured compound shape: eight models in four part folders, each folder also
+    holding the ``cover.jpg`` and ``notes.txt`` the scan registers. Since Mf-7oow the
+    create attaches ALL sixteen - a bundle project holds every registered file under
+    its key - so the queue row and the project route both answer ``known``/0 AND the
+    naive all-asset difference answers 0 as well. That agreement is the point: the
+    naive difference used to be non-zero (4 under Mf-wsdo's models-plus-images table,
+    8 before it) precisely because membership was a suffix table, so "everything the
+    scan registered" and "everything the project holds" were two different sets.
+    Mutation: filter the member set down to models (or re-add any suffix filter) and
+    ``assets_added`` reads 8, ``naive`` reads 8 and this reds.
     """
     key = write_drift_compound(isolated_storage)
     insert_folder_row("DriftCompound", key)
@@ -7107,20 +7324,20 @@ def test_service_a_fresh_bundle_project_reports_no_new_parts(
     assert created["created"] == 1
     result = created["results"][0]
     project_id = result["project_id"]
-    assert result["assets_added"] == 12, (
-        "the eight models plus the four group covers (Mf-wsdo); the four ``notes.txt`` "
-        "stay registered and unattached"
+    assert result["assets_added"] == 16, (
+        "all sixteen registered files: the eight models, the four group covers AND the "
+        "four ``notes.txt`` (Mf-7oow - membership is every registered asset under the key)"
     )
-    assert project_storage_paths(project_id) == registered_member_paths(key)
+    assert project_storage_paths(project_id) == registered_asset_paths(key)
 
     registered = service_assets_under(key)
     members = set(project_asset_ids(client, headers, project_id))
     naive = [path for asset_id, path, _size in registered if asset_id not in members]
 
     assert len(registered) == 16, "eight models and eight support files"
-    assert len(members) == 12 and len(naive) == 4, (
-        "the naive all-asset difference answers the four documents the attach table "
-        "deliberately leaves out - non-zero, which is the whole point of the line"
+    assert len(members) == 16 and naive == [], (
+        "the naive all-asset difference is EMPTY: membership and registration are one "
+        "set now, so there is nothing left for a drift prompt to offer"
     )
 
     row = service_row(key)
@@ -8832,25 +9049,27 @@ def test_a_promoted_tower_creates_one_project_whose_parts_come_out_of_the_child(
     )
     project_id = result["project_id"]
     assert project_id is not None
-    assert result["assets_added"] == len(LIVE_MODEL_NAMES) + len(LIVE_PREVIEW_NAMES) == 18, (
-        "the fifteen models the vendor shipped PLUS the three previews it shipped (the "
-        "attach table, Mf-wsdo) - a promoted row that created 0 assets is the ticket's "
-        "complaint wearing a `ready` badge"
+    assert result["assets_added"] == len(registered_asset_paths(TOWER_DIR)) == 20, (
+        "all twenty files the scan registered under the twin - fifteen models, three "
+        "previews, the vendor ``.txt`` and its nested deliverable zip (Mf-7oow) - a "
+        "promoted row that created 0 assets is the ticket's complaint wearing a `ready` "
+        "badge"
     )
 
     members = project_storage_paths(project_id)
 
-    assert members == {
-        f"{TOWER_MEMBER_DIR}/{name}" for name in (*LIVE_MODEL_NAMES, *LIVE_PREVIEW_NAMES)
+    assert members == registered_asset_paths(TOWER_DIR) == {
+        f"{TOWER_MEMBER_DIR}/{name}"
+        for name in (*LIVE_MODEL_NAMES, *LIVE_PREVIEW_NAMES, LIVE_TEXT_NAME, "01_Wizard_v5.4.zip")
     }, (
-        "the members are the child's fifteen STLs and its three PNGs: the child's "
-        "payload IS the project, previews included"
+        "the members are every registered file under the parent's key, which here is the "
+        "child's whole payload: fifteen STLs, three PNGs, the text and the nested zip"
     )
     assert all(path.startswith(f"{TOWER_MEMBER_DIR}/") for path in members), (
         "every attached member runs through ``01_Wizard/``, so nothing came from anywhere else"
     )
-    assert member_count(project_id) == 18
-    assert len(project_asset_ids(client, headers, project_id)) == 18, "the served project agrees"
+    assert member_count(project_id) == 20
+    assert len(project_asset_ids(client, headers, project_id)) == 20, "the served project agrees"
     assert project_marker(project_id)["key"] == TOWER_DIR, "created from the PARENT's key"
     assert project_listing(client, headers)[project_id]["origin"] == "imported"
 
@@ -8873,70 +9092,40 @@ def test_a_promoted_tower_creates_one_project_whose_parts_come_out_of_the_child(
 def test_a_promoted_tower_create_attaches_its_preview_images(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """Mf-wsdo, on the live tower: the vendor's three previews are MEMBERS of its project.
+    """Mf-7oow, on the live tower: EVERY registered file is a member of its project.
 
-    The owner's sentence was "it didn't pull in all the images from the zip/folder. I had
-    to go back and add them so I could choose the cover I wanted", and the live project
-    ``b8a5e66b`` measured it: 15 STL members at the create, then 3 PNG members added by
-    hand 87 s later, because the landing page's cover picker is
-    ``members.filter(isImageAsset)`` and it had nothing to pick (web
-    ``ui/ProjectLanding.tsx``). This is that create, run for real - the same
-    ``live_tower_extraction`` fixture, the same ``library_scan``, the same
-    ``POST /bundles/create`` - with the image half of the answer pinned:
+    The Mf-wsdo complaint was narrower - the owner had to hand-add the vendor's three
+    previews because the member set was models plus images and nothing else. Mf-7oow
+    removes the table: a bundle project holds every registered asset under its key, so
+    the tower's twenty files are all members and each one carries the role the
+    detector's own ``classify_entry`` gives it.
 
-    * ``assets_added`` and the ``project_asset`` count are 18, not 15: fifteen models
-      PLUS the three previews the vendor shipped, all under ``01_Wizard/``;
-    * the ``.txt`` and the vendor's own nested deliverable zip are still EXCLUDED and
-      still NAMED here - widening the ATTACH table is not opening the door, and a
-      member set that silently grew to 20 would red this pair of assertions;
-    * the cover is a member. Before the ticket the project's ``cover_asset_id`` was the
+    * ``assets_added`` and the ``project_asset`` count are 20: fifteen models, three
+      previews, the vendor's ``.txt`` and its nested deliverable zip, all under
+      ``01_Wizard/``;
+    * the ``.txt`` and the nested ``.zip`` are MEMBERS now - named here so the roles
+      are pinned by name, not by a count. ``classify_entry`` reads them as ``text`` and
+      ``archive``, which is exactly what the row's ``text_count``/``archive_count`` say;
+    * the cover is a member. Before Mf-wsdo the project's ``cover_asset_id`` was the
       largest PNG (``_FileName_Key.png``, 80 bytes against 70 and 60) and that id was
       NOT in the member set - SET AND DANGLING, which is what
       ``.plans/measurements/2026-11-10-bundle-members-mf-wsdo-before.json`` records as
-      ``cover_is_member: false``. The ticket's own "cover was NULL" claim is false, and
-      the artifact says so;
+      ``cover_is_member: false``;
     * the picker's own predicate finds them: filtering the member paths by
       ``bundle_detect.IMAGE_SUFFIXES`` returns the three PNGs, which is the
       server-side shape of ``members.filter(isImageAsset)`` being non-empty.
 
     The fact counts and the member count are asserted in ONE block below, because the
-    trap this ticket walks into is reading them as one number: ``model_count``/``image_count``/
-    ``assets_total`` are what the DETECTOR read (15/3/20 - the whole directory, text and
-    nested zip included), while ``assets_added`` is what the CREATE attached. 15/3/20 with
-    18 members is the ticket. 18/3/20 or 15/3/18 would be somebody editing
-    ``bundle_detect``'s tables, which the rule-set stamp forbids and
-    ``test_the_member_table_is_models_plus_images_and_is_not_the_detector_table`` pins.
+    trap is reading them as one number: ``model_count``/``image_count``/``assets_total``
+    are what the DETECTOR read (15/3/20), while ``assets_added`` is what the CREATE
+    wrote - now the same 20, and a ``model_count`` moved to 20 would be a project and a
+    row disagreeing about what a model is.
 
-    Mutation (both stages run, then restored, and the two production hashes re-verified
-    against the pristine copies afterwards). Stage 1 - put
-    ``kinds=bundle_detect.MODEL_SUFFIXES`` back on the create call, the models-only ATTACH
-    filter this ticket widens: the FIRST assertion of this function reds with
-    ``(status, reason) == ("failed", "cover asset is not a member of the project")``. The
-    row's cover is a PNG, a models-only member set does not hold it, and the primitive's
-    guard refuses before the write. Measured over ``test_bundle_service.py`` +
-    ``test_bundles_api.py``, that single mutation is ``39 failed, 200 passed``. Stage 2 -
-    stage 1 PLUS the primitive's guard neutralised, the true pre-ticket state: the create
-    succeeds and this witness dies on ``(assets_added, member_count) == (18, 18)``
-    answering ``(15, 15)``.
-
-    Nothing else in this function "stays green" under either stage, because pytest aborts
-    at the first red and the assertions after it never run - which is the reason this
-    paragraph used to claim something false. What is behind the first red was measured
-    anyway, by deleting each assertion in turn under stage 2: the fact block reds on its
-    ``assets_added`` leg - ``(15, 15, 3, 20)`` against ``(18, 15, 3, 20)``, so the ROW's
-    ``15/3/20`` are not what moves, the member count inside that tuple is - then
-    ``member_paths == model_paths | preview_paths`` reds with exactly the three PNGs
-    missing, then ``cover_asset_id in member_ids`` reds (set and dangling, the artifact's
-    ``False``), then ``picked == preview_paths`` reds on the empty picker. The ones that DO
-    hold under stage 2 are the report's own answers - the row still says ``largest-image``
-    on ``_FileName_Key.png`` and ``cover_asset_id == row["cover"]["asset_id"]`` still
-    passes - plus the fixture-level ones (the registered set, the text and nested-zip
-    exclusions). That is why the old behaviour was invisible from the report: the row
-    always showed the previews, only the project never held them, and the one number that
-    could tell the two stories - ``assets_added`` - was read as a model count. The row's
-    own numbers were never observed inside this witness at all: ``model_count 15`` /
-    ``image_count 3`` / ``assets_total 20`` beside ``assets_added 15`` is what the BEFORE
-    artifact ``.plans/measurements/2026-11-10-bundle-members-mf-wsdo-before.json`` records.
+    Mutation (run, then restored): make ``_members_of`` return only the MODEL entries
+    (i.e. re-add any suffix filter) and ``(assets_added, member_count)`` answers
+    ``(15, 15)`` while the ``.txt``/nested-zip membership assertions red; change the
+    row's ``model_count`` to read the member count and the ``(20, 15, 3, 20)`` block
+    reds.
     """
     live_tower_extraction(isolated_storage)
     scan()
@@ -8967,20 +9156,23 @@ def test_a_promoted_tower_create_attaches_its_preview_images(
     assert (
         result["assets_added"],
         member_count(project_id),
-    ) == (18, 18), "fifteen models plus the three previews the vendor shipped"
+    ) == (20, 20), "every registered file: fifteen models, three previews, a .txt and a nested zip"
     assert (
         result["assets_added"],
         row["model_count"],
         row["image_count"],
         row["assets_total"],
-    ) == (18, 15, 3, 20), (
-        "two different questions in one block: what the CREATE attached (18) against "
-        "what the DETECTOR read (15 models, 3 images, 20 files on disk) - the facts do "
-        "not move when the attach set does, and 18/15/3/20 is the ticket"
+    ) == (20, 15, 3, 20), (
+        "two different questions in one block: what the CREATE wrote (20: every "
+        "registered file) against what the DETECTOR counted (15 models, 3 images, 20 "
+        "files) - the role counts stay role counts, and 20/15/3/20 is the ticket"
     )
-    assert member_paths == model_paths | preview_paths, (
-        "the members are the fifteen STLs AND the three PNGs - the images the operator "
-        "went back and added by hand are attached by the create now"
+    assert member_paths == model_paths | preview_paths | {
+        f"{TOWER_MEMBER_DIR}/{LIVE_TEXT_NAME}",
+        f"{TOWER_MEMBER_DIR}/01_Wizard_v5.4.zip",
+    }, (
+        "the members are the fifteen STLs, the three PNGs, the vendor's .txt AND its "
+        "nested zip - every registered file under the key, whatever its role"
     )
     assert all(path.startswith(f"{TOWER_MEMBER_DIR}/") for path in member_paths), (
         "every member still comes out of ``01_Wizard/``, the child the promotion read"
@@ -8995,13 +9187,14 @@ def test_a_promoted_tower_create_attaches_its_preview_images(
         "the twenty files the scan registered, named, so the two exclusions below are "
         "named against a set that cannot quietly have shrunk"
     )
-    assert text_path in registered and text_path not in member_paths, (
-        "the vendor's ``Wizard_Dice_v5.4_fixes.txt`` stays OUT of the member set: no "
-        "cover, gallery or preview affordance reads a text member"
+    assert text_path in registered and text_path in member_paths, (
+        "the vendor's ``Wizard_Dice_v5.4_fixes.txt`` IS a member, with role ``text`` - "
+        "the one classifier says so and the row's ``text_count`` agrees"
     )
-    assert nested_zip in registered and nested_zip not in member_paths, (
-        "the vendor's own deliverable ``01_Wizard/01_Wizard_v5.4.zip`` stays OUT too - "
-        "a nested archive is a member of the bundle, never of the project"
+    assert nested_zip in registered and nested_zip in member_paths, (
+        "the vendor's own deliverable ``01_Wizard/01_Wizard_v5.4.zip`` is a member too, "
+        "with role ``archive`` - a nested archive is a member of the bundle AND of the "
+        "project it makes (Mf-7oow; Mf-wsdo had excluded it)"
     )
 
     assert (row["cover"]["reason"], row["cover"]["rel_path"]) == (
@@ -9016,11 +9209,11 @@ def test_a_promoted_tower_create_attaches_its_preview_images(
         "the card's cover and the project's cover are one expression now - and on THIS "
         "create, which excludes no group, that is also a membership: every asset `_cover` "
         "can answer is bounded to its image leg (`IMAGE_SUFFIXES`) or its model leg "
-        "(`PREVIEW_SUFFIXES`, inside `MODEL_SUFFIXES`), both inside the ATTACH table. Do "
-        "not read it as a general 'the row cannot advertise what its project will not "
-        "hold': for a create that EXCLUDES a group the row's cover is chosen "
-        "exclusion-blind over the whole owned set and is routinely not a member - the "
-        "re-ask in `_create_one` is what replaces it, and "
+        "(`PREVIEW_SUFFIXES`, inside `MODEL_SUFFIXES`), and the member set is every "
+        "registered file. Do not read it as a general 'the row cannot advertise what its "
+        "project will not hold': for a create that EXCLUDES a group the row's cover is "
+        "chosen exclusion-blind over the whole owned set and is routinely not a member - "
+        "the re-ask in `_create_one` is what replaces it, and "
         "`test_the_cover_never_picks_a_registered_image_under_an_excluded_group` is that "
         "case"
     )
@@ -9107,9 +9300,9 @@ def test_a_created_promotion_answers_its_own_project_id_and_a_second_create_is_a
     assert second["results"][0]["project_id"] == project_id, "the same project, not a new one"
     assert len(project_listing(client, headers)) == 1, "no duplicate project over the tower's files"
     assert table_counts()["projects"] == 1
-    assert member_count(project_id) == 18, (
-        "a skip attaches nothing a second time - eighteen is what the first create "
-        "attached (fifteen models plus the three previews, Mf-wsdo), not a second helping"
+    assert member_count(project_id) == 20, (
+        "a skip attaches nothing a second time - twenty is what the first create "
+        "attached (every registered file under the key, Mf-7oow), not a second helping"
     )
 
 
@@ -9275,9 +9468,9 @@ def test_a_pair_only_row_with_nothing_offered_under_it_is_ready_and_creates(
         0,
     ), "a pair-only row with nothing offered inside it creates exactly one project"
     assert len(project_listing(client, headers)) == 1
-    assert created["results"][0]["assets_added"] == 4, (
-        "the three models of the payload it owns plus ``preview.png`` - the attach table "
-        "is models plus images since Mf-wsdo; ``notes.txt`` and the nested zip stay out"
+    assert created["results"][0]["assets_added"] == 6, (
+        "every registered file under the key that the pair owns: the three models of the "
+        "payload, ``preview.png``, ``notes.txt`` and the nested zip (Mf-7oow)"
     )
 
 
@@ -9737,8 +9930,9 @@ def test_a_project_created_from_the_bundle_is_the_project_its_twin_archive_would
     project_id = bundle_result["project_id"]
     assert project_id is not None
     assert bundle_result["name"] == "Fates End - Wizard Tower", "the detector's name, ordinal stripped"
-    assert bundle_result["assets_added"] == len(LIVE_MODEL_NAMES) + len(LIVE_PREVIEW_NAMES) == 18, (
-        "the tower's fifteen models and its three previews - the ATTACH table (Mf-wsdo)"
+    assert bundle_result["assets_added"] == len(LIVE_MODEL_NAMES) + len(LIVE_PREVIEW_NAMES) + 2 == 20, (
+        "the tower's fifteen models, three previews, its ``.txt`` and its nested zip - "
+        "every registered file under the key (Mf-7oow)"
     )
 
     body = archive_project_create(client, headers)
@@ -9756,10 +9950,11 @@ def test_a_project_created_from_the_bundle_is_the_project_its_twin_archive_would
     )
 
     assert table_counts()["projects"] == 1, "TWO rows is the defect this ticket exists to close"
-    assert member_count(project_id) == 18, (
-        "an already-created answer attaches nothing a second time - the eighteen the "
-        "bundle door attached (15 models + 3 previews, Mf-wsdo) are still the whole set, "
-        "and the archive door's twenty-entry listing added not one of them"
+    assert member_count(project_id) == 20, (
+        "an already-created answer attaches nothing a second time - the twenty the "
+        "bundle door attached (15 models, 3 previews, the ``.txt`` and the nested zip, "
+        "Mf-7oow) are still the whole set, and the archive door's twenty-entry listing "
+        "added not one of them"
     )
 
 
@@ -9865,14 +10060,14 @@ def test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower(
 ) -> None:
     """AC-5's non-regression, pinned: the archive door's member set did not move.
 
-    Mf-wsdo widened ONE door - the bundle door's ATTACH question - and the claim is that
-    the archive door is untouched, because its ``kinds`` was never a suffix table: what
-    the operator ticked IS the file set (``archive_project_service`` hands ``None``). So
-    the same live tower through ``POST /import/archive/project`` still resolves 20 of 20
-    and attaches all twenty - fifteen STLs, three PNGs, the vendor ``.txt`` AND the
-    nested deliverable zip - and its cover is still the first member ``is_model_path``
-    answers for, which is ``file_utils.MODEL_SUFFIXES``, a third table this ticket
-    deliberately does not touch.
+    Mf-wsdo and Mf-7oow changed ONE door - the bundle door's member set - and the claim
+    is that the archive door is untouched, because it never had a suffix table at all:
+    what the operator ticked IS the file set, and ``create_project_from_extract`` hands
+    the primitive every entry it resolved. So the same live tower through
+    ``POST /import/archive/project`` resolves 20 of 20 and attaches all twenty - fifteen
+    STLs, three PNGs, the vendor ``.txt`` AND the nested deliverable zip - and its cover
+    is still the first member ``is_model_path`` answers for, which is
+    ``file_utils.MODEL_SUFFIXES``, a third table neither ticket touches.
 
     It is also the producer of the archive door's measurement artifact (AGENTS.md wants
     the data, not the count: ``.plans/measurements/2026-11-10-bundle-members-mf-wsdo-archive-*.json``,
@@ -9881,10 +10076,10 @@ def test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower(
     every member named on both sides, not a ``member_count == 20`` that would also be
     true of a door that attached the wrong twenty files.
 
-    Mutation: hand the archive door ``bundle_service.PROJECT_MEMBER_SUFFIXES`` as
-    ``kinds`` - the shape the bundle door now uses - and 20 becomes 18, red here and at
-    ``planned``/``resolved``, while the ``.txt`` and the nested ``.zip`` move into
-    ``excluded``. That is the pair of artifacts this witness exists to keep comparable.
+    Mutation: filter the archive door's ``resolved`` list by any suffix table (the
+    bundle door's deleted one included) and 20 becomes 18, red here and at
+    ``planned``/``resolved``, while the ``.txt`` and the nested ``.zip`` drop out of the
+    member set. That is the pair of artifacts this witness exists to keep comparable.
     """
     live_tower_extraction(isolated_storage)
     scan()
@@ -10332,44 +10527,6 @@ def _top_level_function(module, name: str) -> ast.FunctionDef:
     raise AssertionError(f"no top-level function named {name} in {module.__name__}")
 
 
-def _module_level_targets(module) -> set:
-    """Every name the module binds at its OWN top level, by assignment.
-
-    Used to tell a constant a module owns from one it imported: ``PROJECT_MEMBER_SUFFIXES``
-    must be assigned here, not imported, because where a table lives is what decides
-    whether it can move ``bundle_detect.rule_set_stamp()``.
-    """
-    targets: set = set()
-    for node in ast.parse(Path(module.__file__).read_text()).body:
-        if isinstance(node, ast.Assign):
-            targets.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            targets.add(node.target.id)
-    return targets
-
-
-def _imported_names(module) -> set:
-    """Every name a module pulled in with ``import``/``from ... import``."""
-    names: set = set()
-    for node in ast.parse(Path(module.__file__).read_text()).body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                names.add(alias.asname or alias.name.split(".")[0])
-    return names
-
-
-def _kinds_arguments(body: ast.AST) -> List[Tuple[Optional[str], ast.expr]]:
-    """Every ``kinds=`` argument in ``body``, with the callee it was handed to."""
-    handed: List[Tuple[Optional[str], ast.expr]] = []
-    for node in ast.walk(body):
-        if not isinstance(node, ast.Call):
-            continue
-        for keyword in node.keywords:
-            if keyword.arg == "kinds":
-                handed.append((_callee_name(node), keyword.value))
-    return handed
-
-
 def _string_comparands(body: ast.AST) -> List[str]:
     """Every string literal that sits on either side of a comparison in ``body``."""
     literals: List[str] = []
@@ -10385,121 +10542,18 @@ def _string_comparands(body: ast.AST) -> List[str]:
     return literals
 
 
-def test_the_member_table_is_models_plus_images_and_is_not_the_detector_table() -> None:
-    """Mf-wsdo's ATTACH table, pinned as a THIRD table that must never become a first.
-
-    Three suffix tables already speak about models in this library and the ticket's
-    whole hazard is confusing them: ``bundle_detect.MODEL_SUFFIXES`` is what the
-    DETECTOR counts, ``file_utils.MODEL_SUFFIXES`` is what the web mirrors and the
-    archive door's cover rule read, and
-    ``bundle_service.PROJECT_MEMBER_SUFFIXES`` is now what a bundle create ATTACHES -
-    the detector's models plus the detector's images, and nothing else.
-
-    * it is exactly the union, so members and facts are derived from the same two
-      tables the row is built from;
-    * ``.txt``, ``.zip`` and ``.obj`` are ABSENT. The text exclusion is a decision and
-      not an oversight - the landing list renders every member, what no affordance
-      reads is a text member - and pinning it here is what makes adding text later a
-      decision rather than an accident;
-    * ``.lbrn``/``.lbrn2`` are PRESENT: registration is not suffix-gated, so a vendor
-      LBRN is registrable, and ``bundle_detect.classify_entry`` answers ``model``, so
-      members and facts agree about it;
-    * ``.obj`` is registrable and deliberately NOT a member, because
-      ``classify_entry`` answers ``other`` for it - a member the row counts as "other"
-      would be a project holding a file the report never called a model. That agreement
-      is the reason ``file_utils.MODEL_SUFFIXES`` (which has ``.obj``, lacks ``.lbrn2``)
-      is not this rule, and it is why the constant is asserted to DIFFER from it. What
-      each table CONTAINS is pinned by the module that owns it - ``tests/test_bundle_detect.py``
-      pins the two detector tables, where ``MODEL_SUFFIXES`` is derived from
-      ``IMPORT_ALLOWED_EXTS``, and ``tests/test_archive_project.py`` pins
-      ``file_utils.MODEL_SUFFIXES`` - so this file asserts only the DIFFERENCE;
-    * the constant lives in ``bundle_service``, not in ``bundle_detect``: both detector
-      tables are hashed into ``rule_set_stamp()``, so a member table parked beside them
-      could move the stamp and re-rank every cached row. ``hasattr`` says where it
-      lives, and the imported stamp assertion says that moving it changes nothing - the
-      literal ``RULE_SET_STAMP`` is ``tests/test_bundle_detect.py``'s own, imported
-      rather than restated, so this ticket cannot "fix" a drift by editing the copy.
-
-    Mutation (run, then restored): add ``.txt`` to ``PROJECT_MEMBER_SUFFIXES`` and the
-    ``".txt" not in`` assertion reds; move the constant into ``bundle_detect`` and the
-    ``hasattr`` pair reds; edit either detector table to make the union come out right
-    and the imported ``RULE_SET_STAMP`` reds in this file's own neighbour.
-    """
-    from test_bundle_detect import RULE_SET_STAMP
-
-    assert bundle_service.PROJECT_MEMBER_SUFFIXES == (
-        bundle_detect.MODEL_SUFFIXES | bundle_detect.IMAGE_SUFFIXES
-    )
-    for absent in (".txt", ".zip", ".obj", ".scad", ".gcode"):
-        assert absent not in bundle_service.PROJECT_MEMBER_SUFFIXES, f"{absent} is not attachable"
-    for present in (".stl", ".3mf", ".step", ".stp", ".lbrn", ".lbrn2", ".png", ".jpg"):
-        assert present in bundle_service.PROJECT_MEMBER_SUFFIXES, f"{present} is attachable"
-
-    # Where the constant lives is the rule-set argument made checkable.
-    assert hasattr(bundle_service, "PROJECT_MEMBER_SUFFIXES")
-    assert not hasattr(bundle_detect, "PROJECT_MEMBER_SUFFIXES"), (
-        "the member table is not the detector's: both detector tables are hashed into "
-        "`rule_set_stamp()`, and a member table parked beside them re-ranks every row"
-    )
-    assert bundle_detect.rule_set_stamp() == RULE_SET_STAMP, (
-        "unchanged by this ticket - the value is the one `test_bundle_detect.py` pins, "
-        "not a literal copied here"
-    )
-    # Three tables, three owners, and this file pins only the DIFFERENCE. Restating the
-    # two detector tables here would make this file red the day someone widens the
-    # import allow-list (`test_bundle_detect.py` derives `MODEL_SUFFIXES` from
-    # `IMPORT_ALLOWED_EXTS`), and `file_utils`' table is `test_archive_project.py`'s.
-    assert bundle_service.PROJECT_MEMBER_SUFFIXES != bundle_detect.MODEL_SUFFIXES
-    assert bundle_service.PROJECT_MEMBER_SUFFIXES != file_utils.MODEL_SUFFIXES
-
-
-def test_an_obj_file_is_registered_but_is_neither_a_member_nor_a_model(
-    client: TestClient, isolated_storage: Path
-) -> None:
-    """The ``.obj`` ruling, measured: registrable, ``other`` to the detector, no member.
-
-    ``file_utils.MODEL_SUFFIXES`` calls ``.obj`` a model and ``bundle_detect`` does not,
-    so the choice of table decides whether a project can hold one. It cannot: the scan
-    registers every file, ``classify_entry`` answers ``other`` (``other_count += 1``,
-    ``model_count += 0``), and a member the row never counted would be a project holding
-    a file the report describes as "other". Mutation: make the attach rule read
-    ``file_utils.MODEL_SUFFIXES`` and the ``.obj`` joins the member set, this reds, and
-    the row's own ``model_count`` still says 1 - the two questions disagreeing out loud.
-    """
-    write_file(isolated_storage / "Obj Thing" / "part.stl", STL_BYTES)
-    write_file(isolated_storage / "Obj Thing" / "part.obj", b"v\n")
-    write_file(isolated_storage / "Obj Thing" / "cover.jpg", b"j" * 50)
-    write_text(isolated_storage / "Obj Thing" / "notes.txt", "print at 0.2mm\n")
-    scan()
-    headers = auth_header(client)
-
-    assert bundle_detect.classify_entry("part.obj", 2) == bundle_detect.OTHER
-    row = row_for(detect(client, headers), "Obj Thing")
-
-    assert (row["model_count"], row["image_count"], row["other_count"]) == (1, 1, 1), (
-        "the row counts the STL and the jpg, and counts the .obj as OTHER - which is the "
-        "whole reason the member table is not `file_utils.MODEL_SUFFIXES`"
-    )
-
-    created = create(client, headers, [{"key": "Obj Thing"}])
-
-    assert created["results"][0]["assets_added"] == 2
-    assert project_storage_paths(created["results"][0]["project_id"]) == {
-        "Obj Thing/part.stl",
-        "Obj Thing/cover.jpg",
-    }, "the model and the preview are members; the .obj is registered and is nothing"
-    assert registered_model_paths("Obj Thing") == {"Obj Thing/part.stl"}
-    assert registered_member_paths("Obj Thing") == {"Obj Thing/part.stl", "Obj Thing/cover.jpg"}
-    with Session(engine) as session:
-        registered = {asset.path for asset in bundle_service.registered_assets(session, "Obj Thing")}
-
-    assert "Obj Thing/part.obj" in registered, "registration is not suffix-gated"
+# The deleted ATTACH table's name, assembled from two halves HERE on purpose: a
+# literal in this file would be found by the grep the witness below feeds.
+_DELETED_MEMBER_TABLE = "PROJECT_MEMBER" + "_SUFFIXES"
+# Every model and image suffix the detector knows. A door that compares against one
+# of these is a door answering the membership question itself.
+KIND_SUFFIXES = (".stl", ".3mf", ".step", ".stp", ".lbrn", ".lbrn2", ".png", ".jpg", ".jpeg", ".webp", ".bmp")
 
 
 def test_a_project_create_refuses_a_cover_outside_its_member_set(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """The belt guard: a cover is a MEMBERSHIP question now, and it is asked before the write.
+    """The belt guard: a cover is a MEMBERSHIP question, and it is asked before the write.
 
     ``project_service.create_project_with_members`` checks that a cover asset EXISTS and
     never that it is a member - which is precisely why the live tower's project came out
@@ -10522,6 +10576,10 @@ def test_a_project_create_refuses_a_cover_outside_its_member_set(
     ``created`` with a ``cover_asset_id`` no ``project_asset`` row backs - and nothing in
     the suite would notice except these two assertions, which is the hole the live box
     fell into.
+
+    Mf-7oow note: the guard reads the member list it is HANDED, and the bundle door now
+    hands it every registered file under the key. The models-only list below is
+    therefore still exactly the "door that forgot" this belt exists for.
     """
     live_tower_extraction(isolated_storage)
     scan()
@@ -10540,7 +10598,6 @@ def test_a_project_create_refuses_a_cover_outside_its_member_set(
             members=members,
             marker={"key": TOWER_DIR, "rel_dir": TOWER_DIR},
             cover_asset_id=cover_id,
-            kinds=bundle_service.PROJECT_MEMBER_SUFFIXES,
         )
 
     assert borrowed.status == project_create_service.STATUS_REFUSED, (
@@ -10573,7 +10630,8 @@ def test_a_project_create_refuses_a_cover_outside_its_member_set(
 
     with Session(engine) as session:
         # The positive control: the same members, this time with the PNG among them -
-        # what the widened ATTACH table gives the bundle door - still writes.
+        # what the bundle door's `_members_of` hands over (every registered file) -
+        # still writes.
         honest = project_create_service.create_project_from_members(
             session,
             name="A tower wearing its own face",
@@ -10581,194 +10639,291 @@ def test_a_project_create_refuses_a_cover_outside_its_member_set(
             members=[*members, project_create_service.MemberCandidate(cover_id, f"{TOWER_MEMBER_DIR}/_FileName_Key.png")],
             marker={"key": TOWER_DIR, "rel_dir": TOWER_DIR},
             cover_asset_id=cover_id,
-            kinds=bundle_service.PROJECT_MEMBER_SUFFIXES,
         )
 
     assert honest.status == project_create_service.STATUS_CREATED
     assert len(honest.members) == 16, "fifteen models plus the preview that is the cover"
 
 
-def test_the_member_set_seam_is_the_only_place_a_create_filters_by_kind() -> None:
-    """Mf-wsdo's seam, pinned at the source: one body changed, and the pin got SHARPER.
+def test_an_obj_file_is_a_member_with_role_other_and_is_still_not_a_model(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The ``.obj`` ruling, measured: registrable, ``other`` to the detector, a MEMBER.
 
-    What moved: the bundle door used to hand ONE table down to the seam — the detector's
-    ``MODEL_SUFFIXES`` — and this pin required every ``kinds=`` value in a door body to be
-    exactly that expression. After Mf-wsdo the folder door hands TWO tables down, the
-    MODEL question (``bundle_detect.MODEL_SUFFIXES``, into ``member_asset_ids``, for
-    ``attached`` and the compound group counts) and the ATTACH question
-    (``PROJECT_MEMBER_SUFFIXES``, into ``create_project_from_members``, for what the
-    project holds). A pin that still demanded one table would have demanded the ATTACH
-    table be the detector's — the one edit the rule-set stamp forbids — so it now names
-    BOTH tables and demands exactly one hand-down of each. That is a stricter pin, not a
-    looser one: it gained a table identity check, a namespace check and a
-    named-exactly-once check, and it kept every refusal it had.
+    ``file_utils.MODEL_SUFFIXES`` calls ``.obj`` a model and ``bundle_detect`` does not,
+    so the choice of table decides whether a row counts one. The row does not:
+    ``classify_entry("part.obj")`` answers ``other``, so ``other_count`` counts it and
+    ``model_count`` does not. And since Mf-7oow the created project HOLDS it anyway,
+    with that very same role - membership is every registered file under the key and
+    the role is the detector's answer, so the project and the row agree instead of
+    disagreeing.
 
-    It reads the two door bodies — ``bundle_service._create_one`` and
-    ``archive_project_service.create_project_from_extract`` — and refuses:
-
-    * a ``_suffix`` call in either body: that is ``project_create_service``'s private
-      extension reader, and a door calling it is a door filtering by kind;
-    * a comparison against a string literal ending in ``.stl``: the same refusal in the
-      shape a door would actually write when it grows its own filter
-      (``path.endswith(".stl")``, ``suffix == ".stl"``);
-    * a ``kinds=`` value that is neither table — a THIRD table (``PREVIEW_SUFFIXES``,
-      ``file_utils.MODEL_SUFFIXES``, a hand-written list) is refused by name;
-    * a ``MODEL_SUFFIXES`` read that is not the value of a ``kinds=`` hand-down: reads
-      balance the hand-downs that use it, so a membership test, a local variable or a
-      cover rule in a door body unbalances the count;
-    * the ATTACH table named through anyone else's namespace, or named twice: it is
-      ``bundle_service``'s OWN module-level constant (assigned there, imported from
-      nowhere, and absent from ``bundle_detect``, because both detector tables are
-      hashed into ``rule_set_stamp()``), so the door body names it bare and exactly once;
-    * an archive door that hands ``kinds`` down at all. It has none: what the operator
-      ticked IS the file set. ``handed`` is empty for that body, and if anyone ever
-      gives that door a suffix table the assertion says so out loud.
-
-    And the seam side: ``member_asset_ids(candidates, *, kinds=None)`` - exactly those
-    two parameters, ``kinds`` keyword-only, defaulting to ``None``. Keyword-only is what
-    stops a door passing a table positionally into ``candidates``, and ``None`` meaning
-    "everything" is what lets the archive door ask the no-question question.
-
-    And AC-1's grep proof: ``project_create_service.py`` has exactly ONE ``_suffix``
-    CALL SITE, inside ``member_asset_ids``. The literal
-    ``grep -c '_suffix' curiarium/api/project_create_service.py`` answers ``2``, and the
-    second line is ``def _suffix`` itself — both numbers are asserted below so the grep
-    and the test can be read against each other.
-
-    Mutation (each run, then restored): put ``if _suffix(asset.path) in
-    bundle_detect.MODEL_SUFFIXES`` back into ``_create_one`` (the pre-Mf-yhjo
-    ``model_assets`` comprehension) and it reds three ways at once - a ``_suffix`` call,
-    a ``MODEL_SUFFIXES`` read outside a hand-down, and the balance. Hand
-    ``bundle_detect.MODEL_SUFFIXES`` to ``create_project_from_members`` instead of
-    ``PROJECT_MEMBER_SUFFIXES`` - i.e. undo the ticket - and the "exactly one of each
-    table" claim reds. Move ``PROJECT_MEMBER_SUFFIXES`` into ``bundle_detect`` and import
-    it, and the namespace block reds. Give either door a third table and the hand-down
-    block reds. Move the filter to the archive door and the empty-``handed`` claim reds.
-    Rename ``kinds``, drop the keyword-only star, or default it to a table instead of
-    ``None`` and the signature block reds. Deleting this test is the only quiet way
-    through, which is the usual reason a source pin is worth having.
+    Mutation (run, then restored): filter ``_members_of`` with
+    ``file_utils.MODEL_SUFFIXES`` (or drop any role from the set) and the member count
+    and the role map below red; make the row's ``model_count`` read the member count
+    and the ``(1, 1, 1)`` block reds.
     """
-    seam_calls = {"member_asset_ids", "create_project_from_members"}
-    doors = (
-        (bundle_service, "_create_one", True),
-        (archive_project_service, "create_project_from_extract", False),
+    write_file(isolated_storage / "Obj Thing" / "part.stl", STL_BYTES)
+    write_file(isolated_storage / "Obj Thing" / "part.obj", b"v\n")
+    write_file(isolated_storage / "Obj Thing" / "cover.jpg", b"j" * 50)
+    write_text(isolated_storage / "Obj Thing" / "notes.txt", "print at 0.2mm\n")
+    scan()
+    headers = auth_header(client)
+
+    # The two tables disagree about `.obj` and that is the point: `file_utils`' (the web
+    # mirror, the archive door's cover rule) calls it a model, the detector's classifier
+    # does not. The ROLE is the classifier's answer, so it is `other`.
+    assert ".obj" in file_utils.MODEL_SUFFIXES
+    assert bundle_detect.classify_entry("part.obj", 2) == bundle_detect.OTHER
+    row = row_for(detect(client, headers), "Obj Thing")
+
+    assert (row["model_count"], row["image_count"], row["other_count"]) == (1, 1, 1), (
+        "the row counts the STL and the jpg, and counts the .obj as OTHER - which is the "
+        "whole reason the role is the detector's answer and never a member table's"
     )
 
-    for module, function_name, hands_a_kind_table_down in doors:
-        body = _top_level_function(module, function_name)
-        label = f"{module.__name__}.{function_name}"
+    created = create(client, headers, [{"key": "Obj Thing"}])
 
-        called = set()
-        for node in ast.walk(body):
-            if isinstance(node, ast.Call):
-                called.add(_callee_name(node))
-        assert "_suffix" not in called, f"{label} filters by kind itself"
-        assert not [text for text in _string_comparands(body) if text.endswith(".stl")], (
-            f"{label} compares against a model suffix literal"
-        )
-
-        model_reads = [
-            node
-            for node in ast.walk(body)
-            if isinstance(node, ast.Attribute) and node.attr == "MODEL_SUFFIXES"
-        ]
-        qualified_attach_reads = [
-            node
-            for node in ast.walk(body)
-            if isinstance(node, ast.Attribute) and node.attr == "PROJECT_MEMBER_SUFFIXES"
-        ]
-        assert not qualified_attach_reads, (
-            f"{label} reads `PROJECT_MEMBER_SUFFIXES` through a module namespace: it is "
-            "`bundle_service`'s OWN module-level constant, and a `bundle_detect.` prefix "
-            "would put the member table where the rule-set stamp can reach it"
-        )
-
-        handed = _kinds_arguments(body)
-        tables: List[str] = []
-        for callee, value in handed:
-            assert callee in seam_calls, f"{label} hands `kinds` to {callee!r}, which is not the seam"
-            if (
-                isinstance(value, ast.Attribute)
-                and value.attr == "MODEL_SUFFIXES"
-                and isinstance(value.value, ast.Name)
-                and value.value.id == "bundle_detect"
-            ):
-                tables.append("model")
-                continue
-            assert isinstance(value, ast.Name) and value.id == "PROJECT_MEMBER_SUFFIXES", (
-                f"{label} hands something other than `bundle_detect.MODEL_SUFFIXES` (the "
-                "MODEL question) or `PROJECT_MEMBER_SUFFIXES` (the ATTACH question) as "
-                "`kinds` - a third table is a third answer to one question"
-            )
-            tables.append("attach")
-
-        if hands_a_kind_table_down:
-            assert sorted(tables) == ["attach", "model"], (
-                f"{label} must hand exactly two tables down - the MODEL table to the "
-                "seam's model question and the ATTACH table to the write - and it handed "
-                f"{tables}"
-            )
-            named_attach = [
-                node
-                for node in ast.walk(body)
-                if isinstance(node, ast.Name) and node.id == "PROJECT_MEMBER_SUFFIXES"
-            ]
-            assert len(named_attach) == 1, (
-                f"{label} names the ATTACH table {len(named_attach)} time(s); it is one "
-                "hand-down, and a second use is the door answering a kind question itself"
-            )
-        assert len(model_reads) == tables.count("model"), (
-            f"{label} reads MODEL_SUFFIXES {len(model_reads)} time(s) but hands it down "
-            f"{tables.count('model')} time(s): the table is being used for something "
-            "besides the seam"
-        )
-        if not hands_a_kind_table_down:
-            assert not handed and not model_reads, (
-                f"{label} must not answer the kinds question at all - the archive door's "
-                "file set is the listing the operator ticked"
-            )
-
-    # Where the ATTACH table lives is part of the pin: `bundle_service` owns it by
-    # assignment, imports it from nowhere, and `bundle_detect` does not carry it - the
-    # detector's two tables are hashed into `rule_set_stamp()` and a member table parked
-    # beside them would re-rank every cached row.
-    assert "PROJECT_MEMBER_SUFFIXES" in _module_level_targets(bundle_service)
-    assert "PROJECT_MEMBER_SUFFIXES" not in _imported_names(bundle_service)
-    assert not hasattr(bundle_detect, "PROJECT_MEMBER_SUFFIXES")
-
-    signature = inspect.signature(project_create_service.member_asset_ids)
-
-    assert list(signature.parameters) == ["candidates", "kinds"], list(signature.parameters)
-    kinds = signature.parameters["kinds"]
-    assert kinds.kind is inspect.Parameter.KEYWORD_ONLY, kinds.kind
-    assert kinds.default is None, kinds.default
-
-    # AC-1, the grep made an assertion. `grep -c '_suffix'` over the seam's module
-    # answers 2 - one call site plus the `def` line - and the AST count below is the
-    # number that actually matters: exactly one place READS a suffix, inside
-    # `member_asset_ids`. A second call site would be a second kind question living in
-    # the module that is forbidden from owning one.
-    seam_source = Path(project_create_service.__file__).read_text()
-
-    assert len([line for line in seam_source.splitlines() if "_suffix" in line]) == 2, (
-        "one call site and one `def` - the two lines `grep -c '_suffix'` answers"
+    assert created["results"][0]["assets_added"] == 4, (
+        "an `.obj` is a MEMBER now (Mf-7oow): four files, one of them `other`"
     )
-    seam_tree = ast.parse(seam_source)
-
-    assert len([node for node in ast.walk(seam_tree) if _callee_name_of(node) == "_suffix"]) == 1, (
-        "`member_asset_ids` is the only place the module calls `_suffix`"
+    assert project_storage_paths(created["results"][0]["project_id"]) == {
+        "Obj Thing/part.stl",
+        "Obj Thing/part.obj",
+        "Obj Thing/cover.jpg",
+        "Obj Thing/notes.txt",
+    }, "the model, the preview, the .obj and the document - and the `.obj` is still not a model"
+    assert registered_model_paths("Obj Thing") == {"Obj Thing/part.stl"}, (
+        "the MODEL question is unchanged: `file_utils.MODEL_SUFFIXES` is not this answer"
     )
-    assert len(
-        [node for node in ast.walk(seam_tree) if isinstance(node, ast.FunctionDef) and node.name == "_suffix"]
-    ) == 1
+    assert registered_asset_paths("Obj Thing") == {
+        "Obj Thing/part.stl",
+        "Obj Thing/part.obj",
+        "Obj Thing/cover.jpg",
+        "Obj Thing/notes.txt",
+    }
+    with Session(engine) as session:
+        member_set = bundle_service._members_of(
+            "Obj Thing", bundle_service.registered_assets(session, "Obj Thing")
+        )
 
-    # The two `_suffix`es are the same line written twice, in two modules that must
-    # agree: `bundle_service` decides ownership with one and the seam decides
-    # membership with the other. Nothing but this pins them, and the file that shows a
-    # drift is a `.STL` - owned by the door under one rule and filtered out of the
-    # member set under the other, which reads as a bundle that created with no members.
-    for path in ("a/b.STL", "a/b.stl", "a/b", "a/b.tar.gz", "a/.stl", "", "a/b.PNG", "a/"):
-        assert bundle_service._suffix(path) == project_create_service._suffix(path), path
+    assert {entry.rel_path: entry.role for entry in member_set.entries} == {
+        "part.stl": bundle_detect.MODEL,
+        "part.obj": bundle_detect.OTHER,
+        "cover.jpg": bundle_detect.IMAGE,
+        "notes.txt": bundle_detect.TEXT,
+    }, "the project holds what the row counted, role for role"
+
+
+def test_the_member_roles_are_the_classifiers_own(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The role table, measured on a mixed folder: `_members_of` asks ONE classifier.
+
+    Membership is every registered asset under the key; the ROLE is
+    ``bundle_detect.classify_entry``'s answer and nothing else. Pinned by NAME, so a
+    suffix added to (or dropped from) any detector table moves this witness instead of
+    silently changing what a project holds:
+
+    * model   - ``.stl .3mf .step .stp .lbrn .lbrn2`` (the import allow-list minus the
+      archive);
+    * image   - ``.png .jpg .jpeg .webp .bmp`` (``IMAGE_SUFFIXES``);
+    * text    - ``.pdf .txt .md .html .htm .rtf`` (``BUNDLE_TEXT_EXTS``);
+    * other   - a backup (``.stlbak``), a 3D tool file the import door refuses
+      (``.3dm``), a slicer project (``.scad``, ``.gcode``), and an extension nothing
+      in this library knows;
+    * archive - ``.zip``: a MEMBER now (it was the one file a create excluded), and
+      still never a model.
+
+    Mutation (each run, then restored): answer ``other`` for a ``.pdf`` and the text
+    tally reds; add ``.txt`` to ``IMAGE_SUFFIXES`` and both the text and image tallies
+    red; drop the ``.zip`` arm from ``classify_entry`` and the archive tally reds;
+    filter ``_members_of`` by a suffix table and the member-set equality reds with the
+    ``other`` and ``archive`` files missing.
+    """
+    roles = {
+        "part.stl": bundle_detect.MODEL,
+        "part.3mf": bundle_detect.MODEL,
+        "part.step": bundle_detect.MODEL,
+        "part.stp": bundle_detect.MODEL,
+        "part.lbrn": bundle_detect.MODEL,
+        "part.lbrn2": bundle_detect.MODEL,
+        "render.png": bundle_detect.IMAGE,
+        "render.jpg": bundle_detect.IMAGE,
+        "render.jpeg": bundle_detect.IMAGE,
+        "render.webp": bundle_detect.IMAGE,
+        "render.bmp": bundle_detect.IMAGE,
+        "docs.pdf": bundle_detect.TEXT,
+        "notes.txt": bundle_detect.TEXT,
+        "notes.md": bundle_detect.TEXT,
+        "page.html": bundle_detect.TEXT,
+        "page.htm": bundle_detect.TEXT,
+        "notes.rtf": bundle_detect.TEXT,
+        "part.stlbak": bundle_detect.OTHER,
+        "part.3dm": bundle_detect.OTHER,
+        "part.scad": bundle_detect.OTHER,
+        "part.gcode": bundle_detect.OTHER,
+        "mystery.qqq": bundle_detect.OTHER,
+        "deliverable.zip": bundle_detect.ARCHIVE,
+    }
+    for name in roles:
+        write_file(isolated_storage / "Roles" / name, b"x")
+    scan()
+
+    with Session(engine) as session:
+        member_set = bundle_service._members_of(
+            "Roles", bundle_service.registered_assets(session, "Roles")
+        )
+
+    assert {entry.rel_path: entry.role for entry in member_set.entries} == roles, (
+        "membership is every registered file, and each one's role is the detector's own answer"
+    )
+    assert sorted(entry.rel_path for entry in member_set.entries) == sorted(roles), (
+        "every registered file under the key is a MEMBER - nothing is filtered by role"
+    )
+    tallies: Dict[str, int] = {}
+    for entry in member_set.entries:
+        tallies[entry.role] = tallies.get(entry.role, 0) + 1
+    assert tallies == {
+        bundle_detect.MODEL: 6,
+        bundle_detect.IMAGE: 5,
+        bundle_detect.TEXT: 6,
+        bundle_detect.OTHER: 5,
+        bundle_detect.ARCHIVE: 1,
+    }, "the role tallies of the mixed folder above - one per member, no member twice"
+    for role in (bundle_detect.MODEL, bundle_detect.IMAGE, bundle_detect.TEXT, bundle_detect.OTHER, bundle_detect.ARCHIVE):
+        assert [entry.rel_path for entry in member_set.by_role(role)] == sorted(
+            name for name, found in roles.items() if found == role
+        ), f"`by_role({role!r})` is the only view on the set, and it keeps input order"
+    assert [entry.rel_path for entry in member_set.by_role(bundle_detect.MODEL)][:2] == [
+        "part.3mf",
+        "part.lbrn",
+    ], "input order (path order) is preserved verbatim, so `ProjectAsset.position` cannot move"
+
+    with Session(engine) as session:
+        stray = bundle_service.registered_assets(session, "Roles")
+    with pytest.raises(ValueError, match="is not under bundle key"):
+        bundle_service._members_of("Some Other Key", stray)
+
+
+def test_the_old_member_table_and_its_kinds_seam_are_gone_everywhere() -> None:
+    """Mf-7oow's deletion, made checkable: no source file READS or BINDS the table.
+
+    The ticket deleted ONE suffix table and ONE ``kinds=`` seam, and a table is
+    exactly the thing that comes back by accident - a helper, a second module, a
+    copied set. So this parses every ``.py`` under ``curiarium/api`` and demands that
+    the name appear as NO identifier anywhere: not a module-level constant, not an
+    attribute read, not an import. Prose is not parsed, which is deliberate - the
+    pin exists to keep the RULE dead, and a comment naming the deleted table in the
+    past tense cannot decide a member. It also says the same facts about the modules
+    themselves:
+
+    * no module carries the name, ``bundle_service`` and ``bundle_detect`` included;
+    * ``project_create_service`` has neither ``member_asset_ids`` nor ``_suffix``;
+    * ``create_project_from_members`` takes no ``kinds`` - it writes the member list
+      the door handed it (``asset_ids = [candidate.asset_id for candidate in members]``).
+
+    The name is assembled from two halves above on purpose: a literal here would be
+    found by the very grep that feeds this assertion.
+
+    Mutation: re-add the constant to ``bundle_service`` and the grep reds naming the
+    file; re-add ``kinds=`` to the primitive and the signature assertion reds;
+    re-introduce ``member_asset_ids`` and ``hasattr`` reds.
+    """
+    api_root = Path(bundle_service.__file__).resolve().parent
+    hits: List[str] = []
+    for path in sorted(api_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == _DELETED_MEMBER_TABLE:
+                hits.append(f"{path.relative_to(api_root).as_posix()}:{node.lineno}")
+            elif isinstance(node, ast.Attribute) and node.attr == _DELETED_MEMBER_TABLE:
+                hits.append(f"{path.relative_to(api_root).as_posix()}:{node.lineno}")
+
+    assert hits == [], f"the deleted member suffix table is back in {hits}"
+    for module in (bundle_service, bundle_detect, project_create_service):
+        assert not hasattr(module, _DELETED_MEMBER_TABLE), module.__name__
+    assert not hasattr(project_create_service, "member_asset_ids"), (
+        "the seam is deleted: `create_project_from_members` writes the list it is handed"
+    )
+    assert not hasattr(project_create_service, "_suffix"), (
+        "the module names no file extension at all any more - the role is the detector's answer"
+    )
+    assert "kinds" not in inspect.signature(project_create_service.create_project_from_members).parameters, (
+        "there is no table left to hand down"
+    )
+
+
+def test_the_member_set_is_decided_once_by_the_detectors_own_classifier() -> None:
+    """THE new contract at the source: one member function, one role decision.
+
+    ``_create_one`` asks ``bundle_service._members_of`` exactly ONCE and reads two
+    views off it - the member list it writes, and ``by_role(MODEL)`` for ``attached``,
+    ``models_by_group`` and ``Dedupe.containment``. It refuses:
+
+    * a second ``_members_of`` call: a member set rebuilt from a different list is the
+      Mf-quv4 hand-off returning;
+    * a ``_suffix`` call, or a comparison against a model/image suffix literal: that is
+      a door answering the membership question itself;
+    * a ``classify_entry`` call: the ROLE is decided inside ``_members_of``, once, so
+      a door cannot answer differently from the row it was created from;
+    * a ``.suffix`` attribute read in ``project_create_service``'s whole source: the
+      module that writes the project names no extension at all.
+
+    And the mirror half: ``_members_of`` holds exactly ONE ``classify_entry`` call, so
+    the one classifier is asked once per asset and nowhere outside ``bundle_detect`` -
+    and the archive door consults no bundle rule at all (its resolved listing IS its
+    member set, pinned by
+    ``test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower``).
+
+    Mutations (each run, then restored): call ``_members_of`` twice and the count
+    reds; put a ``classify_entry`` call into ``_create_one`` and the door assertion
+    reds; filter inside ``_members_of`` with a suffix table and
+    ``test_the_member_roles_are_the_classifiers_own`` and
+    ``test_service_a_fresh_bundle_project_reports_no_new_parts`` red instead - this
+    witness pins the SHAPE of the decision, those two pin its ANSWER.
+    """
+    create_one = _top_level_function(bundle_service, "_create_one")
+    members_of = _top_level_function(bundle_service, "_members_of")
+
+    door_calls = [
+        name for name in (_callee_name(node) for node in ast.walk(create_one) if isinstance(node, ast.Call)) if name
+    ]
+    assert door_calls.count("_members_of") == 1, (
+        "the door builds its member set once, from one list - a second build is a second opinion"
+    )
+    assert "_suffix" not in door_calls, "the create door filters by kind itself"
+    assert "classify_entry" not in door_calls, (
+        "the role is decided in `_members_of`; a door asking again could answer "
+        "differently from the row it was created from"
+    )
+    assert not [
+        text for text in _string_comparands(create_one) if text.lower().endswith(KIND_SUFFIXES)
+    ], "the create door compares against a model or image suffix literal"
+    by_role_reads = [node for node in ast.walk(create_one) if isinstance(node, ast.Attribute) and node.attr == "by_role"]
+    assert len(by_role_reads) == 1, (
+        "`by_role` is the only view on the member set, and the door asks it once - for MODEL"
+    )
+
+    members_of_calls = [
+        name for name in (_callee_name(node) for node in ast.walk(members_of) if isinstance(node, ast.Call)) if name
+    ]
+    assert members_of_calls.count("classify_entry") == 1, (
+        "exactly one role decision per asset, and it is the detector's own classifier"
+    )
+
+    seam_tree = ast.parse(Path(project_create_service.__file__).read_text())
+    assert [
+        node for node in ast.walk(seam_tree) if isinstance(node, ast.Attribute) and node.attr == "suffix"
+    ] == [], "the project-writing module reads no file extension, let alone filters on one"
+
+    archive_body = _top_level_function(archive_project_service, "create_project_from_extract")
+    archive_calls = {
+        name for name in (_callee_name(node) for node in ast.walk(archive_body) if isinstance(node, ast.Call)) if name
+    }
+    assert not archive_calls & {"_suffix", "_members_of", "classify_entry"}, (
+        "the archive door consults no bundle rule: the entries the operator ticked ARE the member set"
+    )
 
 
 def test_asking_with_no_key_matches_no_project(
@@ -10958,7 +11113,7 @@ def test_the_create_door_asks_the_ownership_map_the_report_answered_with(
     # And what the tower create attached is the files under the one key the report
     # credited: its models AND its previews (the ATTACH table, Mf-wsdo) - not the
     # ``.txt``, not the twin's contents, and not one file a deeper row owns.
-    assert project_storage_paths(created["results"][0]["project_id"]) == registered_member_paths(
+    assert project_storage_paths(created["results"][0]["project_id"]) == registered_asset_paths(
         TOWER_DIR
     )
 
@@ -10968,13 +11123,14 @@ def test_no_member_create_leaves_an_empty_project_behind(
 ) -> None:
     """One transaction or none: an attach set that names a stranger cannot strand a project.
 
-    The bundle door, asked to create the tower row, with the member-set seam answering
-    ``["no-such-asset"]`` - one id no ``Asset`` row holds. The honest way to build that
-    state is to patch the seam itself for the duration of one real
-    ``POST /bundles/create``: the door still runs, the report still runs, and the create
-    dies inside ``project_service.create_project_with_members``, which checks every id
-    BEFORE it inserts. So the item answers ``failed`` and the ``Project`` table is still
-    empty.
+    The bundle door, asked to create the tower row, with its member builder
+    (``bundle_service._members_of``) answering the real member set PLUS ``no-such-asset``
+    - one id no ``Asset`` row holds. The honest way to build that state is to patch the
+    builder for the duration of one real ``POST /bundles/create``: the door still runs,
+    the report still runs, the cover is still a member (so the pre-write cover guard is
+    not what refuses), and the create dies inside
+    ``project_service.create_project_with_members``, which checks every id BEFORE it
+    inserts. So the item answers ``failed`` and the ``Project`` table is still empty.
 
     The point is the single transaction, and what it replaced: the old door committed the
     project row, then attached files in a SECOND session through
@@ -10995,10 +11151,26 @@ def test_no_member_create_leaves_an_empty_project_behind(
     headers = auth_header(client)
     row = row_for(detect(client, headers), TOWER_DIR)
 
-    def only_a_bogus_id(_candidates, *, kinds=None):
-        return ["no-such-asset"]
+    real_members_of = bundle_service._members_of
 
-    monkeypatch.setattr(project_create_service, "member_asset_ids", only_a_bogus_id)
+    def with_a_stranger(key: str, assets) -> "bundle_service.MembersOf":
+        """The real member set plus one id no ``Asset`` row holds."""
+        member_set = real_members_of(key, assets)
+        stranger = bundle_service.ProjectMember(
+            asset=bundle_service.RegisteredAsset(
+                id="no-such-asset",
+                path=f"{key}/no-such-asset.stl",
+                size=1,
+                mime="application/octet-stream",
+                thumb_version=0,
+                filename="no-such-asset.stl",
+            ),
+            role=bundle_detect.MODEL,
+            rel_path="no-such-asset.stl",
+        )
+        return bundle_service.MembersOf(entries=(*member_set.entries, stranger))
+
+    monkeypatch.setattr(bundle_service, "_members_of", with_a_stranger)
 
     created = create(client, headers, [{"key": row["key"]}])
 

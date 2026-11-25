@@ -311,11 +311,11 @@ def test_create_from_the_report_returns_one_project(
         "since Mf-wsdo this says something stronger than "
         "\"the create used the row's cover\": the cover is one of the project's members"
     )
-    # The ATTACH table: the three models the print needs plus the five previews the
-    # landing page renders (Mf-wsdo). `README.txt`/`LICENSE.txt` stay out, so eight is
-    # not "everything registered" - the row above still counts ten files.
-    assert len(project_asset_ids(client, contributor, project_id)) == 8
-    assert created["results"][0]["assets_added"] == 8
+    # Every registered file under the key (Mf-7oow): the three models, the five
+    # previews AND the two marker documents - the same ten the row above counts, so
+    # membership and the row's facts cannot disagree.
+    assert len(project_asset_ids(client, contributor, project_id)) == 10
+    assert created["results"][0]["assets_added"] == 10
 
 
 def test_a_viewer_can_read_the_report_but_cannot_create_or_dismiss(

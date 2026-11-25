@@ -23,13 +23,12 @@ only module that owns either:
     `project_service.find_project_by_source`. Every leg is skipped when its identity is
     falsy: an empty identity is not an identity, and matching on one matches
     everything.
-  * `member_asset_ids` — the member set. Which kinds a door attaches is a parameter
-    (`kinds`), never a test inside this module, so the day the bundle door stops
-    deciding kinds by suffix changes one body here and not two doors. It is ONE seam
-    asked TWO questions with TWO tables since Mf-wsdo — the ATTACH question
-    (`bundle_service.PROJECT_MEMBER_SUFFIXES`, what the project holds) and the MODEL
-    question (`bundle_detect.MODEL_SUFFIXES`, what gets printed and what containment
-    is asked with) — and neither table is named here.
+  * the member set is decided ONCE, by its owning door, and this module simply writes
+    what it is handed (`asset_ids = [candidate.asset_id for candidate in members]`).
+    For the bundle door that decision is `bundle_service._members_of`: every
+    registered asset under the key, each with the role the detector's own
+    `bundle_detect.classify_entry` gave it. There is no suffix table in this module
+    and none to hand down — Mf-7oow deleted the `kinds=` seam that used to carry one.
   * `create_project_from_members` — one dedupe pass, then
     `project_service.create_project_with_members`, in one transaction. Either the
     project and every member row land, or nothing does.
@@ -69,7 +68,6 @@ The legacy `_archive_project` block is still READ (`_read_marker` falls back to 
 rows written before this module are still found. Nothing writes it. No migration.
 """
 
-from pathlib import PurePath
 from typing import Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 from sqlmodel import Session, func, select
@@ -151,12 +149,13 @@ class Dedupe(NamedTuple):
     # it is about to write is not the set it wants to be found by. `None` means "the
     # member set", which is what it always was and what every door but one wants: the
     # ids are this module's to compute, so a door does not supply them. The bundle
-    # door names them, because since Mf-wsdo the two questions have different answers
-    # - "does a project already hold this bundle's files" is a MODEL question (a
-    # hand-made project over a bundle's files holds the parts a human prints), while
-    # "what does the project hold" is the MEMBER question (those parts plus the
-    # previews the landing page renders). Ask the first with the second and every
-    # re-click over a hand-made project writes a duplicate.
+    # door names them, because the two questions have different answers - "does a
+    # project already hold this bundle's files" is a MODEL question (a hand-made
+    # project over a bundle's files holds the parts a human prints), while "what does
+    # the project hold" is the MEMBER question (every registered file under the key
+    # since Mf-7oow: models, images, documents, unknowns and nested archives). Ask the
+    # first with the second and every re-click over a hand-made project writes a
+    # duplicate.
     #
     # PRECONDITION: naming `containment` is only meaningful with `assets=True`, because
     # these ids are what the assets leg is asked with and no other leg reads them. A
@@ -462,60 +461,6 @@ def find_existing_project(
     return ExistingProject(owner, MATCH_ASSETS) if owner is not None else None
 
 
-def member_asset_ids(
-    candidates: Sequence[MemberCandidate], *, kinds: Optional[Sequence[str]] = None
-) -> List[str]:
-    """THE member-set seam: which offered files a create attaches, as asset ids.
-
-    `kinds` is the whole question, and it is a parameter and never a test in here. ONE
-    seam, asked TWO questions by the bundle door with TWO tables (Mf-wsdo), and asked
-    no question at all by the archive door:
-
-      * the archive door passes nothing — every entry it resolved is a member, because
-        what it read WAS the file set, not a guess about one;
-      * the bundle door's ATTACH question is the write's `kinds=` argument,
-        `bundle_service.PROJECT_MEMBER_SUFFIXES` — models plus the images the landing
-        page can render as a cover, in a gallery, or in its cover picker. Text is out,
-        and so is any nested archive;
-      * the bundle door's MODEL question is the `kinds=` argument of this function as
-        its caller uses it, `bundle_detect.MODEL_SUFFIXES` — the parts a human prints,
-        which is what the compound marker's group counts and the dedupe's containment
-        are asked with.
-
-    Both tables are named by the door that owns detection and handed down; this module
-    names neither (see the module docstring, and the import-closure pin in
-    `tests/test_archive_project.py`). Note which module owns which table: the ATTACH
-    table is `bundle_service`'s, not the detector's, because the detector's two tables
-    are hashed into `bundle_detect.rule_set_stamp()`.
-
-    So the day the bundle door stops answering "which kinds attach" by suffix changes
-    the argument at one call site and the body here, and neither door grows a suffix
-    test back. Order is the caller's, and first-seen order is what
-    `create_project_with_members` writes as `position`.
-    """
-    if kinds is None:
-        return [candidate.asset_id for candidate in candidates]
-    wanted = set(kinds)
-    return [
-        candidate.asset_id
-        for candidate in candidates
-        if _suffix(candidate.path) in wanted
-    ]
-
-
-def _suffix(path: Optional[str]) -> str:
-    """The lowercase extension a `kinds` table is tested against.
-
-    The only such test in this module, and it is reached only through
-    `member_asset_ids` — a door hands a table down and this is what reads it. The
-    leading dot is kept, because that is the shape every `kinds` table in the
-    library is written in (`bundle_detect.MODEL_SUFFIXES`, the import allow-list),
-    and a seam that quietly restated `.stl` as `stl` would match nothing and say
-    nothing.
-    """
-    return PurePath(path or "").suffix.lower()
-
-
 def create_project_from_members(
     session: Session,
     *,
@@ -525,7 +470,6 @@ def create_project_from_members(
     marker: Optional[dict] = None,
     dedupe: Optional[Dedupe] = None,
     cover_asset_id: Optional[str] = None,
-    kinds: Optional[Sequence[str]] = None,
     require_members: bool = True,
     refuse: Optional[str] = None,
     description: Optional[str] = None,
@@ -557,6 +501,12 @@ def create_project_from_members(
          place the Project row and its `project_asset` rows are committed, and they
          commit together.
 
+    `members` is written VERBATIM, in the caller's order, with no kind filter:
+    `asset_ids = [candidate.asset_id for candidate in members]`. Which files are
+    members is the owning door's decision (`bundle_service._members_of` for the bundle
+    door), and Mf-7oow deleted the `kinds=` parameter that once let a door hand a
+    suffix table down here — there is no table in this module to hand.
+
     `origin` is the DOOR (`detection` | `archive_extract` | `manual`); it picks the
     marker sub-block and is not the `Project.origin` column, which is `project_origin`.
     `marker=None` writes no marker: a door with no detection payload — `POST /projects`
@@ -573,13 +523,14 @@ def create_project_from_members(
         # verdict for an operator: it raises instead of quietly creating.
         raise ValueError("Dedupe.containment is set without Dedupe.assets")
 
-    asset_ids = member_asset_ids(members, kinds=kinds)
+    asset_ids = [candidate.asset_id for candidate in members]
 
     if dedupe is not None:
         # Containment is asked with the door's `containment` when it named one and
         # with the member set when it did not - today only the bundle door names one,
         # because it is the only door whose member set is wider than the files that
-        # define the bundle (`Dedupe.containment`).
+        # define the bundle (`Dedupe.containment`), and since Mf-7oow that set is every
+        # registered file under the key rather than a suffix table's answer.
         asked = asset_ids if dedupe.containment is None else list(dedupe.containment)
         existing = find_existing_project(
             session,

@@ -1007,6 +1007,92 @@ describe("ProjectLanding attach-own-files", () => {
   });
 });
 
+describe("ProjectLanding documents and kind mix", () => {
+  it("shows the per-kind line once the member window covers the project", async () => {
+    renderLanding();
+    await screen.findByRole("img", { name: "Photo one" });
+
+    // The fixtures' three members are one model and two images, and
+    // `members.length === asset_count`, so the whole-project mix may be said.
+    expect(screen.getByTestId("project-kind-mix").textContent).toBe(
+      "1 model, 2 images, 0 documents, 0 other files",
+    );
+  });
+
+  it("lists a document member under Documents and counts it in the kind mix", async () => {
+    const withDocument = [
+      ...members,
+      makeAsset({
+        id: "a4",
+        name: "Manual",
+        filename: "manual.pdf",
+        mime: "application/pdf",
+        size: 4096,
+        tags: [],
+        url: "/assets/a4/file",
+        thumb_url: null,
+      }),
+    ];
+    listProjectAssetsMock.mockResolvedValue({ items: withDocument, hasMore: false });
+    renderLanding({ project: makeProject({ asset_count: 4 }) });
+    await screen.findByRole("img", { name: "Photo one" });
+
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section");
+    if (!documents) throw new Error("missing Documents section");
+    const link = within(documents).getByRole("link", { name: /manual\.pdf/ });
+    expect(link.getAttribute("href")).toBe("/assets/a4/file");
+    expect(link.textContent).toContain("4.0 KB");
+
+    expect(screen.getByTestId("project-kind-mix").textContent).toBe(
+      "1 model, 2 images, 1 document, 0 other files",
+    );
+  });
+
+  it("counts a .obj member as an other file, never as a model", async () => {
+    // `.obj` opens in a slicer, but the backend's role table calls it `other`.
+    // The line must read like the rows the project was created from, so the
+    // member lands in neither Documents nor the model count.
+    const withObj = [
+      ...members,
+      makeAsset({
+        id: "a4",
+        name: "Scan",
+        filename: "scan.obj",
+        mime: "model/obj",
+        size: 2048,
+        tags: [],
+        url: "/assets/a4/file",
+        thumb_url: null,
+      }),
+    ];
+    listProjectAssetsMock.mockResolvedValue({ items: withObj, hasMore: false });
+    renderLanding({ project: makeProject({ asset_count: 4 }) });
+    await screen.findByRole("img", { name: "Photo one" });
+
+    expect(screen.getByTestId("project-kind-mix").textContent).toBe(
+      "1 model, 2 images, 0 documents, 1 other file",
+    );
+    expect(screen.queryByRole("heading", { name: "Documents" })).toBeNull();
+  });
+
+  it("renders no Documents heading when the project has no documents", async () => {
+    renderLanding();
+    await screen.findByRole("img", { name: "Photo one" });
+
+    expect(screen.queryByRole("heading", { name: "Documents" })).toBeNull();
+  });
+
+  it("renders no per-kind line for a partial member window", async () => {
+    // Two members loaded out of a three-file project: the window's mix is not
+    // the project's, so the line must stay hidden rather than undercount.
+    listProjectAssetsMock.mockResolvedValue({ items: members.slice(0, 2), hasMore: false });
+    renderLanding({ project: makeProject({ asset_count: 3 }) });
+    await screen.findByRole("img", { name: "Photo one" });
+
+    expect(screen.queryByTestId("project-kind-mix")).toBeNull();
+  });
+});
+
 describe("ProjectLanding attach escape guard", () => {
   it("Escape closes the prompt only, the project stays open", async () => {
     // The prompt handles Escape during React's dispatch on the root container

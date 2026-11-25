@@ -118,6 +118,13 @@ export type BundleDetectItem = {
   image_count: number;
   text_count: number;
   other_count: number;
+  // The `archive` role's count (what the folder holds as a `.zip`, normally 1).
+  // OPTIONAL on purpose, like the neighbouring fields: a payload from before
+  // this field was served omits it, and absent means "the server did not say",
+  // so the detail pane renders an en dash rather than a fabricated 0.
+  // Deliberately not on `BundleMatch`: the report artifact's before/after shape
+  // pair stays comparable, and only a detect row carries the archive role.
+  archive_count?: number;
   // OPTIONAL on purpose, like the neighbouring fields: a payload from before the
   // breakdown was served omits it, and every existing fixture must keep
   // compiling. `undefined` means "the server did not say". Only a compound row

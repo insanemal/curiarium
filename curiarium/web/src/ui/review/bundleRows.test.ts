@@ -1009,9 +1009,11 @@ describe("countLabel", () => {
 });
 
 describe("countsLine", () => {
-  it("lists the asset counts and the registered-asset tail", () => {
+  it("lists the five roles and the registered-asset tail, dashing an absent archive", () => {
+    // `makeBundle()` carries no `archive_count`: that predates the field, so the
+    // archive part says how many archives are UNKNOWN rather than claiming 0.
     expect(countsLine(makeBundle())).toBe(
-      "3 models, 5 images, 2 text files, 0 other files - 8 registered assets",
+      "3 models, 5 images, 2 documents, 0 other files, \u2013 archives - 8 registered assets",
     );
   });
 
@@ -1024,7 +1026,30 @@ describe("countsLine", () => {
       assets_total: 1,
     });
     expect(countsLine(row)).toBe(
-      "1 model, 1 image, 1 text file, 1 other file - 1 registered asset",
+      "1 model, 1 image, 1 document, 1 other file, \u2013 archives - 1 registered asset",
+    );
+  });
+
+  it("counts a numbered archive in the singular", () => {
+    const row = makeBundle({ archive_count: 1 });
+    expect(countsLine(row)).toBe(
+      "3 models, 5 images, 2 documents, 0 other files, 1 archive - 8 registered assets",
+    );
+  });
+
+  it("reproduces the ticket's measured sentence verbatim", () => {
+    // The Mf-7oow measurement: a vendor folder with 794 models, 10 images, 2
+    // documents, 78 other files and one twin zip, 885 registered assets total.
+    const row = makeBundle({
+      model_count: 794,
+      image_count: 10,
+      text_count: 2,
+      other_count: 78,
+      archive_count: 1,
+      assets_total: 885,
+    });
+    expect(countsLine(row)).toBe(
+      "794 models, 10 images, 2 documents, 78 other files, 1 archive - 885 registered assets",
     );
   });
 });
