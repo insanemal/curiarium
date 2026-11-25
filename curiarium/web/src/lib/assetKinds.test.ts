@@ -1,17 +1,50 @@
 import { describe, expect, it } from "vitest";
 
+// The backend's Python tables, read verbatim so the cross-language pins below fail
+// the moment the two sides drift. Read through a raw GLOB, not three `?raw`
+// imports: the web image's build context is `curiarium/web`, so `../../../api/*.py`
+// does not exist in-container, and a STATIC import of it fails to transform - which
+// takes this whole file down instead of skipping three cross-tree pins (AGENTS.md
+// guardrail 3; this exact defect shipped a red full gate on 2026-11-25). An eager
+// glob that matches nothing yields an empty map, so the pins run on the host and
+// skip in the image. Still no `node:fs`: the app has no `@types/node` and must not
+// gain one.
+const API_SOURCES = import.meta.glob("../../../api/*.py", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+
+/** One API source by basename, or `null` when the repo tree is not visible. */
+function apiSource(name: string): string | null {
+  return API_SOURCES[`../../../api/${name}`] ?? null;
+}
+
+/**
+ * A cross-tree pin's source, for use INSIDE a test the matching `skipIf` guards.
+ *
+ * Throwing rather than returning `null` keeps the tests type-safe without a `!`:
+ * a pin whose source vanished after its guard passed is a real failure, not an
+ * absence.
+ */
+function apiSourceOrThrow(name: string): string {
+  const text = apiSource(name);
+  if (text === null) {
+    throw new Error(`${name} is absent although the cross-tree pin was not skipped`);
+  }
+  return text;
+}
+
 // The backend's own TEXT-role table, read verbatim: the cross-language pin below
-// fails if the web set and `bundle_detect.BUNDLE_TEXT_EXTS` drift apart. Vite's
-// `?raw` query is the repo's idiom for reading a non-TS source (the palette and
-// no-native-dialogs tests use it too), so this file needs no `node:fs`.
-import bundleDetectSource from "../../../api/bundle_detect.py?raw";
+// fails if the web set and `bundle_detect.BUNDLE_TEXT_EXTS` drift apart.
+const bundleDetectSource = apiSource("bundle_detect.py");
 // The scan's image table, read verbatim for the same reason: it is the suffix
 // set `classify_entry` asks for the IMAGE role.
-import libraryScanSource from "../../../api/library_scan.py?raw";
+const libraryScanSource = apiSource("library_scan.py");
 // The import allow-list, from which `bundle_detect.MODEL_SUFFIXES` is DERIVED
 // (`frozenset(IMPORT_ALLOWED_EXTS - {".zip"})`). Read verbatim so the model
 // role is parsed from its real source instead of restated as a literal here.
-import configSource from "../../../api/config.py?raw";
+const configSource = apiSource("config.py");
 
 import {
   DOCUMENT_EXTS,
@@ -124,11 +157,13 @@ describe("isDocumentAsset", () => {
 });
 
 describe("DOCUMENT_EXTS", () => {
-  it("mirrors bundle_detect.BUNDLE_TEXT_EXTS", () => {
+  it.skipIf(bundleDetectSource === null)("mirrors bundle_detect.BUNDLE_TEXT_EXTS", () => {
     // Parsed, not imported: the Python table is the other side of a language
     // boundary, and reading it here fails the web suite the moment the two
     // tables drift rather than waiting for a Python mirror test.
-    const literal = /BUNDLE_TEXT_EXTS\s*=\s*frozenset\(\{([^}]*)\}\)/.exec(bundleDetectSource);
+    const literal = /BUNDLE_TEXT_EXTS\s*=\s*frozenset\(\{([^}]*)\}\)/.exec(
+      apiSourceOrThrow("bundle_detect.py"),
+    );
     expect(literal).not.toBeNull();
     const pythonExts = (literal?.[1].match(/["']\.[^"']*["']/g) ?? []).map(quoted =>
       quoted.slice(1, -1),
@@ -182,8 +217,8 @@ describe("classifyMemberRole", () => {
 });
 
 describe("member role tables", () => {
-  it("mirrors library_scan.IMAGE_SUFFIXES", () => {
-    const literal = /IMAGE_SUFFIXES\s*=\s*\{([^}]*)\}/.exec(libraryScanSource);
+  it.skipIf(libraryScanSource === null)("mirrors library_scan.IMAGE_SUFFIXES", () => {
+    const literal = /IMAGE_SUFFIXES\s*=\s*\{([^}]*)\}/.exec(apiSourceOrThrow("library_scan.py"));
     expect(literal).not.toBeNull();
     const pythonExts = (literal?.[1].match(/["']\.[^"']*["']/g) ?? []).map(quoted =>
       quoted.slice(1, -1),
@@ -195,14 +230,18 @@ describe("member role tables", () => {
     ).toEqual(new Set(pythonExts));
   });
 
-  it("mirrors config.IMPORT_ALLOWED_EXTS minus .zip", () => {
+  it.skipIf(bundleDetectSource === null || configSource === null)(
+    "mirrors config.IMPORT_ALLOWED_EXTS minus .zip",
+    () => {
     // The DERIVATION first, so a change to how the model table is built fails here
     // and tells a reader to re-derive, rather than comparing this web set against
     // a table that no longer means the same thing.
-    expect(bundleDetectSource).toMatch(
+    expect(apiSourceOrThrow("bundle_detect.py")).toMatch(
       /MODEL_SUFFIXES\s*=\s*frozenset\(\s*IMPORT_ALLOWED_EXTS\s*-\s*\{[\s\S]*?\.zip[\s\S]*?\}\s*\)/,
     );
-    const literal = /^IMPORT_ALLOWED_EXTS\s*=\s*\{([^}]*)\}/m.exec(configSource);
+    const literal = /^IMPORT_ALLOWED_EXTS\s*=\s*\{([^}]*)\}/m.exec(
+      apiSourceOrThrow("config.py"),
+    );
     expect(literal, "config.IMPORT_ALLOWED_EXTS is no longer a literal set").not.toBeNull();
     const allowed = (literal?.[1].match(/["']\.[^"']*["']/g) ?? []).map(quoted =>
       quoted.slice(1, -1),
