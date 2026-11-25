@@ -3212,6 +3212,62 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     mirrors `MODEL_SUFFIXES`, `IMAGE_SUFFIXES` and `BUNDLE_TEXT_EXTS`, and a test
     reads the Python tables so the two cannot part).
 
+33. **The detector decides what a listing IS; the proposal engine decides what a
+    folder COULD become, and they are different modules with different purity
+    contracts** (`Mf-yitm`). `bundle_detect` answers from a snapshot it is handed -
+    pure, no disk, no subprocess - and `RULE_SET_STAMP` hashes the tables it
+    actually reads. `proposal_engine` measures a live directory (`measure()` walks
+    the disk read-only) and ranks interpretations; it lives in
+    `curiarium/api/proposal_engine.py`, is stdlib-only, and imports no app module,
+    because the operator's tight loop runs it from a bare host python against the
+    live mount. Its tables are therefore a different contract: `MODEL_EXTS` is a
+    deliberate superset of `MODEL_SUFFIXES` (a proposal may name a payload no
+    importer accepts), `check_model_table.py` pins the four copies that must agree
+    and must not be pointed at it, and **`RULE_SET_STAMP` is NOT re-pinned** for
+    the engine's rules - the stamp describes the detector's rule set, and moving a
+    proposal table is not a detection change.
+
+    **A reading the app cannot enact is still served, and says so.**
+    `GET /bundles/detect` consults the engine once per DIRECTORY row (archive rows
+    are skipped) and inserts the engine's dissenting cardinality readings -
+    `split-top-folders`, `split-model-folders` - into `matches[]` as
+    `creatable: false`, `rule` `engine:<shape>`, counts from the engine's census,
+    and a `note` beginning `needs arranging first: ` followed by the engine's own
+    sentence about the arrangement. Confidence is read off the engine's own ranking
+    (at or above the top option `high`, within `ENGINE_CLOSE_CALL` points `medium`,
+    anything further behind `low`), not invented here. Withholding the reading
+    would hide the disagreement between the two rule sets, which is the reason for
+    consulting it at all; enacting it needs an arrange step, which is `Mf-v9eg`
+    and does not exist yet. The call is `probe_git=False`: `propose()` shells out
+    to git for a checkout's tracked set, and a GET handler may never run a
+    subprocess. A directory that vanished mid-walk answers no dissent, so a report
+    never fails because the disk moved under it.
+
+    **The create path refuses that shape before it writes anything.**
+    `POST /bundles/create` with a `creatable: false` match returns `failed` with
+    reason `needs-arrange`, checked before exclusion validation, before the marker
+    and before the session: no project, no assets, no `_bundle` marker. A choice
+    the server cannot honour must cost nothing.
+
+    **The ranking invariants this preserves.** `matches[0]` is still the row's own
+    recommendation (`detector`/`confidence`/`metadata_shape`, by construction). The
+    manual entry is still last unless the row recommends it, which is why dissent
+    is inserted immediately BEFORE the manual entry when that entry is last and
+    appended when the manual entry is first: the operator's own recommendation
+    never moves. A row the engine never dissents on is served unchanged - no entry
+    inserted, no note appears, and every match it already had stays creatable;
+    `creatable` is additive and defaults `true`, so a payload served before this
+    change reads the same.
+
+    **What would make this wrong.** If a served match were `creatable: false`
+    without a `note`; if the dissent were inserted AFTER the manual entry, or ahead
+    of `matches[0]`; if a `split-*` shape reached `_create_one` and wrote a marker,
+    a project or an asset; if the engine were consulted with git probing on a GET
+    (any subprocess in a GET handler); if `RULE_SET_STAMP` moved because the
+    engine's tables changed; if the script grew a second copy of the rules instead
+    of importing the one module; or if the detector's own offered shapes stopped
+    being creatable.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -4301,3 +4357,18 @@ This ADR is superseded if any of the following becomes true:
   starts reading a stored fact (a count, a cached path) instead of the
   registered rows a read already holds; equally if it starts costing a query per
   candidate on the report.
+- a served match is `creatable: false` without a `note`, or the engine's
+  dissenting split is inserted after the manual entry instead of immediately
+  before it;
+- a `creatable: false` shape reaches `_create_one`, or a create of it writes a
+  project, an asset or a `_bundle` marker instead of answering
+  `failed`/`needs-arrange`;
+- the proposal engine is consulted on a GET with git probing on - a subprocess in
+  a GET handler - or `propose()` stops being skippable;
+- `RULE_SET_STAMP` is re-pinned because a proposal-engine table moved, or
+  `check_model_table.py` starts comparing the engine's wider `MODEL_EXTS` as an
+  equality;
+- a second copy of the engine's rules appears in
+  `curiarium/scripts/propose_import.py` - the shim and the engine must stay one
+  module object - or `proposal_engine` gains an app import that breaks the
+  bare-host tight loop.

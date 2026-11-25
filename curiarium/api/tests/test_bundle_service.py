@@ -400,6 +400,45 @@ def generic_bundle(root: Path, name: str) -> Path:
     return bundle
 
 
+COLLECTION_KEY = "import/Collection"
+AGREEING_KEY = "import/Agreeing"
+
+
+def collection_bundle(root: Path) -> Path:
+    """Three products in one folder: each top folder ships its own README and models.
+
+    The detector reads the listing as one `generic` bundle (a model at its own depth
+    plus an image and a text anywhere). The engine reads it as `split-top-folders`,
+    20 + 30 + 10 = 60, against a `one-project` of 40 - 30 - 20 = -10: each child's own
+    document is a claim to be a product, so the split is the ENGINE's recommendation
+    while the app's row recommends something else.
+    """
+    bundle = root / "import" / "Collection"
+    write_file(bundle / "loose.stl", STL_BYTES)
+    write_file(bundle / "cover.jpg", b"j" * 100)
+    write_text(bundle / "notes.txt", "print at 0.2mm\n")
+    for name in ("Widget One", "Widget Two", "Widget Three"):
+        write_text(bundle / name / "README.md", f"# {name}\n")
+        for index in range(3):
+            write_file(bundle / name / f"part{index}.stl", STL_BYTES)
+    return bundle
+
+
+def agreeing_bundle(root: Path) -> Path:
+    """One product in one folder: a `generic` row the engine never dissents on.
+
+    ONE model-bearing child and no product document anywhere, so the engine offers
+    `one-project` and no split at all (a split needs two top folders carrying
+    models).
+    """
+    bundle = root / "import" / "Agreeing"
+    for index in range(3):
+        write_file(bundle / "files" / f"part{index}.stl", STL_BYTES)
+    write_file(bundle / "cover.jpg", b"j" * 100)
+    write_text(bundle / "notes.txt", "print at 0.2mm\n")
+    return bundle
+
+
 def thingiverse_bundle(root: Path, name: str, thing: int) -> Path:
     """A high-confidence bundle whose own documents name its own Thingiverse thing.
 
@@ -2207,7 +2246,17 @@ def test_service_a_no_docs_directory_without_its_archive_is_not_a_bundle(
     # The manual row recommends itself, and the R6 shape is also on offer for the
     # same listing (the plan adds it in rule order for every carrier); the manual
     # entry is FIRST here because it is the recommended shape.
+    #
+    # Mf-yitm consults the engine on this row too, and MEASURED it offers no
+    # dissent: the whole subtree has exactly ONE model-bearing top folder
+    # (`17_clockworkmonster/`), so no `split-*` option exists to disagree with. The
+    # list is therefore what it was before the engine was wired in - which is the
+    # point of the assertion, not an omission from it: had the engine dissented, a
+    # `split-*` entry here would be the ONLY source of that shape.
     assert [match["shape"] for match in report["bundles"][0]["matches"]] == ["manual", "archive-root"]
+    assert not any(
+        match["rule"].startswith("engine:") for match in report["bundles"][0]["matches"]
+    ), "one model-bearing top folder: the engine has no split reading to offer"
     manual = report["bundles"][0]["matches"][0]
     assert manual["note"] in bundle_service.REFUSAL_RULES
     assert manual["note"] == report["bundles"][0]["matches"][0]["rule"]
@@ -4701,6 +4750,11 @@ def test_the_report_layer_imports_nothing_that_can_open_a_socket() -> None:
             # test exists for - no socket, no resolver, and `fetch_thingiverse_thing_page`
             # reachable only from `enrich_bundles` - is unchanged.
             "project_create_service",
+            # Mf-yitm: the read-only proposal engine. Stdlib only, and its ONE
+            # subprocess is behind `probe_git=`; `_engine_dissent` passes False, so a
+            # report still runs no git and opens no socket. Adding the module here
+            # without that call-site is what the behavioural half would catch.
+            "proposal_engine",
         }
     )
     forbidden = {"import_resolvers", "safe_http", "socket", "urllib", "http"}
@@ -11459,7 +11513,10 @@ def test_every_row_carries_the_recommended_match_first_and_the_manual_scope(
     Mutation: build the match list from a different snapshot (or forget to put the
     recommended facts first) and the three equality assertions red for some row;
     a manual row recommends itself, so its manual entry is first and carries the
-    refusal word as its note.
+    refusal word as its note. Since Mf-yitm a row may also carry the engine's
+    dissent, which is the only match that is NOT creatable: the note invariant is
+    therefore two rules, not one - a creatable offer's note is a refusal word or
+    nothing, a non-creatable one always says why in the engine's own sentence.
     """
     moai_bundle(isolated_storage)
     write_stagetop(isolated_storage)
@@ -11493,7 +11550,67 @@ def test_every_row_carries_the_recommended_match_first_and_the_manual_scope(
             assert matches[0] is manual[0], "a manual row recommends itself"
             assert manual[0]["note"] in bundle_service.REFUSAL_RULES
         for match in matches:
-            assert match["note"] is None or match["note"] in bundle_service.REFUSAL_RULES, row["key"]
+            # Every match says whether the server can enact it. A creatable shape
+            # either carries no note or the refusal word the manual offer was built
+            # from; a non-creatable one always carries a note, and that note is the
+            # engine's consequence sentence rather than any refusal vocabulary.
+            assert isinstance(match["creatable"], bool), row["key"]
+            if match["creatable"]:
+                assert match["note"] is None or match["note"] in bundle_service.REFUSAL_RULES, row["key"]
+            else:
+                assert match["note"], f"{row['key']}: a non-creatable offer must say why"
+                assert match["note"] not in bundle_service.REFUSAL_RULES, (
+                    f"{row['key']}: the engine's note is its own sentence, never a refusal word"
+                )
+                assert match["note"].startswith("needs arranging first: "), row["key"]
+                assert match["model_count"] == row["model_count"], (
+                    f"{row['key']}: the engine entry counts the folder this row counted"
+                )
+
+
+def test_service_the_engine_is_consulted_per_row_and_only_dissents_where_it_must(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-3/AC-4: one folder the engine agrees with, one it reads as several projects.
+
+    (i) `import/Agreeing` is one product in one folder: the engine's own answer is
+    `one-project` and no split, so the row is byte-identical to before this ticket.
+    (ii) `import/Collection` holds three top folders that each ship their own
+    document: the engine recommends `split-top-folders` (60) while the detector
+    recommends one `generic` bundle, so the row carries that dissent immediately
+    before the manual entry, marked `creatable=False`.
+
+    Mutation: serve the engine's offers on every row and (i) gains a shape; keep the
+    dissent out of the row and (ii)'s two ordering assertions red.
+    """
+    agreeing_bundle(isolated_storage)
+    collection_bundle(isolated_storage)
+    scan()
+
+    agreeing = service_row(AGREEING_KEY)
+
+    assert agreeing["metadata_shape"] == "generic"
+    assert [match["shape"] for match in agreeing["matches"]] == ["generic", "title-name", "manual"]
+    assert all(match["creatable"] is True for match in agreeing["matches"])
+    assert not any(match["rule"].startswith("engine:") for match in agreeing["matches"]), (
+        "the engine was consulted and had nothing to add, so nothing was added"
+    )
+
+    collection = service_row(COLLECTION_KEY)
+
+    assert collection["metadata_shape"] == "generic"
+    shapes = [match["shape"] for match in collection["matches"]]
+    assert shapes == ["generic", "title-name", "split-top-folders", "manual"], (
+        "the dissent sits between the detector's offers and the manual scope"
+    )
+    dissent = collection["matches"][-2]
+    assert dissent["rule"] == "engine:split-top-folders"
+    assert dissent["creatable"] is False
+    assert dissent["confidence"] == "high", "the engine's top option here IS the split"
+    assert dissent["note"].startswith("needs arranging first: ")
+    assert dissent["model_count"] == collection["model_count"] == 10
+    assert collection["matches"][-1]["shape"] == "manual"
+    assert collection["matches"][-1]["creatable"] is True
 
 
 def test_a_refused_vault_is_one_manual_row_and_creates_a_manual_project(
@@ -11527,10 +11644,12 @@ def test_a_refused_vault_is_one_manual_row_and_creates_a_manual_project(
         "the ledger still names the path with the rule that refused it"
     )
     assert all(
-        match["note"] is None or match["note"] in bundle_service.REFUSAL_RULES
+        (match["note"] is None or match["note"] in bundle_service.REFUSAL_RULES)
+        if match["creatable"]
+        else bool(match["note"])
         for row in report["bundles"]
         for match in row["matches"]
-    )
+    ), "a creatable offer's note is a refusal word; a non-creatable one always says why"
 
     created = create(client, headers, [{"key": "import/Vault"}])
 

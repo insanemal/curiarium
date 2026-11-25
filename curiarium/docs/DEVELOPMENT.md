@@ -199,6 +199,54 @@ well above 0 (the last rows, near 15), the last rendered index is 15 and the
 an error. If the last report still says `first: 0` and there is no 47th card,
 the listener is dead again.
 
+## The proposal engine (one implementation behind the CLI and the API)
+
+`curiarium/api/proposal_engine.py` is the only copy of the rules that answer "what
+could this folder become": `measure()` walks a folder read-only, `propose()` ranks
+the interpretations the facts support, `arrange_proposal()` returns the lines
+describing what arranging one would cost (text only - it moves nothing), and
+`validate()` scores the rules against the operator's labelled folders and returns
+rows instead of printing them.
+`curiarium/scripts/propose_import.py` is now argv plus rendering: it bootstraps
+`sys.path` to `curiarium/api` and calls everything as `proposal_engine.X`.
+
+That module is stdlib-only, and the constraint is load-bearing rather than tidy.
+The operator's tight loop is a bare host python pointed at a live CephFS mount; a
+`fastapi` or `sqlalchemy` import anywhere in the engine would make that loop need
+the whole app environment to start, so
+`curiarium/api/tests/test_proposal_engine.py` audits the engine's imports instead
+of trusting a comment. The same module pins the split itself: it asserts the shim
+and the test import the SAME module object (`sys.modules["proposal_engine"]`,
+resolved to `curiarium/api/proposal_engine.py`) and that the shim defines no
+`propose`, `measure` or `MODEL_EXTS` of its own. Copy the rules back into the
+script and the suite reds on module identity, not on wording drift.
+
+The two host-only proofs are the operator's, run against the real library:
+
+```bash
+python3 curiarium/scripts/propose_import.py --root /mnt/ceph/3D_models --only Vault --only import/Stagetop
+python3 curiarium/scripts/propose_import.py --root /mnt/ceph/3D_models \
+    --projects /tmp/project-keys.json \
+    --labels curiarium/scripts/fixtures/proposal-labels.json --validate
+```
+
+`--projects` is a local export of the live project keys and is NOT committed: it
+names the owner's whole library. The labelled fixtures ARE the regression gate -
+they are the projects the owner confirmed by creating them, so a rule change that
+would split a confirmed product or merge a confirmed collection fails the run.
+[`curiarium/scripts/fixtures/README.md`](../scripts/fixtures/README.md) describes
+the fixture and its `expect` vocabulary. `curiarium/api/tests/test_proposal_engine.py`
+replays six of those labels over synthetic trees, so a rule change cannot silently
+start fragmenting a library on CI; the git-checkout label `import/endorphin` is
+only scored by the host CLI against a real checkout.
+
+The engine's `MODEL_EXTS` is a DELIBERATE superset of the API's five-suffix table:
+a proposal may name a payload no importer accepts, which is exactly what these
+proposals are for. So `check_model_table.py` must not be pointed at it - that
+script pins equality for the four copies that really must agree. The containment
+(`bundle_detect.MODEL_SUFFIXES <= proposal_engine.MODEL_EXTS`) lives in the test
+instead.
+
 ## Build warnings in the web bundle
 
 `npm run build` in `curiarium/web` is expected to emit exactly the warnings below,

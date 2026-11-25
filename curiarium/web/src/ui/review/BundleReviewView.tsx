@@ -53,9 +53,11 @@ import {
   enrichmentLine,
   extractPathFor,
   headline,
+  importMatches,
   importShapes,
   isArchiveOnly,
   isCreatable,
+  isEnactable,
   matchesFilter,
   matchesVisibility,
   needsStorageScan,
@@ -596,7 +598,7 @@ export default function BundleReviewView({
   // are the only ones there are.
   const activeShapeName = activeRow ? activeShape(activeRow, chosenShape[activeRow.key]) : "";
   const activeMatch = activeRow
-    ? (activeRow.matches ?? []).find(match => match.shape === activeShapeName)
+    ? importMatches(activeRow).find(match => match.shape === activeShapeName)
     : undefined;
   const activeGroups = activeMatch?.groups ?? activeRow?.groups ?? [];
   const activeExcluded = activeRow === null ? [] : excludedGroups[activeRow.key] ?? [];
@@ -692,7 +694,14 @@ export default function BundleReviewView({
       // compared against it rather than trusted.
       const chosen = chosenShape[row.key];
       const shape = activeShape(row, chosen);
-      if (chosen !== undefined && shape === chosen) item.shape = chosen;
+      if (chosen !== undefined && shape === chosen) {
+        // The server answers `needs-arrange` and writes nothing for a shape it
+        // cannot enact, so the client must not ask: a reading marked
+        // `creatable: false` falls back to the recommendation, which `activeShape`
+        // already refuses to leave unless the row offers nothing else.
+        const match = importMatches(row).find(entry => entry.shape === shape);
+        if (match === undefined || isEnactable(match)) item.shape = chosen;
+      }
       const excluded = excludedGroups[row.key] ?? [];
       // The bulk doors mean "include every group", so they pass no option and
       // send no field; only the detail pane can carry an exclusion, and only for
@@ -1591,26 +1600,43 @@ export default function BundleReviewView({
                     beside the facts it changes. A row the server offers one shape
                     for is not a question, so nothing renders at all - not an
                     empty wrapper. */}
-                {importShapes(activeRow).length > 1 && (
+                {importMatches(activeRow).length > 1 && (
                   <div className="review-detail-facts">
                     <div
                       className="flex flex-wrap items-center gap-2"
                       role="radiogroup"
                       aria-label="Import as"
                     >
-                      {importShapes(activeRow).map(shape => (
-                        <label key={shape} className="review-toggle">
-                          <input
-                            type="radio"
-                            name={`bundle-shape-${activeRow.key}`}
-                            value={shape}
-                            checked={shape === activeShapeName}
-                            disabled={actionsLocked}
-                            onChange={() => chooseShape(activeRow, shape)}
-                          />
-                          <span>{shapeLabel(shape)}</span>
-                        </label>
-                      ))}
+                      {importMatches(activeRow).map(match => {
+                        const shape = match.shape;
+                        // A reading the server cannot enact is VISIBLE but not
+                        // selectable: it marks a real cardinality question, and
+                        // the server's own `note` says why it is not on offer.
+                        const blocked = !isEnactable(match);
+                        return (
+                          <div
+                            key={shape}
+                            className="flex flex-wrap items-center gap-2"
+                            data-bundle-shape-blocked={blocked ? "true" : undefined}
+                            title={blocked ? (match.note ?? undefined) : undefined}
+                          >
+                            <label className="review-toggle">
+                              <input
+                                type="radio"
+                                name={`bundle-shape-${activeRow.key}`}
+                                value={shape}
+                                checked={shape === activeShapeName}
+                                disabled={actionsLocked || blocked}
+                                onChange={() => chooseShape(activeRow, shape)}
+                              />
+                              <span>{shapeLabel(shape)}</span>
+                            </label>
+                            {blocked && match.note && (
+                              <span className="review-detail-reason">{match.note}</span>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                     {/* What the chosen shape would import, and the server's own
                         note about it, so the operator can see WHY `manual` is on

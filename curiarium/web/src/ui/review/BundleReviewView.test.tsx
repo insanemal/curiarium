@@ -422,6 +422,62 @@ const compoundNotSeparable = makeBundle({
   groups: [{ name: "Gearbox", model_count: 3, foreign: true, separable: false }],
 });
 
+/** A row whose served readings disagree about cardinality: the recommendation
+ *  imports the whole folder as one project, and the proposal engine's dissenting
+ *  readings (`split-top-folders` / `split-model-folders`) are offered VISIBLY but
+ *  with `creatable: false`, because the server refuses them with `needs-arrange`
+ *  and writes nothing. Their `note` is the server's own reason, copied verbatim:
+ *  the client invents no copy for a refusal it did not decide. */
+const SPLIT_NOTE =
+  "needs arranging first: one project per top folder; fragments a single product if it was one";
+const splitTopFolders = makeBundle({
+  key: "Multi",
+  rel_path: "Multi",
+  title: "Multi folder",
+  name_suggestion: "Multi folder",
+  creator: null,
+  licence: null,
+  licence_url: null,
+  source_url: null,
+  detector: "generic-bundle",
+  confidence: "low",
+  metadata_shape: "generic",
+  description_excerpt: null,
+  matches: [
+    {
+      shape: "generic",
+      rule: "generic-bundle",
+      confidence: "low",
+      model_count: 3,
+      image_count: 0,
+      text_count: 0,
+      other_count: 0,
+      note: null,
+    },
+    {
+      shape: "split-top-folders",
+      rule: "engine:split-top-folders",
+      confidence: "low",
+      model_count: 3,
+      image_count: 0,
+      text_count: 0,
+      other_count: 0,
+      note: SPLIT_NOTE,
+      creatable: false,
+    },
+    {
+      shape: SHAPE_MANUAL,
+      rule: "manual",
+      confidence: "low",
+      model_count: 3,
+      image_count: 0,
+      text_count: 0,
+      other_count: 0,
+      note: null,
+    },
+  ],
+});
+
 function makeReport(
   bundles: BundleDetectItem[],
   overrides: Partial<BundleReport> = {},
@@ -2949,6 +3005,120 @@ describe("BundleReviewView import-as chooser", () => {
     expect(
       within(detail()).getByText("Everything under the folder, including the unrelated part."),
     ).toBeTruthy();
+  });
+
+  it("shows a reading the server cannot enact as a visible, disabled, unselected radio", () => {
+    // Catches a chooser that DROPS a non-enactable reading (the operator loses
+    // the cardinality question) and one that leaves it selectable (the operator
+    // sends a request the server answers `needs-arrange` to, writing nothing).
+    renderView(makeState({ report: makeReport([splitTopFolders]) }));
+
+    const radios = within(importAs()).getAllByRole("radio") as HTMLInputElement[];
+    expect(radios.map(radio => radio.value)).toEqual([
+      "generic",
+      "split-top-folders",
+      SHAPE_MANUAL,
+    ]);
+
+    const split = within(importAs()).getByRole("radio", {
+      name: SHAPE_LABELS["split-top-folders"],
+    }) as HTMLInputElement;
+    expect(split.disabled).toBe(true);
+    expect(split.checked).toBe(false);
+
+    // The recommendation is what stands: the refused reading is never checked.
+    const checked = within(importAs()).getByRole("radio", { checked: true }) as HTMLInputElement;
+    expect(checked.value).toBe("generic");
+
+    // The reason is the SERVER's own `note`, visible beside the option and on the
+    // wrapper's title so it is reachable on hover.
+    const blocked = importAs().querySelector("[data-bundle-shape-blocked='true']");
+    expect(blocked).not.toBeNull();
+    expect(within(detail()).getByText(SPLIT_NOTE)).toBeTruthy();
+    expect(blocked?.getAttribute("title")).toBe(SPLIT_NOTE);
+    // Its own counts line still speaks about the recommendation, not the refusal.
+    expect(detail().querySelector("[data-bundle-shape-counts]")?.textContent).toBe(
+      "3 models, 0 images, 0 texts, 0 other",
+    );
+  });
+
+  it("cannot be chosen: a click on the disabled reading leaves the choice where it was", () => {
+    // Catches a `disabled` that only shades the control while `onChange` still
+    // stores the shape, which is how a refused reading would reach the body - the
+    // radio must be genuinely disabled, not merely styled as such.
+    renderView(makeState({ report: makeReport([splitTopFolders]) }));
+
+    const split = within(importAs()).getByRole("radio", {
+      name: SHAPE_LABELS["split-top-folders"],
+    }) as HTMLInputElement;
+    expect(split.disabled).toBe(true);
+    fireEvent.click(split);
+
+    expect(split.checked).toBe(false);
+    expect(
+      (within(importAs()).getByRole("radio", { checked: true }) as HTMLInputElement).value,
+    ).toBe("generic");
+    // The counts line still speaks about the recommendation, so the refused
+    // reading never becomes the shape the pane is describing.
+    expect(detail().querySelector("[data-bundle-shape-counts]")?.textContent).toBe(
+      "3 models, 0 images, 0 texts, 0 other",
+    );
+  });
+
+  it("never sends a shape the server cannot enact", () => {
+    // Catches a createItems that trusts a stored choice: the server answers
+    // `needs-arrange` and writes nothing, so the body must fall back to the
+    // recommendation and carry no `shape` at all. The click is made first, so a
+    // build whose disabled radio still stored a choice is caught here too.
+    const state = makeState({ report: makeReport([splitTopFolders]) });
+    renderView(state);
+
+    fireEvent.click(
+      within(importAs()).getByRole("radio", { name: SHAPE_LABELS["split-top-folders"] }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    expect(state.create).toHaveBeenCalledWith([{ key: "Multi", name: "Multi folder" }]);
+    const item = vi.mocked(state.create).mock.calls[0][0][0];
+    expect(item).not.toHaveProperty("shape");
+  });
+
+  it("drops a stored choice that a refetch has marked unenactable", () => {
+    // The real hole the guard closes: the operator picks a split reading while the
+    // server still offers it, a refetch marks that same reading `creatable: false`,
+    // and the stored choice must not be posted. Catches a createItems that trusts
+    // `chosenShape` instead of asking `activeShape`/`importMatches`.
+    const enactable = makeBundle({
+      ...splitTopFolders,
+      matches: splitTopFolders.matches?.map(match =>
+        match.shape === "split-top-folders" ? { ...match, creatable: true } : match,
+      ),
+    });
+    const view = renderView(makeState({ report: makeReport([enactable]) }));
+
+    fireEvent.click(
+      within(importAs()).getByRole("radio", { name: SHAPE_LABELS["split-top-folders"] }),
+    );
+    expect(
+      (within(importAs()).getByRole("radio", { checked: true }) as HTMLInputElement).value,
+    ).toBe("split-top-folders");
+
+    const refetched = makeState({ report: makeReport([splitTopFolders]) });
+    view.rerender(
+      <BundleReviewView
+        state={refetched}
+        canContribute
+        scan={makeScanState()}
+        canScan={false}
+        onScan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    expect(refetched.create).toHaveBeenCalledWith([{ key: "Multi", name: "Multi folder" }]);
+    const item = vi.mocked(refetched.create).mock.calls[0][0][0];
+    expect(item).not.toHaveProperty("shape");
   });
 
   it("offers manual on every row, high confidence and archive-only included", () => {
