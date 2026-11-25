@@ -2702,7 +2702,9 @@ describe("BundleReviewView detail panel", () => {
     expect(within(panel).getByText("Ready")).toBeTruthy();
     expect(within(panel).getByText("Moai")).toBeTruthy();
     expect(
-      within(panel).getByText("3 models, 5 images, 2 text files, 0 other files - 8 registered assets"),
+      within(panel).getByText(
+        "3 models, 5 images, 2 documents, 0 other files, \u2013 archives - 8 registered assets",
+      ),
     ).toBeTruthy();
     expect(within(panel).getByText("Cover images/hero.jpg")).toBeTruthy();
     expect(within(panel).getByText("Archive Moai.zip - twin verified")).toBeTruthy();

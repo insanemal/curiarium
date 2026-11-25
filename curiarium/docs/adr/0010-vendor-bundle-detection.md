@@ -3123,6 +3123,95 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     change's file set: until it forwards `shape`, a create over HTTP records the
     row's recommended shape. Detection, the report and the service are unaffected.
 
+32. **A project made from a folder holds everything in that folder, and the role of
+    each member is the detector's own answer** (`Mf-7oow`). This SUPERSEDES the
+    member half of Decision 30 and the seam named in Decision 29, and it settles the
+    sentence Decision 31 had to leave pointing forward ("the member set, which stays
+    `PROJECT_MEMBER_SUFFIXES`"); that constant no longer exists. The rule that
+    replaced it is not another table but a deletion: membership is "every registered
+    asset under the chosen key", and nothing decides it by suffix.
+
+    **Why the table had to go.** `PROJECT_MEMBER_SUFFIXES = MODEL_SUFFIXES |
+    IMAGE_SUFFIXES` was the app's third vocabulary for the same files - the detector
+    already answered `classify_entry` for every entry (`model` / `image` / `text` /
+    `other` / `archive`), the row already served those counts, and the create filtered
+    the same folder through a different table. So a registered file could be counted
+    on the row and absent from the project it created. Measured on the owner's live
+    Vault tree (2026-11-25): 792 `.stl` across `01. DRAWERS` and `02. SUSTAINERS`
+    with 7 families beneath each, plus 77 `.stlbak`, 5 PNG, 5 JPG, one `.stp`, one
+    PDF manual, one more text file, one Rhino `.3dm`, and the
+    `Vault Archive_18.11.2026{.zip,/}` pair - 885 registered assets that the old rule
+    reduced to 804 members. His words: "some of the importers only import the STL
+    files when it should be EVERYTHING in the folder".
+
+    **One function, one classifier.** `bundle_service._members_of(key, assets)`
+    returns a frozen `MembersOf` whose `entries` are `ProjectMember(asset, role,
+    rel_path)`, with `role = bundle_detect.classify_entry(rel_path, asset.size)` over
+    the BUNDLE-relative path. It is the only place outside `bundle_detect` where a
+    role is decided, it raises `ValueError` for an asset that is not under `key/`
+    rather than silently dropping a file, it preserves input order so
+    `ProjectAsset.position` cannot move, and `by_role(role)` is its only view.
+    `_create_one` calls it ONCE: the member list it writes is `entries`, and
+    `model_assets` - still the MODEL answer feeding `attached`, `models_by_group`,
+    the compound marker's per-group `attached` and `Dedupe.containment` - is
+    `by_role(MODEL)`. `project_create_service.member_asset_ids`, its `kinds=`
+    parameter and its private `_suffix` are deleted, so there is no longer a seam
+    through which a door can hand a suffix table down; the primitive writes the list
+    it is given. The archive door is unchanged and keeps passing every entry it
+    resolved, which is the same rule by a different route. `bundle_detect` is not
+    modified: its tables stay model-side, for shape inference and cover previews.
+
+    **The role table, as measured.** `model` = `.stl .3mf .step .stp .lbrn .lbrn2`;
+    `image` = `.png .jpg .jpeg .webp .bmp` (`library_scan.IMAGE_SUFFIXES`, suffix
+    only, no mime guessing); `text` = `.pdf .txt .md .html .htm .rtf`
+    (`BUNDLE_TEXT_EXTS`); `archive` = `.zip`; `other` = everything else, including
+    `.stlbak`, `.3dm`, `.obj`, `.scad`, `.gcode` and any unknown extension. Two
+    rulings inside that table are deliberate and recorded because a reader will
+    otherwise read them as bugs:
+
+    * **`.stlbak` is a member with role `other`.** It is a BACKUP, not a part: it is
+      visible in the project, it is counted, and it is never a model, never a group
+      member and never a cover candidate. The cover legs are `IMAGE_SUFFIXES` and
+      `PREVIEW_SUFFIXES`, so a `.stlbak` cannot be offered as a face.
+    * **a nested `.zip` keeps role `archive`, not `other`.** `facts.counts.archive`
+      already counts it there; remapping it would put the member set and the counts
+      back into the disagreement this decision exists to end. It stays an opaque
+      member and is never auto-extracted, which is the behaviour the ticket wanted
+      from the word "other".
+
+    **The confirm line says all five roles, and an unknown is a dash.** The row now
+    serves `archive_count` beside the four it already served, so the mix reads
+    `"794 models, 10 images, 2 documents, 78 other files, 1 archive - 885 registered
+    assets"` for the Vault tree, always in five parts. `archive_count` is declared on
+    `BundleDetectItemOut` only - never on `BundleMatchOut`, never in
+    `bundle_serialize.COUNT_FIELDS` - precisely so an artifact pair taken either side
+    of this change stays comparable, and it is `Optional`, so a payload that predates
+    it renders an en dash rather than a fabricated `0`. The `text` role is spoken as
+    "documents" to a human, and the project page gained a Documents section for it
+    plus a per-kind line that renders only when the loaded member window covers
+    `project.asset_count` - a partial window's mix is not the project's.
+
+    **What did NOT change, and must not.** `facts.counts.model` stays the scan's
+    model count; `models_by_group` and every `groups[].attached` stay model-only, so
+    77 `.stlbak` create no group members; the "N models" sentence reads
+    `model_count` alone; the cover rule is untouched; the `contains_bundles` belt,
+    the exclusion prefixes and the compound marker block are read exactly as before;
+    the create gate, `Dedupe`, the marker's `shape`/`rule`/`detector`/`confidence`
+    and the schema version are untouched. No migration: nothing here added a column.
+
+    **What would make this wrong.** If a suffix table came back anywhere in the
+    member path - a constant, a `kinds=` argument, a `.suffix` read in
+    `project_create_service`, or a `classify_entry` call inside a door - so the
+    project could again disagree with the row that made it; if `_members_of` filtered
+    by role, dropped an asset it could not place instead of raising, or reordered the
+    list; if `attached`, a group's `attached` or `Dedupe.containment` started counting
+    something the member set holds but the model answer does not; if a `.stlbak`
+    became a model, a group member or a cover candidate; if a nested `.zip` were
+    extracted, or counted anywhere but `archive`; if `archive_count` appeared on a
+    match; or if the web's per-kind classifier drifted from `classify_entry` (it
+    mirrors `MODEL_SUFFIXES`, `IMAGE_SUFFIXES` and `BUNDLE_TEXT_EXTS`, and a test
+    reads the Python tables so the two cannot part).
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,

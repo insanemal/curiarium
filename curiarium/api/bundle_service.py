@@ -149,12 +149,16 @@ attach - and a hit is ``skipped`` with the existing project id and the project
 is never touched. A human edit is therefore never overwritten by
 a re-run, and the report says ``already_created`` before anyone presses create.
 
-**A bundle's project attaches only the files its snapshot names.** Detection is
-one deepest-first pass, so a child bundle is claimed before its parent is
-considered: the parent never inherits the child's models, and a directory that
+**A bundle's project holds every registered file its snapshot names.** Detection
+is one deepest-first pass, so a child bundle is claimed before its parent is
+considered: the parent never inherits the child's files, and a directory that
 holds nothing but child bundles is not a bundle at all. A created project
-therefore attaches exactly the model files its own snapshot names - never a
-nested bundle's models under the same recursive prefix.
+therefore holds every registered asset its own snapshot names - models, images,
+text documents, unknowns and nested archives alike - and never a nested bundle's
+files under the same recursive prefix. What each of those files IS in the project
+(``model`` / ``image`` / ``text`` / ``other`` / ``archive``) is the detector's own
+``bundle_detect.classify_entry`` answer, decided once in ``_members_of``, so the
+project and the row it was created from can never disagree about a file.
 
 **Bounds.** The walk is capped at ``MAX_SCAN_ENTRIES`` (``truncated`` says it
 stopped early) and a document read is capped at
@@ -228,30 +232,6 @@ COVER_MODEL_PREVIEW = "model-preview"
 # (ModelViewer.loadObjectFromAsset: stl | 3mf | step | stp). A .lbrn2 is a
 # model a cover can never be rendered from, so it is never offered as one.
 PREVIEW_SUFFIXES = frozenset({".stl", ".3mf", ".step", ".stp"})
-
-# THE ATTACH TABLE: what a project made from a bundle holds. Models - the files a
-# human prints - plus the images the landing page can render as a cover, in a
-# gallery, or in its cover picker (web `ui/ProjectLanding.tsx` filters its members
-# by `isImageAsset`, and a bundle whose previews were never attached showed an
-# empty picker; Mf-wsdo's complaint, measured on project `b8a5e66b`). Text is not
-# in it: the landing list renders every member, so "the page does not show it" is
-# not the reason - no cover, gallery or preview affordance reads a text member, and
-# a nested `.zip` is a member of the bundle but never of the project (Decision 17).
-#
-# This is NOT the detector's model table and it deliberately does not live in
-# `bundle_detect`: `rule_set_stamp()` hashes `MODEL_SUFFIXES` and `IMAGE_SUFFIXES`
-# by value, so a member table parked beside them would re-rank every cached report
-# row the first time anyone tuned what a project holds.
-#
-# Nor is it `file_utils.MODEL_SUFFIXES` - a THIRD, different table (`.obj` in it,
-# `.lbrn2` not), the one the web mirrors and the archive door's cover rule reads.
-# It is deliberately not the member rule: `bundle_detect.classify_entry(".obj")`
-# answers `other`, so an `.obj` member would be a project holding a file the row
-# counts as "other", and members and facts would disagree. `.lbrn`/`.lbrn2` stay
-# members because registration is not suffix-gated (`library_scan`) and the
-# detector calls them models - `test_an_obj_file_is_registered_but_is_neither_a_member_nor_a_model`
-# pins both halves.
-PROJECT_MEMBER_SUFFIXES = bundle_detect.MODEL_SUFFIXES | bundle_detect.IMAGE_SUFFIXES
 
 CREATE_CREATED = "created"
 CREATE_SKIPPED = "skipped"
@@ -1784,6 +1764,65 @@ def registered_assets(session: Session, rel_dir: str) -> List[RegisteredAsset]:
     return registered_from_rows(list(session.exec(statement)))
 
 
+@dataclass(frozen=True)
+class ProjectMember:
+    """One registered asset under a bundle key, and the role its entry earned."""
+
+    asset: RegisteredAsset
+    # bundle_detect.classify_entry(...) -> model | image | text | other | archive
+    role: str
+    # BUNDLE-relative: the asset's storage path minus ``key + "/"``.
+    rel_path: str
+
+
+@dataclass(frozen=True)
+class MembersOf:
+    """Every member of one bundle, in the order the caller's asset list arrived."""
+
+    entries: Tuple[ProjectMember, ...]
+
+    def by_role(self, role: str) -> Tuple[ProjectMember, ...]:
+        """The members whose role is ``role``, in input order. THE one view on the set."""
+        return tuple(entry for entry in self.entries if entry.role == role)
+
+
+def _members_of(key: str, assets: Sequence[RegisteredAsset]) -> MembersOf:
+    """THE member set of one bundle: every registered asset under ``key``.
+
+    Membership is exactly "every registered asset under the key" - models, images,
+    text documents, unknowns and nested archives alike. There is no suffix table
+    deciding who is a member, here or anywhere else in this library.
+
+    The ROLE of each member is decided once, by the detector's own classifier
+    (``bundle_detect.classify_entry``, over the BUNDLE-relative path and the declared
+    size), which is the very call the report's own ``model_count``/``image_count``/
+    ``text_count``/``other_count``/``archive_count`` are built from. So a project and
+    the row it was created from can never disagree about what a file is.
+
+    Input order is preserved verbatim (``registered_assets`` orders by path), so the
+    ``ProjectAsset.position`` a create writes stays byte-identical to what the same
+    list produced before this function existed.
+
+    ``ValueError`` for an asset whose path is not under ``key + "/"``: that is a
+    caller handing in another key's list, and a silently dropped member would be a
+    project quietly missing a file.
+    """
+    prefix = f"{key}/"
+    entries: List[ProjectMember] = []
+    for asset in assets:
+        if not asset.path.startswith(prefix):
+            raise ValueError(f"asset {asset.path!r} is not under bundle key {key!r}")
+        rel_path = asset.path[len(prefix):]
+        entries.append(
+            ProjectMember(
+                asset=asset,
+                role=bundle_detect.classify_entry(rel_path, asset.size),
+                rel_path=rel_path,
+            )
+        )
+    return MembersOf(entries=tuple(entries))
+
+
 def _own_paths(key: str, candidate: BundleCandidate) -> set:
     """The storage paths the candidate's own snapshot names, never a child's."""
     return {f"{key}/{entry.rel_path}" for entry in candidate.snapshot.entries}
@@ -1819,10 +1858,11 @@ def _claimed_assets(
     lets this one expression serve a list of ALL kinds: the map indexes MODELS only
     (``_claim_owners``), so an image or a README has no entry and no entry means no
     owner, not a forfeit. Written as ``claims.get(asset.path, key)``, not
-    ``claims.get(asset.path)``: the latter would drop every non-model whenever a
-    caller widened ``member_asset_ids``' ``kinds`` beyond models, and the caller
-    that does that is ``Mf-wsdo``. For the models the map does index, the two forms
-    answer identically - every model a non-archive candidate names is in it.
+    ``claims.get(asset.path)``: the latter would drop every non-model, and a
+    create's member set holds every registered file under the key (``_members_of``)
+    - images, documents, unknowns and nested archives. For the models the map does
+    index, the two forms answer identically - every model a non-archive candidate
+    names is in it.
     """
     if claims is None:
         return list(assets)
@@ -2304,21 +2344,19 @@ def _claim_owners(candidates: Sequence[BundleCandidate], *, scope: str) -> Dict[
       map decides is which row owns a model, and so both which row the report says
       is ``ready`` and which row ``find_existing_project``'s assets leg can call
       already-created.
-    * Only ``bundle_detect.MODEL_SUFFIXES`` paths are claimable. The RULE is
-      unchanged by ``Mf-wsdo``; the REASON this bullet used to give is what changed.
-      It said "the app attaches MODELS and nothing else", and that stopped being
-      true when the create grew ``PROJECT_MEMBER_SUFFIXES`` - a row can certainly
-      attach a preview now. So say what a claim is FOR: this map settles which row's
-      PARTS a path is. A preview is a product's face, not one of its parts, and the
-      MODEL answer ``_create_one`` still builds as ``model_assets`` - the same table,
-      read by the same call - is what ``attached``, the compound marker's per-group
+    * Only ``bundle_detect.MODEL_SUFFIXES`` paths are claimable. That is not a
+      membership rule and never was: since Mf-7oow a create's member set is every
+      registered file under the key, so a project certainly holds previews,
+      documents and nested archives. Say what a claim is FOR: this map settles which
+      row's PARTS a path is. A preview is a product's face, not one of its parts, and
+      the MODEL answer ``_create_one`` reads off the member set as ``model_assets``
+      (one ``by_role`` call) is what ``attached``, the compound marker's per-group
       counts and ``Dedupe.containment`` are asked with. Letting an image into the map
       makes two rows contest a cover, which re-opens the ``Mf-quv4`` ownership bound
-      this bullet exists to keep; ``Mf-wsdo``'s ADR record (Decision 30) defers that
-      to a decision of its own. And this table is not what keeps a non-model with its
-      row - ``_claimed_assets``' ``claims.get(asset.path, key)`` default is: a path
-      the map is silent about stays with the row that named it instead of going to
-      nobody.
+      this bullet exists to keep. And this table is not what keeps a non-model with
+      its row - ``_claimed_assets``' ``claims.get(asset.path, key)`` default is: a
+      path the map is silent about stays with the row that named it instead of going
+      to nobody.
 
     ``is_archive`` rows are skipped: no registered file can live under a
     ``<x>.zip/`` prefix, so an archive row is never an owner - it is only ever
@@ -2573,6 +2611,11 @@ def _report_row(
         "image_count": facts.counts.image,
         "text_count": facts.counts.text,
         "other_count": facts.counts.other,
+        # The `archive` role's count from this row's own facts - the nested zips the
+        # detector counted. Declared on `BundleDetectItemOut`, or the response model
+        # drops it silently; deliberately NOT on `BundleMatchOut` (see the comment
+        # there), so the report artifact's before/after pair stays comparable.
+        "archive_count": facts.counts.archive,
         # R7's breakdown: one entry per model-bearing group, so a row that covers
         # 60 parts in two editions says so instead of showing an anonymous total.
         # Empty for every row that is not compound. Rendered by the SAME helper the
@@ -2606,13 +2649,13 @@ def _report_row(
         ],
         # The row's cover and the create's cover are ONE expression: `_create_one`
         # re-asks this same `_cover` over its own exclusion-filtered `owned_assets`
-        # instead of writing a second rule free to disagree. What that guarantees is
-        # narrower than what this comment used to claim. What IS true of every asset
-        # this returns an `asset_id` for: `cover_for_registered`' image leg is bounded
-        # to `IMAGE_SUFFIXES` and its model leg to `PREVIEW_SUFFIXES`, a subset of
-        # `MODEL_SUFFIXES`, so a row's cover always sits inside the ATTACH table - and
-        # can never name a `.txt` or a nested `.zip`, which are in the row's own
-        # `owned_assets` and never in what a create writes.
+        # instead of writing a second rule free to disagree. What IS true of every
+        # asset this returns an `asset_id` for: `cover_for_registered`' image leg is
+        # bounded to `IMAGE_SUFFIXES` and its model leg to `PREVIEW_SUFFIXES`, a subset
+        # of `MODEL_SUFFIXES`. So a cover is always a model or an image, and can never
+        # name a `.txt`, a `.stlbak` or a nested `.zip` - all of which a create now
+        # attaches (the member set is every registered file under the key, `_members_of`),
+        # which makes a cover a member of what it writes whenever no group is excluded.
         # "Therefore a card cannot advertise a file the project it creates does not
         # hold" holds only for a create that excludes NO group: this cover is chosen
         # exclusion-blind over the whole owned set, so a create that excludes a group
@@ -3062,30 +3105,24 @@ def _create_one(
         # empty case is a no-op because `startswith(())` is False.
         included_assets = [asset for asset in own_assets if not asset.path.startswith(prefixes)]
         owned_assets = _claimed_assets(included_assets, key=key, claims=claims)
+        # THE MEMBER SET, decided once: every registered asset this row owns (the
+        # excluded groups already filtered out above) is a member, and its ROLE comes
+        # from the detector's own classifier inside `_members_of`. There is no suffix
+        # table anywhere in this path and no `kinds=` hand-down any more - the attach
+        # question ("who is in the project") and the role question ("what IS that
+        # file") are one expression, so a project and the row it came from cannot
+        # disagree about either.
+        member_set = _members_of(key, owned_assets)
         members = [
-            project_create_service.MemberCandidate(asset.id, asset.path) for asset in owned_assets
+            project_create_service.MemberCandidate(entry.asset.id, entry.asset.path)
+            for entry in member_set.entries
         ]
-        # Which KINDS a create attaches is TWO questions and TWO tables, both handed
-        # to one seam (`project_create_service.member_asset_ids`), and this door - the
-        # one that owns detection - names both tables here so the seam holds no suffix
-        # test of its own:
-        #
-        #   * the MODEL question - `kinds=bundle_detect.MODEL_SUFFIXES`, below, into
-        #     `member_asset_ids` - is the set of printed parts. It feeds `attached`
-        #     and the compound marker's per-group `attached` count, and it stays
-        #     models-only whatever a project holds;
-        #   * the ATTACH question - `kinds=PROJECT_MEMBER_SUFFIXES`, on the create call
-        #     below - is what the project HOLDS: those models plus the images the
-        #     landing page can render (Mf-wsdo). It is a module-level name of THIS
-        #     module, not a `bundle_detect` one, precisely because the detector's own
-        #     tables are hashed into `rule_set_stamp()`.
-        #
-        # Neither is a test in this body: no `_suffix` call and no `.stl` literal is
-        # allowed here, which is what makes one argument and one body change when the
-        # answer stops being a suffix again.
-        model_assets = project_create_service.member_asset_ids(
-            members, kinds=bundle_detect.MODEL_SUFFIXES
-        )
+        # `model_assets` is STILL the MODEL answer, read off the same member set: it is
+        # the printed parts, and it feeds `attached`, `models_by_group` below and
+        # `Dedupe.containment` on the create call. It is a VIEW of the member set, never
+        # a second membership test - the roles came from `classify_entry` once, in
+        # `_members_of`, and this body holds no `classify_entry` call at all.
+        model_assets = [entry.asset.id for entry in member_set.by_role(bundle_detect.MODEL)]
         attached = set(model_assets)
         # Bucket the attach set by group once, so `attached` below is a lookup
         # rather than a prefix scan repeated for every group.
@@ -3220,7 +3257,6 @@ def _create_one(
                     containment=tuple(model_assets),
                 ),
                 cover_asset_id=cover["asset_id"],
-                kinds=PROJECT_MEMBER_SUFFIXES,
                 refuse=belt,
                 description=enrichment["description"],
                 creator=enrichment["creator"],

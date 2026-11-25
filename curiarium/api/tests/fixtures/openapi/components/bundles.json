@@ -307,6 +307,17 @@
           }
         ]
       },
+      "archive_count": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Archive Count"
+      },
       "assets_total": {
         "default": 0,
         "title": "Assets Total",

@@ -127,6 +127,12 @@ class BundleDetectItemOut(BaseModel):
   image_count: int = 0
   text_count: int = 0
   other_count: int = 0
+  # The `archive` role's count, from this row's own facts: the nested zips the
+  # detector counted. It exists ONLY here - never on `BundleMatchOut`, never in
+  # `bundle_serialize.COUNT_FIELDS` - so a before/after pair of report artifacts
+  # stays comparable across the change that added it. Optional and defaulted, so a
+  # pre-existing payload still validates.
+  archive_count: Optional[int] = None
   # Only a compound row fills this (`compound-bundle` / low: one product in
   # several parts). Additive and defaulted, so every pre-existing payload still
   # validates.
