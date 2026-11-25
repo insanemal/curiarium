@@ -208,6 +208,9 @@ from models import Asset, Folder, Project
 STORAGE = db.STORAGE
 # A walk is bounded so a pathological tree cannot make a read request run forever.
 MAX_SCAN_ENTRIES = 200_000
+# The dissent pass gets the same allowance as the walk that feeds it, once per
+# pass, so its total cost is a second MAX_SCAN_ENTRIES and not one per row.
+MAX_DISSENT_ENTRIES = MAX_SCAN_ENTRIES
 # The report's own bound. ``build_report`` never truncates by accident: a caller
 # that needs every row (a create pass) asks for more than the walk can produce.
 DEFAULT_LIMIT = 200
@@ -239,14 +242,19 @@ CREATE_SKIPPED = "skipped"
 CREATE_BLOCKED = "blocked"
 CREATE_FAILED = "failed"
 
-# The engine's own vocabulary (``proposal_engine``), read here rather than restated:
-# the two shapes it can read a folder as SEVERAL projects, and the margin it calls a
-# close call. A row the engine disagrees with is offered as a match with
-# ``creatable=False``, and a create of that shape answers this reason: the
-# arrangement it would need is `Mf-v9eg` and does not exist yet.
-ENGINE_SPLIT_SHAPES = ("split-top-folders", "split-model-folders")
-ENGINE_CLOSE_CALL = 15
+# The two shapes the engine can read a folder as SEVERAL projects are its own
+# vocabulary (``proposal_engine.SPLIT_SHAPES``), read here rather than restated. A
+# row the engine disagrees with is offered as a match with ``creatable=False``, and
+# a create of that shape answers this reason: the arrangement it would need is
+# `Mf-v9eg` and does not exist yet.
 NEEDS_ARRANGE = "needs-arrange"
+
+# How far behind the engine's top option a reading may sit and still be called a
+# close call. This is THIS module's tolerance, not the engine's vocabulary: the
+# engine ranks its options by score and has no notion of closeness (its four
+# scoring bonuses happen to be 15). Named, so the band is a rule and not a number
+# in an `if`.
+CLOSE_CALL_POINTS = 15
 
 # A create-time refusal: the candidate's assets include another bundle's. This is
 # a reason on CREATE_FAILED, never a blocked_reason - `blocked` means database
@@ -2258,8 +2266,31 @@ def _wire_groups(
     ]
 
 
+class _DissentBudget:
+    """One entry allowance, shared by every row of one dissent pass.
+
+    The dissent is a SECOND walk of the same tree: the report's own walk is bounded
+    by ``MAX_SCAN_ENTRIES``, but ``proposal_engine.measure`` re-walks each row's
+    subtree with no cap of its own. Measured before this budget, on a 20-deep chain
+    with 50 models per level, the report's walk visits 1000 files while the dissent
+    pass revisits 10500 entries - 10.5x - and one 60k-file folder costs ``measure``
+    174 ms on its own. So the dissent spends from ONE allowance for the whole pass,
+    and the cost of ``GET /bundles/detect`` is bounded by ``MAX_DISSENT_ENTRIES``
+    rather than by how much disk the operator happens to have.
+    """
+
+    def __init__(self, entries: int) -> None:
+        self.remaining = entries
+
+    def spend(self, entries: int) -> None:
+        self.remaining -= entries
+
+
 def _engine_dissent(
-    root: Path, candidate: BundleCandidate, facts: bundle_detect.BundleFacts
+    root: Path,
+    candidate: BundleCandidate,
+    facts: bundle_detect.BundleFacts,
+    budget: _DissentBudget,
 ) -> List[dict]:
     """The engine's dissenting CARDINALITY readings, in the ``BundleMatchOut`` shape.
 
@@ -2270,11 +2301,18 @@ def _engine_dissent(
     exactly where "this is really N projects" matters most. Archive rows are skipped:
     the engine walks a directory, and this question is scoped to those.
 
-    The engine has no confidence vocabulary, so the dissent's strength is read off
-    the engine's OWN ranking instead of a scale invented here: an option scoring at
-    least the top option is ``high`` (the engine recommends this split and the app
-    does not), one inside ``ENGINE_CLOSE_CALL`` points of it is ``medium``, and
-    anything further behind is ``low``.
+    **The confidence band is the app's own reading of the engine's ranking.** The
+    engine has no confidence vocabulary: it ranks its options by score and stops.
+    This module calls an option ``high`` when it scores at or above the engine's top
+    option (the engine recommends this split and the app does not), ``medium`` when
+    it sits within ``CLOSE_CALL_POINTS`` of that top score, and ``low`` otherwise.
+
+    **Budgeted, because the walk itself is unbounded.** The pass spends from the one
+    ``_DissentBudget`` shared by every row: a row with no allowance left answers no
+    dissent at all - an honest silence, never half a census presented as a total, so
+    the report never grows a match it cannot justify. The row's walk gets the
+    remaining allowance as its ``max_entries``, and a census the walk had to truncate
+    cannot be scored honestly either, so a truncated one answers no dissent too.
 
     ``probe_git=False`` is mandatory: this runs inside a GET handler and must never
     run a git subprocess. A folder that disappeared mid-walk answers no dissent at
@@ -2282,11 +2320,18 @@ def _engine_dissent(
     """
     if candidate.is_archive:
         return []
+    if budget.remaining <= 0:
+        return []
     try:
         engine_facts = proposal_engine.measure(
-            str(Path(root) / candidate.snapshot.rel_dir), candidate.key
+            str(Path(root) / candidate.snapshot.rel_dir),
+            candidate.key,
+            max_entries=budget.remaining,
         )
     except OSError:
+        return []
+    budget.spend(engine_facts.entries)
+    if engine_facts.truncated:
         return []
     options, _reasons, _repo = proposal_engine.propose(engine_facts, (), probe_git=False)
     if not options:
@@ -2296,11 +2341,11 @@ def _engine_dissent(
     already_offered = {facts.metadata_shape, facts.detector}
     dissent: List[dict] = []
     for option in options:
-        if option.shape not in ENGINE_SPLIT_SHAPES or option.shape in already_offered:
+        if option.shape not in proposal_engine.SPLIT_SHAPES or option.shape in already_offered:
             continue
         if option.score >= top_score:
             confidence = "high"
-        elif option.score >= top_score - ENGINE_CLOSE_CALL:
+        elif option.score >= top_score - CLOSE_CALL_POINTS:
             confidence = "medium"
         else:
             confidence = "low"
@@ -2497,6 +2542,7 @@ def _report_row(
     absorbed_keys: AbstractSet[str],
     claims: Optional[Mapping[str, str]],
     offered_dirs: AbstractSet[str],
+    dissent_budget: _DissentBudget,
 ) -> Optional[dict]:
     """One wire row for one candidate, or ``None`` when its own detect refuses it.
 
@@ -2704,7 +2750,7 @@ def _report_row(
     # must stay that manual entry - it is APPENDED. A row the engine offers no
     # dissent on is byte-identical to before this ticket, which is the property the
     # tests pin.
-    dissent = _engine_dissent(root, candidate, facts)
+    dissent = _engine_dissent(root, candidate, facts, dissent_budget)
     if dissent:
         if len(matches) > 1 and matches[-1]["shape"] == bundle_detect.SHAPE_MANUAL:
             matches[-1:-1] = dissent
@@ -2881,6 +2927,9 @@ def _report_from_scan(
         # rather than re-deriving it from its own prefix (see ``_claim_owners``).
         claims = _claim_owners(scan.candidates, scope=scope)
         offered_dirs = _offered_dirs(scan.candidates, scope=scope)
+        # ONE allowance for every row of this report's dissent pass (see
+        # ``_DissentBudget``): a per-row budget would be no bound at all.
+        budget = _DissentBudget(MAX_DISSENT_ENTRIES)
         for candidate in scan.candidates:
             row = _report_row(
                 session,
@@ -2895,6 +2944,7 @@ def _report_from_scan(
                 absorbed_keys=absorbed_keys,
                 claims=claims,
                 offered_dirs=offered_dirs,
+                dissent_budget=budget,
             )
             if row is not None:
                 row["rule_set"] = rule_set["stamp"]
@@ -2931,6 +2981,7 @@ def _report_from_scan(
                     # status HEAD gave them: no claim filter, no container leg.
                     claims=None,
                     offered_dirs=frozenset(),
+                    dissent_budget=budget,
                 )
                 if row is None:
                     continue

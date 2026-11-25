@@ -40,6 +40,7 @@ import library_scan
 import login_throttle as login_throttle_module
 import main
 import permissions
+import proposal_engine
 import settings_service
 from db import engine
 from migrations import run_migrations
@@ -1113,6 +1114,60 @@ def test_the_route_serves_the_engines_dissent_but_marks_it_uncreatable(
     assert row["matches"][-1]["creatable"] is True
     for match in row["matches"]:
         assert set(match) == MATCH_KEYS
+
+
+def test_the_dissent_pass_stops_at_its_entry_budget(
+    client: TestClient, contributor: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One allowance per dissent pass: a spent budget silences it, and only it.
+
+    The row's identity, detector, confidence and status, and its detector and manual
+    offers, are exactly what they were while the dissent was served - a row with no
+    budget left answers NO dissent rather than half a census presented as a total.
+    Mutation: ignore the budget and re-walk every row, and the `engine:` match
+    reappears on the silenced report.
+    """
+    collection_bundle(isolated_storage)
+    scan()
+
+    ordinary = row_for(report_for(client, contributor), COLLECTION_KEY)
+    dissent = [match for match in ordinary["matches"] if match["rule"].startswith("engine:")]
+    assert len(dissent) == 1, f"control: this row does carry the dissent: {ordinary['matches']}"
+
+    monkeypatch.setattr(bundle_service, "MAX_DISSENT_ENTRIES", 0)
+    silenced = row_for(report_for(client, contributor), COLLECTION_KEY)
+
+    assert not [match for match in silenced["matches"] if match["rule"].startswith("engine:")], (
+        "a row past the pass's budget answers no dissent at all"
+    )
+    for field in ("key", "rel_path", "title", "name_suggestion", "detector", "confidence", "status"):
+        assert silenced[field] == ordinary[field], field
+    assert silenced["matches"] == [
+        match for match in ordinary["matches"] if not match["rule"].startswith("engine:")
+    ], "only the dissent was withheld"
+
+
+def test_the_dissent_walk_is_bounded_and_says_so(tmp_path: Path) -> None:
+    """``measure`` counts the entries it visits and admits a partial census.
+
+    The budget is checked per directory, so a walk may overshoot by one listing:
+    the assertion is a band, not an equality. Mutation: drop the counter or the
+    truncation flag and a 60-file folder walked with ``max_entries=20`` is
+    presented as a complete census; bound the default (``None``) path too and the
+    unbounded walk stops early instead of measuring the whole tree.
+    """
+    folder = tmp_path / "Flat"
+    folder.mkdir()
+    for index in range(60):
+        (folder / f"part{index}.stl").write_bytes(b"solid part\n")
+
+    bounded = proposal_engine.measure(str(folder), max_entries=20)
+    assert bounded.truncated is True
+    assert 20 <= bounded.entries <= 80, "one directory's listing clears the budget in one step"
+
+    complete = proposal_engine.measure(str(folder))
+    assert complete.truncated is False
+    assert complete.entries == 60, "no budget means the whole tree, exactly as before"
 
 
 def test_a_row_the_engine_never_dissents_on_is_served_unchanged(

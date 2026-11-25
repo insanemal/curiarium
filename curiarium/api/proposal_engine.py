@@ -210,6 +210,11 @@ class Facts:
         self.others = 0
         self.archives = 0
         self.bytes = 0
+        # Directory entries the walk actually visited: files plus subdirectories.
+        self.entries = 0
+        # True when the walk stopped at a caller's entry budget, so this census is
+        # partial and must not be read as a total.
+        self.truncated = False
         # relative dir -> model count, only for dirs that carry models
         self.model_dirs: Dict[str, int] = {}
         # relative dir -> metadata filenames found directly in it
@@ -292,13 +297,31 @@ class Facts:
         return tops[0][1] / self.models
 
 
-def measure(path: str, rel_prefix: str = "") -> Facts:
-    """Walk one candidate folder once and measure it."""
+def measure(
+    path: str, rel_prefix: str = "", *, max_entries: Optional[int] = None
+) -> Facts:
+    """Walk one candidate folder once and measure it.
+
+    ``max_entries`` bounds the walk at the directory-entry level (files plus
+    subdirectories): the app reads this walk inside a GET whose own walk is already
+    bounded (``bundle_service.MAX_SCAN_ENTRIES``), so a second unbounded walk per row
+    could cost far more than the report it feeds. A partial census must be
+    detectable rather than silently reported as a total, so a walk that hits the
+    budget sets ``Facts.truncated``. The check runs once per directory, so a walk
+    may overshoot by one directory's listing - the bound is on how much of the tree
+    gets classified, and a single listing is the smallest step there is. ``None`` -
+    every CLI caller - leaves the walk unbounded, byte-identical to before the
+    budget existed.
+    """
     facts = Facts(os.path.basename(path.rstrip(os.sep)) or path, path, rel_prefix)
     stack: List[Tuple[str, str]] = [(".", path)]
     while stack:
         rel_dir, absolute = stack.pop()
         files, dirs = read_dir(absolute)
+        facts.entries += len(files) + len(dirs)
+        if max_entries is not None and facts.entries > max_entries:
+            facts.truncated = True
+            break
         if rel_dir == ".":
             facts.children.extend(dirs)
         for entry in files:
@@ -493,7 +516,7 @@ def propose(facts: Facts, project_keys: Sequence[str], *,
         else:
             reasons.append("no top folder carries its own metadata")
         options.append(Option(
-            "split-top-folders",
+            SPLIT_SHAPES[0],
             f"split into {len(tops)} projects",
             ", ".join(f"{name} ({count})" for name, count in tops[:6])
             + (" ..." if len(tops) > 6 else ""),
@@ -505,7 +528,7 @@ def propose(facts: Facts, project_keys: Sequence[str], *,
     shallow = [d for d in facts.model_dirs if d != "." and d.count(os.sep) + 1 == 1]
     if len(shallow) >= 3 and len(shallow) > len(tops):
         options.append(Option(
-            "split-model-folders",
+            SPLIT_SHAPES[1],
             f"split into {len(shallow)} projects",
             ", ".join(sorted(shallow, key=str.casefold)[:6]) + (" ..." if len(shallow) > 6 else ""),
             "a project per model-bearing folder at depth 1",
@@ -608,6 +631,13 @@ def series_suggestion(facts: Facts) -> Optional[str]:
 # The shapes that already mean "one project". A wrapper is only proposed for
 # dropping inside them: under a split it is one of the pieces being hoisted out.
 ONE_PROJECT_SHAPES = ("one-project", "git-project")
+
+# The two shapes that mean "this folder is SEVERAL projects". Named here because
+# they are this module's own vocabulary: ``bundle_service`` reads them to offer the
+# dissent and to refuse a create of that shape, and a literal restated there could
+# drift from the table that produces it. Used at the two Option(...) sites in
+# ``propose``.
+SPLIT_SHAPES = ("split-top-folders", "split-model-folders")
 
 # `Vault Archive_18.11.2026` -> `Vault`: the packaging tail a downloader bolts onto
 # the product name. The tail must end the name or begin with a digit, so a product

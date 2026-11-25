@@ -82,7 +82,9 @@ class BundleMatchOut(BaseModel):
   would hide the reading that disagrees with the detector - an honest reading is
   worth more than a short list. ``creatable=False`` plus a ``note`` saying why
   is the contract: the client must not let the operator pick such a shape, and
-  the create path refuses it with ``needs-arrange``.
+  the create path refuses it with ``needs-arrange``. ``creatable`` means "this
+  shape is enactable once the row is ready; the row's own ``status`` still gates
+  the create".
   """
 
   shape: str
