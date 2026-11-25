@@ -98,6 +98,15 @@ export type BundleMatch = {
   other_count: number;
   groups?: BundleGroup[];
   note?: string | null;
+  /** Can the server enact this reading TODAY? `creatable: false` marks a shape
+   *  the detector offers but cannot create from yet (the proposal engine's
+   *  dissenting cardinality readings, which need arranging first), and such a
+   *  match always carries a `note` saying why. ABSENT means enactable: a
+   *  payload from before this field existed is one the server could always act
+   *  on, so the reader must treat it as `true` rather than refuse every old
+   *  report. The create endpoint answers `needs-arrange` for a false shape and
+   *  writes nothing, which is why a client must never send one. */
+  creatable?: boolean;
 };
 
 /** One detected bundle. `status` and `confidence` are orthogonal. */

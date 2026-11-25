@@ -46,10 +46,12 @@ import {
   extractPathFor,
   hasThingSource,
   headline,
+  importMatches,
   importShapes,
   isArchiveOnly,
   isBlocked,
   isCreatable,
+  isEnactable,
   matchesFilter,
   matchesVisibility,
   needsDecision,
@@ -290,6 +292,124 @@ describe("importShapes / activeShape", () => {
     const row = makeBundle({ matches: [match("root-docs"), match("manual")] });
     expect(activeShape(row, "compound")).toBe("root-docs");
   });
+
+  it("skips a choice the server cannot enact, and answers the first enactable shape", () => {
+    // Catches an `activeShape` that only checks the shape is OFFERED: a stored
+    // (or dispatched) `split-top-folders` would then be sent to a server that
+    // refuses it with `needs-arrange` and writes nothing.
+    const row = makeBundle({
+      matches: [
+        match("generic"),
+        { ...match("split-top-folders"), creatable: false, note: "needs arranging first" },
+        match("manual"),
+      ],
+    });
+    expect(activeShape(row, "split-top-folders")).toBe("generic");
+    expect(activeShape(row, undefined)).toBe("generic");
+    // The next enactable shape after the recommendation is still reachable.
+    expect(activeShape(row, "manual")).toBe("manual");
+  });
+
+  it("falls back to the first offered shape when nothing on offer is enactable", () => {
+    // The server refuses that shape itself (`needs-arrange`); the client's job is
+    // not to crash on a row that offers no enactable reading at all.
+    const row = makeBundle({
+      matches: [
+        { ...match("split-top-folders"), creatable: false, note: "needs arranging first" },
+        { ...match("split-model-folders"), creatable: false, note: "needs arranging first" },
+      ],
+    });
+    expect(activeShape(row, "split-model-folders")).toBe("split-top-folders");
+  });
+});
+
+describe("isEnactable", () => {
+  /** A served reading, with `creatable` present only when the caller names it: an
+   *  absent field is what an old payload sends. */
+  const reading = (creatable?: boolean): BundleMatch => ({
+    shape: "generic",
+    rule: "rule",
+    confidence: "low",
+    model_count: 1,
+    image_count: 0,
+    text_count: 0,
+    other_count: 0,
+    note: null,
+    ...(creatable === undefined ? {} : { creatable }),
+  });
+
+  it("reads an absent `creatable` as enactable, so an old payload stays selectable", () => {
+    // Catches a `creatable === true` flip: every pre-field match - and every
+    // shape the detector itself offers, none of which sets the field - would
+    // become unselectable, and the queue would offer nothing to create.
+    expect(isEnactable(reading(undefined))).toBe(true);
+  });
+
+  it("reads an explicit `true` as enactable", () => {
+    // Catches a `=== false` inverted into `!== true`-style wording.
+    expect(isEnactable(reading(true))).toBe(true);
+  });
+
+  it("reads an explicit `false` as not enactable", () => {
+    // Catches a truthiness check: `false` is the one value the server sends that
+    // must revoke the choice.
+    expect(isEnactable(reading(false))).toBe(false);
+  });
+});
+
+describe("importMatches", () => {
+  it("returns the served matches in the served order", () => {
+    const row = makeBundle({
+      matches: [
+        {
+          shape: "generic",
+          rule: "generic-bundle",
+          confidence: "low",
+          model_count: 3,
+          image_count: 1,
+          text_count: 0,
+          other_count: 0,
+          note: null,
+        },
+        {
+          shape: "manual",
+          rule: "manual",
+          confidence: "low",
+          model_count: 3,
+          image_count: 1,
+          text_count: 0,
+          other_count: 0,
+          note: "Everything under the folder.",
+        },
+      ],
+    });
+    // Catches a re-sort or a filter that keeps only enactable readings: the
+    // chooser and its counts must see the server's own order and wording.
+    expect(importMatches(row).map(m => m.shape)).toEqual(["generic", "manual"]);
+    expect(importMatches(row)[1].note).toBe("Everything under the folder.");
+  });
+
+  it("synthesises exactly one match from the row's own fields when `matches` is absent", () => {
+    // Catches a fallback that invents counts or reuses a stale shape: an old
+    // payload still describes itself, and this is the only reading it offers.
+    const base = makeBundle({ metadata_shape: "generic", detector: "generic-bundle" });
+    const row = { ...base } as Partial<BundleDetectItem>;
+    delete row.matches;
+    expect(importMatches(row as BundleDetectItem)).toEqual([
+      {
+        shape: "generic",
+        rule: "generic-bundle",
+        confidence: base.confidence,
+        model_count: base.model_count,
+        image_count: base.image_count,
+        text_count: base.text_count,
+        other_count: base.other_count,
+        note: null,
+      },
+    ]);
+    // The two readers cannot disagree about what the row offers.
+    expect(importShapes(row as BundleDetectItem)).toEqual(["generic"]);
+  });
 });
 
 describe("shapeLabel", () => {
@@ -303,10 +423,17 @@ describe("shapeLabel", () => {
       "id-name",
       "title-name",
       "archive-root",
+      // The proposal engine's dissenting readings: an operator must read a
+      // cardinality choice, never the rule set's token.
+      "split-top-folders",
+      "split-model-folders",
     ]) {
       expect(SHAPE_LABELS[shape]).toBeTruthy();
       expect(shapeLabel(shape)).toBe(SHAPE_LABELS[shape]);
     }
+    // Both split shapes say what they would MAKE, and neither leaks its token.
+    expect(SHAPE_LABELS["split-top-folders"]).toBe("Split into one project per top folder");
+    expect(SHAPE_LABELS["split-model-folders"]).toBe("Split into one project per model folder");
     // The manual shape says what it does rather than naming itself: the operator
     // is choosing files, not vocabulary.
     expect(SHAPE_LABELS[SHAPE_MANUAL]).toBe("Everything in this folder");

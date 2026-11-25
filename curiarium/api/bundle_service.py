@@ -197,6 +197,7 @@ import db
 import library_scan
 import project_create_service
 import project_service
+import proposal_engine
 import settings_service
 import zip_service
 from db import engine
@@ -237,6 +238,15 @@ CREATE_CREATED = "created"
 CREATE_SKIPPED = "skipped"
 CREATE_BLOCKED = "blocked"
 CREATE_FAILED = "failed"
+
+# The engine's own vocabulary (``proposal_engine``), read here rather than restated:
+# the two shapes it can read a folder as SEVERAL projects, and the margin it calls a
+# close call. A row the engine disagrees with is offered as a match with
+# ``creatable=False``, and a create of that shape answers this reason: the
+# arrangement it would need is `Mf-v9eg` and does not exist yet.
+ENGINE_SPLIT_SHAPES = ("split-top-folders", "split-model-folders")
+ENGINE_CLOSE_CALL = 15
+NEEDS_ARRANGE = "needs-arrange"
 
 # A create-time refusal: the candidate's assets include another bundle's. This is
 # a reason on CREATE_FAILED, never a blocked_reason - `blocked` means database
@@ -2248,6 +2258,76 @@ def _wire_groups(
     ]
 
 
+def _engine_dissent(
+    root: Path, candidate: BundleCandidate, facts: bundle_detect.BundleFacts
+) -> List[dict]:
+    """The engine's dissenting CARDINALITY readings, in the ``BundleMatchOut`` shape.
+
+    A match the server can serve but cannot enact yet: the engine reads the folder as
+    SEVERAL projects while the detector reads it as one, and that disagreement is
+    worth showing next to the detector's own offers. Every directory row is
+    consulted, a ``manual`` scope row included - a folder the detector refused is
+    exactly where "this is really N projects" matters most. Archive rows are skipped:
+    the engine walks a directory, and this question is scoped to those.
+
+    The engine has no confidence vocabulary, so the dissent's strength is read off
+    the engine's OWN ranking instead of a scale invented here: an option scoring at
+    least the top option is ``high`` (the engine recommends this split and the app
+    does not), one inside ``ENGINE_CLOSE_CALL`` points of it is ``medium``, and
+    anything further behind is ``low``.
+
+    ``probe_git=False`` is mandatory: this runs inside a GET handler and must never
+    run a git subprocess. A folder that disappeared mid-walk answers no dissent at
+    all - a report must not fail because a directory vanished underneath it.
+    """
+    if candidate.is_archive:
+        return []
+    try:
+        engine_facts = proposal_engine.measure(
+            str(Path(root) / candidate.snapshot.rel_dir), candidate.key
+        )
+    except OSError:
+        return []
+    options, _reasons, _repo = proposal_engine.propose(engine_facts, (), probe_git=False)
+    if not options:
+        return []
+    top_score = options[0].score
+    # A shape the row already recommends is not a dissent, whatever the engine calls it.
+    already_offered = {facts.metadata_shape, facts.detector}
+    dissent: List[dict] = []
+    for option in options:
+        if option.shape not in ENGINE_SPLIT_SHAPES or option.shape in already_offered:
+            continue
+        if option.score >= top_score:
+            confidence = "high"
+        elif option.score >= top_score - ENGINE_CLOSE_CALL:
+            confidence = "medium"
+        else:
+            confidence = "low"
+        dissent.append(
+            {
+                "shape": option.shape,
+                # Which table offered this reading, beside the detector names and
+                # ledger words every other match's rule is.
+                "rule": f"engine:{option.shape}",
+                "confidence": confidence,
+                # The engine's census, mapped onto the flattened fields.
+                "model_count": engine_facts.models,
+                "image_count": engine_facts.images,
+                "text_count": engine_facts.docs,
+                "other_count": engine_facts.others,
+                # The engine's split partitions the folder differently from R7's
+                # compound groups: there is no group breakdown to offer.
+                "groups": [],
+                # Every non-creatable match carries a note, and the note is the
+                # engine's own sentence about what the reading costs.
+                "note": f"needs arranging first: {option.consequence}",
+                "creatable": False,
+            }
+        )
+    return dissent
+
+
 def cover_for_registered(
     assets: Sequence[RegisteredAsset],
     cover_entry: Optional[str] = None,
@@ -2593,6 +2673,43 @@ def _report_row(
                 is_member=lambda asset_id: owner in asset_index.get(asset_id, ()),
             )
             drift_count = len(asset_ids)
+    # The detector's offers first, exactly as ``shape_matches`` orders them and with
+    # every shape creatable: a rule-offered shape is what the create path enacts.
+    matches: List[dict] = [
+        {
+            "shape": match.shape,
+            "rule": match.rule,
+            "confidence": match.confidence,
+            "model_count": match.counts.model,
+            "image_count": match.counts.image,
+            "text_count": match.counts.text,
+            "other_count": match.counts.other,
+            "groups": _wire_groups(candidate.key, match.groups, absorbed_keys),
+            "note": match.note,
+            "creatable": True,
+        }
+        for match in bundle_detect.shape_matches(
+            candidate.snapshot,
+            _candidate_docs(root, candidate),
+            facts,
+            candidate.manual_rule,
+            paired=bool(candidate.archive_path),
+        )
+    ]
+    # Then the engine's dissenting readings, which are honest offers the create path
+    # cannot enact yet. Where they sit keeps both order invariants this list has
+    # always had: when the LAST match is the manual entry (and there is more than
+    # one), the dissent goes immediately BEFORE it, so ``matches[-1]`` stays the
+    # manual offer; otherwise - the manual-recommends-itself row, where ``matches[0]``
+    # must stay that manual entry - it is APPENDED. A row the engine offers no
+    # dissent on is byte-identical to before this ticket, which is the property the
+    # tests pin.
+    dissent = _engine_dissent(root, candidate, facts)
+    if dissent:
+        if len(matches) > 1 and matches[-1]["shape"] == bundle_detect.SHAPE_MANUAL:
+            matches[-1:-1] = dissent
+        else:
+            matches.extend(dissent)
     return {
         "key": key,
         "rel_path": key,
@@ -2627,26 +2744,8 @@ def _report_row(
         # construction, so a client can offer the alternatives without a second
         # round trip and without ranking them itself. The manual entry is last:
         # "everything under this path" is always on offer, whatever the rules said.
-        "matches": [
-            {
-                "shape": match.shape,
-                "rule": match.rule,
-                "confidence": match.confidence,
-                "model_count": match.counts.model,
-                "image_count": match.counts.image,
-                "text_count": match.counts.text,
-                "other_count": match.counts.other,
-                "groups": _wire_groups(candidate.key, match.groups, absorbed_keys),
-                "note": match.note,
-            }
-            for match in bundle_detect.shape_matches(
-                candidate.snapshot,
-                _candidate_docs(root, candidate),
-                facts,
-                candidate.manual_rule,
-                paired=bool(candidate.archive_path),
-            )
-        ],
+        # Built into a local first because the engine's dissent is inserted into it.
+        "matches": matches,
         # The row's cover and the create's cover are ONE expression: `_create_one`
         # re-asks this same `_cover` over its own exclusion-filtered `owned_assets`
         # instead of writing a second rule free to disagree. What IS true of every
@@ -3058,6 +3157,14 @@ def _create_one(
     match = next((candidate_match for candidate_match in matches if candidate_match["shape"] == chosen), None)
     if match is None:
         match = {"shape": recommended_shape, "rule": row["detector"], "groups": row.get("groups") or []}
+    # An offer the server cannot enact is honest but not actionable: applying the
+    # arrangement it needs is `Mf-v9eg` and does not exist yet. Refusing HERE - before
+    # any exclusion validation, before the marker and before the session - means no
+    # project, no assets and no marker are written, so a later arrange step starts
+    # from a clean row. A hand-built row carries no `matches`, so its synthesised
+    # match has no `creatable` at all and `.get(...) is False` is False for it.
+    if match.get("creatable") is False:
+        return _result(key, CREATE_FAILED, reason=NEEDS_ARRANGE)
     # Validation runs before anything that touches the session, and before
     # `find_existing_project` on purpose: an already-created compound row whose
     # group list moved answers a validation reason, never `already_created`.

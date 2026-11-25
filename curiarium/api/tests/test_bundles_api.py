@@ -241,6 +241,63 @@ def moai_bundle(root: Path) -> Path:
     return bundle
 
 
+COLLECTION_KEY = "import/Collection"
+AGREEING_KEY = "import/Agreeing"
+
+
+def collection_bundle(root: Path) -> Path:
+    """Three products in one folder: each top folder ships its own README and models.
+
+    The detector reads the listing as one `generic` bundle (a model at its own depth
+    plus an image and a text anywhere). The engine reads it as `split-top-folders`,
+    20 + 30 + 10 = 60, against a `one-project` of 40 - 30 - 20 = -10: each child's own
+    document is a claim to be a product, so the split is the ENGINE's recommendation
+    while the app's row recommends something else. That is the dissent the row must
+    serve, and it is why its confidence reads `high`.
+    """
+    bundle = root / "import" / "Collection"
+    write_file(bundle / "loose.stl", STL_BYTES)
+    write_file(bundle / "cover.jpg", b"j" * 100)
+    write_text(bundle / "notes.txt", "print at 0.2mm\n")
+    for name in ("Widget One", "Widget Two", "Widget Three"):
+        write_text(bundle / name / "README.md", f"# {name}\n")
+        for index in range(3):
+            write_file(bundle / name / f"part{index}.stl", STL_BYTES)
+    return bundle
+
+
+def agreeing_bundle(root: Path) -> Path:
+    """One product in one folder: a `generic` row the engine never dissents on.
+
+    ONE model-bearing child, no product document anywhere, so the engine offers
+    `one-project` and no split at all (a split needs two top folders carrying
+    models). This is the row whose served matches must be exactly what they were
+    before the engine was consulted.
+    """
+    bundle = root / "import" / "Agreeing"
+    for index in range(3):
+        write_file(bundle / "files" / f"part{index}.stl", STL_BYTES)
+    write_file(bundle / "cover.jpg", b"j" * 100)
+    write_text(bundle / "notes.txt", "print at 0.2mm\n")
+    return bundle
+
+
+# The wire shape of one match. Pinned by key set rather than by literal body, so the
+# field list cannot drift silently in either direction.
+MATCH_KEYS = {
+    "shape",
+    "rule",
+    "confidence",
+    "model_count",
+    "image_count",
+    "text_count",
+    "other_count",
+    "groups",
+    "note",
+    "creatable",
+}
+
+
 def scan() -> None:
     """Register the tree exactly as the live box does; `ready` needs those rows."""
     state = library_scan.scan_storage_root()
@@ -883,17 +940,7 @@ def test_the_route_serves_every_shape_the_row_could_be(client: TestClient, contr
         assert matches[-1]["confidence"] == "low"
         assert matches[-1]["note"] is None
         for match in matches:
-            assert set(match) == {
-                "shape",
-                "rule",
-                "confidence",
-                "model_count",
-                "image_count",
-                "text_count",
-                "other_count",
-                "groups",
-                "note",
-            }
+            assert set(match) == MATCH_KEYS
     compound = next(row for row in report["bundles"] if row["key"] == STAGETOP_KEY)
     compound_match = next(match for match in compound["matches"] if match["shape"] == "compound")
     assert [group["name"] for group in compound_match["groups"]] == [
@@ -913,6 +960,13 @@ def test_the_committed_openapi_fixture_declares_the_match_and_shape_fields() -> 
     match = fixture["BundleMatchOut"]
     assert sorted(match["required"]) == ["confidence", "rule", "shape"]
     assert match["properties"]["note"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    # Additive and defaulted permissively: a client from before this ticket keeps
+    # working, because the default is the permissive value - a shape the server
+    # cannot enact is the one that opts out. NOT required: the default is the one a
+    # pre-existing payload already assumes.
+    assert match["properties"]["creatable"]["type"] == "boolean"
+    assert match["properties"]["creatable"]["default"] is True
+    assert "creatable" not in match["required"], "the field is additive, never required"
     assert "matches" in fixture["BundleDetectItemOut"]["properties"]
     assert fixture["BundleDetectItemOut"]["properties"]["matches"]["items"]["$ref"] == (
         "#/components/schemas/BundleMatchOut"
@@ -997,3 +1051,148 @@ def test_an_unoffered_shape_over_http_fails_and_creates_nothing(
     assert body["results"][0]["status"] == "failed"
     assert body["results"][0]["reason"] == "unknown shape"
     assert project_ids(client, contributor) == [], "an unoffered shape writes nothing"
+
+
+# --- the engine's dissent is an honest offer, not a pickable shape (Mf-yitm) --
+
+
+def test_the_route_serves_the_engines_dissent_but_marks_it_uncreatable(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """AC-3: a folder of three products carries the split reading, and cannot be picked.
+
+    The row recommends `generic` (one bundle), the engine recommends
+    `split-top-folders`, and the served list says both: the dissent sits BEFORE the
+    manual entry, is `creatable=False`, and carries the engine's own sentence about
+    what that reading costs. Mutation: serve the engine's options without the
+    `creatable` flag and the client can pick an arrangement the create path refuses;
+    append the dissent after the manual entry and the two order assertions red.
+    """
+    collection_bundle(isolated_storage)
+    scan()
+
+    row = row_for(report_for(client, contributor), COLLECTION_KEY)
+
+    assert row["detector"] == "generic-bundle"
+    assert row["metadata_shape"] == "generic"
+    recommended = row["matches"][0]
+    assert recommended["shape"] == row["metadata_shape"]
+    assert recommended["rule"] == row["detector"]
+    assert recommended["confidence"] == row["confidence"]
+    assert recommended["groups"] == row["groups"]
+    assert recommended["creatable"] is True
+
+    dissent = [match for match in row["matches"] if match["rule"].startswith("engine:")]
+    assert len(dissent) == 1, row["matches"]
+    entry = dissent[0]
+    assert entry["shape"] == "split-top-folders"
+    assert entry["rule"] == "engine:split-top-folders"
+    assert entry["confidence"] == "high", "the engine's top option here IS this split"
+    assert entry["creatable"] is False
+    assert entry["note"].startswith("needs arranging first: "), (
+        "a non-creatable offer always says why, in the engine's own words"
+    )
+    assert entry["groups"] == [], "the engine's split partitions the folder, it has no compound groups"
+    # 1 loose model + 3 x 3 in the product folders; the image and the four documents
+    # the folder actually holds. The engine's census and the row's agree here.
+    assert (entry["model_count"], entry["image_count"], entry["text_count"], entry["other_count"]) == (10, 1, 4, 0)
+    assert (
+        entry["model_count"],
+        entry["image_count"],
+        entry["text_count"],
+        entry["other_count"],
+    ) == (
+        row["model_count"],
+        row["image_count"],
+        row["text_count"],
+        row["other_count"],
+    ), "the engine entry counts the same folder the row counted"
+
+    assert row["matches"].index(entry) == len(row["matches"]) - 2, "the dissent sits just before the manual offer"
+    assert row["matches"][-1]["shape"] == "manual"
+    assert row["matches"][-1]["creatable"] is True
+    for match in row["matches"]:
+        assert set(match) == MATCH_KEYS
+
+
+def test_a_row_the_engine_never_dissents_on_is_served_unchanged(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """One product in one folder: the served matches are what they were before this ticket.
+
+    Mutation: serve the engine on every row - whatever it answered - and this reds:
+    the shape list gains an entry, or a `note` appears where the detector offered
+    none. The detector's own offer here is `generic`, then R5's `title-name`, then
+    the manual scope, and all three are creatable.
+    """
+    agreeing_bundle(isolated_storage)
+    scan()
+
+    row = row_for(report_for(client, contributor), AGREEING_KEY)
+
+    assert row["detector"] == "generic-bundle"
+    assert [match["shape"] for match in row["matches"]] == ["generic", "title-name", "manual"]
+    assert [match["rule"] for match in row["matches"]] == ["generic-bundle", "title-name", "manual"], (
+        "the detector's own offer, in rule order: nothing was inserted"
+    )
+    assert all(match["creatable"] is True for match in row["matches"])
+    assert all(match["note"] is None for match in row["matches"])
+    assert not any(match["rule"].startswith("engine:") for match in row["matches"])
+
+
+def test_creating_a_dissenting_shape_fails_with_needs_arrange_and_writes_nothing(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """AC-4: the honest offer is refused at the door, before a project or a marker.
+
+    Applying the arrangement is `Mf-v9eg` and does not exist yet, so a create of the
+    engine's shape answers `failed`/`needs-arrange` and writes nothing at all: no
+    project in the listing, no `_bundle` marker in any row, no assets added. A
+    creatable create beside it still succeeds and still records its shape and rule,
+    which is what makes the refusal a refusal of ONE shape rather than of the door.
+
+    Mutation: drop the `creatable is False` guard from ``_create_one`` and the
+    project below is written, so every "nothing was written" assertion reds.
+    """
+    collection_bundle(isolated_storage)
+    agreeing_bundle(isolated_storage)
+    scan()
+    row = row_for(report_for(client, contributor), COLLECTION_KEY)
+    assert any(
+        match["shape"] == "split-top-folders" and match["creatable"] is False for match in row["matches"]
+    ), "the fixture must offer the dissent this test refuses"
+
+    refused = client.post(
+        "/bundles/create",
+        json={"items": [{"key": COLLECTION_KEY, "shape": "split-top-folders"}]},
+        headers=bearer(contributor.token),
+    )
+
+    assert refused.status_code == 200, refused.text
+    body = refused.json()
+    assert (body["created"], body["failed"]) == (0, 1), body
+    result = body["results"][0]
+    assert result["status"] == "failed"
+    assert result["reason"] == "needs-arrange"
+    assert result["project_id"] is None
+    assert result["assets_added"] == 0
+    assert project_ids(client, contributor) == [], "a refused shape writes no project"
+    with Session(engine) as session:
+        markers = [
+            project.id
+            for project in session.exec(select(Project))
+            if "_bundle" in json.loads(project.metadata_json or "{}")
+        ]
+    assert markers == [], "a refused shape writes no marker for a later arrange step to trip over"
+
+    created = client.post(
+        "/bundles/create", json={"items": [{"key": AGREEING_KEY}]}, headers=bearer(contributor.token)
+    )
+
+    assert created.status_code == 200, created.text
+    made = created.json()
+    assert (made["created"], made["failed"]) == (1, 0), made
+    project_id = made["results"][0]["project_id"]
+    marker = project_by_id(client, contributor, project_id)["metadata_json"]["_bundle"]
+    assert marker["shape"] == "generic", "the creatable shape is still created from its own offer"
+    assert marker["rule"] == "generic-bundle"

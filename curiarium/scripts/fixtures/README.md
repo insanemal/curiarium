@@ -1,8 +1,10 @@
 # Proposal-engine fixtures
 
-`proposal-labels.json` is the ground truth `curiarium/scripts/propose_import.py`
-scores itself against: folders the operator confirmed by creating a project from
-them, and the three folders he confirmed are collections.
+`proposal-labels.json` is the ground truth `curiarium/api/proposal_engine.py` scores
+itself against: folders the operator confirmed by creating a project from them, and
+the three folders he confirmed are collections. The module that owns `validate()`
+is that engine; `curiarium/scripts/propose_import.py` is a shim over it, so the
+command below still runs through the script and still scores the same rules.
 
 Keys are **root-relative**, so the same file works against any library root:
 
@@ -19,6 +21,16 @@ It is not committed: it names the owner's whole library.
 Exit code is 1 when a confirmed single product would be split, or a confirmed
 collection would be merged — so the fixture is a regression gate for the rules,
 run locally against the real tree. Rules change; the labels do not.
+
+These labels are also replayed as tests in
+`curiarium/api/tests/test_proposal_engine.py` over synthetic trees, for six of the
+seven keys: a rule change that would start splitting a confirmed product reds on
+CI without the live library. The seventh, the git-checkout label
+`import/endorphin`, is only scored by the host CLI against a real checkout (a
+`.git` directory with nothing behind it is no repo). Both previously-wrong wrapper
+layouts are asserted there too: a twin zip INSIDE the wrapper child, and the case
+where the candidate IS the wrapper. Both must print `drop the wrapper`,
+`<title>/_source/<zip>` and `keep "<part>/" as a part`.
 
 `expect` is one of:
 

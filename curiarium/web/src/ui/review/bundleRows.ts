@@ -6,6 +6,7 @@ import {
   ENRICH_MAX_KEYS,
   type BundleDetectCounts,
   type BundleDetectItem,
+  type BundleMatch,
 } from "../../lib/api/bundles";
 import { DRIFT_KNOWN, DRIFT_NOT_APPLICABLE } from "../projectBundleDrift";
 // Declaration-only import cycles, proved green by these suites: this module
@@ -506,6 +507,13 @@ export const SHAPE_LABELS: Record<string, string> = {
   "id-name": "One project, named from its vendor id",
   "title-name": "One project, named from the folder title",
   "archive-root": "One project, the archive's root files",
+  // The proposal engine's dissenting cardinality readings. They are worded as
+  // what they would MAKE (one project per folder) rather than as the token the
+  // rule set uses, because the operator is deciding what to import, not learning
+  // the detector's vocabulary. Both are `creatable: false` until the folder is
+  // arranged, and the server's own `note` carries that reason.
+  "split-top-folders": "Split into one project per top folder",
+  "split-model-folders": "Split into one project per model folder",
 };
 
 /** The wording for one shape. An unknown shape - a newer server's - is
@@ -519,24 +527,57 @@ export function shapeLabel(shape: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
-/** The shapes this row may be imported as, recommended first. A payload from
- *  before `matches` was served has none, and then the only shape on offer is the
- *  one the detector reported - which is why an absent field is not a refusal. */
+/** Whether a served reading is one the operator may choose. `creatable: false`
+ *  is the server saying it cannot enact that shape yet (it answers
+ *  `needs-arrange` and writes nothing); the strict `!== false` is load-bearing,
+ *  because it keeps every old payload - and every shape the detector itself
+ *  offers, none of which sets the field - selectable. */
+export function isEnactable(match: BundleMatch): boolean {
+  return match.creatable !== false;
+}
+
+/** The matches this row may be imported as, recommended first. A payload from
+ *  before `matches` was served has none, and then the only reading on offer is
+ *  the one the detector reported, synthesised from the row's own fields - which
+ *  is why an absent field is not a refusal. Empty shapes are dropped, so a
+ *  malformed entry cannot become an unlabelled radio. */
+export function importMatches(row: BundleDetectItem): BundleMatch[] {
+  const offered = (row.matches ?? []).filter(match => match.shape !== "");
+  if (offered.length > 0) return offered;
+  return [
+    {
+      shape: row.metadata_shape,
+      rule: row.detector,
+      confidence: row.confidence,
+      model_count: row.model_count,
+      image_count: row.image_count,
+      text_count: row.text_count,
+      other_count: row.other_count,
+      note: null,
+    },
+  ];
+}
+
+/** The shapes this row may be imported as, recommended first. It reads
+ *  `importMatches` so the chooser and its labels can never disagree about what
+ *  the row offers. */
 export function importShapes(row: BundleDetectItem): string[] {
-  const offered = (row.matches ?? [])
-    .map(match => match.shape)
-    .filter(shape => shape !== "");
-  return offered.length > 0 ? offered : [row.metadata_shape];
+  return importMatches(row).map(match => match.shape);
 }
 
 /** The shape a create would use: the operator's choice when the server still
- *  offers it, else the recommendation. Asking the row rather than trusting the
- *  stored choice is what keeps a refetch that changed the offers from sending a
- *  shape the server no longer accepts. */
+ *  offers it AND can enact it, else the first enactable shape on offer. Asking
+ *  the row rather than trusting the stored choice is what keeps a refetch that
+ *  changed the offers - or a shape marked `creatable: false` - from sending a
+ *  choice the server no longer accepts. If a row somehow offers nothing
+ *  enactable, the first offered shape stands and the server refuses it with
+ *  `needs-arrange` rather than the client crashing. */
 export function activeShape(row: BundleDetectItem, chosen: string | undefined): string {
-  const shapes = importShapes(row);
-  if (chosen !== undefined && shapes.includes(chosen)) return chosen;
-  return shapes[0];
+  const matches = importMatches(row);
+  const chosenMatch = chosen === undefined ? undefined : matches.find(m => m.shape === chosen);
+  if (chosenMatch !== undefined && isEnactable(chosenMatch)) return chosenMatch.shape;
+  const enactable = matches.find(isEnactable);
+  return (enactable ?? matches[0]).shape;
 }
 
 /** The bucket a row falls in for the queue's reveal toggles. This is the

@@ -77,6 +77,12 @@ class BundleMatchOut(BaseModel):
   manual entry (shape `manual`) is always present and last unless the row itself
   recommends it, and `note` carries the refusal word a manual offer was built
   from.
+
+  A match the server cannot enact yet is still offered, because withholding it
+  would hide the reading that disagrees with the detector - an honest reading is
+  worth more than a short list. ``creatable=False`` plus a ``note`` saying why
+  is the contract: the client must not let the operator pick such a shape, and
+  the create path refuses it with ``needs-arrange``.
   """
 
   shape: str
@@ -88,6 +94,9 @@ class BundleMatchOut(BaseModel):
   other_count: int = 0
   groups: List[BundleGroupOut] = []
   note: Optional[str] = None
+  # Defaulted True on purpose: every shape the detector offers is creatable, so
+  # the permissive value is the one a client that predates this field assumes.
+  creatable: bool = True
 
 
 class BundleDuplicateGroupOut(BaseModel):
