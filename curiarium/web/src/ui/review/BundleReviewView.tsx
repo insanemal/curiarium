@@ -7,6 +7,7 @@ import {
   type BundleCreateItem,
   type BundleCreateResponse,
   type BundleDetectItem,
+  type BundleMatch,
   type BundleReport,
 } from "../../lib/api/bundles";
 // Domain module, not the `../../lib/api` barrel: the tests replace that barrel
@@ -33,6 +34,8 @@ import {
   BUNDLE_FILTERS,
   EXTRACT_AND_CREATE_HINT,
   EXTRACT_AND_CREATE_LABEL,
+  SHAPE_COMPOUND,
+  activeShape,
   archiveExtractTitle,
   archiveLine,
   bulkEnrichNoneLine,
@@ -50,6 +53,7 @@ import {
   enrichmentLine,
   extractPathFor,
   headline,
+  importShapes,
   isArchiveOnly,
   isCreatable,
   matchesFilter,
@@ -57,6 +61,7 @@ import {
   newPartsLine,
   rowBucket,
   rowStateChip,
+  shapeLabel,
   statusLine,
   typedName,
   type BundleFilter,
@@ -89,7 +94,7 @@ import {
 import ReviewQueueView from "./ReviewQueueView";
 import ScanFidelityNotice from "./ScanFidelityNotice";
 import type { BundleDetectState } from "./useBundleDetect";
-import { bundleBadgeCount, describeQueueCount } from "./useReviewCounts";
+import { bundleBadgeCount, describeQueueCount, formatReviewCount } from "./useReviewCounts";
 
 const PRIMARY_BUTTON = "text-xs px-2.5 py-1.5 rounded-md bg-accent disabled:opacity-60";
 const SECONDARY_BUTTON =
@@ -171,6 +176,17 @@ function rowClassName(selected: boolean, active: boolean): string {
 function settlingLine(results: ArchiveExtractResult[]): string {
   const label = results.length === 1 ? results[0].path : `${results.length} archives`;
   return `Extracting ${label} - waiting for the library scan to register the files. This queue updates itself.`;
+}
+
+/** The counts one offered shape would import, said with the one count formatter
+ *  so an unknown number is the en dash rather than a plausible-looking zero. */
+function shapeCountsLine(match: BundleMatch): string {
+  return [
+    `${formatReviewCount(match.model_count)} models`,
+    `${formatReviewCount(match.image_count)} images`,
+    `${formatReviewCount(match.text_count)} texts`,
+    `${formatReviewCount(match.other_count)} other`,
+  ].join(", ");
 }
 
 /** The archives the given rows can extract. `extractPathFor` is the one rule, so
@@ -418,6 +434,11 @@ export default function BundleReviewView({
   // with nothing excluded has no entry at all: an empty list here would put
   // `exclude_groups: []` on the wire, which is not the same body as omitting it.
   const [excludedGroups, setExcludedGroups] = React.useState<Record<string, string[]>>({});
+  // The shape each row is imported as, per row key, when the operator overrode
+  // the recommendation. A row on its recommended shape has no entry at all, for
+  // the same reason `excludedGroups` drops an empty list: storing the
+  // recommendation would put `shape` on the wire for a choice nobody made.
+  const [chosenShape, setChosenShape] = React.useState<Record<string, string>>({});
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
   // One dialog serves all three doors (card, blocked row, bulk bar). `returnKey`
   // is the row to put focus back on when it closes, so a keyboard user who
@@ -553,7 +574,16 @@ export default function BundleReviewView({
   const lowCreatable = visible.filter(row => row.confidence === "low" && isCreatable(row));
   const stale = report?.stale_dismissals ?? [];
   const activeRow = filtered.find(row => row.key === activeKey) ?? null;
-  const activeGroups = activeRow?.groups ?? [];
+  // The shape the pane is offering: the operator's choice when the row still
+  // offers it, else the recommendation. The groups come from the CHOSEN shape's
+  // own match, because a manual import has none - a payload from before
+  // `matches` was served has no matches at all, and then the row's own groups
+  // are the only ones there are.
+  const activeShapeName = activeRow ? activeShape(activeRow, chosenShape[activeRow.key]) : "";
+  const activeMatch = activeRow
+    ? (activeRow.matches ?? []).find(match => match.shape === activeShapeName)
+    : undefined;
+  const activeGroups = activeMatch?.groups ?? activeRow?.groups ?? [];
   const activeExcluded = activeRow === null ? [] : excludedGroups[activeRow.key] ?? [];
   const activeArchive = activeRow === null ? null : archiveLine(activeRow);
   const activeExtractPath = activeRow === null ? null : extractPathFor(activeRow);
@@ -621,6 +651,18 @@ export default function BundleReviewView({
     });
   };
 
+  // Choosing the recommendation drops the key rather than storing it, so an
+  // operator who looks at the chooser and leaves it alone sends no `shape` at
+  // all and the body stays byte-identical.
+  const chooseShape = (row: BundleDetectItem, shape: string) => {
+    setChosenShape(prev => {
+      const draft = { ...prev };
+      if (shape === importShapes(row)[0]) delete draft[row.key];
+      else draft[row.key] = shape;
+      return draft;
+    });
+  };
+
   const createItems = (
     items: BundleDetectItem[],
     options: { excludeGroups?: boolean } = {},
@@ -628,10 +670,22 @@ export default function BundleReviewView({
     items.map(row => {
       const name = typedName(names, row);
       const item: BundleCreateItem = name ? { key: row.key, name } : { key: row.key };
+      // The operator's own choice goes on the wire, and only an actual override:
+      // a row they never touched sends no `shape`, so the server's recommendation
+      // stands. `activeShape` answers with the recommendation when a refetch
+      // stopped offering the stored choice, which is why the stored value is
+      // compared against it rather than trusted.
+      const chosen = chosenShape[row.key];
+      const shape = activeShape(row, chosen);
+      if (chosen !== undefined && shape === chosen) item.shape = chosen;
       const excluded = excludedGroups[row.key] ?? [];
       // The bulk doors mean "include every group", so they pass no option and
-      // send no field; only the detail pane can carry an exclusion.
-      if (options.excludeGroups && excluded.length > 0) item.exclude_groups = excluded;
+      // send no field; only the detail pane can carry an exclusion, and only for
+      // a compound create - a manual import of the whole folder has no groups to
+      // leave out, so it must never carry one.
+      if (options.excludeGroups && shape === SHAPE_COMPOUND && excluded.length > 0) {
+        item.exclude_groups = excluded;
+      }
       return item;
     });
 
@@ -1504,11 +1558,52 @@ export default function BundleReviewView({
                     <span data-bundle-new-parts="true">{activeNewPartsLine}</span>
                   )}
                 </div>
-                {/* The compound row's breakdown. Only a row with groups renders
-                    it, so every other pane is exactly as it was; the checkboxes
-                    are the operator's only say in what the project contains, and
-                    they exist solely for a group the server will let us exclude. */}
-                {activeGroups.length > 0 && (
+                {/* What this row may be imported as, when there is a choice to
+                    make. One chooser, in the detail pane: the option in the list
+                    must stay free of focusable controls, and the choice belongs
+                    beside the facts it changes. A row the server offers one shape
+                    for is not a question, so nothing renders at all - not an
+                    empty wrapper. */}
+                {importShapes(activeRow).length > 1 && (
+                  <div className="review-detail-facts">
+                    <div
+                      className="flex flex-wrap items-center gap-2"
+                      role="radiogroup"
+                      aria-label="Import as"
+                    >
+                      {importShapes(activeRow).map(shape => (
+                        <label key={shape} className="review-toggle">
+                          <input
+                            type="radio"
+                            name={`bundle-shape-${activeRow.key}`}
+                            value={shape}
+                            checked={shape === activeShapeName}
+                            disabled={actionsLocked}
+                            onChange={() => chooseShape(activeRow, shape)}
+                          />
+                          <span>{shapeLabel(shape)}</span>
+                        </label>
+                      ))}
+                    </div>
+                    {/* What the chosen shape would import, and the server's own
+                        note about it, so the operator can see WHY `manual` is on
+                        offer rather than only that it is. */}
+                    {activeMatch && (
+                      <span data-bundle-shape-counts="true">{shapeCountsLine(activeMatch)}</span>
+                    )}
+                    {activeMatch?.note && (
+                      <span className="review-detail-reason">{activeMatch.note}</span>
+                    )}
+                  </div>
+                )}
+                {/* The compound row's breakdown. Only a row imported AS compound
+                    has groups to decide about - a manual import takes the whole
+                    folder, so the chooser above is the only control that applies
+                    then - and only a row with groups renders it, so every other
+                    pane is exactly as it was; the checkboxes are the operator's
+                    only say in what the project contains, and they exist solely
+                    for a group the server will let us exclude. */}
+                {activeShapeName === SHAPE_COMPOUND && activeGroups.length > 0 && (
                   <div
                     className="review-detail-facts"
                     role="group"

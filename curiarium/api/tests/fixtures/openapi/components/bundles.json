@@ -107,6 +107,17 @@
         "default": false,
         "title": "Name Only",
         "type": "boolean"
+      },
+      "shape": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Shape"
       }
     },
     "required": [
@@ -447,6 +458,14 @@
           }
         ],
         "title": "Licence Url"
+      },
+      "matches": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleMatchOut"
+        },
+        "title": "Matches",
+        "type": "array"
       },
       "metadata_shape": {
         "title": "Metadata Shape",
@@ -814,6 +833,69 @@
       "separable"
     ],
     "title": "BundleGroupOut",
+    "type": "object"
+  },
+  "BundleMatchOut": {
+    "description": "One shape a listing satisfies: the rule that offered it and its counts.\n\n``matches[0]`` on a row is the recommended shape and equals the row's own\n`detector`/`confidence`/`metadata_shape`; the rest are the alternatives. The\nmanual entry (shape `manual`) is always present and last unless the row itself\nrecommends it, and `note` carries the refusal word a manual offer was built\nfrom.",
+    "properties": {
+      "confidence": {
+        "title": "Confidence",
+        "type": "string"
+      },
+      "groups": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleGroupOut"
+        },
+        "title": "Groups",
+        "type": "array"
+      },
+      "image_count": {
+        "default": 0,
+        "title": "Image Count",
+        "type": "integer"
+      },
+      "model_count": {
+        "default": 0,
+        "title": "Model Count",
+        "type": "integer"
+      },
+      "note": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Note"
+      },
+      "other_count": {
+        "default": 0,
+        "title": "Other Count",
+        "type": "integer"
+      },
+      "rule": {
+        "title": "Rule",
+        "type": "string"
+      },
+      "shape": {
+        "title": "Shape",
+        "type": "string"
+      },
+      "text_count": {
+        "default": 0,
+        "title": "Text Count",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "shape",
+      "rule",
+      "confidence"
+    ],
+    "title": "BundleMatchOut",
     "type": "object"
   },
   "BundleRefusalOut": {

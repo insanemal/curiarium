@@ -5,10 +5,12 @@ import {
   type BundleDetectCounts,
   type BundleDetectItem,
   type BundleEnrichment,
+  type BundleMatch,
 } from "../../lib/api/bundles";
 import {
   ARCHIVE_ONLY_FOLDER_LABEL,
   BLOCKED_REASON_LABELS,
+  BLOCKED_REASON_ARCHIVE_ONLY,
   EXTRACT_AND_CREATE_HINT,
   EXTRACT_AND_CREATE_LABEL,
   EXTRACT_AND_CREATE_ROW_TITLE,
@@ -18,6 +20,10 @@ import {
   ROW_STATE_CREATED,
   ROW_STATE_DISMISSED,
   ROW_STATE_IN_PROJECT,
+  SHAPE_COMPOUND,
+  SHAPE_LABELS,
+  SHAPE_MANUAL,
+  activeShape,
   archiveExtractTitle,
   archiveLine,
   blockedReasonLabel,
@@ -39,6 +45,7 @@ import {
   extractPathFor,
   hasThingSource,
   headline,
+  importShapes,
   isArchiveOnly,
   isBlocked,
   isCreatable,
@@ -51,6 +58,7 @@ import {
   payloadOnDisk,
   rowBucket,
   rowStateChip,
+  shapeLabel,
   statusLine,
   typedName,
 } from "./bundleRows";
@@ -58,8 +66,35 @@ import {
 // would still satisfy every named import, but not this `in` check.
 import * as bundleRows from "./bundleRows";
 
+/** The matches every fixture serves, from the one helper that knows the wire's
+ *  order: the shape the row was detected as first (the recommendation), `manual`
+ *  last. A row with groups is offered as `compound`, because that is the shape
+ *  its groups belong to. No fixture spells a `matches` list out, so a test that
+ *  wants a different set is visibly overriding rather than mutating a copy.
+ *  The manual entry counts what the whole folder holds: the row's own totals. */
+function servedMatches(row: BundleDetectItem): BundleMatch[] {
+  const recommended = row.groups && row.groups.length > 0 ? "compound" : row.metadata_shape;
+  const counts = {
+    model_count: row.model_count,
+    image_count: row.image_count,
+    text_count: row.text_count,
+    other_count: row.other_count,
+  };
+  return [
+    {
+      shape: recommended,
+      rule: row.detector,
+      confidence: row.confidence,
+      ...counts,
+      ...(row.groups ? { groups: row.groups } : {}),
+      note: null,
+    },
+    { shape: "manual", rule: "manual", confidence: row.confidence, ...counts, note: null },
+  ];
+}
+
 function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
-  return {
+  const row: BundleDetectItem = {
     key: "Moai statue",
     rel_path: "Moai statue",
     title: "Moai statue",
@@ -92,6 +127,10 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     dismissed: false,
     ...overrides,
   };
+  // Built AFTER the overrides merged, so the matches speak about the fields the
+  // fixture ended up with. A test that needs no `matches` at all deletes it,
+  // the way the payload-shape witnesses delete `assets_total`.
+  return { ...row, matches: overrides.matches ?? servedMatches(row) };
 }
 
 const readyHigh = makeBundle();
@@ -168,8 +207,27 @@ describe("isCreatable", () => {
     expect(isCreatable(makeBundle({ status: "ready", existing_project_id: null }))).toBe(true);
   });
 
-  it("rejects a blocked row", () => {
-    expect(isCreatable(makeBundle({ status: "blocked", existing_project_id: null }))).toBe(false);
+  it("accepts a blocked row, because status is a readiness signal and not a refusal", () => {
+    // REPINNED: this used to assert `false` for any blocked row. A blocked reason
+    // says what a scan registered, not whether the files can be imported, so a
+    // shape mismatch or an unregistered folder no longer withholds a create.
+    expect(
+      isCreatable(makeBundle({ status: "blocked", blocked_reason: "unresolved_directory" })),
+    ).toBe(true);
+    expect(isCreatable(makeBundle({ status: "blocked", blocked_reason: "not_scanned" }))).toBe(true);
+    // An unknown reason from a newer server is not a refusal either: only the one
+    // reason that names another door may stop a create.
+    expect(isCreatable(makeBundle({ status: "blocked", blocked_reason: "future-reason" }))).toBe(
+      true,
+    );
+  });
+
+  it("rejects the one blocked reason that names an extraction instead", () => {
+    // `archive_only` is the row whose door is Extract: it registers the files and
+    // settles the row, so a create there is the wrong request.
+    expect(
+      isCreatable(makeBundle({ status: "blocked", blocked_reason: BLOCKED_REASON_ARCHIVE_ONLY })),
+    ).toBe(false);
   });
 
   it("rejects a ready row that already became a project", () => {
@@ -191,6 +249,75 @@ describe("isCreatable", () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("importShapes / activeShape", () => {
+  const match = (shape: string, note: string | null = null): BundleMatch => ({
+    shape,
+    rule: "rule",
+    confidence: "low",
+    model_count: 1,
+    image_count: 0,
+    text_count: 0,
+    other_count: 0,
+    note,
+  });
+
+  it("offers the served shapes in served order, recommendation first", () => {
+    const row = makeBundle({ matches: [match("root-docs"), match("generic"), match("manual")] });
+    expect(importShapes(row)).toEqual(["root-docs", "generic", "manual"]);
+    // The recommendation is the first served shape, untouched by the operator.
+    expect(activeShape(row, undefined)).toBe("root-docs");
+    expect(activeShape(row, "generic")).toBe("generic");
+    expect(activeShape(row, "manual")).toBe("manual");
+  });
+
+  it("treats an absent `matches` as the recommendation only", () => {
+    // A payload from before the field was served: the one shape it reported is
+    // the only one on offer, and it is by definition the recommendation.
+    const row = { ...makeBundle({ metadata_shape: "generic" }) } as Partial<BundleDetectItem>;
+    delete row.matches;
+    expect(importShapes(row as BundleDetectItem)).toEqual(["generic"]);
+    expect(activeShape(row as BundleDetectItem, undefined)).toBe("generic");
+    // A choice the row no longer offers cannot be sent.
+    expect(activeShape(row as BundleDetectItem, "manual")).toBe("generic");
+  });
+
+  it("falls back to the recommendation when a refetch stopped offering the choice", () => {
+    const row = makeBundle({ matches: [match("root-docs"), match("manual")] });
+    expect(activeShape(row, "compound")).toBe("root-docs");
+  });
+});
+
+describe("shapeLabel", () => {
+  it("labels every shape this client serves, and the ones the tests use", () => {
+    for (const shape of [
+      SHAPE_MANUAL,
+      SHAPE_COMPOUND,
+      "generic",
+      "root-docs",
+      "sibling-docs",
+      "id-name",
+      "title-name",
+      "archive-root",
+    ]) {
+      expect(SHAPE_LABELS[shape]).toBeTruthy();
+      expect(shapeLabel(shape)).toBe(SHAPE_LABELS[shape]);
+    }
+    // The manual shape says what it does rather than naming itself: the operator
+    // is choosing files, not vocabulary.
+    expect(SHAPE_LABELS[SHAPE_MANUAL]).toBe("Everything in this folder");
+  });
+
+  it("prettifies a shape it has never heard of instead of printing the token", () => {
+    // A newer server's shape still reads as words, so the chooser is usable
+    // without this map learning it first - and the raw token never reaches a
+    // label or an accessible name.
+    expect(shapeLabel("future-shape")).toBe("Future shape");
+    expect(shapeLabel("future_shape")).toBe("Future shape");
+    expect(shapeLabel("future-shape")).not.toBe("future-shape");
+    expect(shapeLabel("")).toBe("Unrecognised shape");
   });
 });
 
@@ -435,19 +562,39 @@ describe("statusLine", () => {
   });
 
   it("translates each known blocked reason", () => {
+    // REPINNED: the prefix follows the gate. A blocked row whose Create button is
+    // live says its reason without calling itself blocked; only a row no create
+    // can be sent for keeps the `Blocked - ` prefix, so the pane can never say
+    // both "Blocked" and "Create project" about the same row.
     expect(statusLine(makeBundle({ status: "blocked", blocked_reason: "unresolved_directory" }))).toBe(
-      "Blocked - no matching folder on disk",
+      "no matching folder on disk",
     );
     expect(
       statusLine(makeBundle({ status: "blocked", blocked_reason: "not_scanned", assets_total: 0 })),
-    ).toBe("Blocked - no model file registered by a scan");
+    ).toBe("no model file registered by a scan");
     // `makeBundle`'s default `rel_path` is `Moai statue`, a DIRECTORY, so the
     // honest sentence for this row is the folder one. What used to be asserted
     // here called that folder a zip - the exact lie this ticket is about - so the
-    // corrected expectation is the fix, not a regression.
+    // corrected expectation is the fix, not a regression. The prefix stays: an
+    // `archive_only` row is the one shape no create is sent for.
     expect(statusLine(makeBundle({ status: "blocked", blocked_reason: "archive_only" }))).toBe(
       "Blocked - folder only - this row is a folder, not an archive",
     );
+  });
+
+  it("keeps the word off a live create, whatever the blocked reason", () => {
+    // One predicate owns the gate and the word: every reason that leaves a create
+    // live reads without the refusal prefix, and the one that shuts it reads with
+    // it. Pinned as a table so a new reason has to choose a side on purpose.
+    for (const blocked_reason of ["unresolved_directory", "not_scanned", "future-reason"]) {
+      const row = makeBundle({ status: "blocked", blocked_reason });
+      expect(isCreatable(row)).toBe(true);
+      expect(statusLine(row)).toBe(blockedReasonLabel(row));
+      expect(statusLine(row)).not.toContain("Blocked - ");
+    }
+    const archiveOnly = makeBundle({ status: "blocked", blocked_reason: "archive_only" });
+    expect(isCreatable(archiveOnly)).toBe(false);
+    expect(statusLine(archiveOnly)).toBe(`Blocked - ${blockedReasonLabel(archiveOnly)}`);
   });
 
   it("says which of the two a not_scanned row is once the report calls it non-empty", () => {
@@ -460,7 +607,9 @@ describe("statusLine", () => {
     const orphan = orphanRow();
     expect(payloadOnDisk(orphan)).toBe(true);
     expect(blockedReasonLabel(orphan)).toBe(NOT_SCANNED_REGISTERED_LABEL);
-    expect(statusLine(orphan)).toBe(`Blocked - ${NOT_SCANNED_REGISTERED_LABEL}`);
+    // REPINNED: no prefix, because this row can now be created - the sentence is
+    // the row's reason, not an import refusal.
+    expect(statusLine(orphan)).toBe(NOT_SCANNED_REGISTERED_LABEL);
     expect(statusLine(orphan)).not.toBe("Blocked - no model file registered by a scan");
     // No count is claimed in a status cell, and no remedy is promised: the arm
     // offers none. Mirrors the `ARCHIVE_ONLY_FOLDER_LABEL` witnesses.
@@ -469,17 +618,21 @@ describe("statusLine", () => {
     expect(NOT_SCANNED_REGISTERED_LABEL).not.toMatch(/extract|create|scan it|re-?scan|click/i);
     // The empty leg keeps the plain lookup byte for byte (the test above pins the
     // sentence; this pins that the new arm did not swallow it).
-    expect(statusLine(notScannedRow())).toBe("Blocked - no model file registered by a scan");
+    expect(statusLine(notScannedRow())).toBe("no model file registered by a scan");
   });
 
   it("passes an unknown blocked reason through unchanged", () => {
+    // No prefix: an unknown reason leaves a create live, exactly as the ones this
+    // client knows do.
     expect(statusLine(makeBundle({ status: "blocked", blocked_reason: "future-reason" }))).toBe(
-      "Blocked - future-reason",
+      "future-reason",
     );
   });
 
   it("falls back to a bare blocked line when the reason is missing", () => {
-    expect(statusLine(makeBundle({ status: "blocked", blocked_reason: null }))).toBe("Blocked - blocked");
+    // REPINNED: a row with no blocked reason is not refused by this client, so it
+    // reads the bare word rather than a refusal the gate does not make.
+    expect(statusLine(makeBundle({ status: "blocked", blocked_reason: null }))).toBe("blocked");
   });
 });
 
@@ -561,14 +714,13 @@ describe("blockedReasonLabel", () => {
   });
 
   it("says blocked with no reason at all", () => {
-    // The cell still has to say something: `Blocked - blocked` rather than the
-    // dashed stub an empty lookup would leave behind.
+    // The cell still has to say something: the reason word rather than the dashed
+    // stub an empty lookup would leave behind. No prefix, because the gate this
+    // line follows does not refuse the row (REPINNED with `statusLine`).
     expect(blockedReasonLabel(makeBundle({ status: "blocked", blocked_reason: null }))).toBe(
       "blocked",
     );
-    expect(statusLine(makeBundle({ status: "blocked", blocked_reason: null }))).toBe(
-      "Blocked - blocked",
-    );
+    expect(statusLine(makeBundle({ status: "blocked", blocked_reason: null }))).toBe("blocked");
   });
 });
 
@@ -1453,6 +1605,20 @@ function orphanRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem 
   });
 }
 
+/** The row with files and NO door at all, now that a blocked status no longer
+ *  refuses a create. `import/endorphin` with its twin taken away is an
+ *  `archive_only` DIRECTORY: Extract has no target, and Create refuses because
+ *  that reason names the other door. It names a page and still has a metadata
+ *  gap, so no earlier cause speaks for it - which is what makes it the shape
+ *  `NO_PAYLOAD_DOOR_REASON` is still true of. */
+function danglingRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return endorphinRow({
+    source_url: "https://www.thingiverse.com/thing:2493386",
+    archive: null,
+    ...overrides,
+  });
+}
+
 describe("hasThingSource", () => {
   it("accepts a row that names its vendor page", () => {
     expect(hasThingSource(makeBundle())).toBe(true);
@@ -1685,19 +1851,28 @@ describe("enrichUnavailableLine", () => {
   // no door can reach. The sentence is the refusal text of `noPayloadDoor`, the
   // very predicate both offer predicates read - Mf-ny89 part C's rule for the
   // blocked-reason label, extended to the button set.
-  it("says the payload refusal for the orphan, which names a page and has files", () => {
-    const orphan = orphanRow();
-    expect(hasThingSource(orphan)).toBe(true);
-    expect(payloadOnDisk(orphan)).toBe(true);
-    expect(noPayloadDoor(orphan)).toBe(true);
-    expect(enrichUnavailableLine(orphan)).toBe(NO_PAYLOAD_DOOR_REASON);
+  it("says the payload refusal for the row with files and no door at all", () => {
+    // REPINNED: the orphan this test was written for is now CREATABLE, so the
+    // sentence - which asserts that nothing here creates a project - would be a
+    // lie about it. The wire shape the sentence is still true of is the same row
+    // with its only door taken away: an `archive_only` directory with no twin.
+    const dangling = danglingRow();
+    expect(hasThingSource(dangling)).toBe(true);
+    expect(payloadOnDisk(dangling)).toBe(true);
+    expect(noPayloadDoor(dangling)).toBe(true);
+    expect(enrichUnavailableLine(dangling)).toBe(NO_PAYLOAD_DOOR_REASON);
     // No digit, and no remedy the queue does not offer - the same witnesses the
     // other refusal sentence carries. The remedy wording lives in the door titles, never here:
     // this sentence names the two absent doors and stops, which is what lets the bulk bar speak
     // it too, over a selection it cannot tell anybody what to do about.
     expect(NO_PAYLOAD_DOOR_REASON).not.toMatch(/\d/);
     expect(NO_PAYLOAD_DOOR_REASON).not.toMatch(/extract the archive|re-check|click|press/i);
-    expect(enrichUnavailableLine(orphan)).not.toBe(NO_SOURCE_PAGE_REASON);
+    expect(enrichUnavailableLine(dangling)).not.toBe(NO_SOURCE_PAGE_REASON);
+    // The orphan itself now has the create door, so nothing is refused about its
+    // payload and the pane says nothing about a missing door.
+    expect(isCreatable(orphanRow())).toBe(true);
+    expect(noPayloadDoor(orphanRow())).toBe(false);
+    expect(enrichUnavailableLine(orphanRow())).toBeNull();
   });
 
   it("still says the missing page first, where both causes hold", () => {
@@ -1734,8 +1909,10 @@ describe("bulkEnrichNoneLine", () => {
   // no-page row is deliberately `import/Not Scanned Thing` rather than one of the `archive_only`
   // fixtures: blocked, no page, and no door of its own, so nothing but "one cause or silence"
   // can answer for it - a row with a twin would let the guards silence it by accident.
-  const noPageRow = notScannedRow(); // no page, a gap to fill, no create, no extraction
-  const orphan = orphanRow(); // names a page, files, no door
+  const noPageRow = notScannedRow(); // no page, and nothing sendable: `hasThingSource` says so
+  // REPINNED: the specimen that still has no door is the `archive_only` folder with
+  // no twin - the orphan can be created now, so it is no longer doorless.
+  const dangling = danglingRow(); // names a page, files, no door
 
   it("speaks the one cause a whole selection shares", () => {
     // Two measured `archive_only` rows, both page-less and both with a gap: the bar has an
@@ -1745,26 +1922,34 @@ describe("bulkEnrichNoneLine", () => {
     expect(bulkEnrichNoneLine(rows)).toBe(NO_SOURCE_PAGE_REASON);
     // The single-row specimen keeps working: one row is a selection of one cause.
     expect(bulkEnrichNoneLine([endorphinRow()])).toBe(NO_SOURCE_PAGE_REASON);
-    expect(bulkEnrichNoneLine([orphanRow()])).toBe(NO_PAYLOAD_DOOR_REASON);
+    // REPINNED: the orphan reaches this sentence no longer - it can be created now,
+    // so the bar may not claim there is no create. The doorless shape that still
+    // has the sentence is the `archive_only` folder with no twin.
+    expect(bulkEnrichNoneLine([dangling])).toBe(NO_PAYLOAD_DOOR_REASON);
+    expect(bulkEnrichNoneLine([orphanRow()])).toBeNull();
   });
 
   it("says nothing at all when the selected rows do not agree on a cause", () => {
-    // THE MIS-ATTRIBUTION WITNESS. `import/Not Scanned Thing` says "no vendor page", the orphan
-    // says "no door for these files" - each TRUE of itself, and either one false about the
+    // THE MIS-ATTRIBUTION WITNESS. `import/Not Scanned Thing` says "no vendor page", the doorless
+    // row says "no door for these files" - each TRUE of itself, and either one false about the
     // other. Reciting whichever one the queue happened to put first is the paragraph this ticket
     // deleted, in miniature, so both queue orders are silent (a `find`-style "first non-null"
     // prints the page sentence one way and the payload sentence the other, and neither is
     // redressable by the guards: neither of these rows is creatable or extractable, and the
-    // page sentence here is contradicted by the orphan naming a page).
-    expect(bulkEnrichNoneLine([noPageRow, orphanRow()])).toBeNull();
-    expect(bulkEnrichNoneLine([orphanRow(), noPageRow])).toBeNull();
+    // page sentence here is contradicted by the doorless row naming a page).
+    // REPINNED from `orphanRow()`: that row can be created now, so it is not a
+    // doorless specimen any more.
+    expect(bulkEnrichNoneLine([noPageRow, dangling])).toBeNull();
+    expect(bulkEnrichNoneLine([dangling, noPageRow])).toBeNull();
     // Not vacuously: each row on its own does have a sentence to say.
     expect(enrichUnavailableLine(noPageRow)).toBe(NO_SOURCE_PAGE_REASON);
-    expect(enrichUnavailableLine(orphan)).toBe(NO_PAYLOAD_DOOR_REASON);
+    expect(enrichUnavailableLine(dangling)).toBe(NO_PAYLOAD_DOOR_REASON);
   });
 
   it("does not claim no create while a selected row is creatable", () => {
     // The orphan is the only row with a sentence; `import/G` is the bar's other selected row.
+    // `import/G` is the bar's other selected row. `danglingRow` is the only row with a
+    // sentence - the orphan can be created now, so it no longer speaks one.
     // Its page, creator and licence are stated (the measurement carries none), which is what
     // makes it silent on its own doors - and a silent row is precisely the case the guard, not
     // the one-cause rule, has to answer. Nothing here is sendable, so the bar really would
@@ -1774,17 +1959,20 @@ describe("bulkEnrichNoneLine", () => {
     expect(isCreatable(creatable)).toBe(true);
     expect(enrichUnavailableLine(creatable)).toBeNull();
     expect(canOfferEnrich(creatable)).toBe(false);
-    expect(bulkEnrichNoneLine([orphanRow(), creatable])).toBeNull();
+    expect(enrichUnavailableLine(dangling)).toBe(NO_PAYLOAD_DOOR_REASON);
+    expect(bulkEnrichNoneLine([dangling, creatable])).toBeNull();
   });
 
   it("does not claim no extraction while a selected row has an archive door", () => {
     // `import/endorphin` again, this time with its metadata already filled in (stated, as
     // above) so it says nothing for itself while its twin zip remains a live extraction.
+    // REPINNED: the speaking row is `danglingRow`, because the orphan can be created now.
     const extractable = endorphinRow({ creator: "sculpteo", licence: "CC BY" });
     expect(isArchiveOnly(extractable)).toBe(true);
     expect(enrichUnavailableLine(extractable)).toBeNull();
     expect(canOfferEnrich(extractable)).toBe(false);
-    expect(bulkEnrichNoneLine([orphanRow(), extractable])).toBeNull();
+    expect(enrichUnavailableLine(dangling)).toBe(NO_PAYLOAD_DOOR_REASON);
+    expect(bulkEnrichNoneLine([dangling, extractable])).toBeNull();
   });
 
   it("does not claim no vendor page while a selected row names one", () => {
@@ -1921,7 +2109,12 @@ describe("noPayloadDoor", () => {
     ["import/xbox360_shell, created by its marker", xbox360Row(), true],
     ["import/Pile/Alpha, created by shared files", pileAlphaRow(), true],
     // The orphan (declared union of measured rows - see its fixture).
-    ["the registered not_scanned orphan", orphanRow(), true],
+    // REPINNED: a `not_scanned` row can be created now, so its files have a door
+    // and this predicate is false about it - the ticket's whole point.
+    ["the registered not_scanned orphan, which can now be created", orphanRow(), false],
+    // The doorless shape the predicate is still true of: the same folder with its
+    // only door taken away (`archive_only`, no twin).
+    ["an archive_only folder with files and no twin", danglingRow(), true],
   ];
 
   it.each(truthTable)("answers %s", (_label, row, expected) => {
@@ -1929,9 +2122,11 @@ describe("noPayloadDoor", () => {
   });
 
   it("flips on each of the three facts it asks", () => {
-    // The orphan's three facts, taken away one at a time.
-    expect(noPayloadDoor(orphanRow({ assets_total: 0 }))).toBe(false); // not on disk
-    expect(noPayloadDoor(orphanRow({ status: "ready", blocked_reason: null }))).toBe(false); // creates
+    // REPINNED from `orphanRow()`: that row now HAS a create, so it no longer
+    // flips on the create fact at all. `danglingRow` is the shape whose three
+    // facts still decide the answer one at a time.
+    expect(noPayloadDoor(danglingRow({ assets_total: 0 }))).toBe(false); // not on disk
+    expect(noPayloadDoor(danglingRow({ status: "ready", blocked_reason: null }))).toBe(false); // creates
     // ...and the third leg really is the extraction. `import/endorphin` with its
     // twin removed is the measured directory shape that has files and no door at
     // all - which is precisely the row the twin is there to serve.
@@ -1939,6 +2134,11 @@ describe("noPayloadDoor", () => {
     expect(extractPathFor(endorphinRow({ archive: null }))).toBeNull();
     expect(noPayloadDoor(endorphinRow())).toBe(false);
     expect(noPayloadDoor(endorphinRow({ archive: null }))).toBe(true);
+    // The row this test used to be written for: its create is live, so taking the
+    // other facts away cannot make the predicate speak.
+    expect(isCreatable(orphanRow())).toBe(true);
+    expect(noPayloadDoor(orphanRow())).toBe(false);
+    expect(noPayloadDoor(orphanRow({ assets_total: 0 }))).toBe(false);
   });
 
   it("is a claim about the report, never a write decision", () => {
@@ -1955,13 +2155,25 @@ describe("noPayloadDoor", () => {
 });
 
 describe("canOfferEnrich / canOfferRecheck", () => {
-  it("refuses the orphan the server would still happily enrich", () => {
-    // THE TICKET. `canEnrich` is the server-shaped question and is unchanged: the
-    // refusal is layered on top of it, once, in the offer predicate the buttons read.
+  it("offers the orphan enrichment now that its files have a create", () => {
+    // REPINNED: this used to assert the orphan was refused. `canEnrich` is the
+    // server-shaped question and is unchanged; the layer on top of it refuses only
+    // a payload no door can reach, and a `not_scanned` row now has the create door.
     const orphan = orphanRow();
     expect(canEnrich(orphan)).toBe(true);
-    expect(canOfferEnrich(orphan)).toBe(false);
-    expect(noPayloadDoor(orphan)).toBe(true);
+    expect(isCreatable(orphan)).toBe(true);
+    expect(noPayloadDoor(orphan)).toBe(false);
+    expect(canOfferEnrich(orphan)).toBe(true);
+  });
+
+  it("still refuses enrichment on a payload no door can reach", () => {
+    // The refusal the layer exists for, on the shape that still has no door: an
+    // `archive_only` folder with files and no twin.
+    const dangling = danglingRow();
+    expect(canEnrich(dangling)).toBe(true);
+    expect(isCreatable(dangling)).toBe(false);
+    expect(noPayloadDoor(dangling)).toBe(true);
+    expect(canOfferEnrich(dangling)).toBe(false);
   });
 
   it("gives the door back to the same row the report calls empty", () => {
@@ -1974,18 +2186,20 @@ describe("canOfferEnrich / canOfferRecheck", () => {
   });
 
   it("refuses the re-check door the same way, and only there", () => {
-    const answered = orphanRow({ enrichment: enrichment() });
+    // REPINNED from `orphanRow()`: the doorless specimen has to have no door, and
+    // the orphan now has a create.
+    const answered = danglingRow({ enrichment: enrichment() });
     expect(canRecheck(answered)).toBe(true);
     expect(canOfferRecheck(answered)).toBe(false);
     expect(canOfferEnrich(answered)).toBe(false); // the page already answered
 
-    const answeredEmpty = orphanRow({ enrichment: enrichment(), assets_total: 0 });
+    const answeredEmpty = danglingRow({ enrichment: enrichment(), assets_total: 0 });
     expect(canRecheck(answeredEmpty)).toBe(true);
     expect(canOfferRecheck(answeredEmpty)).toBe(true);
 
     // A settled project is refused by `canRecheck` itself, not by the layer: the
     // layer adds a refusal, it never removes one.
-    const created = orphanRow({ enrichment: enrichment(), existing_project_id: PROJECT_ID });
+    const created = danglingRow({ enrichment: enrichment(), existing_project_id: PROJECT_ID });
     expect(canRecheck(created)).toBe(false);
     expect(canOfferRecheck(created)).toBe(false);
   });
