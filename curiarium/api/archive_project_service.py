@@ -290,15 +290,32 @@ def create_project_from_extract(
             name=project_name,
             origin=project_create_service.ORIGIN_ARCHIVE_EXTRACT,
             # Every entry the listing resolved, and nothing filtered out: what the
-            # operator ticked IS the file set, so this door has no kind to ask
-            # about and hands `kinds` down as None. The bundle door hands TWO tables
-            # down since Mf-wsdo — its ATTACH table (`bundle_service
-            # .PROJECT_MEMBER_SUFFIXES`, what the project holds: models plus the
-            # images the landing page can render) and its MODEL table
-            # (`bundle_detect.MODEL_SUFFIXES`, what containment is asked with) — while
-            # this door still hands none, because a listing an operator ticked needs
-            # no table to say what it is. One seam, three answers, no suffix test in
-            # either door.
+            # operator ticked IS the file set, so membership here is the whole set
+            # and never a suffix question. It is the same member-set rule the bundle
+            # door applies in `bundle_service._members_of` — every registered asset
+            # under the key — reached by a different route: this door has no key to
+            # enumerate, so its listing names the paths and every asset that resolves
+            # is a member. A member's ROLE is a separate question whose only answerer
+            # is `bundle_detect.classify_entry`, over the bundle-relative path. So a
+            # `.txt`, a `.pdf` and an unknown `.3dm` are members exactly as an `.stl`
+            # is. A nested `.zip` is a planned entry like any other — `plan_selection`
+            # drops only junk, directory-like and oversized entries, `_plannable` only
+            # hidden segments and names the scan skips — so once the extraction
+            # registers it the project holds it as a member whose role is `archive`:
+            # an opaque file that nothing on this path opens. The one `ZipFile` above
+            # reads the OUTER archive's listing, and no door here recurses into a
+            # nested archive.
+            #
+            # This door asks for no role, and cannot ask for a table even by mistake:
+            # `create_project_from_members` writes this list verbatim and the `kinds=`
+            # parameter that once let a door hand a suffix table down was deleted by
+            # Mf-7oow, so there is no seam left to hand one to. That is also why the
+            # detector is named here and never imported — the module docstring's claim,
+            # which `tests/test_archive_project.py` refuses if it stops being true. The
+            # only thing read off a member in this module is whether its extension is
+            # a model, in `_cover_asset_id`: an extension test that picks the project's
+            # face, not a membership decision. ADR 0010 Decision 32 records the rule
+            # and the role table.
             members=[
                 project_create_service.MemberCandidate(member.asset_id, member.rel_path)
                 for member in members
