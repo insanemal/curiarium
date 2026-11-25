@@ -271,6 +271,9 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("GET", "/projects"): READ,
     # A report computed from disk on demand; it writes nothing, so a viewer reads it.
     ("GET", "/bundles/detect"): READ,
+    # The arrange's preview: a dry run computed from disk that writes nothing, the
+    # same posture as the report above.
+    ("GET", "/bundles/arrange"): READ,
     ("GET", "/project/{project_id}/assets"): READ,
     # A drift read: one prefix query over rows already registered, writing nothing.
     ("GET", "/project/{project_id}/bundle-drift"): READ,
@@ -317,6 +320,10 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("POST", "/projects"): CONTRIBUTE,
     # One project per confirmed bundle: the same power as `POST /projects`, in bulk.
     ("POST", "/bundles/create"): CONTRIBUTE,
+    # An arrange moves bytes on the volume, and its undo reverses them: power above
+    # "create a row", so an editor. The preview stays READ.
+    ("POST", "/bundles/arrange"): WRITE,
+    ("POST", "/bundles/arrange/{arrange_id}/undo"): WRITE,
     # A dismissal is a reversible report filter, not a library edit.
     ("POST", "/bundles/dismiss"): CONTRIBUTE,
     # A contributor may ask the vendor for a bundle's missing metadata; it fills

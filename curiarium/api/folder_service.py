@@ -11,7 +11,7 @@ import logging
 import os
 import stat
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -29,6 +29,16 @@ log = logging.getLogger(__name__)
 # case. All three mean "occupied", which is the 409 the pre-check would have
 # raised.
 _DESTINATION_OCCUPIED_ERRNOS = frozenset({errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR})
+
+# Directories the library owns for itself: they hold derived or in-flight bytes,
+# never a user's folder, so the Files tree neither shows them nor should. One
+# constant, imported by the ingest-layout test, so "rows agree with disk" has a
+# single definition (Mf-xqvc requirement 5).
+SYSTEM_DIRS = {"thumbs", "bundles", ".incoming", ".trash"}
+
+# `session.info` key holding the rows `ensure_directory_row` already resolved, so
+# a batch of sibling destinations does not re-walk the same parents.
+_ENSURE_DIRECTORY_ROW_MEMO = "folder_service.ensure_directory_row"
 
 
 def validate_parent_folder(session: Session, parent_id: Optional[str], folder_id: Optional[str] = None) -> Optional[str]:
@@ -317,6 +327,119 @@ def create_folder(session: Session, name: str, tags_json: str, parent_id: Option
         remove_created_directory(target)
         raise
     return folder
+
+
+def ensure_directory_row(session: Session, relative: str) -> Folder:
+    """Adopt a directory that already exists on disk as a `Folder` row.
+
+    This is the documented second adopt site, beside `library_scan`'s in-run
+    branch (`resolve_dir_folder`): that one creates the rows for directories it
+    meets while walking the storage root, this one creates the rows for the
+    destination directories a move has already made. `create_folder` cannot be
+    this twin - it dedicates a `mkdir` to every row and answers 409 when the
+    directory is already there, which is exactly the state this call starts
+    from.
+
+    Nothing here touches the disk: no `mkdir`, no walk, no commit. The caller's
+    transaction owns the commit, so this composes inside a larger row commit.
+    `storage_path` is `relative` verbatim, unsanitised, because it must name the
+    real directory (the same rule as `resolve_dir_folder(with_storage_path=True)`:
+    a folder rename or delete moves the directory it finds at that path).
+
+    Resolution order:
+    - a row that already owns `relative` (casefold) is returned unchanged;
+    - else the `(parent_id, name)` row is healed to `relative` and returned (the
+      scan's heal rule, without the scan);
+    - else the row is inserted and flushed, so its id exists for the caller.
+    """
+    memo = session.info.setdefault(_ENSURE_DIRECTORY_ROW_MEMO, {})
+    key = relative.casefold()
+    remembered = memo.get(key)
+    if remembered is not None:
+        return remembered
+
+    owner = session.exec(select(Folder).where(Folder.storage_path.collate("NOCASE") == relative)).first()
+    if owner is not None:
+        memo[key] = owner
+        return owner
+
+    parent_relative, _, name = relative.rpartition("/")
+    parent_id = ensure_directory_row(session, parent_relative).id if parent_relative else None
+    existing = session.exec(select(Folder).where(Folder.parent_id == parent_id, Folder.name == name)).first()
+    if existing is not None:
+        # The ownership check above proved no other row holds `relative`, so this
+        # heal cannot collide with idx_folder_storage_path_unique.
+        if existing.storage_path != relative:
+            existing.storage_path = relative
+            session.add(existing)
+            session.flush()
+        memo[key] = existing
+        return existing
+
+    folder = Folder(name=name, tags_json="[]", parent_id=parent_id, storage_path=relative)
+    session.add(folder)
+    session.flush()
+    memo[key] = folder
+    return folder
+
+
+def unseeable_directories(root: Path) -> List[str]:
+    """Storage-root-relative directories on disk that no folder row names, sorted.
+
+    The rule this measures (Mf-xqvc): *if a directory exists on disk that is not
+    a folder row, the tree must show it or the app must not create it.* A
+    directory nothing owns is a place the Files tree cannot reach: its bytes are
+    on the volume and invisible in the UI, and no delete, rename or move can
+    ever act on them.
+
+    This is the one implementation of that measurement - `tests/test_ingest_layout.py`
+    calls it rather than keeping a copy. A path whose first segment is in
+    `SYSTEM_DIRS` is skipped together with everything under it; the storage root
+    itself is never an offender.
+    """
+    from db import engine
+
+    with Session(engine) as session:
+        registered = {folder.storage_path for folder in session.exec(select(Folder)) if folder.storage_path}
+    offenders: List[str] = []
+    for path in root.rglob("*"):
+        if not path.is_dir():
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative.split("/")[0] in SYSTEM_DIRS:
+            continue
+        if relative not in registered:
+            offenders.append(relative)
+    return sorted(offenders)
+
+
+def stale_asset_paths() -> List[str]:
+    """Asset rows whose `storage_path` names no file on disk, sorted by path.
+
+    The other half of the row/disk measuring stick: `unseeable_directories` finds
+    bytes with no row, this finds rows with no bytes. A mount no-copy row is
+    exempt - it never wrote a managed file, by design, and its live `source_path`
+    is the file it shows. That mirrors `asset_service.resolve_asset_file`'s second
+    branch; the predicate is imported inside the call so this module takes no
+    import-time dependency on `asset_service`.
+    """
+    from asset_service import is_mount_source_allowed
+    from db import engine
+
+    root = storage_root()
+    stale: List[str] = []
+    with Session(engine) as session:
+        for asset in session.exec(select(Asset)):
+            if not asset.storage_path:
+                continue
+            if (root / asset.storage_path).exists():
+                continue
+            if asset.source_path:
+                source = Path(asset.source_path)
+                if source.exists() and is_mount_source_allowed(source):
+                    continue
+            stale.append(asset.storage_path)
+    return sorted(stale)
 
 
 def _stage_folder_changes(

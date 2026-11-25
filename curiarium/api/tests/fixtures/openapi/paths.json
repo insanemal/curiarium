@@ -1647,6 +1647,147 @@
       "summary": "Oidc Status"
     }
   },
+  "/bundles/arrange": {
+    "get": {
+      "description": "The arrangement preview the apply echoes back by ``plan_id``.\n\nA READ: it walks the disk and writes nothing, the same posture as\n``GET /bundles/detect``. The preview is load-bearing on the wire because a\n``creatable:false`` match carries only a note: without this the moves an\napproval approves are nowhere in the answer, and the operator would approve a\nshape whose effect they never saw.",
+      "operationId": "arrange_preview_bundles_arrange_get",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "key",
+          "required": true,
+          "schema": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "shape",
+          "required": true,
+          "schema": {
+            "title": "Shape",
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleArrangePlanOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Arrange Preview"
+    },
+    "post": {
+      "description": "Apply one previewed arrangement: projects first, then the bytes on disk.\n\nThe plan is recomputed and its id must match the one the client echoed, so a\ntree that moved since the preview is a ``stale_plan`` 409 rather than an\napproval of something the operator never saw.",
+      "operationId": "arrange_bundles_bundles_arrange_post",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BundleArrangeRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleArrangeAppliedOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Arrange Bundles"
+    }
+  },
+  "/bundles/arrange/{arrange_id}/undo": {
+    "post": {
+      "description": "Fold one applied arrangement back, byte for byte, and drop its project.\n\nA WRITE like the apply it reverses. The ledger is the only source of the move\nlist, so undo can only ever reverse what this arrangement itself did.",
+      "operationId": "undo_arrange_bundles_arrange__arrange_id__undo_post",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "arrange_id",
+          "required": true,
+          "schema": {
+            "title": "Arrange Id",
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleArrangeUndoOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Undo Arrange"
+    }
+  },
   "/bundles/create": {
     "post": {
       "description": "Create one project per confirmed bundle; partial success is the contract.\n\nThe report is recomputed first and every key is looked up in it, so a key the\nclient sends is never trusted on its own. A bundle that is blocked, or that\nalready became a project, creates nothing and says so per item.",

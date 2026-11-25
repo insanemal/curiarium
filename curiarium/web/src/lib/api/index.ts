@@ -22,3 +22,4 @@ export { type AuditEvent, type AuditQuery, type AuditPage, listAuditEvents } fro
 export { type UserSession, listSessions, revokeSession, listUserSessions, revokeUserSession } from "./sessions";
 export { type User, type UserCreate, type UserPatch, type PasswordReset, listUsers, createUser, updateUser, resetUserPassword, deleteUser } from "./users";
 export { type BundleCover, type BundleArchive, type BundleDetectItem, type BundleDetectCounts, type BundleReport, type BundleReportQuery, type BundleCreateItem, type BundleCreateItemResult, type BundleCreateResponse, type BundleDismissResponse, getBundleReport, createBundles, setBundleDismissed } from "./bundles";
+export { type BundleArrangeMove, type BundleArrangeCreate, type BundleArrangeRefusal, type BundleArrangePlan, type BundleArrangeApplied, type BundleArrangeUndo, getArrangePlan, arrangeBundles, undoArrange } from "./bundles";

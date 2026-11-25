@@ -18,6 +18,318 @@
     "title": "BundleArchiveOut",
     "type": "object"
   },
+  "BundleArrangeAppliedOut": {
+    "description": "What one apply did: its ledger id, its projects and the moves it landed.\n\n``already_applied`` is the re-post's answer and says nothing moved a second time.",
+    "properties": {
+      "already_applied": {
+        "default": false,
+        "title": "Already Applied",
+        "type": "boolean"
+      },
+      "applied": {
+        "title": "Applied",
+        "type": "boolean"
+      },
+      "arrange_id": {
+        "title": "Arrange Id",
+        "type": "string"
+      },
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "moves": {
+        "default": 0,
+        "title": "Moves",
+        "type": "integer"
+      },
+      "plan_id": {
+        "title": "Plan Id",
+        "type": "string"
+      },
+      "project_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Project Id"
+      },
+      "project_ids": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Project Ids",
+        "type": "array"
+      },
+      "shape": {
+        "title": "Shape",
+        "type": "string"
+      },
+      "stale": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Stale",
+        "type": "array"
+      },
+      "unseeable": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Unseeable",
+        "type": "array"
+      }
+    },
+    "required": [
+      "key",
+      "shape",
+      "plan_id",
+      "arrange_id",
+      "applied"
+    ],
+    "title": "BundleArrangeAppliedOut",
+    "type": "object"
+  },
+  "BundleArrangeCreateOut": {
+    "description": "A destination directory the moves imply, and whether it is already there.",
+    "properties": {
+      "exists": {
+        "title": "Exists",
+        "type": "boolean"
+      },
+      "path": {
+        "title": "Path",
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "exists"
+    ],
+    "title": "BundleArrangeCreateOut",
+    "type": "object"
+  },
+  "BundleArrangeMoveOut": {
+    "description": "One move an arrangement would make, its two ends storage-root-relative.\n\n``from`` is a Python keyword, so the field is ``from_`` with an alias. The alias\nis what the wire says and what the OpenAPI schema renders; a bare ``from_``\nleaking onto the wire is the bug this pair exists to not have.",
+    "properties": {
+      "from": {
+        "title": "From",
+        "type": "string"
+      },
+      "kind": {
+        "title": "Kind",
+        "type": "string"
+      },
+      "to": {
+        "title": "To",
+        "type": "string"
+      }
+    },
+    "required": [
+      "from",
+      "to",
+      "kind"
+    ],
+    "title": "BundleArrangeMoveOut",
+    "type": "object"
+  },
+  "BundleArrangePlanOut": {
+    "description": "The arrangement preview the apply echoes back by ``plan_id``.\n\n``text`` is rendered from ``moves``, never beside it, so every sentence the\noperator reads is backed by a record in the list.",
+    "properties": {
+      "creates": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleArrangeCreateOut"
+        },
+        "title": "Creates",
+        "type": "array"
+      },
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "moves": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleArrangeMoveOut"
+        },
+        "title": "Moves",
+        "type": "array"
+      },
+      "plan_id": {
+        "title": "Plan Id",
+        "type": "string"
+      },
+      "refusals": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleArrangeRefusalOut"
+        },
+        "title": "Refusals",
+        "type": "array"
+      },
+      "report": {
+        "$ref": "#/components/schemas/BundleArrangeReportOut"
+      },
+      "shape": {
+        "title": "Shape",
+        "type": "string"
+      },
+      "text": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Text",
+        "type": "array"
+      }
+    },
+    "required": [
+      "key",
+      "shape",
+      "plan_id",
+      "report"
+    ],
+    "title": "BundleArrangePlanOut",
+    "type": "object"
+  },
+  "BundleArrangeRefusalOut": {
+    "description": "One reason the arrangement cannot be applied, with its own status.\n\n``plan`` returns these instead of raising: a 200 with a non-empty list is the\nhonest preview, and ``apply`` raises the first one.",
+    "properties": {
+      "detail": {
+        "title": "Detail",
+        "type": "string"
+      },
+      "reason": {
+        "title": "Reason",
+        "type": "string"
+      },
+      "status": {
+        "title": "Status",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "status",
+      "reason",
+      "detail"
+    ],
+    "title": "BundleArrangeRefusalOut",
+    "type": "object"
+  },
+  "BundleArrangeReportOut": {
+    "description": "The row's own verdict about the shape being previewed.\n\n``creatable`` means the row already recommends this shape and nothing refuses\nit; a ``False`` here beside a non-empty ``moves`` is exactly the preview a\nclient needs before approving an arrangement the create path cannot enact.",
+    "properties": {
+      "blocked_reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Blocked Reason"
+      },
+      "creatable": {
+        "default": false,
+        "title": "Creatable",
+        "type": "boolean"
+      }
+    },
+    "title": "BundleArrangeReportOut",
+    "type": "object"
+  },
+  "BundleArrangeRequest": {
+    "additionalProperties": false,
+    "description": "The previewed plan, replayed: the id proves the tree has not changed since.",
+    "properties": {
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "plan_id": {
+        "title": "Plan Id",
+        "type": "string"
+      },
+      "shape": {
+        "title": "Shape",
+        "type": "string"
+      }
+    },
+    "required": [
+      "key",
+      "shape",
+      "plan_id"
+    ],
+    "title": "BundleArrangeRequest",
+    "type": "object"
+  },
+  "BundleArrangeUndoOut": {
+    "description": "What one undo restored, and whether the project it created went with it.\n\n``project_removed`` is False when membership changed after the arrange: the tree\nis restored, the project is left where it is, and the response says so.",
+    "properties": {
+      "arrange_id": {
+        "title": "Arrange Id",
+        "type": "string"
+      },
+      "key": {
+        "title": "Key",
+        "type": "string"
+      },
+      "moves": {
+        "default": 0,
+        "title": "Moves",
+        "type": "integer"
+      },
+      "project_removed": {
+        "default": false,
+        "title": "Project Removed",
+        "type": "boolean"
+      },
+      "projects_removed": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Projects Removed",
+        "type": "array"
+      },
+      "stale": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Stale",
+        "type": "array"
+      },
+      "undone": {
+        "title": "Undone",
+        "type": "boolean"
+      },
+      "unseeable": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "title": "Unseeable",
+        "type": "array"
+      }
+    },
+    "required": [
+      "arrange_id",
+      "key",
+      "undone"
+    ],
+    "title": "BundleArrangeUndoOut",
+    "type": "object"
+  },
   "BundleCoverOut": {
     "description": "The cover a created project would get, and why that one was chosen.",
     "properties": {

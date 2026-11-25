@@ -586,12 +586,12 @@ def peel_proposals(facts: Facts, repo: dict) -> List[dict]:
 
 
 
-def series_suggestion(facts: Facts) -> Optional[str]:
-    """A numbered folder whose siblings share a title prefix inherits it.
+def _series_match(facts: Facts) -> Optional[Tuple[str, str, int]]:
+    """The series title a numbered folder inherits, with its evidence.
 
-    `17_ClockworkMonster` is a Fates End tower (owner, 2026-11-25); its siblings are
-    `01_Fates End - Wizard Tower` ... `16_...`. The number is a series index, not
-    clutter, so the proposal keeps it and supplies the missing series title.
+    Returns `(the renamed folder, the series name, how many siblings share it)`, or
+    None when the folder is not numbered or has no series beside it. One measurement,
+    two renderings: `series_title` wants the name, `series_suggestion` the argument.
     """
     match = re.match(r"^(\d{2,})[_.\- ]+(.*)$", facts.name)
     if not match:
@@ -615,7 +615,47 @@ def series_suggestion(facts: Facts) -> Optional[str]:
     series, count = max(titles.items(), key=lambda kv: kv[1])
     if count < 3 or rest.startswith(series):
         return None
-    return f'rename to "{number}_{series} - {rest}" (belongs to the {series} series: {count} siblings)'
+    return f"{number}_{series} - {rest}", series, count
+
+
+def series_title(facts: Facts) -> Optional[str]:
+    """The renamed folder name, e.g. "17_Fates End - ClockworkMonster", or None."""
+    match = _series_match(facts)
+    return match[0] if match is not None else None
+
+
+def series_suggestion(facts: Facts) -> Optional[str]:
+    """A numbered folder whose siblings share a title prefix inherits it.
+
+    `17_ClockworkMonster` is a Fates End tower (owner, 2026-11-25); its siblings are
+    `01_Fates End - Wizard Tower` ... `16_...`. The number is a series index, not
+    clutter, so the proposal keeps it and supplies the missing series title. The name
+    is rendered FROM `series_title`, so the rename the operator reads is the move the
+    plan makes.
+    """
+    match = _series_match(facts)
+    if match is None:
+        return None
+    title, series, count = match
+    return f'rename to "{title}" (belongs to the {series} series: {count} siblings)'
+
+
+def folder_title(name: str) -> str:
+    """The product title of a folder name, keeping a numeric series prefix.
+
+    A numbered folder's number is a series index, not clutter (`17_ClockworkMonster`
+    is the 17th Fates End tower, owner 2026-11-25), so it survives: stripping it is
+    the bug this function exists to not have. Only underscores and a `model files`
+    tail are tidied away. A name left with no body falls back to itself - an unnamed
+    product is worse than a badly named one.
+    """
+    prefix = re.match(r"^(\d{2,})[_.\- ]+", name)
+    body = name[prefix.end():] if prefix else name
+    body = re.sub(r"[-_ ]*model[_-]?files?$", "", body, flags=re.IGNORECASE)
+    body = body.replace("_", " ").strip(" _-.")
+    if not body:
+        return name
+    return f"{prefix.group(1)}_{body}" if prefix else body
 
 
 # --- wrappers -------------------------------------------------------------
@@ -694,6 +734,37 @@ def _own_wrapper_archive(facts: Facts) -> Optional[str]:
     return None
 
 
+def _wrapper_child(facts: Facts) -> Optional[Tuple[str, int, List[str]]]:
+    """The child that is packaging: its name, its model count, its archive(s).
+
+    Two layouts, one answer - a zip beside the child (matched by stem, and only when
+    the child carries nearly the whole folder's payload) or a zip INSIDE it (the zip
+    is the provenance itself, so no share test). Returns None when no child is a
+    wrapper: `endorphin`'s five ingredients each keep their own archive and are five
+    products.
+    """
+    if not facts.models:
+        return None
+    root_twins = {os.path.splitext(name)[0].casefold() for name in facts.twin_archives()}
+    for child, count in facts.top_children_with_models():
+        if child == "(root files)":
+            continue
+        if child.casefold() in root_twins:
+            if count / facts.models < 0.9:
+                continue
+            archives = [
+                twin for twin in facts.twin_archives()
+                if os.path.splitext(twin)[0].casefold() == child.casefold()
+            ]
+        else:
+            inner = _child_twin(facts, child)
+            if not inner:
+                continue
+            archives = [os.path.basename(inner)]
+        return child, count, archives
+    return None
+
+
 def _wrapper_lines(facts: Facts, own_archive: Optional[str]) -> List[str]:
     """Drop-the-wrapper proposal for whichever of the three layouts the facts fit.
 
@@ -705,45 +776,17 @@ def _wrapper_lines(facts: Facts, own_archive: Optional[str]) -> List[str]:
     if not facts.models:
         return []
     tops = facts.top_children_with_models()
-    root_twins = {os.path.splitext(name)[0].casefold() for name in facts.twin_archives()}
     lines: List[str] = []
-    wrapper: Optional[str] = None
-    wrapper_models = 0
-    archives: List[str] = []
-    title = facts.name
-    for child, count in tops:
-        if child == "(root files)":
-            continue
-        if child.casefold() in root_twins:
-            # The zip sits BESIDE the folder, so a matching stem is only provenance
-            # when the child is also the parent's content: endorphin's five
-            # ingredients each keep their own archive and are five products.
-            if count / facts.models < 0.9:
-                continue
-            archives = [
-                twin for twin in facts.twin_archives()
-                if os.path.splitext(twin)[0].casefold() == child.casefold()
-            ]
-        else:
-            # The zip sits INSIDE the child. That zip is the provenance itself - a
-            # child cannot hold an archive named after itself by coincidence - so no
-            # share test is needed: a wrapper holding 10 of the folder's 13 models
-            # beside a `Rhino models/` part is still the wrapper.
-            inner = _child_twin(facts, child)
-            if not inner:
-                continue
-            archives = [os.path.basename(inner)]
-        wrapper, wrapper_models = child, count
-        break
-    if wrapper is None:
+    title = wrapper_title(facts.name)
+    match = _wrapper_child(facts)
+    if match is None:
         if own_archive is None:
             return []
-        wrapper, wrapper_models = facts.name, facts.models
-        archives = [own_archive]
-        title = wrapper_title(facts.name)
+        wrapper, wrapper_models, archives = facts.name, facts.models, [own_archive]
         # The candidate IS the wrapper, so there is no parent to take a share of.
         inside = f"{wrapper_models} models inside it"
     else:
+        wrapper, wrapper_models, archives = match
         inside = f"{wrapper_models} of {facts.models} models inside it"
     lines.append(
         f'drop the wrapper "{wrapper}/" while arranging: its name is the archive\'s, '
@@ -762,25 +805,162 @@ def _wrapper_lines(facts: Facts, own_archive: Optional[str]) -> List[str]:
     return lines
 
 
+def _rel_join(*parts: str) -> str:
+    """Join storage-relative path parts. Never absolute, never a leading slash."""
+    return "/".join(part.strip("/") for part in parts if part and part != ".")
+
+
+def _entry_names(path: str) -> List[str]:
+    """One directory's files and subdirectories, sorted: a move list has one order."""
+    files, dirs = read_dir(path)
+    return sorted([entry.name for entry in files] + dirs, key=str.casefold)
+
+
+def _move(facts: Facts, source: str, target: str) -> dict:
+    """One move record, with `kind` read off the disk the way the source is."""
+    local = os.path.join(facts.path, os.path.relpath(source or ".", facts.rel or "."))
+    return {"from": source, "to": target, "kind": "dir" if os.path.isdir(local) else "file"}
+
+
+def _identity_free(moves: List[dict]) -> List[dict]:
+    """Drop a move that would rename nothing: a plan holds only real effects."""
+    return [move for move in moves if move["from"] != move["to"]]
+
+
+def _own_wrapper_moves(facts: Facts, archive: str) -> List[dict]:
+    """Case (b): the candidate IS the wrapper, so its content rises one level.
+
+    The product folder takes the wrapper's place and the archive is filed under it.
+    Moves that would not move anything are dropped: a candidate already named after
+    its product needs the archive filed, not its children renamed in place.
+    """
+    base = facts.rel
+    parent = os.path.dirname(base)
+    product_base = _rel_join(parent, wrapper_title(facts.name))
+    sources = [
+        (_rel_join(base, name), _rel_join(product_base, name))
+        for name in _entry_names(facts.path) if name != archive
+    ]
+    sources.append(
+        (_rel_join(parent, archive), _rel_join(product_base, "_source", archive))
+    )
+    moves = [_move(facts, source, target) for source, target in sources]
+    return _identity_free(moves)
+
+
+def _wrapper_child_moves(facts: Facts, wrapper: str, archives: List[str]) -> List[dict]:
+    """Case (a)/(c): the candidate holds the wrapper, so its content rises into it.
+
+    The candidate already IS the product folder (`Vault/`), so the wrapper's children
+    move up one level and the archive is filed under `_source/` - whether that zip
+    sat beside the wrapper or inside it.
+    """
+    base = facts.rel
+    inner = _child_twin(facts, wrapper)
+    inner_archive = os.path.basename(inner) if inner else None
+    sources = [
+        (_rel_join(base, wrapper, name), _rel_join(base, name))
+        for name in _entry_names(os.path.join(facts.path, wrapper))
+        if name != inner_archive
+    ]
+    for archive in archives:
+        # The zip is the provenance wherever it sits: beside the wrapper (a sibling of
+        # the child) or inside it (the extracted folder's own download).
+        source = (
+            _rel_join(base, wrapper, archive) if archive == inner_archive
+            else _rel_join(base, archive)
+        )
+        sources.append((source, _rel_join(base, "_source", archive)))
+    return [_move(facts, source, target) for source, target in sources]
+
+
+def arrange_moves(facts: Facts, chosen: str) -> List[dict]:
+    """The moves the chosen shape implies, as storage-relative records.
+
+    A move list is the plan: `arrange_proposal` prints one line per record and
+    nothing else it cannot back, and `plan_digest` hashes exactly this list, so a
+    shape's whole effect is one reviewable structure. Read-only: it measures what is
+    a directory and returns records; it moves nothing.
+    """
+    base = facts.rel
+    parent = os.path.dirname(base)
+    name = facts.name
+
+    if chosen == "split-top-folders":
+        # The candidate is a container, not a product: every child that carries
+        # models is hoisted out to sit beside it, where the corpus says products live
+        # (`import/Stagetop`, `import/17_ClockworkMonster`, `import/endorphin`).
+        children = [
+            child for child, _count in facts.top_children_with_models()
+            if child != "(root files)"
+        ]
+        return _identity_free([
+            _move(facts, _rel_join(base, child), _rel_join(parent, child))
+            for child in children
+        ])
+
+    if chosen == "split-model-folders":
+        shallow = [
+            folder for folder in facts.model_dirs
+            if folder != "." and folder.count(os.sep) + 1 == 1
+        ]
+        return _identity_free([
+            _move(facts, _rel_join(base, folder), _rel_join(parent, folder))
+            for folder in sorted(shallow, key=str.casefold)
+        ])
+
+    if chosen not in ONE_PROJECT_SHAPES:
+        # `add-to-project` / `git-project` keep the folder where it is, and every
+        # other shape belongs to another door.
+        return []
+
+    own_archive = _own_wrapper_archive(facts)
+    if own_archive is not None:
+        return _own_wrapper_moves(facts, own_archive)
+
+    match = _wrapper_child(facts)
+    if match is not None:
+        wrapper, _count, archives = match
+        return _wrapper_child_moves(facts, wrapper, archives)
+
+    # Only now, with no wrapper in the way, does the folder's own name get a say:
+    # the series rename comes last because the moves above only touch `base`'s
+    # children and `base` keeps its name until this move.
+    title = series_title(facts)
+    if title is not None and title != name:
+        return [_move(facts, base, _rel_join(parent, title))]
+
+    if folder_title(name) != name:
+        return [_move(facts, base, _rel_join(parent, folder_title(name)))]
+
+    return []
+
+
+def _move_line(move: dict) -> str:
+    return f'move "{move["from"]}" -> "{move["to"]}"'
+
+
 def arrange_proposal(facts: Facts, chosen: str) -> List[str]:
-    """What the disk would have to look like. Text only - this tool moves nothing."""
+    """What the disk would have to look like, rendered FROM the move list.
+
+    The prose argues; the `move` lines are the plan. Nothing prints that a record
+    does not back: the old `(no file moves)` and the prefix-stripping rename were the
+    engine saying two things the disk would not do. Text only - this tool moves
+    nothing.
+    """
     lines: List[str] = []
     name = facts.name
     cleaned = re.sub(r"[-_ ]*model[_-]?files?$", "", name, flags=re.IGNORECASE)
     cleaned = re.sub(r"^(\d{2,})[_\-. ]+", "", cleaned)
     cleaned = re.sub(r"[_]+", " ", cleaned).strip()
-    # Decided before the cosmetic rename below: when the candidate IS the extracted
-    # wrapper, tidying its name renames the packaging and leaves the product unnamed,
-    # and the drop supersedes it (Mf-yitm case (b)).
-    own_archive = _own_wrapper_archive(facts) if chosen in ONE_PROJECT_SHAPES else None
+    # The vendor id is a suggestion about a TITLE, never a move: nothing on disk is
+    # keyed on it, so it stays prose.
     stripped_id = re.sub(r"[ _\-]+\d{5,}$", "", cleaned).strip()
     if stripped_id and stripped_id != cleaned:
         lines.append(f'(vendor id looks like "-{re.search(r"[ _\-]+(\d{5,})$", cleaned).group(1)}"; '
                      f'title could be "{stripped_id}")')
-    if cleaned and cleaned != name and own_archive is None:
-        lines.append(f'rename "{name}" -> "{cleaned}"')
     if chosen == "split-top-folders":
-        lines.append("hoist each top folder into its own project folder (no file moves)" )
+        lines.append("hoist each top folder into its own project folder")
     if chosen == "add-to-project":
         lines.append("no move: the folder is already inside the project")
     if chosen == "git-project":
@@ -789,13 +969,35 @@ def arrange_proposal(facts: Facts, chosen: str) -> List[str]:
         hint = series_suggestion(facts)
         if hint:
             lines.append(hint)
-        lines.extend(_wrapper_lines(facts, own_archive))
-    prefix = re.match(r"^(\d{2,})[_.\- ]+", name)
-    if prefix:
-        lines.append(f'or keep the sort prefix as-is: "{name}"')
+        lines.extend(_wrapper_lines(facts, _own_wrapper_archive(facts)))
+    moves = arrange_moves(facts, chosen)
+    lines.extend(_move_line(move) for move in moves)
     if not lines:
         lines.append("none: this path is already a sane folder name")
     return lines
+
+
+def plan_digest(key: str, shape: str, moves, creates) -> str:
+    """A stable id for one plan: the same list twice, the same id twice.
+
+    Canonical JSON (sorted keys, no whitespace) over the key, the shape, the moves as
+    `[from, to, kind]` triples and the creates, so a stale plan is refused by identity
+    rather than by re-reading the disk and hoping. `hashlib` and `json` are imported
+    here, not at the top: the engine's top-level imports are pinned to os/re/typing.
+    """
+    import hashlib
+    import json
+    canonical = json.dumps(
+        {
+            "key": key,
+            "shape": shape,
+            "moves": [[move["from"], move["to"], move["kind"]] for move in moves],
+            "creates": list(creates),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 
@@ -976,18 +1178,37 @@ def propose_archive(facts: ArchiveFacts) -> Tuple[List[Option], List[str]]:
     return options, reasons
 
 
+def arrange_archive_moves(facts: "ArchiveFacts", chosen: str) -> List[dict]:
+    """The one move an archive needs: unpack into the product folder, file the zip.
+
+    The title runs BOTH strips: `product_title` removes a download site's code and
+    `wrapper_title` the packaging tail, so `Vault Archive_18.11.2026.zip` and a
+    `Vault Archive_18.11.2026/` extracted twin name ONE product folder - `Vault/` -
+    and not two (correction 8).
+    """
+    if chosen != "archive-project":
+        return []
+    title = wrapper_title(product_title(facts.stem))
+    return [{
+        "from": facts.rel,
+        "to": _rel_join(title, "_source", facts.name),
+        "kind": "file",
+    }]
+
+
 def arrange_archive(facts: ArchiveFacts, chosen: str) -> List[str]:
     if chosen != "archive-project":
         return ["none: leave the archive where it is"]
     # The PRODUCT names the folder, never the archive's inner wrapper: `02_Fighter`
     # is a vendor's packaging, while "02_Fates End - Fighter Tower" is the thing the
     # operator owns (owner ruling, Mf-0fd5: the archive title goes to the project).
-    title = product_title(facts.stem)
+    title = wrapper_title(product_title(facts.stem))
     root = facts.common_root()
     lines = [f'unpack into "{title}/" (one project)']
     if root:
         lines.append(f'drop the wrapper folder "{root}/" while unpacking')
     lines.append(f'then file the archive inside it: "{title}/_source/{facts.name}" (owner rule 2026-11-25)')
+    lines.extend(_move_line(move) for move in arrange_archive_moves(facts, chosen))
     return lines
 
 

@@ -353,3 +353,90 @@ def test_concurrent_api_renames_in_one_folder_yield_one_200_one_409(isolated_sto
         before[loser_id].filename,
         before[loser_id].storage_path,
     )
+
+
+# --- a directory is moved by the same, one mover ---------------------------
+
+
+def file_tree(root: Path) -> dict:
+    """Every file below `root`, relative posix path -> bytes (empty dirs implied)."""
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def test_a_directory_moves_whole_with_its_contents(isolated_storage: Path) -> None:
+    """A folder move is one ``move_managed_file``, subtree intact, source gone.
+
+    Mutation: a mover that only handles files leaves the source branch on disk
+    with its bytes while the destination is missing, and a mover that copies
+    instead of renames leaves both trees behind.
+    """
+    storage = isolated_storage
+    source = storage / "Boxes" / "Kit"
+    target = storage / "Archive" / "Kit"
+    write_file(source / "one.stl", b"one bytes")
+    write_file(source / "nested" / "two.stl", b"two bytes")
+
+    assert asset_service.move_managed_file(source, target) is True
+
+    assert not source.exists()
+    assert file_tree(target) == {"one.stl": b"one bytes", "nested/two.stl": b"two bytes"}
+
+
+def test_a_directory_onto_an_existing_destination_is_a_409_and_moves_nothing(isolated_storage: Path) -> None:
+    """An occupied directory destination is refused before a byte moves.
+
+    Mutation: dropping the ``exists()`` fast path (or letting the arbiter
+    overwrite) renders the second folder onto the first: one tree's files are
+    replaced by the other's and a row ends up naming bytes it did not write.
+    """
+    storage = isolated_storage
+    source = storage / "Boxes" / "Kit"
+    target = storage / "Archive" / "Kit"
+    write_file(source / "one.stl", b"source one")
+    write_file(source / "nested" / "two.stl", b"source two")
+    write_file(target / "one.stl", b"target one")
+    source_before = file_tree(source)
+    target_before = file_tree(target)
+
+    with pytest.raises(HTTPException) as error:
+        asset_service.move_managed_file(source, target)
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "Storage path already exists: Archive/Kit"
+    assert file_tree(source) == source_before
+    assert file_tree(target) == target_before
+
+
+def test_cross_device_refusal_propagates_exdev_and_moves_nothing(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cross-device move is a bare ``OSError``: there is no copy path here.
+
+    Mutation: swallowing ``EXDEV`` (or translating it to success) claims a move
+    that never happened, so the caller's row update then rewrites paths to a
+    destination with no bytes; a copy fallback would leave the source tree
+    behind. The arrange's pre-flight is what turns this into a 409.
+    """
+
+    def cross_device_link(src, dst, *args, **kwargs):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    def cross_device_rename(src, dst, *args, **kwargs):
+        raise OSError(errno.EXDEV, "cross-device rename")
+
+    monkeypatch.setattr(os, "link", cross_device_link)
+    monkeypatch.setattr(os, "rename", cross_device_rename)
+    storage = isolated_storage
+    source = storage / "Boxes" / "Kit"
+    target = storage / "Archive" / "Kit"
+    write_file(source / "one.stl", b"one bytes")
+    write_file(source / "nested" / "two.stl", b"two bytes")
+    before = file_tree(storage)
+
+    with pytest.raises(OSError) as error:
+        asset_service.move_managed_file(source, target)
+
+    assert not isinstance(error.value, HTTPException)
+    assert error.value.errno == errno.EXDEV
+    assert not target.exists()
+    assert file_tree(storage) == before

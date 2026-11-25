@@ -247,6 +247,43 @@ script pins equality for the four copies that really must agree. The containment
 (`bundle_detect.MODEL_SUFFIXES <= proposal_engine.MODEL_EXTS`) lives in the test
 instead.
 
+## The arrange surface (approving a shape, and undoing it)
+
+Detection says what a folder IS; the arrange is the one operation that makes the
+disk match a shape the operator chose. Three routes, classified in
+`permissions.ROUTE_PERMISSIONS`:
+
+| Route | Level | What it does |
+| --- | --- | --- |
+| `GET /bundles/arrange?key=&shape=` | READ | re-walks the folder, asks `proposal_engine` for the move list that shape implies, and returns the moves, the directories they need, the prose rendered from them, the row's own `creatable` verdict and every refusal it found. A dry run: it writes nothing |
+| `POST /bundles/arrange` | WRITE | applies one previewed plan, echoing its `plan_id` back so a tree that changed since the preview is a 409 rather than an approval of something never shown |
+| `POST /bundles/arrange/{arrange_id}/undo` | WRITE | folds the landed moves back through the same mover and restores the rows from the ledger |
+
+The **ledger** is the durability story. It rides inside the project's existing
+`_bundle` marker as `_bundle["arrange"]`, beside `key`/`detector`/`groups` - the
+whole `_bundle` dict is passed to `project_service.merge_project_marker`, because
+that function replaces a `_`-prefixed key wholesale and a nested-only write would
+drop the detection fields. It carries `id`/`plan`/`shape`/`moves`/`creates`/
+`projects`/`folders`/`assets`/`done`/`applied`/`undone`: `done` is how far a partial
+apply got, `applied` says the move list landed, `undone` says it was folded back,
+and `folders`/`assets` are the row paths an undo restores. Commit 1 writes the
+project(s) and the ledger before a single byte moves, so an interrupted arrange is
+a project with a replayable record, never a project with nothing behind it.
+
+**One mover.** Every move - a file and a directory alike - goes through
+`asset_service.move_managed_file`. A directory is moved whole by that function's
+rename fallback; `folder_service.move_folder` is never called from the arrange and
+there is no copy path. That is what makes the cross-device case a refusal:
+`EXDEV` is translated into a 409 (`"cross-device move refused: nothing moved, and
+this operation has no copy path"`, or `"... after N of M moves landed; re-post the
+same plan to finish"` for a partial one), and the pre-flight reports the same rule
+as a `cross_device` refusal before any byte moves. A `.zip` row is refused with a
+pointer at the extract door for the same reason: unpacking would be a copy.
+
+The service's rules are in `curiarium/api/arrange_service.py`; the HTTP proofs are
+`tests/test_arrange.py` (preview, apply, the four evidence layouts) and
+`tests/test_arrange_undo.py` (the fold backwards, the row restore, the replay).
+
 ## Build warnings in the web bundle
 
 `npm run build` in `curiarium/web` is expected to emit exactly the warnings below,

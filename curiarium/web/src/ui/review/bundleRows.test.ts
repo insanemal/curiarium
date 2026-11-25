@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   ENRICH_MAX_KEYS,
+  type BundleArrangePlan,
+  type BundleArrangeRefusal,
   type BundleDetectCounts,
   type BundleDetectItem,
   type BundleEnrichment,
@@ -27,6 +29,11 @@ import {
   activeShape,
   archiveExtractTitle,
   archiveLine,
+  arrangeAppliesNothing,
+  arrangeMoveCount,
+  arrangeMoveCountLabel,
+  arrangeMoveLine,
+  arrangeRefusalLine,
   blockedReasonLabel,
   bulkEnrichNoneLine,
   bulkEnrichTitle,
@@ -49,6 +56,7 @@ import {
   importMatches,
   importShapes,
   isArchiveOnly,
+  isArrangable,
   isBlocked,
   isCreatable,
   isEnactable,
@@ -293,10 +301,12 @@ describe("importShapes / activeShape", () => {
     expect(activeShape(row, "compound")).toBe("root-docs");
   });
 
-  it("skips a choice the server cannot enact, and answers the first enactable shape", () => {
-    // Catches an `activeShape` that only checks the shape is OFFERED: a stored
-    // (or dispatched) `split-top-folders` would then be sent to a server that
-    // refuses it with `needs-arrange` and writes nothing.
+  it("honours a refused-but-offered choice, so the arrange door stays reachable", () => {
+    // Catches an `activeShape` that only honours ENACTABLE choices: the operator
+    // could select `split-top-folders`, and the pane would silently snap back to
+    // `generic`, leaving `isArrangable` false and the arrange door dead. The
+    // choice must survive because the door exists to approve the moves that make
+    // that same reading true.
     const row = makeBundle({
       matches: [
         match("generic"),
@@ -304,22 +314,28 @@ describe("importShapes / activeShape", () => {
         match("manual"),
       ],
     });
-    expect(activeShape(row, "split-top-folders")).toBe("generic");
+    expect(activeShape(row, "split-top-folders")).toBe("split-top-folders");
+    // An untouched row still answers the recommendation.
     expect(activeShape(row, undefined)).toBe("generic");
-    // The next enactable shape after the recommendation is still reachable.
+    // The other offered readings remain reachable too.
     expect(activeShape(row, "manual")).toBe("manual");
   });
 
   it("falls back to the first offered shape when nothing on offer is enactable", () => {
     // The server refuses that shape itself (`needs-arrange`); the client's job is
-    // not to crash on a row that offers no enactable reading at all.
+    // not to crash on a row that offers no enactable reading at all. A choice
+    // that is still offered wins, even here, because it is the shape the arrange
+    // door would plan for.
     const row = makeBundle({
       matches: [
         { ...match("split-top-folders"), creatable: false, note: "needs arranging first" },
         { ...match("split-model-folders"), creatable: false, note: "needs arranging first" },
       ],
     });
-    expect(activeShape(row, "split-model-folders")).toBe("split-top-folders");
+    expect(activeShape(row, undefined)).toBe("split-top-folders");
+    expect(activeShape(row, "split-model-folders")).toBe("split-model-folders");
+    // A choice the row no longer offers answers the first offered shape.
+    expect(activeShape(row, "generic")).toBe("split-top-folders");
   });
 });
 
@@ -2479,5 +2495,126 @@ describe("needsStorageScan", () => {
     expect(
       needsStorageScan(makeBundle({ status: "blocked", blocked_reason: "future-reason" })),
     ).toBe(false);
+  });
+});
+
+describe("arranging", () => {
+  /** A served reading the server cannot enact: the dissenting cardinality
+   *  shapes, which need the folder's files moved before a create can be sent. */
+  const needsArranging: BundleMatch = {
+    shape: "split-top-folders",
+    rule: "split-top-folders",
+    confidence: "low",
+    model_count: 3,
+    image_count: 0,
+    text_count: 0,
+    other_count: 0,
+    note: "One project per top folder, once this folder is arranged.",
+    creatable: false,
+  };
+  const enactable: BundleMatch = {
+    shape: "generic",
+    rule: "generic-bundle",
+    confidence: "low",
+    model_count: 3,
+    image_count: 0,
+    text_count: 0,
+    other_count: 0,
+    note: null,
+  };
+  const manual: BundleMatch = { ...enactable, shape: "manual", rule: "manual" };
+
+  /** One previewed plan, shaped the way the server answers `GET
+   *  /bundles/arrange`: the moves, the engine's own text, the directories they
+   *  imply and whatever the server refuses. */
+  function arrangePlan(overrides: Partial<BundleArrangePlan> = {}): BundleArrangePlan {
+    return {
+      key: "Moai statue",
+      shape: "split-top-folders",
+      plan_id: "plan-1",
+      moves: [
+        { from: "Moai statue/a.stl", to: "Moai statue/Fates End/a.stl", kind: "file" },
+        { from: "Moai statue/b.stl", to: "Moai statue/Fates End/b.stl", kind: "file" },
+      ],
+      text: ['move "Moai statue/a.stl" -> "Moai statue/Fates End/a.stl"'],
+      creates: [{ path: "Moai statue/Fates End", exists: false }],
+      refusals: [],
+      report: { creatable: false, blocked_reason: "nothing_to_arrange" },
+      ...overrides,
+    };
+  }
+
+  it("quotes both paths of a move, so a path with spaces still reads as two", () => {
+    // Catches dropping either pair of quotes: with the paths bare, `a b/c.stl ->
+    // a b/d/c.stl` has four possible readings of where the source ends.
+    expect(
+      arrangeMoveLine({
+        from: "Moai statue/a.stl",
+        to: "Moai statue/Fates End/a.stl",
+        kind: "file",
+      }),
+    ).toBe('move "Moai statue/a.stl" -> "Moai statue/Fates End/a.stl"');
+  });
+
+  it("renders a refusal as the server's own detail, verbatim", () => {
+    // Catches a sentence rebuilt from `status`/`reason`: the server's detail is
+    // the operator sentence, its count is the server's own measurement, and a
+    // client that rewrites it prints a second explanation of one refusal.
+    const refusal: BundleArrangeRefusal = {
+      status: 409,
+      reason: "cross_device",
+      detail: "cross-device move refused: 3 of 5 moves would cross a device boundary",
+    };
+    expect(arrangeRefusalLine(refusal)).toBe(
+      "cross-device move refused: 3 of 5 moves would cross a device boundary",
+    );
+  });
+
+  it("counts the moves a previewed plan would make", () => {
+    // Catches counting `creates` or `text` instead: the two move records are the
+    // only ones that describe a write.
+    expect(arrangeMoveCount(arrangePlan())).toBe(2);
+    expect(arrangeMoveCount(arrangePlan({ moves: [] }))).toBe(0);
+  });
+
+  it("renders an unknown move count as the en dash, never a fabricated 0", () => {
+    // Catches a `moves.length` read on an absent list (`undefined.length` would
+    // throw, and `?? 0` would claim a plan of zero moves) and a label that
+    // prints the bare number: an unknown count is the one formatter's dash.
+    const payload = { ...arrangePlan() } as Partial<BundleArrangePlan>;
+    delete payload.moves;
+    expect(arrangeMoveCount(payload as BundleArrangePlan)).toBeNull();
+    expect(arrangeMoveCountLabel(null)).toBe("\u2013 moves");
+    expect(arrangeMoveCountLabel(1)).toBe("1 move");
+    expect(arrangeMoveCountLabel(0)).toBe("0 moves");
+  });
+
+  it("offers the arrange door for the shape the server cannot enact yet", () => {
+    const row = makeBundle({ matches: [enactable, needsArranging, manual] });
+    // The door is for exactly this reading: the server says
+    // `creatable: false`, so a Create would answer `needs-arrange` and write
+    // nothing.
+    expect(isArrangable(row, "split-top-folders")).toBe(true);
+  });
+
+  it("never offers it for an ENACTABLE shape, nor for one the row does not serve", () => {
+    // Catches an inverted `isEnactable` here: the door would appear on every
+    // ordinary row, so an enactable shape - one Create can already write -
+    // would be offered "Preview the moves" instead, and the operator would
+    // rearrange a folder that needed no arranging.
+    const row = makeBundle({ matches: [enactable, needsArranging, manual] });
+    expect(isArrangable(row, "generic")).toBe(false);
+    expect(isArrangable(row, "manual")).toBe(false);
+    // A shape this row does not offer has no match to judge, so the answer is no
+    // door rather than a door for a shape nobody can choose.
+    expect(isArrangable(row, "compound")).toBe(false);
+  });
+
+  it("calls a plan with no move and no directory nothing to apply", () => {
+    // Catches a check that reads only one of the two lists: a plan that creates
+    // a directory without moving anything is work, and the server applies it.
+    expect(arrangeAppliesNothing(arrangePlan({ moves: [], creates: [] }))).toBe(true);
+    expect(arrangeAppliesNothing(arrangePlan({ creates: [] }))).toBe(false);
+    expect(arrangeAppliesNothing(arrangePlan({ moves: [] }))).toBe(false);
   });
 });

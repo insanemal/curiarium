@@ -3,6 +3,7 @@ import { Check } from "lucide-react";
 
 import {
   ENRICH_MAX_KEYS,
+  type BundleArrangePlan,
   type BundleCover,
   type BundleCreateItem,
   type BundleCreateResponse,
@@ -38,6 +39,10 @@ import {
   activeShape,
   archiveExtractTitle,
   archiveLine,
+  arrangeAppliesNothing,
+  arrangeMoveCount,
+  arrangeMoveCountLabel,
+  arrangeRefusalLine,
   bulkEnrichNoneLine,
   bulkEnrichTitle,
   canExtractAndCreate,
@@ -56,6 +61,7 @@ import {
   importMatches,
   importShapes,
   isArchiveOnly,
+  isArrangable,
   isCreatable,
   isEnactable,
   matchesFilter,
@@ -97,7 +103,7 @@ import {
 import ReviewQueueView from "./ReviewQueueView";
 import ScanFidelityNotice from "./ScanFidelityNotice";
 import ScanStorageAction from "./ScanStorageAction";
-import type { BundleDetectState } from "./useBundleDetect";
+import type { BundleReviewState } from "./useBundleDetect";
 import type { LibraryScanState } from "./useLibraryScan";
 import { bundleBadgeCount, describeQueueCount, formatReviewCount } from "./useReviewCounts";
 
@@ -242,7 +248,7 @@ function enrichActionLabel(row: BundleDetectItem): string | null {
 }
 
 type Props = {
-  state: BundleDetectState;
+  state: BundleReviewState;
   /** Writes (create, dismiss, extract) are CONTRIBUTE actions; a viewer reads. */
   canContribute: boolean;
   /** At least one project was created by this click, and the operator stays put.
@@ -456,6 +462,23 @@ export default function BundleReviewView({
   // the same reason `excludedGroups` drops an empty list: storing the
   // recommendation would put `shape` on the wire for a choice nobody made.
   const [chosenShape, setChosenShape] = React.useState<Record<string, string>>({});
+  // The arrangement preview the pane is showing, and the record of one it
+  // applied. Both are keyed by row: a refetch reorders the queue, and an
+  // instance reused across a row change would paint one bundle's moves under
+  // another's title. `moves: null` is "this arrangement was undone" - the
+  // self-report survives the fold-back, the count does not, because it no
+  // longer describes the tree.
+  const [arrangePreview, setArrangePreview] = React.useState<{
+    key: string;
+    plan: BundleArrangePlan;
+  } | null>(null);
+  const [arranged, setArranged] = React.useState<{
+    key: string;
+    arrangeId: string;
+    moves: number | null;
+    unseeable: string[];
+    stale: string[];
+  } | null>(null);
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
   // One dialog serves all three doors (card, blocked row, bulk bar). `returnKey`
   // is the row to put focus back on when it closes, so a keyboard user who
@@ -505,7 +528,8 @@ export default function BundleReviewView({
   const bulkLocking = bulkExtract !== null;
   // One gate on every MUTATING door in the queue: the five bulk buttons, the bulk
   // door's own button and its confirm, the detail pane's create/dismiss/enrich,
-  // the detail pane's own extract action, the blocked-reason cell and Enter on a
+  // the detail pane's arrange preview, apply and undo, the detail pane's own
+  // extract action, the blocked-reason cell and Enter on a
   // zip-only row. `busy` alone reports
   // only the final `creating` phase, while a one-step run owns the queue's
   // writes across all four of its phases, from the listing to the create - so
@@ -597,9 +621,40 @@ export default function BundleReviewView({
   // `matches` was served has no matches at all, and then the row's own groups
   // are the only ones there are.
   const activeShapeName = activeRow ? activeShape(activeRow, chosenShape[activeRow.key]) : "";
+  // The arrangement the pane is showing, keyed by row AND derived per shape: a
+  // refetch reorders rows, and a shape change would otherwise leave the old
+  // shape's plan under the new shape's radio button.
+  const activeArrangePlan =
+    activeRow !== null &&
+    arrangePreview !== null &&
+    arrangePreview.key === activeRow.key &&
+    arrangePreview.plan.shape === activeShapeName
+      ? arrangePreview.plan
+      : null;
+  const activeArranged = activeRow !== null && arranged?.key === activeRow.key ? arranged : null;
+  // "This shape needs arranging first" is exactly when the arrange door is the
+  // right button: the row offers the shape and the server cannot enact it. It is
+  // a contribute door, so a viewer is offered neither it nor the panel behind it.
+  const activeArrangable =
+    canContribute && activeRow !== null && isArrangable(activeRow, activeShapeName);
   const activeMatch = activeRow
     ? importMatches(activeRow).find(match => match.shape === activeShapeName)
     : undefined;
+  // A chosen reading the server cannot enact is not a create: the doors refuse
+  // it and the arrange door beside them is the only way to make it true. The
+  // reason is the server's own note, the same one the radio carries, so the
+  // client still invents no copy.
+  const activeShapeUnenactable = activeMatch !== undefined && !isEnactable(activeMatch);
+  const activeShapeReason = activeShapeUnenactable
+    ? (activeMatch?.note ?? undefined)
+    : undefined;
+  // The bulk create is refused only when the active row's refused choice is
+  // part of the selection it would send: an unrelated active row must not shut
+  // a door for rows whose own shapes are fine.
+  const bulkCreateBlocked =
+    activeShapeUnenactable &&
+    activeRow !== null &&
+    creatableSelected.some(row => row.key === activeRow.key);
   const activeGroups = activeMatch?.groups ?? activeRow?.groups ?? [];
   const activeExcluded = activeRow === null ? [] : excludedGroups[activeRow.key] ?? [];
   const activeArchive = activeRow === null ? null : archiveLine(activeRow);
@@ -696,9 +751,10 @@ export default function BundleReviewView({
       const shape = activeShape(row, chosen);
       if (chosen !== undefined && shape === chosen) {
         // The server answers `needs-arrange` and writes nothing for a shape it
-        // cannot enact, so the client must not ask: a reading marked
-        // `creatable: false` falls back to the recommendation, which `activeShape`
-        // already refuses to leave unless the row offers nothing else.
+        // cannot enact, so the client must not ask. The pane's create doors are
+        // disabled while such a reading is chosen (the arrange door is offered
+        // instead), and this guard is the wire's last resort: a race that got
+        // here anyway must still not post a shape the server refuses.
         const match = importMatches(row).find(entry => entry.shape === shape);
         if (match === undefined || isEnactable(match)) item.shape = chosen;
       }
@@ -771,6 +827,53 @@ export default function BundleReviewView({
   const enrichSelected = () => {
     const keys = enrichableSelected.slice(0, ENRICH_MAX_KEYS).map(row => row.key);
     if (keys.length > 0) void state.enrich(keys);
+  };
+
+  // The arrange door's three steps. Each keeps the verdict it was given and
+  // nothing else: a null answer means the hook already wrote the error line, so
+  // the pane must not invent a verdict of its own.
+  const previewArrange = () => {
+    if (activeRow === null) return;
+    const key = activeRow.key;
+    void state.arrangePlan(key, activeShapeName).then(plan => {
+      if (plan) setArrangePreview({ key, plan });
+    });
+  };
+
+  const applyArrange = (plan: BundleArrangePlan) => {
+    if (activeRow === null) return;
+    void state.arrange(activeRow.key, plan.shape, plan.plan_id).then(applied => {
+      if (!applied) return;
+      // The apply consumes the plan: its `plan_id` names a tree that has just
+      // moved, so the preview must not stay on screen as if it were still the
+      // offer.
+      setArrangePreview(null);
+      setArranged({
+        key: applied.key,
+        arrangeId: applied.arrange_id,
+        moves: applied.moves,
+        unseeable: applied.unseeable,
+        stale: applied.stale,
+      });
+    });
+  };
+
+  const undoArrangeRun = (arrangeId: string) => {
+    void state.undoArrange(arrangeId).then(undone => {
+      if (!undone) return;
+      // The count goes - those moves no longer happened - but the self-report
+      // does not: a directory the walk cannot see, or a row that names no file,
+      // is still true of the tree this click just folded back. `undone.key` is
+      // the row the SERVER found the ledger under, not the row that happens to
+      // be active when the answer arrives.
+      setArranged({
+        key: undone.key,
+        arrangeId: undone.arrange_id,
+        moves: null,
+        unseeable: undone.unseeable,
+        stale: undone.stale,
+      });
+    });
   };
 
   const openExtract = (targets: ExtractTarget[], returnKey: string | null) => {
@@ -1365,7 +1468,8 @@ export default function BundleReviewView({
             <button
               type="button"
               className={PRIMARY_BUTTON}
-              disabled={actionsLocked || creatableSelected.length === 0}
+              disabled={actionsLocked || creatableSelected.length === 0 || bulkCreateBlocked}
+              title={bulkCreateBlocked ? activeShapeReason : undefined}
               onClick={createSelected}
             >
               {`Create selected (${creatableSelected.length})`}
@@ -1609,9 +1713,12 @@ export default function BundleReviewView({
                     >
                       {importMatches(activeRow).map(match => {
                         const shape = match.shape;
-                        // A reading the server cannot enact is VISIBLE but not
-                        // selectable: it marks a real cardinality question, and
-                        // the server's own `note` says why it is not on offer.
+                        // A reading the server cannot enact is VISIBLE and
+                        // SELECTABLE: the operator may choose it precisely so
+                        // the arrange door below can approve the moves that make
+                        // it true. Its radio stays a normal control; only the
+                        // create doors refuse while it stands, and the server's
+                        // own `note` says why.
                         const blocked = !isEnactable(match);
                         return (
                           <div
@@ -1626,7 +1733,7 @@ export default function BundleReviewView({
                                 name={`bundle-shape-${activeRow.key}`}
                                 value={shape}
                                 checked={shape === activeShapeName}
-                                disabled={actionsLocked || blocked}
+                                disabled={actionsLocked}
                                 onChange={() => chooseShape(activeRow, shape)}
                               />
                               <span>{shapeLabel(shape)}</span>
@@ -1711,6 +1818,84 @@ export default function BundleReviewView({
                         />
                       </label>
                     )}
+                    {/* The arrangement door: a shape the server cannot enact
+                        yet needs its files moved first, so this is where the
+                        operator reads every move before any of them happens.
+                        Nothing is written until Apply, and Apply is not offered
+                        while the server holds an objection to the plan. */}
+                    {activeArrangePlan !== null && (
+                      <div
+                        className="review-detail-facts"
+                        role="group"
+                        aria-label="Arrangement preview"
+                        data-arrange-plan="true"
+                      >
+                        <span data-arrange-moves="true">
+                          {`Arrangement: ${arrangeMoveCountLabel(arrangeMoveCount(activeArrangePlan))}`}
+                        </span>
+                        {/* The engine's own lines, copied and never rebuilt: the
+                            server already rendered the moves into sentences, and
+                            a second formatter here would let the two drift. */}
+                        {activeArrangePlan.text.map((line, index) => (
+                          <span key={`${index}-${line}`} data-arrange-text="true">
+                            {line}
+                          </span>
+                        ))}
+                        {activeArrangePlan.creates.length > 0 && (
+                          <>
+                            <span>Creates these folders</span>
+                            {activeArrangePlan.creates.map((create, index) => (
+                              <span
+                                key={`${index}-${create.path}`}
+                                className="font-mono"
+                                data-arrange-create="true"
+                              >
+                                {create.path}
+                              </span>
+                            ))}
+                          </>
+                        )}
+                        {/* The server's refusal, verbatim. The client decided
+                            none of these, so it writes no words for one - and
+                            while one stands the plan cannot be applied. */}
+                        {activeArrangePlan.refusals.map(refusal => (
+                          <span
+                            key={`${refusal.status}-${refusal.reason}`}
+                            className="review-detail-reason"
+                            data-arrange-refusal="true"
+                          >
+                            {arrangeRefusalLine(refusal)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {activeArranged !== null && (
+                      <div
+                        className="review-detail-facts"
+                        role="group"
+                        aria-label="Arrangement result"
+                      >
+                        {activeArranged.moves !== null && (
+                          <span data-arrange-applied="true">
+                            {`Arranged: ${arrangeMoveCountLabel(activeArranged.moves)}`}
+                          </span>
+                        )}
+                        {/* The server's self-report, said out loud and by name.
+                            A silent pass would leave a directory the walk cannot
+                            see - or a row that names no file - for the next
+                            reader to find on their own. */}
+                        {activeArranged.unseeable.length > 0 && (
+                          <span className="review-detail-reason" data-arrange-unseeable="true">
+                            {`Written but unseen by the library: ${activeArranged.unseeable.join(", ")}`}
+                          </span>
+                        )}
+                        {activeArranged.stale.length > 0 && (
+                          <span className="review-detail-reason" data-arrange-stale="true">
+                            {`Asset rows that name no file: ${activeArranged.stale.join(", ")}`}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     <div className="review-detail-actions">
                       {/* The one-step door. A zip-only row is blocked, so the plain Create button
                           beside it is disabled - this is the action that makes the row creatable
@@ -1731,7 +1916,10 @@ export default function BundleReviewView({
                         <button
                           type="button"
                           className={PRIMARY_BUTTON}
-                          disabled={actionsLocked || !isCreatable(activeRow)}
+                          disabled={
+                            actionsLocked || !isCreatable(activeRow) || activeShapeUnenactable
+                          }
+                          title={activeShapeUnenactable ? activeShapeReason : undefined}
                           onClick={createActive}
                         >
                           Create project
@@ -1755,6 +1943,57 @@ export default function BundleReviewView({
                           onClick={enrichActive}
                         >
                           {activeEnrichLabel}
+                        </button>
+                      )}
+                      {activeArrangable && activeArrangePlan === null && (
+                        <button
+                          type="button"
+                          className={SECONDARY_BUTTON}
+                          data-arrange-preview="true"
+                          disabled={actionsLocked}
+                          onClick={previewArrange}
+                        >
+                          Preview the moves
+                        </button>
+                      )}
+                      {activeArrangePlan !== null && (
+                        <>
+                          <button
+                            type="button"
+                            className={PRIMARY_BUTTON}
+                            data-arrange-apply="true"
+                            // A plan the server already objects to answers 409,
+                            // and one that applies nothing has no move to offer:
+                            // neither may look like a working button.
+                            disabled={
+                              actionsLocked ||
+                              activeArrangePlan.refusals.length > 0 ||
+                              arrangeAppliesNothing(activeArrangePlan)
+                            }
+                            onClick={() => applyArrange(activeArrangePlan)}
+                          >
+                            Apply this arrangement
+                          </button>
+                          <button
+                            type="button"
+                            className={SECONDARY_BUTTON}
+                            data-arrange-cancel="true"
+                            disabled={actionsLocked}
+                            onClick={() => setArrangePreview(null)}
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      )}
+                      {activeArranged !== null && activeArranged.moves !== null && (
+                        <button
+                          type="button"
+                          className={SECONDARY_BUTTON}
+                          data-arrange-undo="true"
+                          disabled={actionsLocked}
+                          onClick={() => undoArrangeRun(activeArranged.arrangeId)}
+                        >
+                          Undo this arrange
                         </button>
                       )}
                       {activeEnrichReason !== null && (

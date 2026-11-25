@@ -47,6 +47,9 @@ import type { Project } from "../../lib/api/projects";
 import type { LibraryScanStatus } from "../../lib/api/settings";
 import {
   ENRICH_MAX_KEYS,
+  type BundleArrangeApplied,
+  type BundleArrangePlan,
+  type BundleArrangeUndo,
   type BundleCreateItemResult,
   type BundleCreateResponse,
   type BundleDetectItem,
@@ -69,7 +72,7 @@ import {
   isArchiveOnly,
   needsDecision,
 } from "./bundleRows";
-import type { BundleDetectState } from "./useBundleDetect";
+import type { BundleReviewState } from "./useBundleDetect";
 import type { LibraryScanState } from "./useLibraryScan";
 
 const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
@@ -602,7 +605,7 @@ function makeVerdict(overrides: Partial<ArchiveProjectResult> = {}): ArchiveProj
   };
 }
 
-function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectState {
+function makeState(overrides: Partial<BundleReviewState> = {}): BundleReviewState {
   return {
     report: makeReport([moai, cableClip, legacyVase, moaiZip]),
     loading: false,
@@ -621,6 +624,12 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
     dismiss: vi.fn(async () => {}),
     enrich: vi.fn(async () => {}),
     notice: null,
+    // The arrange doors answer `null` - "nothing answered" - because the error
+    // line is the hook's to write. A fixture that wants a plan, or a verdict,
+    // passes its own spy; `null` proves the pane invents no verdict of its own.
+    arrangePlan: vi.fn(async (): Promise<BundleArrangePlan | null> => null),
+    arrange: vi.fn(async (): Promise<BundleArrangeApplied | null> => null),
+    undoArrange: vi.fn(async (): Promise<BundleArrangeUndo | null> => null),
     afterExtract: vi.fn(async (): Promise<SettleOutcome> => "settled"),
     waitAfterExtract: vi.fn(async (): Promise<SettleOutcome> => "settled"),
     ...overrides,
@@ -628,7 +637,7 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
 }
 
 function renderView(
-  state: BundleDetectState,
+  state: BundleReviewState,
   canContribute = true,
   options: { canScan?: boolean; onScan?: () => void } = {},
 ): RenderResult {
@@ -740,7 +749,7 @@ function installArchiveListings(): void {
 }
 
 /** Both reveal toggles need live setters, exactly as the hook supplies them. */
-function VisibilityHarness({ initial }: { initial: BundleDetectState }) {
+function VisibilityHarness({ initial }: { initial: BundleReviewState }) {
   const [showDismissed, setShowDismissed] = React.useState(initial.showDismissed);
   const [showCreated, setShowCreated] = React.useState(initial.showCreated);
   return (
@@ -1013,7 +1022,7 @@ describe("BundleReviewView empty states", () => {
 
   type Case = {
     name: string;
-    state: BundleDetectState;
+    state: BundleReviewState;
     copy: string;
     /** The reveal toggles on screen: the way out, and nothing else. */
     toggles: string[];
@@ -3007,10 +3016,11 @@ describe("BundleReviewView import-as chooser", () => {
     ).toBeTruthy();
   });
 
-  it("shows a reading the server cannot enact as a visible, disabled, unselected radio", () => {
+  it("shows a reading the server cannot enact as a visible, selectable radio carrying its note", () => {
     // Catches a chooser that DROPS a non-enactable reading (the operator loses
-    // the cardinality question) and one that leaves it selectable (the operator
-    // sends a request the server answers `needs-arrange` to, writing nothing).
+    // the cardinality question) and one that DISABLES it: the arrange door is
+    // the only way to make that reading true, and a disabled radio makes the
+    // door unreachable from any payload the server actually emits.
     renderView(makeState({ report: makeReport([splitTopFolders]) }));
 
     const radios = within(importAs()).getAllByRole("radio") as HTMLInputElement[];
@@ -3023,10 +3033,11 @@ describe("BundleReviewView import-as chooser", () => {
     const split = within(importAs()).getByRole("radio", {
       name: SHAPE_LABELS["split-top-folders"],
     }) as HTMLInputElement;
-    expect(split.disabled).toBe(true);
+    // Not busy, so the reading is a normal control the operator may choose.
+    expect(split.disabled).toBe(false);
     expect(split.checked).toBe(false);
 
-    // The recommendation is what stands: the refused reading is never checked.
+    // The recommendation still stands until the operator makes the choice.
     const checked = within(importAs()).getByRole("radio", { checked: true }) as HTMLInputElement;
     expect(checked.value).toBe("generic");
 
@@ -3036,58 +3047,74 @@ describe("BundleReviewView import-as chooser", () => {
     expect(blocked).not.toBeNull();
     expect(within(detail()).getByText(SPLIT_NOTE)).toBeTruthy();
     expect(blocked?.getAttribute("title")).toBe(SPLIT_NOTE);
-    // Its own counts line still speaks about the recommendation, not the refusal.
+    // Its own counts line still speaks about the recommendation until chosen.
     expect(detail().querySelector("[data-bundle-shape-counts]")?.textContent).toBe(
       "3 models, 0 images, 0 texts, 0 other",
     );
   });
 
-  it("cannot be chosen: a click on the disabled reading leaves the choice where it was", () => {
-    // Catches a `disabled` that only shades the control while `onChange` still
-    // stores the shape, which is how a refused reading would reach the body - the
-    // radio must be genuinely disabled, not merely styled as such.
-    renderView(makeState({ report: makeReport([splitTopFolders]) }));
+  it("selects that reading, shuts the create door and offers the arrange door", () => {
+    // The contract change: choosing a reading the server cannot enact must not
+    // silently create the recommendation. It selects, the Create button refuses
+    // with the server's own reason, and the arrange door takes its place.
+    const state = makeState({ report: makeReport([splitTopFolders]) });
+    renderView(state);
 
     const split = within(importAs()).getByRole("radio", {
       name: SHAPE_LABELS["split-top-folders"],
     }) as HTMLInputElement;
-    expect(split.disabled).toBe(true);
     fireEvent.click(split);
 
-    expect(split.checked).toBe(false);
+    expect(split.checked).toBe(true);
     expect(
       (within(importAs()).getByRole("radio", { checked: true }) as HTMLInputElement).value,
-    ).toBe("generic");
-    // The counts line still speaks about the recommendation, so the refused
-    // reading never becomes the shape the pane is describing.
-    expect(detail().querySelector("[data-bundle-shape-counts]")?.textContent).toBe(
-      "3 models, 0 images, 0 texts, 0 other",
-    );
+    ).toBe("split-top-folders");
+
+    const create = within(detail()).getByRole("button", {
+      name: "Create project",
+    }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    expect(create.getAttribute("title")).toBe(SPLIT_NOTE);
+
+    // The bulk door sends the same row, so it refuses for the same reason.
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    const createSelected = screen.getByRole("button", {
+      name: /^Create selected/,
+    }) as HTMLButtonElement;
+    expect(createSelected.disabled).toBe(true);
+    expect(createSelected.getAttribute("title")).toBe(SPLIT_NOTE);
+
+    const preview = within(detail()).getByRole("button", {
+      name: "Preview the moves",
+    }) as HTMLButtonElement;
+    expect(preview.disabled).toBe(false);
   });
 
   it("never sends a shape the server cannot enact", () => {
     // Catches a createItems that trusts a stored choice: the server answers
-    // `needs-arrange` and writes nothing, so the body must fall back to the
-    // recommendation and carry no `shape` at all. The click is made first, so a
-    // build whose disabled radio still stored a choice is caught here too.
+    // `needs-arrange` and writes nothing, so the body must never carry that
+    // shape. The click is made first, so a build that only shades the disabled
+    // control is caught here too: a disabled button fires no handler.
     const state = makeState({ report: makeReport([splitTopFolders]) });
     renderView(state);
 
     fireEvent.click(
       within(importAs()).getByRole("radio", { name: SHAPE_LABELS["split-top-folders"] }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    const create = within(detail()).getByRole("button", {
+      name: "Create project",
+    }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    fireEvent.click(create);
 
-    expect(state.create).toHaveBeenCalledWith([{ key: "Multi", name: "Multi folder" }]);
-    const item = vi.mocked(state.create).mock.calls[0][0][0];
-    expect(item).not.toHaveProperty("shape");
+    expect(state.create).not.toHaveBeenCalled();
   });
 
-  it("drops a stored choice that a refetch has marked unenactable", () => {
+  it("keeps the create door shut when a refetch marks the stored choice unenactable", () => {
     // The real hole the guard closes: the operator picks a split reading while the
     // server still offers it, a refetch marks that same reading `creatable: false`,
-    // and the stored choice must not be posted. Catches a createItems that trusts
-    // `chosenShape` instead of asking `activeShape`/`importMatches`.
+    // and the stored choice must now shut the create door rather than snap back to
+    // the recommendation and create something the operator did not choose.
     const enactable = makeBundle({
       ...splitTopFolders,
       matches: splitTopFolders.matches?.map(match =>
@@ -3114,11 +3141,19 @@ describe("BundleReviewView import-as chooser", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    // The choice is still offered, so it still stands - and the create door
+    // refuses it with the server's own note.
+    expect(
+      (within(importAs()).getByRole("radio", { checked: true }) as HTMLInputElement).value,
+    ).toBe("split-top-folders");
+    const create = within(detail()).getByRole("button", {
+      name: "Create project",
+    }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    expect(create.getAttribute("title")).toBe(SPLIT_NOTE);
+    fireEvent.click(create);
 
-    expect(refetched.create).toHaveBeenCalledWith([{ key: "Multi", name: "Multi folder" }]);
-    const item = vi.mocked(refetched.create).mock.calls[0][0][0];
-    expect(item).not.toHaveProperty("shape");
+    expect(refetched.create).not.toHaveBeenCalled();
   });
 
   it("offers manual on every row, high confidence and archive-only included", () => {
@@ -4116,10 +4151,10 @@ describe("BundleReviewView project list hand-off", () => {
   /** Mount the view with the two hand-off props, and hand back the state the
    *  doors actually hold - the spies have to be the ones the view calls. */
   function handoff(
-    overrides: Partial<BundleDetectState> = {},
+    overrides: Partial<BundleReviewState> = {},
     props: { onProjectsChanged?: () => void; onProjectImported?: (id: string) => void } = {},
     report?: BundleReport,
-  ): BundleDetectState {
+  ): BundleReviewState {
     const state = makeState(report ? { report, ...overrides } : overrides);
     render(
       <BundleReviewView
@@ -4769,5 +4804,308 @@ describe("BundleReviewView storage scan on an unresolved row", () => {
 
     expect(within(detail()).queryByRole("button", { name: "Rescan storage folder" })).toBeNull();
     expect(detail().querySelector('[data-scan-surface="detail"]')).toBeNull();
+  });
+});
+
+/** A row whose EVERY served reading needs arranging first, so the shape the pane
+ *  falls back to is `creatable: false` - the one state the arrange door exists
+ *  for. `activeShape` answers the first offered reading when nothing on offer can
+ *  be enacted (`bundleRows`), and that reading is the one a plan is built for. */
+const MODEL_SPLIT_NOTE =
+  "needs arranging first: one project per model folder; fragments a single product if it was one";
+const arrangingRow = makeBundle({
+  key: "Container",
+  rel_path: "Container",
+  title: "Container folder",
+  name_suggestion: "Container folder",
+  creator: null,
+  licence: null,
+  licence_url: null,
+  source_url: null,
+  detector: "generic-bundle",
+  confidence: "low",
+  metadata_shape: "generic",
+  description_excerpt: null,
+  matches: [
+    {
+      shape: "split-top-folders",
+      rule: "engine:split-top-folders",
+      confidence: "low",
+      model_count: 2,
+      image_count: 0,
+      text_count: 0,
+      other_count: 0,
+      note: SPLIT_NOTE,
+      creatable: false,
+    },
+    {
+      shape: "split-model-folders",
+      rule: "engine:split-model-folders",
+      confidence: "low",
+      model_count: 2,
+      image_count: 0,
+      text_count: 0,
+      other_count: 0,
+      note: MODEL_SPLIT_NOTE,
+      creatable: false,
+    },
+  ],
+});
+
+/** One plan, shaped the way `GET /bundles/arrange` answers: two directory moves
+ *  out of the container, the engine's own text, the folder they imply, and no
+ *  objection - so Apply is offered. */
+function makeArrangePlan(overrides: Partial<BundleArrangePlan> = {}): BundleArrangePlan {
+  return {
+    key: "Container",
+    shape: "split-top-folders",
+    plan_id: "plan-1",
+    moves: [
+      { from: "Container/Alpha", to: "Alpha", kind: "dir" },
+      { from: "Container/Beta", to: "Beta", kind: "dir" },
+    ],
+    text: ['move "Container/Alpha" -> "Alpha"', 'move "Container/Beta" -> "Beta"'],
+    creates: [{ path: "Alpha", exists: false }],
+    refusals: [],
+    report: { creatable: false, blocked_reason: "needs_arrange" },
+    ...overrides,
+  };
+}
+
+/** One apply verdict. `unseeable`/`stale` are the server's own self-report and
+ *  default to empty, so a test that cares about them says so. */
+function makeArrangeApplied(overrides: Partial<BundleArrangeApplied> = {}): BundleArrangeApplied {
+  return {
+    key: "Container",
+    shape: "split-top-folders",
+    plan_id: "plan-1",
+    arrange_id: "arrange-7",
+    project_id: "p1",
+    applied: true,
+    moves: 2,
+    already_applied: false,
+    unseeable: [],
+    stale: [],
+    ...overrides,
+  };
+}
+
+function makeArrangeUndone(overrides: Partial<BundleArrangeUndo> = {}): BundleArrangeUndo {
+  return {
+    arrange_id: "arrange-7",
+    key: "Container",
+    undone: true,
+    moves: 2,
+    project_removed: true,
+    unseeable: [],
+    stale: [],
+    ...overrides,
+  };
+}
+
+function planPanel(): HTMLElement {
+  return within(detail()).getByRole("group", { name: "Arrangement preview" });
+}
+
+function previewButton(): HTMLButtonElement {
+  return within(detail()).getByRole("button", {
+    name: "Preview the moves",
+  }) as HTMLButtonElement;
+}
+
+function applyButton(): HTMLButtonElement {
+  return within(detail()).getByRole("button", {
+    name: "Apply this arrangement",
+  }) as HTMLButtonElement;
+}
+
+function undoButton(): HTMLButtonElement {
+  return within(detail()).getByRole("button", {
+    name: "Undo this arrange",
+  }) as HTMLButtonElement;
+}
+
+describe("the arrange door", () => {
+  it("previews the moves for a shape the server cannot enact yet", async () => {
+    // Catches a pane that asks for a plan on mount, or one that renders none of
+    // what came back: the click is the only trigger, and the server's own text and
+    // folder list are what the operator decides on.
+    const arrangePlan = vi.fn(async () => makeArrangePlan());
+    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan });
+    renderView(state);
+
+    // Nothing is asked for before the click: a preview is a disk walk.
+    expect(state.arrangePlan).not.toHaveBeenCalled();
+    fireEvent.click(previewButton());
+
+    await waitFor(() => expect(planPanel()).toBeTruthy());
+    expect(state.arrangePlan).toHaveBeenCalledWith("Container", "split-top-folders");
+
+    const panel = planPanel();
+    expect(within(panel).getByText('move "Container/Alpha" -> "Alpha"')).toBeTruthy();
+    expect(within(panel).getByText('move "Container/Beta" -> "Beta"')).toBeTruthy();
+    expect(within(panel).getByText("Creates these folders")).toBeTruthy();
+    expect(
+      Array.from(panel.querySelectorAll("[data-arrange-create]")).map(node => node.textContent),
+    ).toEqual(["Alpha"]);
+    // The count comes through the one formatter, so it is a real count here and
+    // an en dash when the server does not send one.
+    expect(panel.querySelector("[data-arrange-moves]")?.textContent).toBe("Arrangement: 2 moves");
+    // A clean plan is a click that can work.
+    expect(applyButton().disabled).toBe(false);
+  });
+
+  it("is reachable from a real payload by choosing the refused reading", async () => {
+    // The payload the server actually emits: `generic` plus a `creatable: false`
+    // `split-top-folders` plus `manual`. Choosing that reading must keep it
+    // selected (or the door never opens), then Preview and Apply must carry the
+    // chosen shape and the served `plan_id` to the server.
+    const arrangePlan = vi.fn(async () => makeArrangePlan({ key: "Multi" }));
+    const arrange = vi.fn(async () => makeArrangeApplied({ key: "Multi" }));
+    const state = makeState({ report: makeReport([splitTopFolders]), arrangePlan, arrange });
+    renderView(state);
+
+    const importAs = within(detail()).getByRole("radiogroup", { name: "Import as" });
+    fireEvent.click(
+      within(importAs).getByRole("radio", { name: SHAPE_LABELS["split-top-folders"] }),
+    );
+    expect(
+      (within(importAs).getByRole("radio", { checked: true }) as HTMLInputElement).value,
+    ).toBe("split-top-folders");
+
+    fireEvent.click(previewButton());
+    await waitFor(() => expect(planPanel()).toBeTruthy());
+    expect(state.arrangePlan).toHaveBeenCalledWith("Multi", "split-top-folders");
+
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(undoButton()).toBeTruthy());
+    expect(state.arrange).toHaveBeenCalledWith("Multi", "split-top-folders", "plan-1");
+  });
+
+  it("refuses to offer Apply while the server holds an objection", async () => {
+    // Catches an Apply that ignores `refusals`: pressing it would answer 409 and
+    // write nothing, so the pane must not present a move that cannot be done.
+    const refusal = {
+      status: 409,
+      reason: "destination_exists",
+      detail: "destination exists: Alpha",
+    };
+    const arrangePlan = vi.fn(async () =>
+      makeArrangePlan({
+        refusals: [{ ...refusal, detail: "cross-device move refused: 2 of 2 moves" }, refusal],
+      }),
+    );
+    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan });
+    renderView(state);
+
+    fireEvent.click(previewButton());
+    await waitFor(() => expect(planPanel()).toBeTruthy());
+
+    expect(applyButton().disabled).toBe(true);
+    // The server's sentence, verbatim and in the reason style - including its own
+    // count of the moves it refused. The client decided neither.
+    const refusals = Array.from(planPanel().querySelectorAll("[data-arrange-refusal]"));
+    expect(refusals.map(node => node.textContent)).toEqual([
+      "cross-device move refused: 2 of 2 moves",
+      "destination exists: Alpha",
+    ]);
+    expect(refusals[0].className).toBe("review-detail-reason");
+  });
+
+  it("applies the previewed plan, names the moves that landed and offers the undo", async () => {
+    // Catches an Apply that sends the row key instead of the served `plan_id`, and
+    // one that leaves the consumed preview on screen: the plan names a tree that
+    // has just moved.
+    const arrangePlan = vi.fn(async () => makeArrangePlan());
+    const arrange = vi.fn(async () => makeArrangeApplied());
+    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan, arrange });
+    renderView(state);
+
+    fireEvent.click(previewButton());
+    await waitFor(() => expect(planPanel()).toBeTruthy());
+    fireEvent.click(applyButton());
+
+    await waitFor(() => expect(undoButton()).toBeTruthy());
+    expect(state.arrange).toHaveBeenCalledWith("Container", "split-top-folders", "plan-1");
+    expect(detail().querySelector("[data-arrange-applied]")?.textContent).toBe("Arranged: 2 moves");
+    expect(detail().querySelector("[data-arrange-plan]")).toBeNull();
+  });
+
+  it("undoes that arrangement by the id the server issued", async () => {
+    // Catches an undo driven by the row key or the plan id: the ledger is found by
+    // `arrange_id`, and a second arrange has its own.
+    const arrangePlan = vi.fn(async () => makeArrangePlan());
+    const arrange = vi.fn(async () => makeArrangeApplied({ arrange_id: "arrange-9" }));
+    const undoArrange = vi.fn(async () => makeArrangeUndone({ arrange_id: "arrange-9" }));
+    const state = makeState({
+      report: makeReport([arrangingRow]),
+      arrangePlan,
+      arrange,
+      undoArrange,
+    });
+    renderView(state);
+
+    fireEvent.click(previewButton());
+    await waitFor(() => expect(planPanel()).toBeTruthy());
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(undoButton()).toBeTruthy());
+
+    fireEvent.click(undoButton());
+
+    await waitFor(() => expect(state.undoArrange).toHaveBeenCalledWith("arrange-9"));
+    // The count is gone with the moves, and so is the undo control: there is
+    // nothing left of this arrange to fold back a second time.
+    await waitFor(() =>
+      expect(detail().querySelector("[data-arrange-applied]")).toBeNull(),
+    );
+    expect(within(detail()).queryByRole("button", { name: "Undo this arrange" })).toBeNull();
+  });
+
+  it("names the paths a response could not see, rather than passing over them", async () => {
+    // Catches a silent pass: a directory this write made that the library walk
+    // cannot see, and an asset row whose path names no file, are the two things an
+    // operator must be told about by name.
+    const arrangePlan = vi.fn(async () => makeArrangePlan());
+    const arrange = vi.fn(async () =>
+      makeArrangeApplied({ unseeable: ["Ghost"], stale: ["Container/gone.stl"] }),
+    );
+    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan, arrange });
+    renderView(state);
+
+    fireEvent.click(previewButton());
+    await waitFor(() => expect(planPanel()).toBeTruthy());
+    fireEvent.click(applyButton());
+
+    await waitFor(() => expect(detail().querySelector("[data-arrange-unseeable]")).not.toBeNull());
+    const unseeable = detail().querySelector("[data-arrange-unseeable]");
+    const stale = detail().querySelector("[data-arrange-stale]");
+    expect(unseeable?.textContent).toContain("Ghost");
+    expect(stale?.textContent).toContain("Container/gone.stl");
+    // They live beside the reason style, not in a live region that would
+    // re-announce the queue on every ArrowDown.
+    expect(unseeable?.className).toBe("review-detail-reason");
+    expect(unseeable?.getAttribute("role")).toBeNull();
+  });
+
+  it("offers no arrange door for a shape the server can already enact", () => {
+    // Catches a door that ignores `isArrangable`: an ordinary row would be offered
+    // "Preview the moves" beside a Create that already works, and the operator
+    // would be invited to rearrange a folder nothing asked to move.
+    renderView(makeState({ report: makeReport([moai]) }));
+    expect(detail().querySelector("[data-arrange-preview]")).toBeNull();
+  });
+
+  it("offers a viewer none of these controls", () => {
+    // Catches an arrange door left outside the `canContribute` gate: a READ-only
+    // role would be invited to start a disk walk and then to write.
+    const arrangePlan = vi.fn(async () => makeArrangePlan());
+    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan });
+    renderView(state, false);
+
+    expect(within(detail()).queryByRole("button", { name: "Preview the moves" })).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: "Apply this arrangement" })).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: "Undo this arrange" })).toBeNull();
+    expect(detail().querySelector("[data-arrange-plan]")).toBeNull();
+    expect(state.arrangePlan).not.toHaveBeenCalled();
   });
 });

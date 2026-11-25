@@ -78,6 +78,18 @@ generalises - the full reasoning and the measurement are Decision 23).
 an excluded group is an ATTACH decision, the group is re-offered from the created
 project's own marker, and the detection rule and its stamp are untouched).
 
+**Extended:** 2026-11-26 - ticket `Mf-v9eg` (the arrange applies an approved
+proposal and nothing else: it never runs from a background sweep and never on a
+rescan, so the disk only changes when an operator echoes back a plan id they were
+shown. The ledger rides inside the project's existing `_bundle` marker as
+`_bundle["arrange"]` - the whole marker is merged, so `key`/`detector`/`groups`
+survive beside it - which makes an interrupted apply a project with a replayable
+record rather than a project with nothing behind it. And a `creatable: false`
+match is now ACTIONABLE: `GET /bundles/arrange` serves the moves the create door
+cannot enact, so the row a create refuses with `needs-arrange` is a row the
+operator can still approve, preview and undo. The detection decision below is
+unchanged - the arrange reads the row, it never rewrites what a rule offered).
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the

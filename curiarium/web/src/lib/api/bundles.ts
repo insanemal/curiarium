@@ -297,6 +297,85 @@ export type BundleEnrichResponse = {
   results: BundleEnrichItemResult[];
 };
 
+/** One file or directory the plan would move. Both paths are relative to the
+ *  storage root (never absolute, never candidate-relative), and `kind` is
+ *  `file` or `dir` - the mover needs to know which one it is looking at. */
+export type BundleArrangeMove = {
+  from: string;
+  to: string;
+  kind: string;
+};
+
+/** One destination directory the plan's moves imply, plus the server's own
+ *  reading of that destination. The plan lists only the directories no `Folder`
+ *  row names yet, so `exists` is about the DIRECTORY on disk, not about the row. */
+export type BundleArrangeCreate = {
+  path: string;
+  exists: boolean;
+};
+
+/** One reason `apply` would refuse this plan. It is RETURNED rather than raised,
+ *  because a 200 with a non-empty list is the honest preview: the operator sees
+ *  the objection before asking for the write. `detail` is the server's operator
+ *  sentence and is rendered verbatim - the client invents no copy for a refusal
+ *  it did not decide. */
+export type BundleArrangeRefusal = {
+  status: number;
+  reason: string;
+  detail: string;
+};
+
+/** What an arrangement WOULD do, and the `plan_id` that names exactly this plan.
+ *  `text` is the engine's own rendering of the moves (never rebuilt here), and
+ *  `refusals` holds every objection the apply would raise - so a preview is
+ *  always shown, and only a plan with an empty list may be applied. */
+export type BundleArrangePlan = {
+  key: string;
+  shape: string;
+  plan_id: string;
+  moves: BundleArrangeMove[];
+  text: string[];
+  creates: BundleArrangeCreate[];
+  refusals: BundleArrangeRefusal[];
+  report: {
+    creatable: boolean;
+    blocked_reason: string | null;
+  };
+};
+
+/** The verdict of an apply. `moves` counts the moves that LANDED, not the ones
+ *  the plan named, and `already_applied` is a re-post of a plan that already
+ *  ran, so a caller must not read either as "this click moved N files".
+ *
+ *  `unseeable` and `stale` are the server's own self-report - directories it
+ *  wrote that the library walk cannot see, and asset rows whose path no longer
+ *  names a file - and they are named on screen rather than swallowed. */
+export type BundleArrangeApplied = {
+  key: string;
+  shape: string;
+  plan_id: string;
+  arrange_id: string;
+  project_id: string;
+  applied: boolean;
+  moves: number;
+  already_applied: boolean;
+  unseeable: string[];
+  stale: string[];
+};
+
+/** The verdict of an undo. The files are always folded back; `project_removed`
+ *  is the narrower fact - the created project goes only when its membership is
+ *  unchanged, and the response says so either way. */
+export type BundleArrangeUndo = {
+  arrange_id: string;
+  key: string;
+  undone: boolean;
+  moves: number;
+  project_removed: boolean;
+  unseeable: string[];
+  stale: string[];
+};
+
 /** The report is a dry run: detection writes nothing to disk and no rows. */
 export async function getBundleReport(params: BundleReportQuery = {}): Promise<BundleReport> {
   const qs = new URLSearchParams();
@@ -367,6 +446,54 @@ export async function enrichBundles(
   if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) {
     throw new Error(await readErrorMessage(res, "Failed to read the source page"));
+  }
+  return res.json();
+}
+
+/** What arranging a bundle's files into the chosen shape WOULD do. A READ, on
+ *  the detect report's own posture: it walks the disk and writes nothing and no
+ *  rows, which is why the pane may ask for it before offering the write. */
+export async function getArrangePlan(key: string, shape: string): Promise<BundleArrangePlan> {
+  const qs = new URLSearchParams();
+  qs.set("key", key);
+  qs.set("shape", shape);
+  const res = await fetch(`${apiBase()}/bundles/arrange?${qs.toString()}`, {
+    headers: authHeaders(),
+  });
+  assertOk(res, "Failed to preview the arrangement");
+  return res.json();
+}
+
+/** Applies exactly the plan that was previewed: `plan_id` is the whole check, so
+ *  a tree that changed since the preview is refused (`stale_plan`) instead of
+ *  being rearranged against a plan nobody read. */
+export async function arrangeBundles(item: {
+  key: string;
+  shape: string;
+  planId: string;
+}): Promise<BundleArrangeApplied> {
+  const res = await fetch(`${apiBase()}/bundles/arrange`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ key: item.key, shape: item.shape, plan_id: item.planId }),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, "Failed to arrange the bundle"));
+  }
+  return res.json();
+}
+
+/** Folds one arrangement back. The request carries no body at all: the id in the
+ *  path IS the argument, and the ledger the apply wrote says what to undo. */
+export async function undoArrange(arrangeId: string): Promise<BundleArrangeUndo> {
+  const res = await fetch(`${apiBase()}/bundles/arrange/${encodeURIComponent(arrangeId)}/undo`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, "Failed to undo the arrangement"));
   }
   return res.json();
 }

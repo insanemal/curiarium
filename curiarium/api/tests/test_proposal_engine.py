@@ -36,6 +36,8 @@ and this module skips itself there.
 import ast
 import importlib.util
 import json
+import os
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -257,6 +259,24 @@ def build_own_wrapper(root: Path) -> Path:
     return wrapper
 
 
+def build_container(root: Path) -> Path:
+    """A drop-zone container: two products and a loose model, all under one folder."""
+    container = root / "import" / "Drop"
+    write_models(container / "Product A", 2)
+    write_models(container / "Product B", 3)
+    write(container / "loose.stl")
+    return container
+
+
+def build_series(root: Path) -> Path:
+    """`17_ClockworkMonster` beside three numbered Fates End towers: a series."""
+    tower = root / "import" / "17_ClockworkMonster"
+    write_models(tower / "tower", 5)
+    for index, thing in ((1, "Wizard Tower"), (2, "Fighter Tower"), (3, "Rogue Tower")):
+        write_models(root / "import" / f"0{index}_Fates End - {thing}", 2)
+    return tower
+
+
 def build_labelled_tree(root: Path) -> None:
     """Every label fixture except `import/endorphin`, as the shape its note describes."""
     # Three marble machines from one creator: each carries its own README and print
@@ -370,7 +390,18 @@ def test_a_zip_inside_the_wrapper_child_still_names_the_wrapper(tmp_path: Path) 
         f"not the product's (10 of 13 models inside it)",
         f'file "{VAULT_ZIP}" in "Vault/_source/{VAULT_ZIP}"',
         'keep "Rhino models/" as a part',
-    ], f"expected the wrapper to be dropped and the zip filed, got {arrange!r}"
+        f'move "Vault/{VAULT_WRAPPER}/part0" -> "Vault/part0"',
+        f'move "Vault/{VAULT_WRAPPER}/part1" -> "Vault/part1"',
+        f'move "Vault/{VAULT_WRAPPER}/part2" -> "Vault/part2"',
+        f'move "Vault/{VAULT_WRAPPER}/part3" -> "Vault/part3"',
+        f'move "Vault/{VAULT_WRAPPER}/part4" -> "Vault/part4"',
+        f'move "Vault/{VAULT_WRAPPER}/part5" -> "Vault/part5"',
+        f'move "Vault/{VAULT_WRAPPER}/part6" -> "Vault/part6"',
+        f'move "Vault/{VAULT_WRAPPER}/part7" -> "Vault/part7"',
+        f'move "Vault/{VAULT_WRAPPER}/part8" -> "Vault/part8"',
+        f'move "Vault/{VAULT_WRAPPER}/part9" -> "Vault/part9"',
+        f'move "Vault/{VAULT_WRAPPER}/{VAULT_ZIP}" -> "Vault/_source/{VAULT_ZIP}"',
+    ], f"expected the wrapper to be dropped and its content moved up, got {arrange!r}"
     assert chosen in proposal_engine.ONE_PROJECT_SHAPES, f"the layout is one project, not {chosen}"
     assert "none: this path is already a sane folder name" not in arrange, (
         "the before-state of this bug: a wrapper was reported as a sane folder name"
@@ -392,6 +423,8 @@ def test_the_wrapper_itself_drops_instead_of_being_renamed(tmp_path: Path) -> No
         f"not the product's (12 models inside it)",
         f'file "{VAULT_ZIP}" in "Vault/_source/{VAULT_ZIP}"',
         'keep "Rhino models/" as a part',
+        f'move "{VAULT_WRAPPER}/Rhino models" -> "Vault/Rhino models"',
+        f'move "{VAULT_ZIP}" -> "Vault/_source/{VAULT_ZIP}"',
     ], f"expected the candidate to be dropped as the wrapper, got {arrange!r}"
     assert chosen in proposal_engine.ONE_PROJECT_SHAPES
     assert not [line for line in arrange if line.startswith("rename")], (
@@ -411,6 +444,225 @@ def test_the_wrapper_title_is_the_product_not_the_packaging() -> None:
         "a name the strip would empty falls back to itself: an unnamed project is worse than a "
         "badly named one"
     )
+
+
+# --- the plan is a move list (Mf-v9eg) -------------------------------------
+
+
+def test_folder_title_keeps_the_series_prefix() -> None:
+    """`17_` is a series index, not clutter: the title keeps it.
+
+    Mutation: strip a leading numeric prefix (the old `rename "17_ClockworkMonster" ->
+    "ClockworkMonster"` line) and the owner's 17th Fates End tower loses its place in
+    the series - the second of the three contradictory ClockworkMonster lines.
+    """
+    assert proposal_engine.folder_title("17_ClockworkMonster") == "17_ClockworkMonster"
+    assert proposal_engine.folder_title("xbox360_shell") == "xbox360 shell"
+    assert proposal_engine.folder_title("Vault Archive_18.11.2026") == "Vault Archive 18.11.2026"
+    assert proposal_engine.folder_title("__") == "__", (
+        "a name the tidy would empty falls back to itself: an unnamed product is worse"
+    )
+
+
+def test_arrange_moves_hoists_each_model_bearing_child_out_of_a_container(tmp_path: Path) -> None:
+    """A split container keeps nothing: each product rises to sit beside it.
+
+    Mutation: leave the children nested (`to` under the container) and every hoisted
+    product lands a level deeper than the corpus: `import/Stagetop`,
+    `import/17_ClockworkMonster` and `import/endorphin` all sit directly under the drop
+    zone, never under a container.
+    """
+    container = build_container(tmp_path)
+    facts = proposal_engine.measure(str(container), "import/Drop")
+    assert proposal_engine.arrange_moves(facts, "split-top-folders") == [
+        {"from": "import/Drop/Product B", "to": "import/Product B", "kind": "dir"},
+        {"from": "import/Drop/Product A", "to": "import/Product A", "kind": "dir"},
+    ], "a loose root model is not a folder to hoist: (root files) must never be a move"
+    assert proposal_engine.arrange_moves(facts, "split-model-folders") == [
+        {"from": "import/Drop/Product A", "to": "import/Product A", "kind": "dir"},
+        {"from": "import/Drop/Product B", "to": "import/Product B", "kind": "dir"},
+    ]
+
+
+def test_arrange_moves_keeps_the_folder_for_a_project_shape(tmp_path: Path) -> None:
+    """`add-to-project`/`git-project` mean the folder stays exactly where it is.
+
+    Mutation: invent a move for these shapes and the folder the operator already owns
+    is renamed out from under its own project (the checkout's boundary is the repo).
+    """
+    write_models(tmp_path / "import" / "Widget" / "part", 2)
+    facts = proposal_engine.measure(str(tmp_path / "import" / "Widget"), "import/Widget")
+    assert proposal_engine.arrange_moves(facts, "add-to-project") == []
+    assert proposal_engine.arrange_moves(facts, "git-project") == []
+
+
+def test_arrange_moves_files_the_wrapper_archive_under_source(tmp_path: Path) -> None:
+    """Case (b): the candidate is the wrapper, so its content rises into the product.
+
+    Mutation: name `_source/` after the wrapper (`Vault Archive_18.11.2026/_source/`)
+    and the extracted twin and its own zip disagree about which folder is the product.
+    """
+    wrapper = build_own_wrapper(tmp_path)
+    facts = proposal_engine.measure(str(wrapper), VAULT_WRAPPER)
+    assert proposal_engine.arrange_moves(facts, "one-project") == [
+        {"from": f"{VAULT_WRAPPER}/Rhino models", "to": "Vault/Rhino models", "kind": "dir"},
+        {"from": VAULT_ZIP, "to": f"Vault/_source/{VAULT_ZIP}", "kind": "file"},
+    ]
+
+
+def test_arrange_moves_supplies_the_series_title_and_keeps_the_number(tmp_path: Path) -> None:
+    """The series move is the only rename, and it keeps `17_`.
+
+    Mutation: render the move from a prefix-stripping title and the folder loses the
+    series index; print both a cosmetic rename and the series move and the operator is
+    told to rename twice with different answers.
+    """
+    tower = build_series(tmp_path)
+    facts = proposal_engine.measure(str(tower), "import/17_ClockworkMonster")
+    assert proposal_engine.series_title(facts) == "17_Fates End - ClockworkMonster"
+    assert proposal_engine.series_suggestion(facts) == (
+        'rename to "17_Fates End - ClockworkMonster" '
+        "(belongs to the Fates End series: 3 siblings)"
+    ), "the suggestion text is what callers pin: it must render FROM the title, unchanged"
+    moves = proposal_engine.arrange_moves(facts, "one-project")
+    assert moves == [{
+        "from": "import/17_ClockworkMonster",
+        "to": "import/17_Fates End - ClockworkMonster",
+        "kind": "dir",
+    }]
+    for move in moves:
+        assert re.match(r"^\d{2,}_", os.path.basename(move["to"])), (
+            f"{move['to']!r} strips the series number: 17_ is an index, not clutter"
+        )
+
+
+def test_every_move_is_storage_relative(tmp_path: Path) -> None:
+    """A move names the storage root's path, never the candidate's or an absolute one.
+
+    Mutation: build `from`/`to` from `facts.path` (or with `..`) and the app applies
+    the move against a different tree than the plan measured - the refusal list's
+    `outside_root` exists because that is how it starts.
+    """
+    wrapper = build_own_wrapper(tmp_path / "own")
+    container = build_container(tmp_path / "container")
+    vault = build_vault(tmp_path / "vault")
+    facts_container = proposal_engine.measure(str(container), "import/Drop")
+    assert facts_container.rel.startswith("import/"), (
+        "this fixture is the nested one: the drop zone is where every move is measured from"
+    )
+    cases = [
+        (proposal_engine.measure(str(wrapper), VAULT_WRAPPER), "one-project"),
+        (facts_container, "split-top-folders"),
+        (proposal_engine.measure(str(vault), "Vault"), "one-project"),
+    ]
+    seen = 0
+    for facts, shape in cases:
+        for move in proposal_engine.arrange_moves(facts, shape):
+            seen += 1
+            assert move["kind"] in ("dir", "file")
+            for path in (move["from"], move["to"]):
+                assert path and not os.path.isabs(path) and not path.startswith("/"), (
+                    f"{path!r} is absolute: a move record is storage-relative"
+                )
+                assert ".." not in path.split("/"), f"{path!r} escapes the storage root"
+                assert not path.startswith(str(tmp_path)), (
+                    f"{path!r} carries the measured root: the API resolves it against its own"
+                )
+    assert seen >= 3, "the fixtures must actually produce moves, or this proves nothing"
+
+
+def test_the_arranged_text_prints_every_move(tmp_path: Path) -> None:
+    """Nothing prints that the move list does not back, and no move goes unprinted.
+
+    Mutation: print a move the list does not hold (the old `rename "..." -> "..."` and
+    `or keep the sort prefix as-is` lines) and the operator reads a plan the app will
+    never apply; keep `(no file moves)` on a split and the text denies its own moves.
+    """
+    wrapper = build_own_wrapper(tmp_path / "own")
+    container = build_container(tmp_path / "container")
+    vault = build_vault(tmp_path / "vault")
+    tower = build_series(tmp_path / "series")
+    facts_container = proposal_engine.measure(str(container), "import/Drop")
+    cases = [
+        (proposal_engine.measure(str(wrapper), VAULT_WRAPPER), "one-project"),
+        (proposal_engine.measure(str(vault), "Vault"), "one-project"),
+        (facts_container, "split-top-folders"),
+        (facts_container, "split-model-folders"),
+        (facts_container, "add-to-project"),
+        (facts_container, "git-project"),
+        (proposal_engine.measure(str(tower), "import/17_ClockworkMonster"), "one-project"),
+    ]
+    for facts, shape in cases:
+        moves = proposal_engine.arrange_moves(facts, shape)
+        lines = proposal_engine.arrange_proposal(facts, shape)
+        rendered = "\n".join(lines)
+        assert "(no file moves)" not in rendered, f"{shape} still denies its own moves: {rendered}"
+        for move in moves:
+            assert f'move "{move["from"]}" -> "{move["to"]}"' in lines, (
+                f"{shape} plans {move!r} but never prints it: {rendered}"
+            )
+        printed = [line for line in lines if line.startswith('move "')]
+        assert len(printed) == len(moves), (
+            f"{shape} printed {len(printed)} move line(s) for {len(moves)} move(s): {rendered}"
+        )
+
+
+def test_arrange_archive_names_one_product_folder(tmp_path: Path) -> None:
+    """An archive and its extracted twin must name ONE product folder.
+
+    The zip is the download this folder came out of, so `_source/` and the folder the
+    twin is dropped to are the same product. Mutation: drop the `wrapper_title` strip
+    and the zip unpacks into `Vault Archive_18.11.2026/` while its twin was arranged
+    to `Vault/` - two folders for one product (correction 8).
+    """
+    vault = build_vault(tmp_path)
+    archive = vault / VAULT_WRAPPER / VAULT_ZIP
+    facts = proposal_engine.measure_archive(str(archive), f"Vault/{VAULT_WRAPPER}/{VAULT_ZIP}")
+    assert proposal_engine.arrange_archive_moves(facts, "archive-project") == [{
+        "from": f"Vault/{VAULT_WRAPPER}/{VAULT_ZIP}",
+        "to": f"Vault/_source/{VAULT_ZIP}",
+        "kind": "file",
+    }]
+    rendered = "\n".join(proposal_engine.arrange_archive(facts, "archive-project"))
+    assert f'"Vault/_source/{VAULT_ZIP}"' in rendered
+    assert f'"{VAULT_WRAPPER}/_source/' not in rendered, (
+        f"the packaging named the product folder: {rendered}"
+    )
+    assert proposal_engine.arrange_archive_moves(facts, "archive-split") == [], (
+        "only the one-project shape files the archive: a split unpacks several folders"
+    )
+
+
+def test_plan_digest_is_the_same_plan_twice_and_changes_with_any_move() -> None:
+    """The plan id is identity: same plan, same id; any edit, a different id.
+
+    Mutation: hash a timestamp, the dict's repr or only the key, and `stale_plan`
+    either refuses an unchanged disk or accepts a plan whose moves were rewritten.
+    """
+    moves = [{"from": "import/Drop/Product A", "to": "import/Product A", "kind": "dir"}]
+    creates = [{"path": "import/Product A", "exists": True}]
+    first = proposal_engine.plan_digest("import/Drop", "split-top-folders", moves, creates)
+    assert first == proposal_engine.plan_digest(
+        "import/Drop", "split-top-folders", list(moves), list(creates)
+    ), "the same plan must hash the same on the second call"
+    assert re.fullmatch(r"[0-9a-f]{64}", first), f"a sha256 hex digest, got {first!r}"
+    changed = [
+        proposal_engine.plan_digest("import/Drop", "one-project", moves, creates),
+        proposal_engine.plan_digest("import/Other", "split-top-folders", moves, creates),
+        proposal_engine.plan_digest("import/Drop", "split-top-folders", [], creates),
+        proposal_engine.plan_digest("import/Drop", "split-top-folders", [
+            {"from": "import/Drop/Product B", "to": "import/Product A", "kind": "dir"},
+        ], creates),
+        proposal_engine.plan_digest("import/Drop", "split-top-folders", [
+            {"from": "import/Drop/Product A", "to": "import/Product B", "kind": "dir"},
+        ], creates),
+        proposal_engine.plan_digest("import/Drop", "split-top-folders", [
+            {"from": "import/Drop/Product A", "to": "import/Product A", "kind": "file"},
+        ], creates),
+        proposal_engine.plan_digest("import/Drop", "split-top-folders", moves, []),
+    ]
+    assert len(set(changed)) == len(changed), "two different plans collided"
+    assert first not in changed, "an edited plan kept the id of the plan it replaced"
 
 
 # --- git is behind a switch, and validate() is not a printer ---------------

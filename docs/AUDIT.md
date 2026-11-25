@@ -67,7 +67,7 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 55 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 57 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
@@ -90,6 +90,8 @@ could honestly reconstruct.
 | `bundle.create` | `POST /bundles/create` (one row per created bundle) | the bundle key: the storage-root-relative directory, or the zip's relative path | `{"project_id", "created", "assets_added", "assets_failed", "detector", "confidence", "name_only"}` - which rule matched and how sure it was, never the parsed documents | fail-loud: the project and its memberships are committed by shared services that own their sessions |
 | `bundle.dismiss` | `POST /bundles/dismiss` (one row per key that actually changed) | the bundle key | `{"dismissed"}` - `true` for a dismissal, `false` for its undo | fail-loud: the map lives in the appconfig store, which commits in its own session |
 | `bundle.enrich` | `POST /bundles/enrich` (one row per bundle whose page answered) | the bundle key | `{"thing_id", "source_url", "fields"}` - which fields the page supplied, never the page body or the cookie | fail-loud: the record lives in the appconfig store, which commits in its own session; a refusal writes no row |
+| `arrange.apply` | `POST /bundles/arrange` | the bundle key the plan was measured on | `{"arrange_id", "plan", "shape", "moves", "project_ids", "created_project", "done"}` - the plan the operator approved by echoing its id, and `done` is how many of `moves` landed, so a partial apply says so | fail-loud: the projects and the ledger are committed before the row is written, and the ledger is what a re-post resumes from |
+| `arrange.undo` | `POST /bundles/arrange/{arrange_id}/undo` | the bundle key the undone plan was measured on | `{"arrange_id", "plan", "shape", "moves", "projects_removed"}` - `moves` is how many landed moves were folded back, `projects_removed` the projects the arrange created and the undo dropped | fail-loud: the bytes are back and the rows restored before the row is written |
 | `trash.purge` | `POST /trash/purge` | `"trash"` | `{"purged", "bytes", "failed"}` from `trash_service.purge()` | fail-loud |
 | `settings.storage.update` | `POST /settings/storage` | `"storage_path_template"` | `{"from", "to"}` templates | fail-closed |
 | `settings.mount_import.update` | `POST /settings/mount-import` | `"mount_import"` | `{"enabled", "copy_files"}` | fail-closed |
@@ -258,8 +260,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 103 routes, 41
-of them `GET`; the remaining 62 split into 48 audited keys and 14 exempt keys.
+out of scope by construction: they change nothing. The matrix has 106 routes, 42
+of them `GET`; the remaining 64 split into 50 audited keys and 14 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without
@@ -610,7 +612,7 @@ administration).
 | Parameter | Type | Semantics |
 |---|---|---|
 | `actor` | string | exact match, case-insensitive (both sides lowered, value stripped) |
-| `action` | string | exact match, case-sensitive - one of the 52 names above |
+| `action` | string | exact match, case-sensitive - one of the 57 names above |
 | `target` | string | case-sensitive substring match; `%`, `_` and `\` are escaped, so it is a literal substring. An asset id also returns that asset's `asset.create` row, because creation's target is the new id |
 | `since` | string | `created_at >= value` |
 | `until` | string | `created_at <= value` |

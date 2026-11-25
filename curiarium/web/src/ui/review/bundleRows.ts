@@ -4,6 +4,9 @@
 
 import {
   ENRICH_MAX_KEYS,
+  type BundleArrangeMove,
+  type BundleArrangePlan,
+  type BundleArrangeRefusal,
   type BundleDetectCounts,
   type BundleDetectItem,
   type BundleMatch,
@@ -565,17 +568,20 @@ export function importShapes(row: BundleDetectItem): string[] {
   return importMatches(row).map(match => match.shape);
 }
 
-/** The shape a create would use: the operator's choice when the server still
- *  offers it AND can enact it, else the first enactable shape on offer. Asking
- *  the row rather than trusting the stored choice is what keeps a refetch that
- *  changed the offers - or a shape marked `creatable: false` - from sending a
- *  choice the server no longer accepts. If a row somehow offers nothing
- *  enactable, the first offered shape stands and the server refuses it with
- *  `needs-arrange` rather than the client crashing. */
+/** The shape the pane is offering: the operator's choice whenever the row still
+ *  offers it, and the first enactable shape on offer only when the choice is
+ *  gone. A refused-but-offered reading MUST survive here: it is exactly the
+ *  shape the arrange door exists for, and falling back to the recommendation
+ *  would make that door unreachable no matter which radio was chosen. Asking
+ *  the row rather than trusting the stored choice still keeps a refetch that
+ *  stopped offering it from sending a shape the server no longer knows. If a
+ *  row offers nothing enactable and nothing was chosen, the first offered shape
+ *  stands and the server refuses it with `needs-arrange` rather than the client
+ *  crashing. */
 export function activeShape(row: BundleDetectItem, chosen: string | undefined): string {
   const matches = importMatches(row);
   const chosenMatch = chosen === undefined ? undefined : matches.find(m => m.shape === chosen);
-  if (chosenMatch !== undefined && isEnactable(chosenMatch)) return chosenMatch.shape;
+  if (chosenMatch !== undefined) return chosenMatch.shape;
   const enactable = matches.find(isEnactable);
   return (enactable ?? matches[0]).shape;
 }
@@ -711,4 +717,55 @@ export function archiveLine(row: BundleDetectItem): string | null {
 export function typedName(names: Record<string, string>, row: BundleDetectItem): string {
   const name = names[row.key] ?? row.name_suggestion;
   return name.trim();
+}
+
+// Arranging: the moves a shape needs before it can be created at all. Every
+// function below is pure - the plan is the server's, and this module only says
+// what one of its lines reads as, never what the plan should have been.
+
+/** One move, with both paths quoted: a path may hold spaces, and the separator
+ *  between the two is the only thing that says which half is which. */
+export function arrangeMoveLine(move: BundleArrangeMove): string {
+  return `move "${move.from}" -> "${move.to}"`;
+}
+
+/** The server's operator sentence for one refusal, VERBATIM - including any
+ *  count in it, which is the server's own measurement of the tree it walked.
+ *  The client decided no refusal, so it writes no words for one: a sentence
+ *  rebuilt from `status`/`reason` here would drift from the detail the 409
+ *  carries, and an operator would read two explanations of one refusal. */
+export function arrangeRefusalLine(refusal: BundleArrangeRefusal): string {
+  return refusal.detail;
+}
+
+/** How many moves a previewed plan would make, or null when the payload carries
+ *  no move list at all. A zero is a real answer - `nothing_to_arrange` is a
+ *  refusal with its own sentence - so an absent list must never read as one. */
+export function arrangeMoveCount(plan: BundleArrangePlan): number | null {
+  const moves: BundleArrangeMove[] | undefined = plan.moves;
+  return Array.isArray(moves) ? moves.length : null;
+}
+
+/** That count's words, noun included so the one formatter owns the number here.
+ *  An unknown count reads `– moves` and never a fabricated `0`. */
+export function arrangeMoveCountLabel(count: number | null): string {
+  return `${formatReviewCount(count)} ${count === 1 ? "move" : "moves"}`;
+}
+
+/** Whether the chosen shape needs arranging before it can be created: the row
+ *  offers that shape AND the server cannot enact it yet. That is exactly when
+ *  the arrange door is the right button - an enactable shape is created, never
+ *  arranged - and it reads `isEnactable`, so this door and the `creatable:
+ *  false` note beside the radio cannot disagree about which shapes are in this
+ *  state. */
+export function isArrangable(row: BundleDetectItem, shape: string): boolean {
+  const match = importMatches(row).find(entry => entry.shape === shape);
+  return match !== undefined && !isEnactable(match);
+}
+
+/** Whether applying this plan would do nothing at all: no move and no directory
+ *  to create. The server refuses such a plan (`nothing_to_arrange`) rather than
+ *  applying an empty operation, so the pane may not offer the move either. */
+export function arrangeAppliesNothing(plan: BundleArrangePlan): boolean {
+  return plan.moves.length === 0 && plan.creates.length === 0;
 }

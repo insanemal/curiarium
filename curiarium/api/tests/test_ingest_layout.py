@@ -5,12 +5,15 @@ tree must show it or the app must not create it.* A directory nothing owns is a
 place the Files tree cannot reach: its bytes are on the volume and invisible in
 the UI, and no delete, rename or move can ever act on them.
 
-The measuring stick is ``unseeable_directories``: every directory under the
-storage root that is neither the storage root, nor a system directory
-(``thumbs``, ``bundles``, ``.incoming``, ``.trash``), nor the ``storage_path`` of
-some folder row. Each door - the ordinary upload, the linked-zip import and the
-in-library archive extract - is driven here and the measurement is asserted
-empty.
+The measuring stick is ``folder_service.unseeable_directories``: every directory
+under the storage root that is neither the storage root, nor a system directory
+(``folder_service.SYSTEM_DIRS``: ``thumbs``, ``bundles``, ``.incoming``,
+``.trash``), nor the ``storage_path`` of some folder row. Its twin
+``folder_service.stale_asset_paths`` measures the other direction: rows whose
+``storage_path`` names no file. Both helpers live in production so "rows agree
+with disk" has ONE implementation. Each door - the ordinary upload, the
+linked-zip import and the in-library archive extract - is driven here and both
+measurements are asserted empty.
 
 The archive door is deliberately two-step and is pinned that way instead of
 being pretended atomic: ``archive_service.extract_out`` writes a twin tree with
@@ -24,7 +27,7 @@ whole session, so rows and the template are restored at teardown).
 
 import zipfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,6 +36,7 @@ from sqlmodel import Session, select
 import archive_service
 import asset_service
 import db
+import folder_service
 import library_scan
 import seams
 import settings_service
@@ -42,10 +46,6 @@ from main import app
 from migrations import run_migrations
 from models import Asset, Folder
 from schemas.imports import ImportZipExtractRequest
-
-# Directories the library owns for itself: they hold derived or in-flight bytes,
-# never a user's folder, so the Files tree neither shows them nor should.
-SYSTEM_DIRS = {"thumbs", "bundles", ".incoming", ".trash"}
 
 ELECROW = "elecrow-7-inch-screen-console-model_files"
 ELECROW_BASENAMES = ["body-v201.stl", "body-v202.stl", "screen-bracket.stl", "stand.stl"]
@@ -61,32 +61,6 @@ def auth_header(client: TestClient) -> dict:
         return {}
     token = client.post("/login", json={"username": "admin", "password": "super-secret"}).json()["token"]
     return {"Authorization": f"Bearer {token}"}
-
-
-def registered_dirs(session: Session) -> set:
-    """Every directory a folder row claims."""
-    return {folder.storage_path for folder in session.exec(select(Folder)) if folder.storage_path}
-
-
-def unseeable_directories(root: Path) -> List[str]:
-    """Storage-relative directories on disk that no folder row names.
-
-    Sorted, so a failure prints the offenders in a stable order. A path whose
-    first segment is a system directory is skipped together with everything
-    under it.
-    """
-    with Session(engine) as session:
-        registered = registered_dirs(session)
-    offenders: List[str] = []
-    for path in root.rglob("*"):
-        if not path.is_dir():
-            continue
-        relative = path.relative_to(root).as_posix()
-        if relative.split("/")[0] in SYSTEM_DIRS:
-            continue
-        if relative not in registered:
-            offenders.append(relative)
-    return sorted(offenders)
 
 
 def create_folder(client: TestClient, headers: dict, name: str, parent_id: Optional[str] = None) -> dict:
@@ -152,7 +126,8 @@ def test_a_plain_upload_creates_no_directory_the_tree_cannot_show(isolated_stora
             asset = upload(client, headers, basename, folder["id"])
             assert asset["storage_path"] == f"Props/{basename}"
 
-    assert unseeable_directories(isolated_storage) == []
+    assert folder_service.unseeable_directories(isolated_storage) == []
+    assert folder_service.stale_asset_paths() == []
 
 
 def test_an_elecrow_folder_upload_lands_flat_in_one_directory(isolated_storage: Path) -> None:
@@ -168,8 +143,9 @@ def test_an_elecrow_folder_upload_lands_flat_in_one_directory(isolated_storage: 
     assert directory.is_dir()
     assert [path for path in directory.rglob("*") if path.is_dir()] == []
     # Exactly one directory, the folder's own: no per-file directories beside it.
-    assert [path.name for path in isolated_storage.iterdir() if path.is_dir() and path.name not in SYSTEM_DIRS] == [ELECROW]
-    assert unseeable_directories(isolated_storage) == []
+    assert [path.name for path in isolated_storage.iterdir() if path.is_dir() and path.name not in folder_service.SYSTEM_DIRS] == [ELECROW]
+    assert folder_service.unseeable_directories(isolated_storage) == []
+    assert folder_service.stale_asset_paths() == []
 
 
 def test_a_path_carrying_upload_creates_only_visible_directories(isolated_storage: Path) -> None:
@@ -181,7 +157,8 @@ def test_a_path_carrying_upload_creates_only_visible_directories(isolated_storag
             asset = upload(client, headers, f"{ELECROW}/{basename}", folder["id"])
             assert asset["storage_path"] == f"{ELECROW}/{basename}"
 
-    assert unseeable_directories(isolated_storage) == []
+    assert folder_service.unseeable_directories(isolated_storage) == []
+    assert folder_service.stale_asset_paths() == []
 
 
 def test_a_deduped_folder_writes_where_its_row_points(isolated_storage: Path) -> None:
@@ -201,7 +178,8 @@ def test_a_deduped_folder_writes_where_its_row_points(isolated_storage: Path) ->
 
     assert asset["storage_path"] == "Foo (2)/cube.stl"
     assert (isolated_storage / "Foo (2)" / "cube.stl").is_file()
-    assert unseeable_directories(isolated_storage) == []
+    assert folder_service.unseeable_directories(isolated_storage) == []
+    assert folder_service.stale_asset_paths() == []
 
 
 def test_an_ancestor_name_in_the_upload_path_is_not_silently_shortened(isolated_storage: Path) -> None:
@@ -226,7 +204,8 @@ def test_an_ancestor_name_in_the_upload_path_is_not_silently_shortened(isolated_
     assert lone_ancestor["storage_path"] == "Parts/elecrow/Parts/x.stl"
     assert base_by_row_name["storage_path"] == "Parts/elecrow/z.stl"
     assert base_by_full_path["storage_path"] == "Parts/elecrow/y.stl"
-    assert unseeable_directories(isolated_storage) == []
+    assert folder_service.unseeable_directories(isolated_storage) == []
+    assert folder_service.stale_asset_paths() == []
 
 
 def test_a_nested_deduped_leaf_can_be_spelled_either_way(isolated_storage: Path) -> None:
@@ -249,7 +228,8 @@ def test_a_nested_deduped_leaf_can_be_spelled_either_way(isolated_storage: Path)
 
     assert by_row_name["storage_path"] == "Foo/Foo (2)/a.stl"
     assert by_deduped_leaf["storage_path"] == "Foo/Foo (2)/b.stl"
-    assert unseeable_directories(isolated_storage) == []
+    assert folder_service.unseeable_directories(isolated_storage) == []
+    assert folder_service.stale_asset_paths() == []
 
 
 # --- the linked-zip import door --------------------------------------------
@@ -283,7 +263,8 @@ def test_the_zip_door_registers_every_directory_it_writes(isolated_storage: Path
 
     assert [asset.storage_path for asset in assets] == ["elecrow-files/body-v201.stl", "elecrow-files/sub/x.stl"]
     assert failed == ["__MACOSX/._junk"]
-    assert unseeable_directories(isolated_storage) == []
+    assert folder_service.unseeable_directories(isolated_storage) == []
+    assert folder_service.stale_asset_paths() == []
 
 
 # --- the in-library archive extract door -----------------------------------
@@ -310,8 +291,37 @@ def test_the_archive_extract_door_becomes_visible_after_a_scan(
     assert outcome.files == 2
     assert outcome.scan_started is False
     # Before the scan the twin tree is on disk and nothing owns it.
-    assert unseeable_directories(storage) == ["elecrow", "elecrow/sub"]
+    assert folder_service.unseeable_directories(storage) == ["elecrow", "elecrow/sub"]
 
     library_scan.scan_storage_root()
 
-    assert unseeable_directories(storage) == []
+    assert folder_service.unseeable_directories(storage) == []
+    assert folder_service.stale_asset_paths() == []
+
+
+# --- the measuring stick catches a defect ----------------------------------
+
+
+def test_the_stale_helper_catches_a_row_with_no_bytes(isolated_storage: Path) -> None:
+    """A defect injected behind the app's back is named, not silently passed.
+
+    Without this, the empty assertion in every door above could be a tautology:
+    a helper that reports nothing would pass them all. Deleting the bytes an
+    asset row names is exactly the state a half-finished move leaves, and the
+    helper must name the row's storage path, sorted.
+    """
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        folder = create_folder(client, headers, "Props")
+        first = upload(client, headers, "body-v201.stl", folder["id"])
+        second = upload(client, headers, "stand.stl", folder["id"])
+
+    assert folder_service.stale_asset_paths() == []
+
+    (isolated_storage / first["storage_path"]).unlink()
+    (isolated_storage / second["storage_path"]).unlink()
+
+    # The directory still exists and its row still owns it, so only half the
+    # stick moves: the rows with no bytes are named, the directory is still seen.
+    assert folder_service.unseeable_directories(isolated_storage) == []
+    assert folder_service.stale_asset_paths() == ["Props/body-v201.stl", "Props/stand.stl"]

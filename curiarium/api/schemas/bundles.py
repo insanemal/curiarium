@@ -8,12 +8,20 @@ generic `CountsOut` would collide with a future domain.
 
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .batch import BatchFailure
 
 __all__ = [
   "BundleArchiveOut",
+  "BundleArrangeAppliedOut",
+  "BundleArrangeCreateOut",
+  "BundleArrangeMoveOut",
+  "BundleArrangePlanOut",
+  "BundleArrangeRefusalOut",
+  "BundleArrangeReportOut",
+  "BundleArrangeRequest",
+  "BundleArrangeUndoOut",
   "BundleCoverOut",
   "BundleCreateItemIn",
   "BundleCreateItemOut",
@@ -337,3 +345,112 @@ class BundleEnrichResponse(BaseModel):
   unavailable: int = 0
   unknown: int = 0
   results: List[BundleEnrichItemOut] = []
+
+
+class BundleArrangeMoveOut(BaseModel):
+  """One move an arrangement would make, its two ends storage-root-relative.
+
+  ``from`` is a Python keyword, so the field is ``from_`` with an alias. The alias
+  is what the wire says and what the OpenAPI schema renders; a bare ``from_``
+  leaking onto the wire is the bug this pair exists to not have.
+  """
+
+  model_config = ConfigDict(populate_by_name=True)
+
+  from_: str = Field(alias="from", serialization_alias="from")
+  to: str
+  # file | dir - read off the disk when the plan was measured.
+  kind: str
+
+
+class BundleArrangeCreateOut(BaseModel):
+  """A destination directory the moves imply, and whether it is already there."""
+
+  path: str
+  exists: bool
+
+
+class BundleArrangeRefusalOut(BaseModel):
+  """One reason the arrangement cannot be applied, with its own status.
+
+  ``plan`` returns these instead of raising: a 200 with a non-empty list is the
+  honest preview, and ``apply`` raises the first one.
+  """
+
+  status: int
+  reason: str
+  detail: str
+
+
+class BundleArrangeReportOut(BaseModel):
+  """The row's own verdict about the shape being previewed.
+
+  ``creatable`` means the row already recommends this shape and nothing refuses
+  it; a ``False`` here beside a non-empty ``moves`` is exactly the preview a
+  client needs before approving an arrangement the create path cannot enact.
+  """
+
+  creatable: bool = False
+  blocked_reason: Optional[str] = None
+
+
+class BundleArrangePlanOut(BaseModel):
+  """The arrangement preview the apply echoes back by ``plan_id``.
+
+  ``text`` is rendered from ``moves``, never beside it, so every sentence the
+  operator reads is backed by a record in the list.
+  """
+
+  key: str
+  shape: str
+  plan_id: str
+  moves: List[BundleArrangeMoveOut] = []
+  text: List[str] = []
+  creates: List[BundleArrangeCreateOut] = []
+  refusals: List[BundleArrangeRefusalOut] = []
+  report: BundleArrangeReportOut
+
+
+class BundleArrangeRequest(BaseModel):
+  """The previewed plan, replayed: the id proves the tree has not changed since."""
+
+  model_config = ConfigDict(extra="forbid")
+  key: str
+  shape: str
+  plan_id: str
+
+
+class BundleArrangeAppliedOut(BaseModel):
+  """What one apply did: its ledger id, its projects and the moves it landed.
+
+  ``already_applied`` is the re-post's answer and says nothing moved a second time.
+  """
+
+  key: str
+  shape: str
+  plan_id: str
+  arrange_id: str
+  project_id: Optional[str] = None
+  project_ids: List[str] = []
+  applied: bool
+  already_applied: bool = False
+  moves: int = 0
+  unseeable: List[str] = []
+  stale: List[str] = []
+
+
+class BundleArrangeUndoOut(BaseModel):
+  """What one undo restored, and whether the project it created went with it.
+
+  ``project_removed`` is False when membership changed after the arrange: the tree
+  is restored, the project is left where it is, and the response says so.
+  """
+
+  arrange_id: str
+  key: str
+  undone: bool
+  moves: int = 0
+  project_removed: bool = False
+  projects_removed: List[str] = []
+  unseeable: List[str] = []
+  stale: List[str] = []

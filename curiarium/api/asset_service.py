@@ -404,6 +404,12 @@ def _move_without_clobber(old_path: Path, new_path: Path) -> bool:
     lock and renames; the lock serialises this process's moving threads only,
     which is why hardlinking is the default and this is the fallback. Either way
     an occupied destination is never overwritten: False is returned.
+
+    A directory also arrives here and takes the fallback: ``os.link`` on a
+    directory raises ``EPERM``, which ``_HARDLINK_UNSUPPORTED_ERRNOS`` treats as
+    "this filesystem cannot hardlink", so the locked ``os.rename`` moves the
+    whole tree. That single errno is what makes a directory move work without a
+    second mover or a copy path.
     """
     try:
         _hardlink_move(old_path, new_path)
@@ -411,6 +417,8 @@ def _move_without_clobber(old_path: Path, new_path: Path) -> bool:
     except FileExistsError:
         return False
     except OSError as error:
+        # EPERM is the directory path: os.link refuses directories outright, and
+        # the rename below is the only way to move one without a copy tree.
         if error.errno not in _HARDLINK_UNSUPPORTED_ERRNOS:
             raise
     with _FALLBACK_MOVE_LOCK:
@@ -421,7 +429,16 @@ def _move_without_clobber(old_path: Path, new_path: Path) -> bool:
 
 
 def move_managed_file(old_path: Path, new_path: Path) -> bool:
-    """Move one managed file and prune the directory it vacated.
+    """Move one managed file or directory and prune the directory it vacated.
+
+    This is the ONE mover: a file, a folder and an arrange's directory move all
+    reach here, and there is no second mover and no copy path. A directory is
+    moved whole with its subtree - the arbiter is ``os.link``, which raises
+    ``EPERM`` on a directory, and the locked ``os.rename`` fallback then renames
+    the tree in one step. ``EXDEV`` (and any other error the fallback raises) is
+    not swallowed: it propagates as a bare ``OSError`` for the caller to
+    translate, because a cross-device move would need the copy path this
+    function deliberately does not have.
 
     Only an explicit rename (same directory) or a folder move reaches here; a
     metadata edit never does, which is what keeps the storage template from
