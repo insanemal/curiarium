@@ -97,7 +97,7 @@ def extract_entries(tmp_path: Path, entries: List[str], title: Optional[str] = N
 def folder_path_of(asset: Asset) -> str:
     """The asset's folder as a slash path, `Unassigned` for a root asset."""
     with Session(engine) as session:
-        return "/".join(asset_service.folder_segments(session, asset.folder_id))
+        return asset_service.folder_relative_path(session, asset.folder_id)
 
 
 # --- per-entry names --------------------------------------------------------

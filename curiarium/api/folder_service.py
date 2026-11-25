@@ -183,20 +183,35 @@ def get_or_create_child(parent_id: Optional[str], name: str) -> tuple[Folder, bo
             return existing, False
 
 
-def _drop_repeated_base_segments(segments: list[str], accepted: set[str], at_most: int) -> list[str]:
-    """Drop the leading incoming segments that merely spell the base again.
+def _drop_repeated_base_segments(segments: list[str], base_segments: Sequence[str], base_name: str) -> list[str]:
+    """Drop the leading incoming segments that spell the base itself, and no more.
 
-    Measured necessity: without this, uploading `elecrow-files/x.stl` into the
+    Measured necessity: without a drop, uploading `elecrow-files/x.stl` into the
     folder named `elecrow-files` created `elecrow-files (2)/elecrow-files/`,
     because the base's directory leaf is deduped `(2)` while its row name is not,
     so a leading segment equal to either spelling is the base itself spelled
-    again. A base you are inside can be spelled at most once, which is what
-    `at_most` bounds the drops to.
+    again rather than a child of it.
+
+    The drop is bounded to the base's own identity - never to an ancestor name.
+    An earlier ``accepted`` set held every segment of the base's relative path
+    with ``at_most=len(base_segments)``, so uploading `Parts/x.stl` into
+    `Parts/elecrow` silently dropped `Parts/` and landed the file at
+    `Parts/elecrow/x.stl`, although `Parts` there is a real child folder the
+    sender asked for. The base can still be spelled two ways, neither of which
+    reaches above it: as its *full* relative path (one exact case-insensitive
+    chain), or as at most ONE leading segment equal to its row name or the leaf
+    of its directory - names that differ only when the directory is deduped
+    (row `Foo` at path `Foo (2)`). Anything else is kept.
     """
     remaining = list(segments)
-    for _ in range(at_most):
-        if not remaining or remaining[0].casefold() not in accepted:
-            break
+    folded_base = [segment.casefold() for segment in base_segments]
+    if folded_base and [segment.casefold() for segment in remaining[: len(folded_base)]] == folded_base:
+        return remaining[len(folded_base):]
+    accepted = {base_name.casefold()}
+    if base_segments:
+        accepted.add(base_segments[-1].casefold())
+    accepted.discard("")
+    if remaining and remaining[0].casefold() in accepted:
         remaining.pop(0)
     return remaining
 
@@ -209,10 +224,12 @@ def resolve_folder_chain(base_folder_id: Optional[str], segments: Sequence[str])
 
     The base folder is converged first (its NULL-path ancestors are persisted),
     so the accepted spellings of "where we already are" are real directory
-    names. A leading segment that spells the base - its row name or the leaf of
-    its directory, deduped or not - is dropped rather than made into a child:
-    see `_drop_repeated_base_segments` for the measurement that demands it.
-    With no base folder nothing is dropped, because nothing is being repeated.
+    names. The leading segments that spell the base - its full relative path as
+    one exact chain, else at most one segment equal to its row name or the leaf
+    of its directory - are dropped rather than made into a child: see
+    `_drop_repeated_base_segments` for the measurement that demands it and the
+    bound that keeps an *ancestor* name from being dropped by mistake. With no
+    base folder nothing is dropped, because nothing is being repeated.
 
     Empty `segments` returns the base untouched and never touches the disk.
     """
@@ -221,7 +238,7 @@ def resolve_folder_chain(base_folder_id: Optional[str], segments: Sequence[str])
     if not segments:
         return base_folder_id, []
 
-    accepted: set[str] = set()
+    base_name = ""
     base_segments: list[str] = []
     if base_folder_id:
         with Session(engine) as session:
@@ -230,9 +247,8 @@ def resolve_folder_chain(base_folder_id: Optional[str], segments: Sequence[str])
             base_name = base.name if base is not None else ""
             session.commit()
         base_segments = [segment for segment in relative.split("/") if segment]
-        accepted = {base_name.casefold()} | {segment.casefold() for segment in base_segments}
 
-    remaining = _drop_repeated_base_segments(list(segments), accepted, len(base_segments))
+    remaining = _drop_repeated_base_segments(list(segments), base_segments, base_name)
     current = base_folder_id
     created: list[str] = []
     for segment in remaining:

@@ -253,7 +253,11 @@ def test_stream_entry_returns_the_cumulative_total_and_honours_both_caps(
 
 
 def test_entry_filename_keeps_only_the_last_segment() -> None:
-    """``sanitize_filename`` alone would flatten ``a/b/c.stl`` into ``a_b_c.stl``."""
+    """A member's path is its placement; its leaf is its filename.
+
+    ``sanitize_filename`` used to flatten ``a/b/c.stl`` into ``a_b_c.stl``, which
+    is the silent rename splitting the leaf out exists to avoid.
+    """
     assert entry_policy.entry_filename("a/b/c.stl") == "c.stl"
     assert entry_policy.entry_filename("a_b.stl") == "a_b.stl"
 
@@ -261,9 +265,9 @@ def test_entry_filename_keeps_only_the_last_segment() -> None:
 def test_entry_member_segments_keeps_the_tree_and_refuses_padded_dots() -> None:
     """Rendering per segment is also what creates the ``.``/``..`` segments it refuses.
 
-    ``sanitize_filename`` strips whitespace and NULs before taking the basename,
-    so each spelling below renders a dot segment that the exact-match guard in
-    ``normalize_zip_entry_path`` would not have caught.
+    The renderer that used to flatten ``a/b/c.stl`` stripped whitespace and NULs
+    first, so each spelling below rendered a dot segment that the exact-match
+    guard in ``normalize_zip_entry_path`` would not have caught.
     """
     assert entry_policy.entry_member_segments("a/b/c.stl") == ["a", "b", "c.stl"]
 

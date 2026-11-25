@@ -204,6 +204,54 @@ def test_a_deduped_folder_writes_where_its_row_points(isolated_storage: Path) ->
     assert unseeable_directories(isolated_storage) == []
 
 
+def test_an_ancestor_name_in_the_upload_path_is_not_silently_shortened(isolated_storage: Path) -> None:
+    """Only the base folder may be dropped from an incoming path, never an ancestor.
+
+    The drop is bounded to the base's own identity. A leading segment that names
+    an *ancestor* of the base (here ``Parts`` above ``Parts/elecrow``) is a real
+    child folder the sender asked for, and dropping it would be the silent
+    rename this ticket exists to kill.
+    """
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        parts = create_folder(client, headers, "Parts")
+        elecrow = create_folder(client, headers, "elecrow", parts["id"])
+        assert elecrow["storage_path"] == "Parts/elecrow"
+
+        lone_ancestor = upload(client, headers, "Parts/x.stl", elecrow["id"])
+        base_by_row_name = upload(client, headers, "elecrow/z.stl", elecrow["id"])
+        base_by_full_path = upload(client, headers, "Parts/elecrow/y.stl", elecrow["id"])
+
+    # The new pin: this used to land at 'Parts/elecrow/x.stl'.
+    assert lone_ancestor["storage_path"] == "Parts/elecrow/Parts/x.stl"
+    assert base_by_row_name["storage_path"] == "Parts/elecrow/z.stl"
+    assert base_by_full_path["storage_path"] == "Parts/elecrow/y.stl"
+    assert unseeable_directories(isolated_storage) == []
+
+
+def test_a_nested_deduped_leaf_can_be_spelled_either_way(isolated_storage: Path) -> None:
+    """One segment, not the whole chain, is what the deduped-leaf spelling drops.
+
+    The base here is the second ``Foo``: row name ``Foo``, directory leaf
+    ``Foo (2)``. Both spellings name the base itself, so exactly one leading
+    segment goes; the file still lands inside ``Foo (2)``.
+    """
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        outer = create_folder(client, headers, "Foo")
+        first = create_folder(client, headers, "Foo", outer["id"])
+        base = create_folder(client, headers, "Foo", outer["id"])
+        assert first["storage_path"] == "Foo/Foo"
+        assert base["storage_path"] == "Foo/Foo (2)"
+
+        by_row_name = upload(client, headers, "Foo/a.stl", base["id"])
+        by_deduped_leaf = upload(client, headers, "Foo (2)/b.stl", base["id"])
+
+    assert by_row_name["storage_path"] == "Foo/Foo (2)/a.stl"
+    assert by_deduped_leaf["storage_path"] == "Foo/Foo (2)/b.stl"
+    assert unseeable_directories(isolated_storage) == []
+
+
 # --- the linked-zip import door --------------------------------------------
 
 

@@ -24,7 +24,7 @@ from asset_file_service import delete_all_asset_files
 from auth import AuthContext
 from config import IMPORT_MAX_BYTES, MOUNT_IMPORT_PATH
 from db import STORAGE, THUMBS, engine
-from file_utils import build_import_filename, mime_from_content_type, sanitize_filename
+from file_utils import FilenameHasPath, build_import_filename, mime_from_content_type, sanitize_filename
 from models import Asset, Folder
 from prepared_print import inspect_prepared_print
 from schemas import ImportRequest
@@ -102,19 +102,6 @@ def sample_storage_path(template: str) -> str:
     )
 
 
-def folder_segments(session: Session, folder_id: Optional[str]) -> List[str]:
-    if not folder_id:
-        return ["Unassigned"]
-    segments: List[str] = []
-    current = session.get(Folder, folder_id)
-    guard = set()
-    while current and current.id not in guard:
-        guard.add(current.id)
-        segments.insert(0, sanitize_path_segment(current.name, "Folder"))
-        current = session.get(Folder, current.parent_id) if current.parent_id else None
-    return segments or ["Unassigned"]
-
-
 def folder_relative_path(session: Session, folder_id: Optional[str]) -> str:
     """The directory a folder's own row names, converged; `Unassigned` at root.
 
@@ -180,10 +167,25 @@ class AssetFilenameError(HTTPException):
 
 
 def filename_for_model_name(name: str, current_filename: str) -> str:
+    """The filename `name` takes, keeping the stored file's own extension.
+
+    The extension comes from `current_filename`, the row's own value, and the
+    two doors that reach here (`POST /asset/{id}/rename` and the metadata
+    editor) answer 400 rather than the 500 a bare `ValueError` becomes: a
+    backslash is a legal POSIX filename character, so `Path("thing.stl\\v2")`
+    has the suffix `.stl\\v2` and the renderer refuses it. The row's filename is
+    what is wrong, so the 400 names it rather than the new name being applied.
+    """
     extension = Path(current_filename or "").suffix
     if not extension:
         raise AssetFilenameError()
-    return sanitize_filename(f"{sanitize_path_segment(name, 'Model')}{extension}")
+    try:
+        return sanitize_filename(f"{sanitize_path_segment(name, 'Model')}{extension}")
+    except FilenameHasPath:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Asset filename must not contain a path: {current_filename!r}",
+        ) from None
 
 
 def model_name_for_rename(name: str, current_filename: str) -> str:

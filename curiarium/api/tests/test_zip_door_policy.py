@@ -318,7 +318,7 @@ def test_a_real_scan_after_the_archive_extract_registers_no_junk_asset_or_folder
     assert filenames.isdisjoint({"extra.stl", "trashed.stl", ".DS_Store", "Thumbs.db", "._part.stl"})
     assert {folder.name for folder in folders}.isdisjoint({"__MACOSX", "$RECYCLE.BIN"})
     with Session(engine) as session:
-        full_paths = ["/".join(asset_service.folder_segments(session, folder.id)) for folder in folders]
+        full_paths = [asset_service.folder_relative_path(session, folder.id) for folder in folders]
     assert all("__MACOSX" not in path and "$RECYCLE.BIN" not in path for path in full_paths), full_paths
 
 

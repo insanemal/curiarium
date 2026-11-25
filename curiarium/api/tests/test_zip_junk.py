@@ -175,7 +175,7 @@ def state() -> dict:
 
 def folder_paths(folder_ids: set[str]) -> set[str]:
     with Session(engine) as session:
-        return {"/".join(asset_service.folder_segments(session, folder_id)) for folder_id in folder_ids}
+        return {asset_service.folder_relative_path(session, folder_id) for folder_id in folder_ids}
 
 
 # --- the predicate ----------------------------------------------------------
