@@ -83,6 +83,23 @@ export type BundleEnrichment = {
  *  drift into a request the server would reject. */
 export const ENRICH_MAX_KEYS = 25;
 
+/** One of the folder shapes a row could be imported as, with the rule that
+ *  matched it and the counts and groups THAT shape would produce. The server
+ *  serves them strongest-first, with `manual` (import everything in the folder)
+ *  last, so the first entry is its recommendation and the pane offers the rest
+ *  as an override. */
+export type BundleMatch = {
+  shape: string;
+  rule: string;
+  confidence: string;
+  model_count: number;
+  image_count: number;
+  text_count: number;
+  other_count: number;
+  groups?: BundleGroup[];
+  note?: string | null;
+};
+
 /** One detected bundle. `status` and `confidence` are orthogonal. */
 export type BundleDetectItem = {
   key: string;
@@ -107,6 +124,11 @@ export type BundleDetectItem = {
   // fills it; the review detail pane renders the breakdown from it, while the
   // grouped *project* presentation and the variant filter are still C3/Mf-aaqi.
   groups?: BundleGroup[];
+  // OPTIONAL on purpose, exactly like the field above: fixtures and cached
+  // payloads written before the chooser existed omit it, and a reader must
+  // treat that as "the recommendation is the only shape on offer" rather than
+  // as an error or an empty offer. The first entry is the recommendation.
+  matches?: BundleMatch[];
   cover: BundleCover;
   assets_total: number;
   status: string;
@@ -203,6 +225,10 @@ export type BundleCreateItem = {
    *  the field is absent. OMITTED entirely when nothing is excluded, so every
    *  existing row's request body stays byte-identical. */
   exclude_groups?: string[];
+  /** The operator's own choice: one of the row's `matches` shapes. OMITTED when
+   *  the server's recommendation stands, so an untouched row's request body is
+   *  the one it always was. */
+  shape?: string | null;
 };
 
 export type BundleCreateItemResult = {

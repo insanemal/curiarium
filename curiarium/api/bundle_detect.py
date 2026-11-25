@@ -205,8 +205,10 @@ SHAPE_ARCHIVE_ROOT = "archive-root"
 # The two move together only when a table moves. `2026-11-07.0` is the case where
 # they do not: Mf-wd3v changed WHICH listing the archive-owned promotion is judged
 # on, so a report taken at it offers a different row, while every table below is
-# byte-identical to `2026-11-05.2` and the stamp must NOT move.
-RULE_SET_VERSION = "2026-11-07.0"
+# byte-identical to `2026-11-05.2` and the stamp must NOT move. `2026-11-25.0`
+# moved the tables: DETECTOR_MANUAL and SHAPE_MANUAL joined the stamp, so version
+# and stamp move together by construction.
+RULE_SET_VERSION = "2026-11-25.0"
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"
@@ -230,6 +232,13 @@ SHAPE_ID_NAME = "id-name"
 SHAPE_GENERIC = "generic"
 DETECTOR_TITLE_NAME = "title-name"
 SHAPE_TITLE_NAME = "title-name"
+# The manual row: a directory no rule offers, offered as the SCOPE "everything
+# under this path" rather than as a claim about what it is. Detector and shape are
+# both ``manual`` so a report can say the row came from the operator's choice
+# rather than from a rule, and provenance stays ``None`` by construction - the
+# same restraint every ``_name_only_facts`` row makes.
+DETECTOR_MANUAL = "manual"
+SHAPE_MANUAL = "manual"
 
 # R5's exclusion list: names that say "a part of a thing", never "a thing". A
 # hand extraction and a vendor both ship these as payload directories, so
@@ -437,6 +446,7 @@ def rule_set_tables() -> dict:
         "DETECTOR_GENERIC": DETECTOR_GENERIC,
         "DETECTOR_TITLE_NAME": DETECTOR_TITLE_NAME,
         "DETECTOR_ARCHIVE_BUNDLE": DETECTOR_ARCHIVE_BUNDLE,
+        "DETECTOR_MANUAL": DETECTOR_MANUAL,
         # Confidences.
         "CONFIDENCE_HIGH": CONFIDENCE_HIGH,
         "CONFIDENCE_MEDIUM": CONFIDENCE_MEDIUM,
@@ -450,6 +460,7 @@ def rule_set_tables() -> dict:
         "SHAPE_GENERIC": SHAPE_GENERIC,
         "SHAPE_TITLE_NAME": SHAPE_TITLE_NAME,
         "SHAPE_ARCHIVE_ROOT": SHAPE_ARCHIVE_ROOT,
+        "SHAPE_MANUAL": SHAPE_MANUAL,
         # Suffix tables and shape bounds.
         "MODEL_SUFFIXES": sorted(MODEL_SUFFIXES),
         "IMAGE_SUFFIXES": sorted(IMAGE_SUFFIXES),
@@ -602,6 +613,25 @@ class Detection:
 
     facts: Optional[BundleFacts]
     refusal: Optional[str]
+
+
+@dataclass(frozen=True)
+class ShapeMatch:
+    """One shape a snapshot could be read as, with the rule that offered it.
+
+    A report row answers with a LIST of these: ``matches[0]`` is the shape the
+    row recommends (exactly the row's own detector/confidence/metadata_shape),
+    the rest are the other shapes the same listing satisfies, and the manual
+    entry is the operator's "everything under this path" answer - always present,
+    and last unless the recommendation itself is manual.
+    """
+
+    shape: str
+    rule: str
+    confidence: str
+    counts: BundleCounts
+    groups: Tuple[BundleGroup, ...] = ()
+    note: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1900,3 +1930,109 @@ def compound_bundle_facts(snapshot: BundleSnapshot) -> Optional[BundleFacts]:
         _model_entries(snapshot),
     )
     return replace(facts, groups=groups)
+
+
+# --- the manual shape: a directory offered as a SCOPE (Mf-z643) --------------
+#
+# Detection is no longer a gatekeeper: every path is importable, and a directory
+# the rules refused is still offerable as "everything under this path". Manual is
+# the SHAPE of that offer, never a claim about provenance - the creator, licence,
+# URL and thing id stay ``None`` exactly as they do on every name-only row,
+# because "the operator chose this folder" says nothing about who made it or what
+# it may be reused for.
+
+
+def manual_facts(snapshot: BundleSnapshot) -> BundleFacts:
+    """The SCOPE facts for a directory: everything under this path, nothing claimed.
+
+    Manual is the shape of an offer, never a statement about what the directory IS.
+    The counts describe the whole subtree the caller handed in, the title is the
+    folder's display name, and every provenance field is ``None`` by construction
+    (``_name_only_facts``) - a scope says where a project should start, never who
+    made its files or what licence they carry. The rule that refused the path is
+    the row's ``note`` (``shape_matches``), so the evidence stays recoverable
+    without turning a refusal into a provenance claim.
+    """
+    return _name_only_facts(
+        DETECTOR_MANUAL,
+        CONFIDENCE_LOW,
+        SHAPE_MANUAL,
+        snapshot,
+        _counts(snapshot),
+        _cover_entry(snapshot),
+        _model_entries(snapshot),
+    )
+
+
+def _match_of(facts: BundleFacts) -> ShapeMatch:
+    """One ``BundleFacts`` as the shape it answers with; nothing is re-derived."""
+    return ShapeMatch(
+        shape=facts.metadata_shape,
+        rule=facts.detector,
+        confidence=facts.confidence,
+        counts=facts.counts,
+        groups=facts.groups,
+    )
+
+
+def _manual_match(snapshot: BundleSnapshot, manual_note: Optional[str]) -> ShapeMatch:
+    """The manual entry: the scope's counts, the refusing rule, and LOW confidence."""
+    facts = manual_facts(snapshot)
+    return ShapeMatch(
+        shape=facts.metadata_shape,
+        rule=manual_note or DETECTOR_MANUAL,
+        confidence=CONFIDENCE_LOW,
+        counts=facts.counts,
+        groups=facts.groups,
+        note=manual_note,
+    )
+
+
+def shape_matches(
+    snapshot: BundleSnapshot,
+    docs: Mapping[str, str],
+    recommended: BundleFacts,
+    manual_note: Optional[str] = None,
+    *,
+    paired: bool = False,
+) -> Tuple[ShapeMatch, ...]:
+    """Every shape this listing satisfies, FIRST the one the row recommends.
+
+    ``matches[0]`` is ``recommended`` byte-for-byte (shape, rule, confidence and
+    groups), which is what lets a report row assert that its own detector,
+    confidence and ``metadata_shape`` are the first choice rather than one of many
+    equal answers. The rest are added in rule order - R1/R2/R4/R3, R6, R5, R7, and
+    the promotion only when ``paired`` says an archive owns the directory - with
+    the first shape to claim a name winning. The manual entry is always present:
+    the operator can always choose "everything under this path", whatever the rules
+    answered, and it is appended LAST unless the recommendation itself is manual -
+    then the first entry IS that manual entry (note included) and no second one is
+    appended.
+
+    Pure on purpose, like every rule above it: it reads the snapshot and the docs
+    it was handed, never disk or a database, and an empty ``docs`` is simply a
+    listing with no documents rather than an error. ``recommended`` is never
+    mutated - it is copied field by field into the first entry.
+    """
+    manual = _manual_match(snapshot, manual_note)
+    matches: List[ShapeMatch] = [manual] if recommended.metadata_shape == SHAPE_MANUAL else [_match_of(recommended)]
+    seen = {match.shape for match in matches}
+
+    def add(facts: Optional[BundleFacts]) -> None:
+        if facts is None:
+            return
+        match = _match_of(facts)
+        if match.shape in seen:
+            return
+        seen.add(match.shape)
+        matches.append(match)
+
+    add(detect_bundle_decision(snapshot, docs).facts)
+    add(single_root_archive_facts(snapshot))
+    add(title_name_facts(snapshot))
+    add(compound_bundle_facts(snapshot))
+    if paired:
+        add(archive_owned_facts(snapshot))
+    if recommended.metadata_shape != SHAPE_MANUAL:
+        matches.append(manual)
+    return tuple(matches)

@@ -202,6 +202,10 @@ def serialise_report(root, *, limit=None, command=None, database_path=None) -> d
         # row - only a marker has one).
         serialised["groups"] = row["groups"]
         serialised["shape"] = row["metadata_shape"]
+        # Every shape the listing satisfies, recommended first and the manual
+        # scope last. Recorded so two artifacts show which alternatives were on
+        # offer, not only the answer the row happened to recommend.
+        serialised["matches"] = row["matches"]
         rows.append(serialised)
     rows.sort(key=lambda item: item["rel_path"])
 

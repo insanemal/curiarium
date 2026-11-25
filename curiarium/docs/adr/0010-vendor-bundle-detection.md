@@ -3020,6 +3020,109 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     bundle door excludes - and `test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower`
     pins it.
 
+31. **The rules ADVISE; they do not gate. Every path is importable, and a path
+    strictly inside an existing project's key is not a detection row at all.**
+    Seven rules that each answer "is this a bundle?" had become a gatekeeper, and a
+    gate built out of guesses refuses things nobody guessed. Measured live on
+    2026-11-25: `import/Vault` is a real product - 792 `.stl` across `01. DRAWERS`
+    and `02. SUSTAINERS`, families beneath, plus 77 `.stlbak`, 5 PNG, 5 JPG, one
+    `.stp`, a PDF manual and one Rhino `.3dm` - and the report offered **zero rows
+    and 818 refusals** for it, `R3:no-own-depth-model` at every top level because
+    the models live many levels down, `member-of-bundle` for everything below. The
+    owner could not import it at all. The same gate produced the opposite failure
+    on `import/Stagetop`: **20 rows inside a project he already owns**, most
+    `blocked`/`unresolved_directory`, i.e. twenty invitations to fragment a product.
+    A rule that matches nothing is therefore no longer a dead end.
+
+    **The report offers the matches; `detector`/`confidence` stay the
+    recommendation.** `bundle_detect.shape_matches` returns a `ShapeMatch(shape,
+    rule, confidence, counts, groups, note)` for every shape a listing satisfies,
+    FIRST the row's own recommendation - so `matches[0]` equals that row's
+    `detector`, `confidence` and `metadata_shape` by construction and cannot drift
+    from it - then the remaining rules in their measured order, then the manual
+    entry LAST. `manual` (`DETECTOR_MANUAL`/`SHAPE_MANUAL`) is the SCOPE "everything
+    under this path", offered on every row and derived by `manual_facts`, so its
+    creator, licence, URL and thing id are `None` by construction exactly like
+    every other `_name_only_facts` row: an operator's choice of folder says nothing
+    about who made the files. `note` carries the refusal word a manual offer was
+    built from, which is how `R3:no-own-depth-model`, `R4:no-own-depth-model` and
+    `promotion:no-own-depth-model` stop being verdicts and become an explanation -
+    the constants and their `REFUSAL_RULES` membership stay, the refusal ledger
+    stays served, and a manual row is the ONE path the ledger may name that is also
+    a row, because that word is the row's own note. `shape_matches` is pure, like
+    every rule above it: it reads the snapshot and the documents it was handed.
+
+    **The create gate no longer reads `status`.** It reads
+    `blocked_reason == archive_only`, which is the one reason that names another
+    door (Extract registers those files and settles the row). `blocked` still means
+    database readiness (Mf-um7x) and the client's `isCreatable` answers the same
+    gate, so a shape mismatch (`not_scanned`) or an unregistered folder
+    (`unresolved_directory`) can never make a path unimportable; `unresolved_directory`
+    survives as a scan-state signal on the row. What refuses a create afterwards is
+    the things that are about files rather than shapes: the `contains_bundles` belt
+    (another bundle's assets inside), the group-exclusion validation, and the
+    primitive's empty-member refusal. The client's status line and its Create button
+    are one predicate (`isCreatable`), so a blocked row with a live Create never
+    reads "Blocked -".
+
+    **Every create records the shape it was made from.** `marker["shape"]` is
+    written for every create, and `marker["rule"]` names the rule that offered that
+    shape; `detector` and `confidence` stay byte-identical to the row, so a marker
+    keeps answering "what did detection recommend" while also answering "what did
+    the operator choose". The chosen shape also decides which groups the create
+    validates against, so a create can never honour an exclusion the chosen shape
+    does not have. `manual` changes the SCOPE of one create - one project over the
+    whole subtree, no groups - and never the member set, which stays
+    `PROJECT_MEMBER_SUFFIXES` (Mf-7oow owns member kinds). An unoffered shape
+    answers `failed`/`unknown shape` instead of silently creating something else.
+
+    **Project keys join the detection exclusion, and that is the whole fix for the
+    twenty Stagetop rows.** `scan_bundles(root, *, excluded_keys=...)` prunes every
+    path strictly inside a project's `_bundle.key` BEFORE any pass runs, so no
+    candidate, no refusal and no duplicate inside a project can be produced - no
+    `in_project` status, no "Add to project" action, no new chip, because drift
+    (`Mf-8i04`) already reports what a grown project gained. The keys are derived by
+    ONE function both doors call (`_excluded_keys`, through
+    `known_project_keys`/`project_service.bundle_marker_of`), because a second
+    derivation is exactly how a create answers `unknown bundle` for a row its own
+    report offered. The direction of the qualification matters and is measured:
+    candidate keys are WALK-relative while marker keys are STORAGE-relative, so the
+    guard uses `_unqualify(scope, key)` - `_qualify` would produce
+    `import/import/Stagetop` and exclude nothing. The project KEY ITSELF is never
+    excluded (`_strictly_inside_any` is strict), which is what keeps its own
+    `already_created` row on the report; and a scoped report taken inside a project
+    key answers zero rows, deliberately.
+
+    **The stamp moves by construction.** `DETECTOR_MANUAL` and `SHAPE_MANUAL` joined
+    `rule_set_tables()`, so `rule_set_stamp()` changed because a table changed, and
+    `RULE_SET_VERSION` moved to `2026-11-25.0` with it. Two artifacts taken either
+    side of this decision are therefore NOT comparable by `bundle_serialize`'s own
+    rule, and the measurement records the row-for-row delta beside that sentence
+    rather than pretending the pair is like-for-like.
+
+    **What would make this wrong.** If a shape became a gate again - any create
+    refused because `status` is `blocked`, or because the rules offered nothing; if
+    `manual` stopped being offered on every row, or stopped being LAST, or started
+    carrying provenance; if `matches[0]` stopped equalling the row's
+    detector/confidence/metadata_shape; if a manual row stopped carrying its
+    refusing rule as `note`, or a note named a word outside `REFUSAL_RULES`; if a
+    path strictly inside a project key started being offered as a row (a new
+    `in_project` status, or an "Add to project" affordance, is that mistake wearing
+    a name); if the report and the create door stopped deriving the project keys
+    identically, or the guard used `_qualify`; if a scoped report inside a project
+    key started answering rows; if a create stopped recording `shape`/`rule`, or
+    `detector`/`confidence` started following the chosen shape; if a manual create
+    started carrying group exclusions; or if the `manual` vocabulary entered
+    `REFUSAL_RULES` as a refusal word rather than as a shape.
+
+    **One forwarding gap, recorded rather than hidden.** The create contract
+    (`BundleCreateItemIn.shape`), the service (`BundleCreateItem.shape`, `unknown
+    shape`) and the review client all carry the chosen shape, but
+    `routers/bundles.py` maps the request body onto the service item field by field
+    (the Mf-ao6r trap) and that mapping is a one-line follow-up outside this
+    change's file set: until it forwards `shape`, a create over HTTP records the
+    row's recommended shape. Detection, the report and the service are unaffected.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,

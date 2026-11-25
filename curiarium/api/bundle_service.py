@@ -177,7 +177,7 @@ import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import AbstractSet, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import AbstractSet, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 from zipfile import BadZipFile
 
 from fastapi import HTTPException
@@ -321,7 +321,11 @@ class BundleCandidate:
     means the row exists only because the folder holds ONE product in several
     model-bearing parts, so its facts come from
     ``bundle_detect.compound_bundle_facts``, its confidence is LOW, and it
-    carries a group breakdown.
+    carries a group breakdown. ``manual`` means the row exists only because the
+    walk refused this directory and the operator is still allowed to import it:
+    its facts come from ``bundle_detect.manual_facts``, its confidence is LOW, its
+    ``manual_rule`` is the ledger word that refused it, and the row states a
+    SCOPE (everything under this path) rather than a claim about the directory.
     """
 
     key: str
@@ -334,6 +338,8 @@ class BundleCandidate:
     archive_owned: bool = False
     title_name: bool = False
     compound: bool = False
+    manual: bool = False
+    manual_rule: Optional[str] = None
 
     @property
     def offers_archive_only(self) -> bool:
@@ -812,12 +818,74 @@ def _compound_pass(
     return list(found) + compounds, absorbed_rows
 
 
+def _manual_pass(
+    folded: Mapping[str, Sequence[bundle_detect.BundleEntry]],
+    found: Sequence[BundleCandidate],
+    refusals: Mapping[str, str],
+    owned: AbstractSet[str],
+) -> List[BundleCandidate]:
+    """The refused directories, offered as a SCOPE: one row per MAXIMAL refusal.
+
+    Detection is no longer a gatekeeper, so a directory the rules declined is
+    still importable as "everything under this path". The row is deliberately
+    coarse: ONE manual row per maximal refused root, never one per descendant -
+    the parent already says the whole subtree is in scope, and a child row would
+    double-count the same files. Archives are never manual (only directories are
+    iterated), and a directory that HOLDS or SITS INSIDE a row is not a candidate
+    either: it is a container or a member, and the rules' answer for it stands.
+
+    Only a REFUSED root becomes manual - the ledger word that refused it is the
+    row's ``note`` - and a directory with every count at zero is not a row at all.
+    The emitted row is creatable precisely because the create gate no longer reads
+    ``status``: a manual row is ``blocked`` by database readiness exactly like any
+    other unresolved directory, and the operator's choice is what makes it a
+    project.
+    """
+    # `taken` includes the excluded project keys, so a directory that holds one
+    # is a container here too - the same answer `_relates_to_any` gives the walk.
+    taken = {candidate.key for candidate in found} | set(owned)
+    emitted: set = set()
+    manual: List[BundleCandidate] = []
+    for rel_dir in sorted(folded, key=lambda item: (_depth(item), item.casefold(), item)):
+        if not rel_dir:
+            continue
+        if _relates_to_any(rel_dir, taken):
+            continue
+        if _strictly_inside_any(rel_dir, emitted):
+            continue
+        rule = refusals.get(rel_dir)
+        if rule is None:
+            continue
+        if not folded.get(rel_dir):
+            continue
+        snapshot = _folder_snapshot(rel_dir, folded[rel_dir])
+        facts = bundle_detect.manual_facts(snapshot)
+        counts = facts.counts
+        if not any((counts.model, counts.image, counts.text, counts.other, counts.archive)):
+            continue
+        manual.append(
+            BundleCandidate(
+                key=rel_dir,
+                snapshot=snapshot,
+                archive_path=None,
+                is_archive=False,
+                confidence=facts.confidence,
+                manual=True,
+                manual_rule=rule,
+            )
+        )
+        emitted.add(rel_dir)
+    return manual
+
+
 def _build_candidates(
     root: Path,
     files_by_dir: Mapping[str, Sequence[Tuple[str, int]]],
     dirs_by_parent: Mapping[str, set],
     suppressed: AbstractSet[str],
     refusals: Dict[str, str],
+    *,
+    excluded_keys: AbstractSet[str] = frozenset(),
 ) -> Tuple[List[BundleCandidate], List[BundleCandidate]]:
     """Every bundle under ``root`` from one walk's listings, as ``(offered, absorbed)``.
 
@@ -828,6 +896,11 @@ def _build_candidates(
     ``refusals`` is the ledger this function WRITES: every path it declines gets
     a rule, so a caller can say why something is missing. It is never read back to
     decide anything, so recording a refusal cannot change which rows are offered.
+
+    ``excluded_keys`` is the walk-relative set of project marker keys; the manual
+    pass reads it only as "a directory that holds one of these is a container".
+    The subtrees themselves are already gone - ``scan_bundles`` prunes before any
+    pass runs - so no other leg here needs to know about a project at all.
     """
     folded = _subtree(files_by_dir)
     found: List[BundleCandidate] = []
@@ -1275,6 +1348,12 @@ def _build_candidates(
     # decides every OTHER row is untouched.
     found, absorbed = _compound_pass(folded, files_by_dir, found, refusals)
 
+    # The manual pass runs AFTER R7 so it can see every row that will exist: a
+    # refused directory that holds a compound row is a container, never a second
+    # scope over the same files. Its rows ride the `with_twins` loop below, so
+    # they sort and attach twins exactly like every other row.
+    found.extend(_manual_pass(folded, found, refusals, excluded_keys))
+
     # A folder candidate's archive is provenance: reported, never a member. A row
     # that is already archive-only is reported as it was built.
     #
@@ -1305,6 +1384,8 @@ def _build_candidates(
                     archive_owned=candidate.archive_owned,
                     title_name=candidate.title_name,
                     compound=candidate.compound,
+                    manual=candidate.manual,
+                    manual_rule=candidate.manual_rule,
                 )
             )
     with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
@@ -1312,7 +1393,7 @@ def _build_candidates(
     return with_twins, absorbed_with_twins
 
 
-def scan_bundles(root: Path) -> BundleScan:
+def scan_bundles(root: Path, *, excluded_keys: AbstractSet[str] = frozenset()) -> BundleScan:
     """One walk of the storage tree: bundle candidates plus duplicate archives.
 
     Detection is one deepest-first pass. ``bundle_detect.detect_bundle`` applies R1 ->
@@ -1336,13 +1417,27 @@ def scan_bundles(root: Path) -> BundleScan:
     bundle (``bundle_detect.is_bundle_member``): it is never a candidate and never
     a pairing, and it is removed from every duplicate group before it is reported,
     so the report never offers part of a live bundle for deletion.
+
+    ``excluded_keys`` names the storage subtrees an existing project already owns,
+    in walk-relative spelling. The walk is PRUNED of every such subtree before any
+    pass runs, which is what makes "a path inside an existing project is not a
+    detection row" structural rather than a filter applied afterwards: no
+    candidate, no refusal and no duplicate inside a project key can ever be
+    produced. The project KEY ITSELF is never excluded - ``_strictly_inside_any``
+    is strict - so the row for the project's own directory survives and can still
+    report ``already_created``. The parameter is keyword-only and defaulted so the
+    nineteen positional call sites keep meaning exactly what they meant.
     """
     root = Path(root)
     files_by_dir, dirs_by_parent, truncated = _walk_tree(root)
+    if excluded_keys:
+        files_by_dir, dirs_by_parent = _without_owned_subtrees(files_by_dir, dirs_by_parent, excluded_keys)
     duplicates = duplicate_archives(root, files_by_dir)
     suppressed = frozenset(bundle_detect.duplicate_archive_paths(duplicates))
     refusals: Dict[str, str] = {}
-    candidates, absorbed = _build_candidates(root, files_by_dir, dirs_by_parent, suppressed, refusals)
+    candidates, absorbed = _build_candidates(
+        root, files_by_dir, dirs_by_parent, suppressed, refusals, excluded_keys=excluded_keys
+    )
     # Only the offered rows name bundle directories: an absorbed key is already
     # inside its compound key, so adding it would only restate the subtree.
     bundle_dirs = {candidate.key for candidate in candidates if not candidate.is_archive}
@@ -1388,9 +1483,16 @@ def _reconcile_refusals(
     directory that was then promoted is "consumed", not missing. This step reads
     the FINAL candidate set and settles each entry, so the ledger never contradicts
     the rows. It only ever edits the ledger: no candidate is added or dropped here.
+    The one deliberate exception is a MANUAL row: it is offered as a scope but the
+    rule that refused the path is its own `note`, so the ledger keeps naming it
+    with that same rule instead of popping it (Mf-z643).
     """
     offered_keys = {candidate.key for candidate in candidates}
     offered_dirs = {candidate.key for candidate in candidates if not candidate.is_archive}
+    # A manual row IS a refused path offered as a scope: the ledger keeps the rule
+    # that refused it, because that word is the row's own `note` (Mf-z643). Every
+    # OTHER row keeps the old contract - a path is either a row or a refusal.
+    manual_keys = {candidate.key for candidate in candidates if candidate.manual}
     attached = {candidate.archive_path for candidate in candidates if candidate.archive_path}
     all_zips = set(_zip_files(files_by_dir))
 
@@ -1410,6 +1512,10 @@ def _reconcile_refusals(
 
     for rel_path in list(refusals):
         if rel_path in all_zips:
+            continue
+        if rel_path in manual_keys:
+            # The one exception, by design: a manual row carries its refusing rule
+            # as `note`, so the ledger must keep naming it with the same word.
             continue
         if rel_path in offered_keys:
             refusals.pop(rel_path)
@@ -1938,7 +2044,117 @@ def _qualify(scope: str, rel_path: str) -> str:
     return f"{scope}/{rel_path}" if scope else rel_path
 
 
+def _unqualify(scope: str, key: str) -> Optional[str]:
+    """The walk-relative spelling of a STORAGE-relative marker key, or ``None``.
+
+    Candidate keys are WALK-relative while a project marker's key is
+    STORAGE-relative, which is exactly why ``_qualify`` (the import/import/Stagetop
+    direction) is the wrong one here: a marker key outside the scanned subtree
+    must answer ``None`` and never be passed through unchanged, or a top-level
+    project key would collide with a same-named walk key under a scope.
+    """
+    if not scope:
+        return key
+    if key == scope:
+        return ""
+    if key.startswith(scope + "/"):
+        return key[len(scope) + 1 :]
+    return None
+
+
+def known_project_keys(session: Session) -> FrozenSet[str]:
+    """Every storage-relative bundle key a Project's marker names.
+
+    ``project_service.bundle_marker_of`` is the ONE marker reader - never a second
+    JSON parse here - so a bad metadata column means the same thing to the create
+    door, the compound belt and this guard. This is what makes "a path inside an
+    existing project is not a detection row" one predicate instead of a rule per
+    pass: a key with no marker simply contributes nothing.
+    """
+    keys = set()
+    for project in session.exec(select(Project)):
+        key = project_service.bundle_marker_of(project.metadata_json).get("key")
+        if isinstance(key, str) and key:
+            keys.add(key)
+    return frozenset(keys)
+
+
+def _excluded_keys(scope: str) -> FrozenSet[str]:
+    """The marker keys under ``scope``, expressed as WALK-relative subtrees.
+
+    This is the ONE derivation both doors call - ``build_report`` for the report
+    and ``create_bundles`` for the create - because a second derivation is exactly
+    how a create answers ``unknown bundle`` for a row its own report offered.
+    """
+    with Session(engine) as session:
+        known = known_project_keys(session)
+    relative = (_unqualify(scope, key) for key in known)
+    return frozenset(key for key in relative if key is not None)
+
+
+def _owned_subtree(rel_dir: str, owned: AbstractSet[str]) -> bool:
+    """Whether ``rel_dir`` is, or sits inside, a project's marker key.
+
+    The ``"" in owned`` leg is a SCOPED report: the walk root itself is the
+    project key, so every path in it is owned and the report answers no rows.
+    """
+    return "" in owned or _strictly_inside_any(rel_dir, owned)
+
+
+def _without_owned_subtrees(
+    files_by_dir: Mapping[str, Sequence[Tuple[str, int]]],
+    dirs_by_parent: Mapping[str, set],
+    owned: AbstractSet[str],
+) -> Tuple[Dict[str, List[Tuple[str, int]]], Dict[str, set]]:
+    """Pruned copies of the walk with every project-owned subtree dropped.
+
+    Dropping the subtree BEFORE anything is decided is what makes "a path inside
+    an existing project is not a detection row" structural: no candidate, no
+    refusal and no duplicate group can be produced from it. The project KEY ITSELF
+    is never dropped (``_strictly_inside_any`` is strict), which is what keeps its
+    own ``already_created`` row on the report.
+
+    The key keeps its own subtree LISTING, folded into its entry, because a row is
+    built from a directory's folded subtree (``_subtree``): dropping the children
+    outright would leave a project key reading zero models and offer a row that
+    disagrees with the project it names. Archives are the exception - they are
+    dropped rather than folded in, so no ``.zip`` inside a project can ever reach
+    the pairing or zip-only passes as a candidate or a duplicate.
+
+    A scope that sits at or below a project key (``"" in owned``) is entirely
+    owned, so its walk is empty and the report answers no rows at all.
+    """
+    if "" in owned:
+        return {}, {}
+    folded = _subtree(files_by_dir)
+    kept_files: Dict[str, List[Tuple[str, int]]] = {}
+    for rel_dir, files in files_by_dir.items():
+        if _owned_subtree(rel_dir, owned):
+            continue
+        if rel_dir in owned:
+            kept_files[rel_dir] = [
+                (entry.rel_path, entry.size)
+                for entry in folded.get(rel_dir, ())
+                if _suffix(entry.rel_path) != ".zip"
+            ]
+            continue
+        kept_files[rel_dir] = list(files)
+    kept_parents: Dict[str, set] = {}
+    for parent, children in dirs_by_parent.items():
+        if _owned_subtree(parent, owned):
+            continue
+        kept_parents[parent] = {
+            name for name in children if not _owned_subtree(_qualify(parent, name), owned)
+        }
+    return kept_files, kept_parents
+
+
 def _candidate_facts(root: Path, candidate: BundleCandidate) -> Optional[bundle_detect.BundleFacts]:
+    if candidate.manual:
+        # A manual row is a SCOPE: its facts come from the whole subtree listing
+        # and never from a rule, so re-running detection here would answer None
+        # and drop the row the walk deliberately offered.
+        return bundle_detect.manual_facts(candidate.snapshot)
     if candidate.compound:
         # R7 is a post-pass: `_detect_folder` re-runs `detect_bundle`, which never
         # knows the compound rule, so asking it here would answer None and drop the
@@ -1952,6 +2168,44 @@ def _candidate_facts(root: Path, candidate: BundleCandidate) -> Optional[bundle_
     if candidate.is_archive:
         return _detect_archive(Path(root) / candidate.snapshot.rel_dir, candidate.snapshot)
     return _detect_folder(Path(root), candidate.snapshot)
+
+
+def _candidate_docs(root: Path, candidate: BundleCandidate) -> Dict[str, str]:
+    """The bounded documents a candidate carries, keyed bundle-relative.
+
+    The same two reads detection uses, so ``shape_matches`` can ask every rule of
+    one listing without opening a byte the scan would not have opened: a directory
+    through ``_read_docs``, an archive through the bounded zip-entry reader.
+    """
+    entries = bundle_detect.doc_entry_candidates(candidate.snapshot)
+    if candidate.is_archive:
+        archive = Path(root) / candidate.snapshot.rel_dir
+        docs: Dict[str, str] = {}
+        for name in entries:
+            text = zip_service.read_zip_text_entry(archive, name, bundle_detect.BUNDLE_DOC_MAX_BYTES)
+            if text is not None:
+                docs[name] = text
+        return docs
+    return _read_docs(Path(root) / candidate.snapshot.rel_dir, entries)
+
+
+def _wire_groups(
+    key: str, groups: Sequence[bundle_detect.BundleGroup], absorbed_keys: AbstractSet[str]
+) -> List[dict]:
+    """One group list in the wire shape, shared by the row and every match.
+
+    ``separable`` is compared in the walk's own relative key space because that is
+    the space the candidate and the absorbed set share.
+    """
+    return [
+        {
+            "name": group.name,
+            "model_count": group.model_count,
+            "foreign": group.foreign,
+            "separable": f"{key}/{group.name}" in absorbed_keys,
+        }
+        for group in groups
+    ]
 
 
 def cover_for_registered(
@@ -2321,18 +2575,34 @@ def _report_row(
         "other_count": facts.counts.other,
         # R7's breakdown: one entry per model-bearing group, so a row that covers
         # 60 parts in two editions says so instead of showing an anonymous total.
-        # Empty for every row that is not compound.
-        #
-        # `separable` is compared in the walk's own relative key space because
-        # that is the space the candidate and the absorbed set share.
-        "groups": [
+        # Empty for every row that is not compound. Rendered by the SAME helper the
+        # `matches` list uses, so a match's groups can never disagree with the
+        # row's own.
+        "groups": _wire_groups(candidate.key, facts.groups, absorbed_keys),
+        # Every shape this listing satisfies, FIRST the one this row recommends -
+        # `matches[0]` equals the row's own detector/confidence/metadata_shape by
+        # construction, so a client can offer the alternatives without a second
+        # round trip and without ranking them itself. The manual entry is last:
+        # "everything under this path" is always on offer, whatever the rules said.
+        "matches": [
             {
-                "name": group.name,
-                "model_count": group.model_count,
-                "foreign": group.foreign,
-                "separable": f"{candidate.key}/{group.name}" in absorbed_keys,
+                "shape": match.shape,
+                "rule": match.rule,
+                "confidence": match.confidence,
+                "model_count": match.counts.model,
+                "image_count": match.counts.image,
+                "text_count": match.counts.text,
+                "other_count": match.counts.other,
+                "groups": _wire_groups(candidate.key, match.groups, absorbed_keys),
+                "note": match.note,
             }
-            for group in facts.groups
+            for match in bundle_detect.shape_matches(
+                candidate.snapshot,
+                _candidate_docs(root, candidate),
+                facts,
+                candidate.manual_rule,
+                paired=bool(candidate.archive_path),
+            )
         ],
         # The row's cover and the create's cover are ONE expression: `_create_one`
         # re-asks this same `_cover` over its own exclusion-filtered `owned_assets`
@@ -2400,13 +2670,21 @@ def build_report(*, path: str = "", limit: int = DEFAULT_LIMIT, include_dismisse
     but are never capped by ``limit``: the walk is already bounded by
     ``MAX_SCAN_ENTRIES``, and a reclaimable-bytes total that stopped at a page
     boundary would be a number the operator could not act on.
+
+    This door and ``create_bundles`` are the only two that derive
+    ``excluded_keys``: every other scan keeps the default, so no other caller
+    silently changes what it offers.
     """
     scope = _scope(path)
     root = STORAGE / scope if scope else STORAGE
     if not _is_inside_storage(root):
         raise HTTPException(status_code=400, detail="path must stay inside the storage root")
     return _report_from_scan(
-        scan_bundles(root), root=root, scope=scope, limit=limit, include_dismissed=include_dismissed
+        scan_bundles(root, excluded_keys=_excluded_keys(scope)),
+        root=root,
+        scope=scope,
+        limit=limit,
+        include_dismissed=include_dismissed,
     )
 
 
@@ -2588,13 +2866,16 @@ class BundleCreateItem:
     part of this product. Each must be a foreign group the walk absorbed as a row
     of its own: ``_exclusion_prefixes`` states why a group outside that set is
     refused, and it is the ticket's "when excluded it must remain a bundle row of
-    its own rather than vanishing".
+    its own rather than vanishing". ``shape`` names one of the row's ``matches``
+    shapes; ``None`` means the row's recommended shape, exactly as before this
+    field existed. An unoffered shape answers ``failed``/``unknown shape``.
     """
 
     key: str
     name: Optional[str] = None
     name_only: bool = False
     exclude_groups: Tuple[str, ...] = ()
+    shape: Optional[str] = None
 
 
 def _result(
@@ -2702,13 +2983,46 @@ def _create_one(
     key = (item.key or "").strip()
     if row is None or candidate is None:
         return _result(key, CREATE_FAILED, reason="unknown bundle")
-    if row["status"] == BLOCKED:
-        return _result(key, CREATE_BLOCKED, reason=row["blocked_reason"] or BLOCKED)
+    # THE DEAD END DIES. ``blocked`` still means database readiness (Mf-um7x) and
+    # the Extract door still keys on ``archive_only`` - but a shape or scan
+    # mismatch is no longer a refusal. A row the rules declined is offered as the
+    # manual SCOPE and the operator's choice is what creates it; the create-time
+    # belt (``contains_bundles``), the exclusion validation and the primitive's
+    # empty-member refusal are what answer from here on.
+    if row["blocked_reason"] == ARCHIVE_ONLY:
+        return _result(key, CREATE_BLOCKED, reason=row["blocked_reason"] or ARCHIVE_ONLY)
+    # The create follows the operator's chosen shape, not the row's recommendation:
+    # every create carries the shape it was made from, so a manual row and a
+    # compound row are distinguishable by their markers. A hand-built row may carry
+    # no `matches` and no `metadata_shape` at all; then its detector names the shape
+    # and its own `groups` is the only source of truth.
+    recommended_shape = row.get("metadata_shape")
+    if not recommended_shape:
+        # A hand-built row (tests, and any caller that never read the report) has no
+        # `metadata_shape`; the candidate's own kind is then the only signal, and a
+        # plain row falls back to its detector name.
+        if candidate.compound:
+            recommended_shape = bundle_detect.SHAPE_COMPOUND
+        elif candidate.manual:
+            recommended_shape = bundle_detect.SHAPE_MANUAL
+        else:
+            recommended_shape = row["detector"]
+    matches = row.get("matches") or []
+    offered = [match["shape"] for match in matches] or [recommended_shape]
+    chosen = item.shape or recommended_shape
+    if chosen not in offered:
+        return _result(key, CREATE_FAILED, reason="unknown shape")
+    match = next((candidate_match for candidate_match in matches if candidate_match["shape"] == chosen), None)
+    if match is None:
+        match = {"shape": recommended_shape, "rule": row["detector"], "groups": row.get("groups") or []}
     # Validation runs before anything that touches the session, and before
     # `find_existing_project` on purpose: an already-created compound row whose
     # group list moved answers a validation reason, never `already_created`.
-    # `row.get("groups") or []` because a hand-built row need not carry the key.
-    groups = row.get("groups") or []
+    # The chosen match's groups are the ONE source for exclusion validation and
+    # for the compound marker, so a create can never validate against groups the
+    # chosen shape does not have. For the recommended compound row this is
+    # byte-identical to the row's own `groups`.
+    groups = match.get("groups") or []
     prefixes, refusal = _exclusion_prefixes(key, groups, item.exclude_groups)
     if refusal is not None:
         return _result(key, CREATE_FAILED, reason=refusal)
@@ -2719,6 +3033,11 @@ def _create_one(
         "key": key,
         "detector": row["detector"],
         "confidence": row["confidence"],
+        # Every create records the shape it was made from and the rule that offered
+        # that shape. `detector`/`confidence` stay byte-identical to the row; a
+        # manual create says ``shape=manual`` and its rule is the ledger word.
+        "shape": chosen,
+        "rule": match.get("rule") or row["detector"],
         "rel_dir": row["rel_path"],
         "archive": (row["archive"] or {}).get("rel_path"),
         "twin_verified": (row["archive"] or {}).get("twin_verified") if row["archive"] else None,
@@ -2828,7 +3147,16 @@ def _create_one(
             and len(assets) > len(own_assets)
             else None
         )
-        if candidate.compound:
+        # The compound marker runs when the CHOSEN shape is compound, not when the
+        # candidate is: the operator's choice decides what the project records.
+        # The groups come from the chosen match (the one source of truth), while
+        # `attached` still comes from `models_by_group` - the files this create
+        # actually attaches. A manual create carries NO `groups` and NO `cover`
+        # block: manual is a SCOPE, not a compound. Members are NOT decided by the
+        # shape - `owned_assets`/`members`/`model_assets`/`cover`/`belt` read the
+        # same expressions as before, because a manual create changes the SCOPE of
+        # one project over the whole subtree, never which kinds a project holds.
+        if chosen == bundle_detect.SHAPE_COMPOUND:
             # The guard uses the walk's own verdict, not the row's: in-process both
             # come from ONE `scan`, so they cannot disagree.
             # `model_count` is what the SCAN registers, and `attached` is how many
@@ -2842,7 +3170,6 @@ def _create_one(
             # `IMPORT_MOUNT_INCLUDE_HIDDEN=1` makes it register the sidecars the
             # detector still refuses, which separates the numbers again - named in
             # ADR 0010 Decision 25, off by default and untested.
-            marker["shape"] = "compound"
             marker["groups"] = [
                 {
                     "name": group["name"],
@@ -2970,11 +3297,16 @@ def create_bundles(items: Sequence[BundleCreateItem], ctx: audit.AuditContext) -
 
     The report is recomputed first and every item is looked up in it: a key the
     client sent is never trusted on its own, and a bundle that turned
-    ``blocked`` since the report was rendered creates nothing. One walk serves
+    ``archive_only`` since the report was rendered creates nothing - ``blocked``
+    alone is a database-readiness answer now, never a shape gate (Mf-z643). One walk serves
     both the report and the candidate lookup, so a duplicate archive is refused
     as ``unknown bundle`` by construction: it is suppressed from both.
+
+    The scope here is the whole storage root, and the exclusion set is derived the
+    same way ``build_report`` derives it - one derivation, so a create can never
+    answer ``unknown bundle`` for a row its own report offered.
     """
-    scan = scan_bundles(STORAGE)
+    scan = scan_bundles(STORAGE, excluded_keys=_excluded_keys(""))
     report = _report_from_scan(scan, root=STORAGE, scope="", limit=MAX_SCAN_ENTRIES, include_dismissed=True)
     rows = {row["key"]: row for row in report["bundles"]}
     by_key = {candidate.key: candidate for candidate in scan.candidates}

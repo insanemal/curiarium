@@ -153,6 +153,10 @@ def jsonable(artifact: dict) -> dict:
 
 def fresh_decision(root: Path, candidate: bundle_service.BundleCandidate) -> bundle_detect.Detection:
     """The pure decision for one candidate, asked again from the snapshot."""
+    if candidate.manual:
+        # A manual row is a SCOPE rather than a rule: `detect_bundle` refuses the
+        # listing, and the row exists because the operator may still import it.
+        return bundle_detect.Detection(facts=bundle_detect.manual_facts(candidate.snapshot), refusal=None)
     if candidate.title_name:
         return bundle_detect.title_name_decision(candidate.snapshot)
     if candidate.pair_only or candidate.archive_owned:
@@ -270,12 +274,21 @@ def test_a_rule_change_diff_names_every_changed_added_and_removed_row(
     detector_changed = [path for path in common if old_rows[path]["detector"] != new_rows[path]["detector"]]
     confidence_changed = [path for path in common if old_rows[path]["confidence"] != new_rows[path]["confidence"]]
 
-    assert added, "the corpus no longer exercises ADDED rows (widened R3_MODEL_DIRS should offer import/pile)"
-    assert removed, "the corpus no longer exercises REMOVED rows (disabling R5 should drop the Fates End row)"
+    # Manual rows changed this coverage test's premise: a directory the rules
+    # refuse is now OFFERED as a manual scope, so widening R3 does not ADD
+    # import/pile - it moves that same row's detector from `manual` to
+    # `generic-bundle`. The row-for-row answer is asserted below instead.
+    assert not added, f"a manual row means widening a rule moves a row, never creates one: {added}"
+    # Same premise for removals: disabling R5 leaves `01_Fates End - Wizard
+    # Tower` refused, so it is still offered as the manual scope - its detector
+    # moves title-name -> manual rather than the row disappearing.
+    assert not removed, f"a refused directory is still a manual row: {removed}"
     assert detector_changed, "the corpus no longer exercises a detector change (DETECTOR_GENERIC was renamed)"
     assert confidence_changed, (
         "the corpus no longer exercises a confidence change (the 5390184_DRAGON row should fall medium -> low)"
     )
+    assert PILE in detector_changed, "widened R3_MODEL_DIRS should move import/pile off the manual scope"
+    assert FATES_END in detector_changed, "disabling R5 should move the Fates End row onto the manual scope"
 
     diff = bundle_serialize.diff_artifacts(before, after)
 
@@ -289,8 +302,9 @@ def test_a_rule_change_diff_names_every_changed_added_and_removed_row(
     dragon = next(item for item in diff["confidence_changed"] if item["rel_path"] == DRAGON)
     assert (dragon["old"], dragon["new"]) == ("medium", "low")
     assert DRAGON in detector_changed
-    assert FATES_END in removed
-    assert PILE in added
+    # A refused directory is still a manual row, so disabling R5 MOVES the Fates
+    # End row's detector rather than removing it (see the note above).
+    assert FATES_END not in removed
 
     text = bundle_serialize.format_diff(diff)
     assert "comparable: NO" in text
@@ -474,7 +488,14 @@ def test_refusals_are_additive_and_do_not_change_the_offered_rows(storage: Path)
         assert rows[candidate.key]["confidence"] == decision.facts.confidence
 
     assert report["refused"], "the corpus must have refused paths"
+    # A MANUAL row is deliberately both a row and a ledger entry: the rule that
+    # refused the path is the row's `note` (Mf-z643). Every other row stays
+    # disjoint from the ledger, which is the property this test is about.
+    manual = {row["rel_path"] for row in report["bundles"] if row["detector"] == "manual"}
     for item in report["refused"]:
+        if item["rel_path"] in manual:
+            assert rows[item["rel_path"]]["matches"][0]["rule"] == item["rule"]
+            continue
         assert item["rel_path"] not in offered, item
     assert scan.refusals, "the scan itself must carry the ledger"
     assert {item.rel_path for item in scan.refusals} == {item["rel_path"] for item in report["refused"]}

@@ -50,6 +50,7 @@ import {
   type BundleCreateResponse,
   type BundleDetectItem,
   type BundleDuplicateGroup,
+  type BundleMatch,
   type BundleReport,
 } from "../../lib/api/bundles";
 import type { SettleOutcome } from "../../lib/scanSettle";
@@ -61,6 +62,8 @@ import {
   EXTRACT_AND_CREATE_ROW_TITLE,
   NO_PAYLOAD_DOOR_REASON,
   NO_SOURCE_PAGE_REASON,
+  SHAPE_LABELS,
+  SHAPE_MANUAL,
   bulkEnrichTitle,
   isArchiveOnly,
   needsDecision,
@@ -85,8 +88,34 @@ const EXTRACT_RESULT: ArchiveExtractResult = {
   scan_started: true,
 };
 
+/** The matches every fixture serves, from the one helper that knows the wire's
+ *  order: the shape the row was detected as first (the recommendation), `manual`
+ *  last. A row with groups is offered as `compound`, because that is the shape
+ *  its groups belong to. No fixture spells a `matches` list out, so a test that
+ *  wants a different set is visibly overriding rather than mutating a copy. */
+function servedMatches(row: BundleDetectItem): BundleMatch[] {
+  const recommended = row.groups && row.groups.length > 0 ? "compound" : row.metadata_shape;
+  const counts = {
+    model_count: row.model_count,
+    image_count: row.image_count,
+    text_count: row.text_count,
+    other_count: row.other_count,
+  };
+  return [
+    {
+      shape: recommended,
+      rule: row.detector,
+      confidence: row.confidence,
+      ...counts,
+      ...(row.groups ? { groups: row.groups } : {}),
+      note: null,
+    },
+    { shape: "manual", rule: "manual", confidence: row.confidence, ...counts, note: null },
+  ];
+}
+
 function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
-  return {
+  const row: BundleDetectItem = {
     key: "Moai",
     rel_path: "Moai",
     title: "Moai statue",
@@ -119,6 +148,10 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     dismissed: false,
     ...overrides,
   };
+  // Built AFTER the overrides merged, so the matches speak about the fields the
+  // fixture ended up with. A test that needs no `matches` at all deletes it, the
+  // way the payload-shape witnesses delete `assets_total`.
+  return { ...row, matches: overrides.matches ?? servedMatches(row) };
 }
 
 const moai = makeBundle();
@@ -1044,8 +1077,11 @@ describe("BundleReviewView writes", () => {
     renderView(state);
 
     fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+    // REPINNED from `(2)`: `Legacy_vase` is `unresolved_directory`, which no longer
+    // refuses a create - a blocked status is a readiness fact now, and only
+    // `archive_only` names another door. The settled row is still left out.
     expect(screen.getByRole("button", { name: /^Create selected/ }).textContent).toBe(
-      "Create selected (2)",
+      "Create selected (3)",
     );
     // The already-created row is settled, so it is not shown, let alone selected.
     expect(screen.getByText("3 bundles selected")).toBeTruthy();
@@ -1053,7 +1089,10 @@ describe("BundleReviewView writes", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Create selected/ }));
 
     const items = vi.mocked(state.create).mock.calls[0][0];
-    expect(items.map(item => item.key)).toEqual(["Moai", "Cable_clip"]);
+    expect(items.map(item => item.key)).toEqual(["Moai", "Cable_clip", "Legacy_vase"]);
+    // No row carries a shape: the operator never touched the chooser, so the
+    // server's recommendation stands and the body is the one it always was.
+    for (const item of items) expect(item).not.toHaveProperty("shape");
   });
 
   it("creates every visible low-confidence creatable row as name-only", () => {
@@ -1755,6 +1794,37 @@ function orphanRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem 
   });
 }
 
+/** The row with files and NO door at all, now that a blocked status no longer
+ *  refuses a create: an `archive_only` DIRECTORY with no twin. Extract has no
+ *  target and Create refuses (that reason names the other door), so
+ *  `NO_PAYLOAD_DOOR_REASON` is still true of it - and it names a page with a
+ *  metadata gap, so no earlier cause speaks for it. */
+function danglingRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return makeBundle({
+    key: "import/endorphin",
+    rel_path: "import/endorphin",
+    title: "endorphin",
+    name_suggestion: "endorphin",
+    creator: null,
+    licence: null,
+    licence_url: null,
+    description_excerpt: null,
+    source_url: "https://www.thingiverse.com/thing:2493386",
+    detector: "generic-bundle",
+    confidence: "low",
+    metadata_shape: "generic",
+    model_count: 1,
+    image_count: 1,
+    text_count: 0,
+    other_count: 0,
+    assets_total: 8,
+    status: "blocked",
+    blocked_reason: "archive_only",
+    archive: null,
+    ...overrides,
+  });
+}
+
 /** The first words of the paragraph this ticket deleted. Hard-coded rather than
  *  imported, because the constant is gone from the module and only a verbatim
  *  fragment can witness that neither bar nor pane still speaks it. */
@@ -1772,17 +1842,20 @@ describe("BundleReviewView offers only the actions that can succeed", () => {
   }
 
   it("refuses to offer enrichment as the only live action on an on-disk row", () => {
-    const orphan = orphanRow();
-    renderView(makeState({ report: makeReport([orphan]) }));
+    const dangling = danglingRow();
+    renderView(makeState({ report: makeReport([dangling]) }));
 
     // The row is in the queue and the report says its key holds files.
-    expect(rowKeys()).toContain(orphan.key);
+    expect(rowKeys()).toContain(dangling.key);
     // No enrichment door of either kind, so no click can reach a refusal.
     expect(detail().querySelector("[data-bundle-enrich]")).toBeNull();
     expect(within(detail()).queryByRole("button", { name: "Enrich from source page" })).toBeNull();
     expect(within(detail()).queryByRole("button", { name: "Re-check source page" })).toBeNull();
     // The reason span speaks the refusal of the very predicate that gated the
     // button - not the old universal paragraph about four gates this row fails none of.
+    // REPINNED from the orphan: a `not_scanned` row can be created now, so the
+    // only row this refusal is still true of is an `archive_only` folder with no
+    // twin and nothing to extract.
     const reason = detail().querySelector<HTMLElement>("[data-bundle-enrich-reason]");
     expect(reason?.textContent).toBe(NO_PAYLOAD_DOOR_REASON);
     expect(screen.queryByText(DELETED_BULK_PARAGRAPH)).toBeNull();
@@ -1792,23 +1865,45 @@ describe("BundleReviewView offers only the actions that can succeed", () => {
     expect(reason?.getAttribute("role")).toBeNull();
   });
 
-  it("keeps the create shut and the extract door absent on that same row", () => {
-    renderView(makeState({ report: makeReport([orphanRow()]) }));
+  it("offers enrichment on the blocked row that now has a create", () => {
+    // REPINNED: the orphan used to be refused both doors. Its create is live now,
+    // so the theorem this block exists for holds the other way round - enrichment
+    // is never the ONLY live action, because Create stands beside it.
+    const orphan = orphanRow();
+    renderView(makeState({ report: makeReport([orphan]) }));
 
-    // Blocked, so the primary door is the row's honest state: present, disabled.
+    expect(within(detail()).getByRole("button", { name: "Enrich from source page" })).toBeTruthy();
     const create = within(detail()).getByRole("button", {
       name: "Create project",
     }) as HTMLButtonElement;
-    expect(create.disabled).toBe(true);
+    expect(create.disabled).toBe(false);
+    // Nothing is refused, so the pane says nothing about a missing door.
+    expect(detail().querySelector("[data-bundle-enrich-reason]")).toBeNull();
+    expect(screen.queryByText(NO_PAYLOAD_DOOR_REASON)).toBeNull();
+  });
+
+  it("keeps the create live and the extract door absent on that same row", () => {
+    const orphan = orphanRow();
+    renderView(makeState({ report: makeReport([orphan]) }));
+
+    // REPINNED: `not_scanned` is a readiness fact, not an import refusal, so the
+    // primary door is live - and the row's own cell must not call it blocked.
+    const create = within(detail()).getByRole("button", {
+      name: "Create project",
+    }) as HTMLButtonElement;
+    expect(create.disabled).toBe(false);
+    expect(statusCell(orphan.key).textContent).not.toContain("Blocked - ");
     // And no extraction in place, no one-step: `extractPathFor` answers null, so
-    // neither control renders. The row really has no door for its files.
+    // neither control renders.
     expect(detail().querySelector("[data-extract-and-create]")).toBeNull();
     expect(within(detail()).queryByRole("button", { name: /^Extract/ })).toBeNull();
   });
 
   it("counts nothing in the bulk bar, disables the button, and says why in the row's words", () => {
-    const orphan = orphanRow();
-    renderView(makeState({ report: makeReport([orphan]) }));
+    // REPINNED from the orphan, which the bar can now send: the row whose words
+    // the bar speaks is the doorless one.
+    const dangling = danglingRow();
+    renderView(makeState({ report: makeReport([dangling]) }));
 
     fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
 
@@ -1829,16 +1924,33 @@ describe("BundleReviewView offers only the actions that can succeed", () => {
     expect(within(bulkBar()).queryByText(NO_SOURCE_PAGE_REASON)).toBeNull();
   });
 
+  it("counts the orphan the bar can now send, and speaks nothing", () => {
+    // REPINNED: the create door makes the orphan sendable, so the bar counts it
+    // and has no refusal to explain. The deleted paragraph stays gone either way.
+    renderView(makeState({ report: makeReport([orphanRow()]) }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
+
+    const button = enrichButton();
+    expect(button.textContent).toBe("Enrich selected (1)");
+    expect(button.disabled).toBe(false);
+    expect(button.hasAttribute("title")).toBe(false);
+    expect(bulkBar().querySelector("[data-bundle-enrich-none-reason]")).toBeNull();
+    expect(screen.queryByText(DELETED_BULK_PARAGRAPH)).toBeNull();
+  });
+
   it("says nothing in the bar when the selected rows do not agree on a cause", () => {
     // THE MIS-ATTRIBUTION WITNESS, rendered. `Legacy_vase` names no page, so its own sentence
-    // is the page one; the orphan DOES name a page whose payload no door can reach, so its own
-    // sentence is the payload one. Each is true of its row and false of the other, so a bar that
-    // recites the first one it found in queue order is the paragraph this ticket deleted in
-    // miniature. Both queue orders are asked because which sentence such a bar would have spoken
-    // is exactly what the order decided - and neither order is saved by the two guards, since
-    // neither row is creatable or extractable and only the orphan names a page.
+    // is the page one; the doorless row DOES name a page whose payload no door can reach, so
+    // its own sentence is the payload one. Each is true of its row and false of the other, so
+    // a bar that recites the first one it found in queue order is the paragraph this ticket
+    // deleted in miniature. Both queue orders are asked because which sentence such a bar would
+    // have spoken is exactly what the order decided - and neither order is saved by the two
+    // guards, since neither row is creatable or extractable and only the doorless row names a
+    // page. REPINNED from the orphan: that row can be created now, so it is not a doorless
+    // specimen any more.
     const noPage = legacyVase;
-    const withPage = orphanRow();
+    const withPage = danglingRow();
     for (const rows of [[noPage, withPage], [withPage, noPage]]) {
       const view = renderView(makeState({ report: makeReport(rows) }));
 
@@ -1876,8 +1988,10 @@ describe("BundleReviewView offers only the actions that can succeed", () => {
   });
 
   it("keeps Dismiss live - hiding the row is never company for the refusal", () => {
-    const orphan = orphanRow();
-    const state = makeState({ report: makeReport([orphan]) });
+    // REPINNED from the orphan: that row now has a live create, so the row this
+    // sentence is about is the doorless one.
+    const dangling = danglingRow();
+    const state = makeState({ report: makeReport([dangling]) });
     renderView(state);
 
     const dismiss = within(detail()).getByRole("button", {
@@ -1885,7 +1999,7 @@ describe("BundleReviewView offers only the actions that can succeed", () => {
     }) as HTMLButtonElement;
     expect(dismiss.disabled).toBe(false);
     fireEvent.click(dismiss);
-    expect(state.dismiss).toHaveBeenCalledWith([orphan.key], true);
+    expect(state.dismiss).toHaveBeenCalledWith([dangling.key], true);
 
     // The bulk Dismiss is live too, while the Enrich button beside it stays shut.
     fireEvent.click(screen.getByRole("button", { name: "Select all shown" }));
@@ -2708,6 +2822,188 @@ describe("BundleReviewView compound groups", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Create low as name-only/ }));
 
     expect(state.create).toHaveBeenCalledWith([{ key: "StageTop", name_only: true }]);
+  });
+});
+
+describe("BundleReviewView import-as chooser", () => {
+  function importAs(): HTMLElement {
+    return within(detail()).getByRole("radiogroup", { name: "Import as" });
+  }
+
+  it("offers exactly one chooser, in the detail pane, in the served order", () => {
+    renderView(makeState({ report: makeReport([moai]) }));
+
+    expect(within(detail()).getAllByRole("radiogroup", { name: "Import as" })).toHaveLength(1);
+    // Never in the list: an option must stay free of focusable controls.
+    expect(listbox().querySelector("[role='radiogroup']")).toBeNull();
+
+    const radios = within(importAs()).getAllByRole("radio") as HTMLInputElement[];
+    expect(radios.map(radio => radio.value)).toEqual(["root-docs", SHAPE_MANUAL]);
+    // A VISIBLE label per option, in human words rather than the wire tokens.
+    expect(radios.map(radio => radio.labels?.[0]?.textContent)).toEqual([
+      SHAPE_LABELS["root-docs"],
+      SHAPE_LABELS[SHAPE_MANUAL],
+    ]);
+  });
+
+  it("checks the recommended shape and shows that shape's counts", () => {
+    renderView(makeState({ report: makeReport([moai]) }));
+
+    const checked = within(importAs()).getByRole("radio", { checked: true }) as HTMLInputElement;
+    expect(checked.value).toBe("root-docs");
+    expect(detail().querySelector("[data-bundle-shape-counts]")?.textContent).toBe(
+      "3 models, 5 images, 2 texts, 0 other",
+    );
+  });
+
+  it("follows the choice with that shape's counts and note", () => {
+    // The chosen match's own numbers, so the operator can see what `manual` would
+    // import - including the parts the recommendation leaves out.
+    const row = makeBundle({
+      key: "StageTop",
+      rel_path: "StageTop",
+      title: "StageTop Wave One",
+      name_suggestion: "StageTop Wave One",
+      matches: [
+        {
+          shape: "compound",
+          rule: "compound-bundle",
+          confidence: "low",
+          model_count: 45,
+          image_count: 0,
+          text_count: 1,
+          other_count: 0,
+          note: null,
+        },
+        {
+          shape: SHAPE_MANUAL,
+          rule: "manual",
+          confidence: "low",
+          model_count: 48,
+          image_count: 2,
+          text_count: 1,
+          other_count: 3,
+          note: "Everything under the folder, including the unrelated part.",
+        },
+      ],
+    });
+    renderView(makeState({ report: makeReport([row]) }));
+
+    expect(detail().querySelector("[data-bundle-shape-counts]")?.textContent).toBe(
+      "45 models, 0 images, 1 texts, 0 other",
+    );
+
+    fireEvent.click(within(importAs()).getByRole("radio", { name: SHAPE_LABELS[SHAPE_MANUAL] }));
+
+    expect(detail().querySelector("[data-bundle-shape-counts]")?.textContent).toBe(
+      "48 models, 2 images, 1 texts, 3 other",
+    );
+    expect(
+      within(detail()).getByText("Everything under the folder, including the unrelated part."),
+    ).toBeTruthy();
+  });
+
+  it("offers manual on every row, high confidence and archive-only included", () => {
+    renderView(makeState({ report: makeReport([moai]) }));
+    expect(
+      within(importAs()).getByRole("radio", { name: SHAPE_LABELS[SHAPE_MANUAL] }),
+    ).toBeTruthy();
+    cleanup();
+
+    renderView(makeState({ report: makeReport([moaiZip]) }));
+    expect(
+      within(importAs()).getByRole("radio", { name: SHAPE_LABELS[SHAPE_MANUAL] }),
+    ).toBeTruthy();
+  });
+
+  it("sends the chosen shape and never an exclusion when manual is picked", () => {
+    const state = makeState({ report: makeReport([compound]) });
+    renderView(state);
+
+    // An exclusion the operator made on the recommended compound shape...
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Gearbox" }));
+    fireEvent.click(within(importAs()).getByRole("radio", { name: SHAPE_LABELS[SHAPE_MANUAL] }));
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    // ...must not travel with a manual import: there are no groups to leave out.
+    expect(state.create).toHaveBeenCalledWith([
+      { key: "StageTop", name: "StageTop Wave One", shape: SHAPE_MANUAL },
+    ]);
+    const item = vi.mocked(state.create).mock.calls[0][0][0];
+    expect(item).not.toHaveProperty("exclude_groups");
+  });
+
+  it("keeps the group chooser only while compound is the chosen shape", () => {
+    renderView(makeState({ report: makeReport([compound]) }));
+
+    // The fixture's recommended shape is compound, so the chooser stands.
+    expect(
+      within(importAs()).getByRole("radio", {
+        name: SHAPE_LABELS.compound,
+        checked: true,
+      }),
+    ).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Groups in this bundle" })).toBeTruthy();
+
+    fireEvent.click(within(importAs()).getByRole("radio", { name: SHAPE_LABELS[SHAPE_MANUAL] }));
+
+    expect(screen.queryByRole("group", { name: "Groups in this bundle" })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: "Include Gearbox" })).toBeNull();
+
+    // Choosing the recommendation again puts it back: one piece of state, and the
+    // chooser is reversible.
+    fireEvent.click(within(importAs()).getByRole("radio", { name: SHAPE_LABELS.compound }));
+    expect(screen.getByRole("group", { name: "Groups in this bundle" })).toBeTruthy();
+  });
+
+  it("gains no focusable control in the option, and the listbox keeps one tab stop", () => {
+    renderView(makeState());
+
+    const options = Array.from(listbox().querySelectorAll("[role='option']"));
+    expect(options.length).toBe(4);
+    for (const option of options) {
+      // Not a button, not a radio, not the glyph: the chooser lives in the pane.
+      expect(
+        option.querySelector("button, input, [role='radio'], [role='checkbox'], [role='switch']"),
+      ).toBeNull();
+    }
+    expect(options.filter(option => option.getAttribute("tabindex") === "0")).toHaveLength(1);
+  });
+
+  it("treats a payload with no matches as the one recommendation, and renders no wrapper", () => {
+    // A cached payload from before the field was served: one shape, so there is
+    // nothing to choose and no empty wrapper is left behind.
+    const legacy = { ...moai } as Partial<BundleDetectItem>;
+    delete legacy.matches;
+    renderView(makeState({ report: makeReport([legacy as BundleDetectItem]) }));
+
+    expect(within(detail()).queryByRole("radiogroup", { name: "Import as" })).toBeNull();
+    expect(detail().querySelector("[data-bundle-shape-counts]")).toBeNull();
+    // The pane still renders its facts: nothing was disturbed.
+    expect(within(detail()).getByText("Ready")).toBeTruthy();
+  });
+
+  it("keeps Create live on a creatable blocked row and shut on the archive-only row", () => {
+    renderView(makeState({ report: makeReport([legacyVase]) }));
+
+    // `unresolved_directory` is a readiness fact now: the create is live, and the
+    // row does not call itself blocked beside a live Create button.
+    expect(statusCell(legacyVase.key).textContent).toBe("no matching folder on disk");
+    expect(
+      (within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+    cleanup();
+
+    renderView(makeState({ report: makeReport([moaiZip]) }));
+
+    // The zip-only row keeps the refusal word and offers its own door instead.
+    expect(statusCell(moaiZip.key).textContent).toContain("Blocked - ");
+    expect(
+      (within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(within(detail()).getByRole("button", { name: "Extract Moai zip" })).toBeTruthy();
   });
 });
 

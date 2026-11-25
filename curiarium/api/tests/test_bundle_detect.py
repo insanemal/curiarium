@@ -1906,8 +1906,8 @@ RULE_SET_TABLE_HOMES = {
     "HIDDEN_NAME_PREFIX": (library_scan, "HIDDEN_NAME_PREFIX"),
 }
 
-RULE_SET_VERSION = "2026-11-07.0"
-RULE_SET_STAMP = "0f317ee0fa2ff200a703a8c10be1c6f565d50d4263b3629a1004dffee7c0c911"
+RULE_SET_VERSION = "2026-11-25.0"
+RULE_SET_STAMP = "25d3e7969ac75dc97e71e4410d254bf9701a3fc5983082abd01eb1c65b6d6bbd"
 
 # Every constant `rule_set_tables` captures, with a replacement that differs from
 # the shipped value. The names are also the exact key set of the derived table, so
@@ -1924,6 +1924,7 @@ ROW_DECIDING_TABLES = {
     "DETECTOR_GENERIC": "generic-bundle-v2",
     "DETECTOR_TITLE_NAME": "title-name-v2",
     "DETECTOR_ARCHIVE_BUNDLE": "archive-bundle-v2",
+    "DETECTOR_MANUAL": "manual-v2",
     "CONFIDENCE_HIGH": "high-v2",
     "CONFIDENCE_MEDIUM": "medium-v2",
     "CONFIDENCE_LOW": "low-v2",
@@ -1935,6 +1936,7 @@ ROW_DECIDING_TABLES = {
     "SHAPE_GENERIC": "generic-v2",
     "SHAPE_TITLE_NAME": "title-name-shape-v2",
     "SHAPE_ARCHIVE_ROOT": "archive-root-v2",
+    "SHAPE_MANUAL": "manual-shape-v2",
     "MODEL_SUFFIXES": frozenset({".obj"}),
     "IMAGE_SUFFIXES": frozenset({".webp"}),
     # The scan's own two tables, stamped because the model count now asks them
@@ -1993,7 +1995,9 @@ def test_the_rule_set_stamp_is_pinned_so_a_table_edit_cannot_go_unnoticed() -> N
     WHICH listing the archive-owned promotion is judged on, so a report taken at it
     offers a row it did not offer before, while every table below stayed
     byte-identical - the version moves and the stamp must not. A stamp that moved
-    here would be a table edit nobody made.
+    here would be a table edit nobody made. `2026-11-25.0` is the opposite case by
+    construction: DETECTOR_MANUAL and SHAPE_MANUAL joined the stamp, so version and
+    stamp moved together.
     """
     assert bundle_detect.RULE_SET_VERSION == RULE_SET_VERSION
     assert bundle_detect.RULE_SET_STAMP == RULE_SET_STAMP
@@ -2816,3 +2820,142 @@ def test_bounded_model_evidence_is_defined_exactly_once() -> None:
     assert "root_model_count" not in called_names(promotion), (
         "and it is not R7's depth-0 reading doing the job instead"
     )
+
+
+# --- the manual shape and the match list (Mf-z643) --------------------------
+#
+# Detection stops being a gatekeeper: every path is importable, and a refused
+# listing is offered as the MANUAL scope ("everything under this path"). These
+# tests pin the pure half - the facts that scope produces and the match list a
+# row renders - with no disk, no session and no HTTP.
+
+
+def test_manual_facts_is_a_scope_and_never_a_provenance_claim() -> None:
+    """Manual says WHERE a project starts, never who made the files.
+
+    Mutation: give ``manual_facts`` a provenance parameter (or copy one in from a
+    sibling rule) and the ``None`` assertions red - a scope is not evidence.
+    """
+    judged = snapshot("Vault", {"parts/a.stl": 40, "b.stl": 41, "family/c.stl": 42, "preview.jpg": 50, "notes.txt": 5})
+
+    facts = bundle_detect.manual_facts(judged)
+
+    assert (facts.detector, facts.metadata_shape, facts.confidence) == (
+        bundle_detect.DETECTOR_MANUAL,
+        bundle_detect.SHAPE_MANUAL,
+        bundle_detect.CONFIDENCE_LOW,
+    )
+    assert (facts.creator, facts.licence, facts.licence_url, facts.source_url, facts.thing_id) == (
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    assert facts.description is None
+    assert facts.title == bundle_detect.display_name("Vault")
+    assert facts.counts.model == 3
+    assert facts.counts.image == 1
+    assert facts.counts.text == 1
+    assert facts.groups == ()
+    # The manual vocabulary is not a refusal word: it names a shape, not an absence.
+    assert bundle_detect.DETECTOR_MANUAL not in bundle_detect.REFUSAL_RULES
+    assert bundle_detect.SHAPE_MANUAL not in bundle_detect.REFUSAL_RULES
+
+
+def test_shape_matches_puts_the_recommended_first_and_the_manual_scope_last() -> None:
+    """AC-1's pure half: ``matches[0]`` IS the row's answer, manual is always last.
+
+    Mutation: append the recommended facts instead of prepending them, or emit the
+    manual entry anywhere but last, and one of the two index assertions reds. The
+    empty-``docs`` case is here too: a listing with no documents is not an error.
+    """
+    judged = snapshot("Moai", {"README.txt": 10, "LICENSE.txt": 10, "a.stl": 40, "b.jpg": 50})
+    recommended = bundle_detect.detect_bundle_decision(judged, r1_docs()).facts
+    assert recommended is not None
+
+    matches = bundle_detect.shape_matches(judged, r1_docs(), recommended)
+
+    assert matches[0].shape == recommended.metadata_shape
+    assert matches[0].rule == recommended.detector
+    assert matches[0].confidence == recommended.confidence
+    assert matches[0].counts == recommended.counts
+    assert matches[0].groups == recommended.groups
+    assert matches[-1].shape == bundle_detect.SHAPE_MANUAL
+    assert matches[-1].rule == bundle_detect.DETECTOR_MANUAL
+    assert matches[-1].confidence == bundle_detect.CONFIDENCE_LOW
+    assert matches[-1].note is None
+    assert len({match.shape for match in matches}) == len(matches), "one entry per shape, first wins"
+
+    undocd = bundle_detect.shape_matches(judged, {}, recommended)
+    assert undocd[-1].shape == bundle_detect.SHAPE_MANUAL, "an empty docs map is a listing, not an error"
+
+
+def test_shape_matches_lists_the_other_rules_with_the_recommended_shape_deduped() -> None:
+    """Every rule that also fires is offered, once, after the recommendation.
+
+    The xbox shape fires both R5 (its own models and a spaced name) and R7 (a
+    foreign group it holds). R7's groups ride the match, which is what lets a
+    create choose the compound shape explicitly.
+    """
+    judged = snapshot(
+        "xbox360 shell",
+        {
+            "shell-0.stl": 40,
+            "shell-1.stl": 40,
+            "shell-2.stl": 40,
+            "Wallmount - 5461913/bracket.stl": 41,
+            "Wallmount - 5461913/README.txt": 10,
+            "Wallmount - 5461913/LICENSE.txt": 10,
+        },
+    )
+    docs = {
+        "Wallmount - 5461913/README.txt": "Created by Thingiverse user maker_5461913\nLicensed under CC BY\n",
+        "Wallmount - 5461913/LICENSE.txt": "Wallmount by maker_5461913 on Thingiverse: https://www.thingiverse.com/thing:5461913\n",
+    }
+    recommended = bundle_detect.title_name_facts(judged)
+    assert recommended is not None
+
+    matches = bundle_detect.shape_matches(judged, docs, recommended)
+
+    assert [match.shape for match in matches] == ["title-name", "compound", "manual"]
+    compound = matches[1]
+    assert compound.rule == bundle_detect.DETECTOR_COMPOUND
+    assert [group.name for group in compound.groups] == ["Wallmount - 5461913"]
+    assert matches[-1].shape == bundle_detect.SHAPE_MANUAL
+
+
+def test_shape_matches_offers_the_promotion_only_when_an_archive_paired() -> None:
+    """``paired`` gates the promotion shape and nothing else; manual always survives.
+
+    Mutation: always offer ``archive_owned_facts`` and a directory no archive owns
+    reports a ``generic`` alternative it never earned.
+    """
+    judged = snapshot("clockwork", {"a.stl": 40, "b.stl": 41})
+    recommended = bundle_detect.manual_facts(judged)
+
+    unpaired = bundle_detect.shape_matches(judged, {}, recommended, paired=False)
+    paired = bundle_detect.shape_matches(judged, {}, recommended, paired=True)
+
+    assert bundle_detect.SHAPE_GENERIC not in {match.shape for match in unpaired}
+    assert bundle_detect.SHAPE_GENERIC in {match.shape for match in paired}
+    assert {match.shape for match in unpaired} <= {match.shape for match in paired}
+
+
+def test_shape_matches_emits_a_manual_recommendation_once_with_its_note() -> None:
+    """A manual row recommends itself: one manual entry, first, carrying the note.
+
+    Mutation: append a second manual entry when the recommended shape IS manual and
+    this reds - the row would offer the same shape twice.
+    """
+    judged = snapshot("vault", {"a.stl": 40, "b.stl": 41})
+    recommended = bundle_detect.manual_facts(judged)
+
+    matches = bundle_detect.shape_matches(judged, {}, recommended, "R3:no-own-depth-model")
+
+    manual = [match for match in matches if match.shape == bundle_detect.SHAPE_MANUAL]
+    assert len(manual) == 1
+    assert matches[0] is manual[0]
+    assert manual[0].note == "R3:no-own-depth-model"
+    assert manual[0].rule == "R3:no-own-depth-model"
+    assert manual[0].confidence == bundle_detect.CONFIDENCE_LOW

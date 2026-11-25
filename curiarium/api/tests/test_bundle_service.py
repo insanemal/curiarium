@@ -710,10 +710,17 @@ def test_a_legacy_bundle_is_reported_unresolvable_and_creates_nothing(
 
     blocked = create(client, headers, [{"key": "Moai"}])
     assert blocked["created"] == 0
-    assert blocked["blocked"] == 1
-    assert blocked["results"][0]["reason"] == "unresolved_directory"
+    # `blocked` is no longer a create gate (Mf-z643): only an archive-only row
+    # answers `blocked`. The legacy bundle holds no registered assets, so the
+    # primitive's empty-member refusal is what answers now - a state refusal,
+    # never a shape claim, and still no project.
+    assert blocked["blocked"] == 0
+    assert blocked["failed"] == 1
+    assert blocked["results"][0]["status"] == "failed"
+    assert blocked["results"][0]["reason"] == "no member files resolved"
     bulk = create(client, headers, [{"key": "Moai", "name_only": True}])
-    assert bulk["created"] == 0, "a bulk name-only create must skip a blocked bundle"
+    assert bulk["created"] == 0, "a bulk name-only create must not invent a project over no files"
+    assert bulk["failed"] == 1
     assert project_listing(client, headers) == {}
 
 
@@ -1029,7 +1036,13 @@ def test_a_new_shape_folder_containing_a_zip_only_bundle_is_not_a_bundle(
 
     report = detect(client, headers)
 
-    assert [row["key"] for row in report["bundles"]] == ["Inbox/Vendor.zip"]
+    # `Inbox` is a container and stays off the row list. `Inbox/wrap` is a
+    # directory the rules refuse, and since Mf-z643 a refused directory is
+    # offered as the MANUAL scope rather than silence - detection is no longer a
+    # gatekeeper. The point of this test is that `Inbox` itself is not a bundle.
+    assert [row["key"] for row in report["bundles"]] == ["Inbox/Vendor.zip", "Inbox/wrap"]
+    assert row_for(report, "Inbox/wrap")["detector"] == "manual"
+    assert row_for(report, "Inbox/wrap")["matches"][-1]["note"] == row_for(report, "Inbox/wrap")["matches"][-1]["rule"]
 
 
 def test_the_named_files_allowance_survives_a_second_model_subdirectory(
@@ -1236,7 +1249,10 @@ def test_the_live_shape_has_no_container_bundle(client: TestClient, isolated_sto
     keys = {row["key"] for row in report["bundles"]}
     assert "import" not in keys, "a container is not a bundle"
     assert "import/ParentOf" not in keys, "a directory that holds only a bundle is not a bundle"
-    assert "import/residual" not in keys, "a model-only directory is not a bundle"
+    # `import/residual` is refused by the rules and is now offered as the MANUAL
+    # scope: every path is importable (Mf-z643), so a refused directory is no
+    # longer an absence. The rule half of the old assertion is `detector`.
+    assert row_for(report, "import/residual")["detector"] == "manual"
     moai_row = row_for(report, f"import/{MOAI}")
     assert moai_row["confidence"] == "high"
     assert moai_row["model_count"] == 3, "models at depth 1 under files/ are still counted"
@@ -2130,15 +2146,36 @@ def test_service_a_no_docs_directory_without_its_archive_is_not_a_bundle(
     scan()
     headers = auth_header(client)
 
-    assert bundle_service.build_report()["bundles"] == []
-    assert bundle_service.iter_bundle_candidates(isolated_storage) == ([], False)
+    # The RULE is still silent: no detector offers this shape. Since Mf-z643 the
+    # directory is nevertheless offered as the MANUAL scope, because detection is
+    # no longer a gatekeeper - the row says "everything under this path" rather
+    # than claiming the listing is a bundle.
+    report = bundle_service.build_report()
+    # The maximal refused root is `import` itself: it holds no row, so it is the
+    # one MANUAL row covering everything under this path (Mf-z643).
+    assert [row["key"] for row in report["bundles"]] == ["import"]
+    assert report["bundles"][0]["detector"] == "manual"
+    assert (report["bundles"][0]["model_count"], report["bundles"][0]["image_count"]) == (12, 2)
+    # The manual row recommends itself, and the R6 shape is also on offer for the
+    # same listing (the plan adds it in rule order for every carrier); the manual
+    # entry is FIRST here because it is the recommended shape.
+    assert [match["shape"] for match in report["bundles"][0]["matches"]] == ["manual", "archive-root"]
+    manual = report["bundles"][0]["matches"][0]
+    assert manual["note"] in bundle_service.REFUSAL_RULES
+    assert manual["note"] == report["bundles"][0]["matches"][0]["rule"]
+    assert (manual["model_count"], manual["image_count"], manual["text_count"]) == (12, 2, 0)
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    assert truncated is False
+    assert [(candidate.key, candidate.manual) for candidate in candidates] == [("import", True)]
 
-    created = create(client, headers, [{"key": f"import/{NO_TITLE_ROOT}"}])
+    created = create(client, headers, [{"key": "import"}])
 
-    assert created["created"] == 0
-    assert created["failed"] == 1
-    assert created["results"][0]["reason"] == "unknown bundle"
-    assert project_listing(client, headers) == {}
+    # The manual scope is creatable: the operator's choice replaces the shape
+    # gate. It is still a real row with a resolved Folder and registered models,
+    # so the create is one project over the whole subtree.
+    assert created["created"] == 1
+    assert created["results"][0]["assets_added"] == 14
+    assert len(project_listing(client, headers)) == 1
 
 
 def test_service_a_pile_of_bundles_and_a_zip_is_still_not_a_bundle(
@@ -2478,13 +2515,21 @@ def test_service_a_pile_of_two_unnamed_model_directories_is_not_promoted(isolate
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
 
     assert truncated is False
-    assert [candidate.key for candidate in candidates] == ["import/RepRap-MultiFilament/Alpha"], (
-        "the pile is refused by own-depth/cardinality; only Alpha's name reads as a title"
-    )
+    # `Alpha` is R5's title row; `Beta` is refused by the same floor and rides the
+    # MANUAL scope (Mf-z643) instead of vanishing. Neither is the pile's row: the
+    # pile itself holds a row and is therefore a container.
+    assert [candidate.key for candidate in candidates] == [
+        "import/RepRap-MultiFilament/Alpha",
+        "import/RepRap-MultiFilament/Beta",
+    ], "the pile is refused by own-depth/cardinality; only Alpha's name reads as a title"
     report = bundle_service.build_report()
-    assert [row["key"] for row in report["bundles"]] == ["import/RepRap-MultiFilament/Alpha"]
+    assert [row["key"] for row in report["bundles"]] == [
+        "import/RepRap-MultiFilament/Alpha",
+        "import/RepRap-MultiFilament/Beta",
+    ]
     alpha = row_for(report, "import/RepRap-MultiFilament/Alpha")
     assert (alpha["detector"], alpha["confidence"]) == ("title-name", "low")
+    assert row_for(report, "import/RepRap-MultiFilament/Beta")["detector"] == "manual"
 
 
 def test_service_a_verified_stem_twin_does_not_promote_a_pile_of_bundles(
@@ -2769,8 +2814,14 @@ def test_service_a_stem_twin_that_does_not_match_pairs_nothing(isolated_storage:
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
 
     assert truncated is False
-    assert candidates == [], "a size or name mismatch pairs nothing"
-    assert bundle_service.build_report()["bundles"] == []
+    # No archive PAIRED with a directory. The one candidate is `import` itself,
+    # the maximal refused root, offered as the MANUAL scope (Mf-z643): both
+    # namesake directories are inside it and the archives are children of it.
+    assert [(candidate.key, candidate.manual) for candidate in candidates] == [("import", True)]
+    report = bundle_service.build_report()
+    assert [row["key"] for row in report["bundles"]] == ["import"]
+    assert report["bundles"][0]["detector"] == "manual"
+    assert report["bundles"][0]["archive"] is None
 
 
 def test_service_a_failed_stem_verification_consumes_the_archive(isolated_storage: Path) -> None:
@@ -2802,8 +2853,14 @@ def test_service_a_failed_stem_verification_consumes_the_archive(isolated_storag
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
 
     assert truncated is False
-    assert candidates == [], "the failed stem check consumed the archive"
-    assert bundle_service.build_report()["bundles"] == []
+    # The failed stem check consumed the archive and paired nothing. The one
+    # candidate is `import` itself, the maximal refused root, offered as the
+    # MANUAL scope (Mf-z643) rather than silence.
+    assert [(candidate.key, candidate.manual) for candidate in candidates] == [("import", True)]
+    report = bundle_service.build_report()
+    assert [row["key"] for row in report["bundles"]] == ["import"]
+    assert report["bundles"][0]["detector"] == "manual"
+    assert report["bundles"][0]["archive"] is None
 
 
 def test_service_a_stem_twin_in_another_parent_pairs_nothing(isolated_storage: Path) -> None:
@@ -3144,15 +3201,22 @@ def test_service_a_doc_less_model_only_directory_without_an_id_is_still_refused(
     scan()
     headers = auth_header(client)
 
-    assert bundle_service.build_report()["bundles"] == []
-    assert bundle_service.iter_bundle_candidates(isolated_storage) == ([], False)
+    # R4 does not fire on an ordinary name: no detector offers this shape. The
+    # directory itself is offered as the MANUAL scope (Mf-z643), so the create is
+    # the operator's choice rather than a rule's claim - and it makes one project.
+    report = bundle_service.build_report()
+    # The maximal refused root is `import`, offered as the MANUAL scope (Mf-z643).
+    assert [row["key"] for row in report["bundles"]] == ["import"]
+    assert report["bundles"][0]["detector"] == "manual"
+    candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
+    assert truncated is False
+    assert [(candidate.key, candidate.manual) for candidate in candidates] == [("import", True)]
 
-    created = create(client, headers, [{"key": "import/plainparts"}])
+    created = create(client, headers, [{"key": "import"}])
 
-    assert created["created"] == 0
-    assert created["failed"] == 1
-    assert created["results"][0]["reason"] == "unknown bundle"
-    assert project_listing(client, headers) == {}
+    assert created["created"] == 1
+    assert created["results"][0]["assets_added"] == 1
+    assert len(project_listing(client, headers)) == 1
 
 
 def test_service_a_name_only_with_a_derived_url_is_not_sent_name_only_by_the_low_bar(
@@ -3488,8 +3552,13 @@ def test_service_the_nine_title_shaped_folders_are_offered_and_the_two_parts_are
 
     report = detect(client, headers)
 
-    expected = sorted(f"import/{name}" for name in TITLE_FOLDERS)
-    assert sorted(row["key"] for row in report["bundles"]) == expected
+    title_keys = sorted(f"import/{name}" for name in TITLE_FOLDERS)
+    part_keys = sorted(f"import/{name}" for name in PART_FOLDERS)
+    # The nine title rows, plus the two part directories as MANUAL scopes: R5
+    # refuses them, and a refused directory is offered as "everything under this
+    # path" since Mf-z643. The rule still offers only the nine.
+    assert sorted(row["key"] for row in report["bundles"]) == sorted(title_keys + part_keys)
+    assert sorted(row["key"] for row in report["bundles"] if row["detector"] == "title-name") == title_keys
     for name in TITLE_FOLDERS:
         row = row_for(report, f"import/{name}")
         assert row["detector"] == "title-name", f"{name} is offered on its name alone"
@@ -3506,12 +3575,17 @@ def test_service_the_nine_title_shaped_folders_are_offered_and_the_two_parts_are
 
     keys = {row["key"] for row in report["bundles"]}
     for name in PART_FOLDERS:
-        assert f"import/{name}" not in keys, f"{name} is a part name, never a title"
+        assert f"import/{name}" in keys, "a refused directory is a manual scope, never silence"
+        assert row_for(report, f"import/{name}")["detector"] == "manual", (
+            f"{name} is a part name, never a title"
+        )
 
     candidates, truncated = bundle_service.iter_bundle_candidates(isolated_storage)
     assert truncated is False
-    assert sorted(candidate.key for candidate in candidates) == expected
-    assert all(candidate.title_name is True for candidate in candidates)
+    assert sorted(candidate.key for candidate in candidates) == sorted(title_keys + part_keys)
+    titles = [candidate for candidate in candidates if candidate.title_name]
+    assert sorted(candidate.key for candidate in titles) == title_keys
+    assert all(candidate.manual for candidate in candidates if candidate.key in set(part_keys))
     assert all(candidate.archive_path is None for candidate in candidates)
 
     created = create(client, headers, [{"key": "import/skull mask"}])
@@ -3653,8 +3727,15 @@ def test_service_the_switch_off_removes_only_the_title_rows(
     monkeypatch.setattr(bundle_detect, "TITLE_NAME_BUNDLES_ENABLED", True)
     on = bundle_service.build_report()
 
-    assert [row["key"] for row in off["bundles"]] == [MOAI], "only the title rows depend on the switch"
+    assert [row["key"] for row in off["bundles"]] == [MOAI, "import"], (
+        # With R5 off the title row is refused, so the maximal refused root is
+        # `import` and it is offered as the MANUAL scope (Mf-z643). Only the
+        # title rows depend on the switch, and this is that dependence.
+        "only the title rows depend on the switch"
+    )
+    assert row_for(off, "import")["detector"] == "manual"
     assert sorted(row["key"] for row in on["bundles"]) == sorted([MOAI, "import/skull mask"])
+    assert row_for(on, "import/skull mask")["detector"] == "title-name"
 
 
 def test_service_r4_outranks_the_title_rule_on_an_id_named_folder(
@@ -5330,7 +5411,13 @@ def test_service_a_git_dump_keeps_its_separate_product_rows(
         for item in report["bundles"]
         if item["key"].startswith(f"import/{ENDORPHIN}")
     }
-    assert rows == expected
+    # The checkout's own directories R7 must not touch keep the detector they
+    # had. `_includes`/`_layouts`/`_sass` are repo payload the rules refuse, and
+    # since Mf-z643 they ride the MANUAL scope rather than vanishing.
+    manual_dirs = {
+        f"import/{ENDORPHIN}/{name}": "manual" for name in ("_includes", "_layouts", "_sass")
+    }
+    assert rows == {**expected, **manual_dirs}
     assert "import/endorphin/STLs" not in rows
     assert "compound-bundle" not in {item["detector"] for item in report["bundles"]}
 
@@ -5900,23 +5987,28 @@ def test_excluding_the_foreign_group_creates_one_project_of_its_own_27(
     assert marker["cover"]["asset_id"] == project.cover_asset_id
 
     after = row_for(detect(client, headers, limit=1000), f"import/{XBOX}")
-    for field in ("model_count", "assets_total", "groups", "status"):
+    for field in ("model_count", "assets_total", "status"):
         assert after[field] == before[field], field
+    # The excluded group sits INSIDE the created project's key, so it is no longer
+    # a detection row (Mf-z643) and the key is re-evaluated over its whole subtree
+    # as a title row. The groups belong to the created marker now; the compound
+    # match is still offered (`matches`), so a later create can choose it again.
+    assert after["groups"] == []
+    assert after["detector"] == "title-name"
+    assert "compound" in [match["shape"] for match in after["matches"]]
     assert after["cover"]["asset_id"] == before["cover"]["asset_id"]
 
 
-def test_the_excluded_group_is_offered_as_its_own_row(
+def test_the_excluded_group_is_inside_the_project_key_and_is_not_a_row(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """An excluded group comes back as a real, creatable row - at both scopes.
+    """A descendant of a created project is not a detection row, at either scope.
 
-    The re-offer is a REPORT-level act: the same walk still names the mount
-    ``member-of-bundle``, so the report and the ledger each say what they know.
-    Mutation: drop the second loop in `_report_from_scan` and the mount row is
-    missing; drop the `reoffered_relative` filter and the key is both a row and a
-    refusal; drop `_qualify` from the marker lookup and the scoped read offers
-    nothing; delete the re-offer loop's `row["rule_set"]` stamp and the stamp
-    assertion reds.
+    This used to be the C2 re-offer witness: the absorbed mount came back as a
+    row of its own. Mf-z643 makes the exclusion a CREATE-time decision only - once
+    `import/xbox360_shell` is a project key, everything inside it stops being a
+    row, and the marker is the one record of what was excluded. The report must
+    name the mount nowhere: not as a row, not in the ledger, at either scope.
     """
     write_xbox360(isolated_storage)
     insert_folder_row(XBOX, f"import/{XBOX}")
@@ -5927,39 +6019,24 @@ def test_the_excluded_group_is_offered_as_its_own_row(
 
     report = detect(client, headers, limit=1000)
 
-    row = row_for(report, mount_key())
-    assert row["detector"] == "thingiverse-readme"
-    assert row["confidence"] == "high"
-    assert row["status"] == "ready"
-    assert row["blocked_reason"] is None
-    assert row["groups"] == []
-    assert row["model_count"] == XBOX_GROUP_MODELS
-    compound = service_row(f"import/{XBOX}")
-    assert compound["groups"] == [
-        {
-            "name": XBOX_GROUP,
-            "model_count": XBOX_GROUP_MODELS,
-            "foreign": True,
-            "separable": True,
-        }
-    ]
+    keys = {row["key"] for row in report["bundles"]}
+    assert keys == {f"import/{XBOX}"}
+    row = row_for(report, f"import/{XBOX}")
+    assert row["detector"] == "title-name"
+    assert row["existing_project_match"] == "marker"
     assert mount_key() not in refusal_ledger(report)
-    # The wire model does not declare the per-row stamp - it is a service-level
-    # fact, one rule set per report - so this is read from the service's dict.
-    assert service_row(mount_key())["rule_set"] == report["rule_set"]["stamp"]
 
-    walked = bundle_service.scan_bundles(isolated_storage)
-    assert {item.rel_path: item.rule for item in walked.refusals}[mount_key()] == "member-of-bundle"
+    walked = bundle_service.scan_bundles(isolated_storage, excluded_keys={"import/xbox360_shell"})
+    # A manual row keeps its refusing word in the ledger (it is the row's `note`).
+    assert [(item.rel_path, item.rule) for item in walked.refusals] == [("import", "R3:trio-no-image")]
     assert mount_key() not in {candidate.key for candidate in walked.candidates}
 
-    assert report["counts"]["total"] == 2
+    assert report["counts"]["total"] == 1
     scoped = detect(client, headers, path="import", limit=1000)
-    assert scoped["counts"]["total"] == 2
-    scoped_mount = row_for(scoped, mount_key())
-    assert scoped_mount["key"] == row["key"], "a scoped read names the same bundle absolutely"
-    refused = {item["rel_path"] for item in scoped["refused"]}
-    assert f"{XBOX}/{XBOX_GROUP}" not in refused
-    assert mount_key() not in refused
+    assert scoped["counts"]["total"] == 1
+    scoped_keys = {row["key"] for row in scoped["bundles"]}
+    assert scoped_keys == {f"import/{XBOX}"}
+    assert mount_key() not in {item["rel_path"] for item in scoped["refused"]}
 
 
 def test_no_directory_is_both_a_row_and_a_refusal(client: TestClient, isolated_storage: Path) -> None:
@@ -5979,10 +6056,12 @@ def test_no_directory_is_both_a_row_and_a_refusal(client: TestClient, isolated_s
 
     def assert_disjoint() -> None:
         report = detect(client, headers, limit=1000)
-        rows = {row["key"] for row in report["bundles"]}
+        # A MANUAL row is deliberately both a row and a ledger entry: the ledger word
+        # is its `note` (Mf-z643). Every other row stays disjoint from the ledger.
+        rows = {row["key"] for row in report["bundles"] if row["detector"] != "manual"}
         assert rows & set(refusal_ledger(report)) == set()
         scoped = detect(client, headers, path="import", limit=1000)
-        scoped_rows = {row["key"] for row in scoped["bundles"]}
+        scoped_rows = {row["key"] for row in scoped["bundles"] if row["detector"] != "manual"}
         assert scoped_rows & set(refusal_ledger(scoped)) == set()
 
     assert_disjoint()
@@ -5993,11 +6072,12 @@ def test_no_directory_is_both_a_row_and_a_refusal(client: TestClient, isolated_s
 def test_a_dismissed_re_offered_group_is_not_stale_and_a_vanished_key_is(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """A dismissal of a re-offered group still names a live row; a ghost key does not.
+    """A dismissal of a LIVE key is not stale; a key naming nothing is.
 
-    Mutation: build `live_keys` from `scan.candidates` alone and the dismissed
-    mount key reads stale the moment it is hidden, which is exactly the class of
-    false stale a re-offer must not introduce.
+    The former C2 re-offer witness used the excluded mount, which is now inside the
+    project key and therefore no longer a row - so the live key here is the
+    project's own key row (Mf-z643). The point is the same one: `live_keys` must
+    name everything the report could still show, or a hidden row reads stale.
     """
     write_xbox360(isolated_storage)
     insert_folder_row(XBOX, f"import/{XBOX}")
@@ -6006,17 +6086,22 @@ def test_a_dismissed_re_offered_group_is_not_stale_and_a_vanished_key_is(
     headers = auth_header(client)
     assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
 
-    dismiss(client, headers, [mount_key()])
+    dismiss(client, headers, [f"import/{XBOX}"])
     report = detect(client, headers, limit=1000)
 
-    assert mount_key() not in report["stale_dismissals"], "a live row is never stale"
-    assert mount_key() not in {row["key"] for row in report["bundles"]}
+    assert f"import/{XBOX}" not in report["stale_dismissals"], "a live row is never stale"
+    assert f"import/{XBOX}" not in {row["key"] for row in report["bundles"]}
     assert report["counts"]["dismissed"] == 1
+    # The mount is inside the project key, so dismissing it names a key that can
+    # never be live again - the correct stale answer.
+    dismiss(client, headers, [mount_key()])
+    report = detect(client, headers, limit=1000)
+    assert mount_key() in report["stale_dismissals"]
 
     dismiss(client, headers, ["ghost/dismissed"])
     report = detect(client, headers, limit=1000)
     assert "ghost/dismissed" in report["stale_dismissals"]
-    assert mount_key() not in report["stale_dismissals"]
+    assert f"import/{XBOX}" not in report["stale_dismissals"]
 
 
 def model_asset_ids(rel_dir: str) -> List[str]:
@@ -6034,16 +6119,15 @@ def model_asset_ids(rel_dir: str) -> List[str]:
 def test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """The re-offer needs the marker, and only the marker: absorbed alone creates nothing.
+    """A descendant of a created project is never a row, with or without a marker.
 
-    Three parts, one contract. (a) Before anything recorded an exclusion the
-    absorbed key is not a row and answers ``unknown bundle``. (b) With the
-    exclusion recorded, the group creates a project on facts RECOMPUTED from its
-    own documents - never the compound's ``low`` - and its marker carries only the
-    six keys every row has. (c) A second, exclusion-free tree leaves its own
-    foreign group exactly where it was. Mutation: remove the `by_key.update(...)`
-    line in `create_bundles` and part (b) answers `unknown bundle`; copy the
-    compound row's detector/confidence into the split marker and part (b) reds.
+    This used to be the C2 re-offer witness. Mf-z643 makes the exclusion a
+    CREATE-time decision: once `import/xbox360_shell` is a project key, the mount
+    inside it stops being a detection row for both doors, so the marker is the
+    only record of what was excluded. (a) Before anything was created the mount
+    is not a row. (b) After the exclusion is recorded it is STILL not a row and
+    the create answers ``unknown bundle`` - the exclusion lives in the marker.
+    (c) A second, exclusion-free tree behaves identically for its own group.
     """
     write_xbox360(isolated_storage)
     insert_folder_row(XBOX, f"import/{XBOX}")
@@ -6056,29 +6140,23 @@ def test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered(
     assert before_any["results"][0]["reason"] == "unknown bundle"
     assert table_counts()["projects"] == 0
 
-    assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
-    split = create(client, headers, [{"key": mount_key()}])
+    first = create_for_exclusion(client, headers, [XBOX_GROUP])
+    assert first["created"] == 1
+    marker = project_marker(first["results"][0]["project_id"])
+    assert marker["groups"] == [
+        {
+            "name": XBOX_GROUP,
+            "model_count": XBOX_GROUP_MODELS,
+            "foreign": True,
+            "included": False,
+            "attached": 0,
+        }
+    ]
 
-    assert split["created"] == 1
-    project_id = split["results"][0]["project_id"]
-    assert project_storage_paths(project_id) == {
-        f"{mount_key()}/bracket-{index}.stl" for index in range(XBOX_GROUP_MODELS)
-    }
-    marker = project_marker(project_id)
-    assert (marker["detector"], marker["confidence"]) == ("thingiverse-readme", "high")
-    assert marker["key"] == mount_key()
-    assert set(marker) - {"enrichment"} == {
-        "key",
-        "detector",
-        "confidence",
-        "rel_dir",
-        "archive",
-        "twin_verified",
-        # Mf-yhjo: one `_bundle` namespace for every creating door, and `origin` is
-        # what tells the doors apart inside it. The other six keys are the shape
-        # `bundle_drift` and the create-time belt read, and they have not moved.
-        "origin",
-    }
+    split = create(client, headers, [{"key": mount_key()}])
+    assert split["failed"] == 1
+    assert split["results"][0]["reason"] == "unknown bundle"
+    assert table_counts()["projects"] == 1
 
     copy_key = f"import/{XBOX}-copy"
     shutil.copytree(isolated_storage / "import" / XBOX, isolated_storage / "import" / f"{XBOX}-copy")
@@ -6092,17 +6170,15 @@ def test_a_re_offered_group_creates_its_own_project_and_only_when_re_offered(
     assert table_counts()["projects"] == projects_before + 1
 
 
-def test_a_re_offered_group_without_a_folder_row_is_blocked_and_creates_nothing(
+def test_a_created_project_key_is_not_re_offered_as_a_descendant(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """AC-3e: a re-offered row resolves on the same terms as any other row.
+    """Deleting the mount's Folder changes nothing: the mount is not a row at all.
 
-    The row is offered because the marker says so, but a directory with no
-    ``Folder.storage_path`` row is still ``blocked``/``unresolved_directory`` and
-    creates nothing. The row is removed AFTER the scan on purpose: the assets stay
-    registered, so only the resolution is missing. Mutation: let the re-offer skip
-    the folder check (or create from an unresolved row) and a project appears
-    with no folder behind it.
+    The former C2 re-offer needed the marker to offer the group again, and the
+    folder check then decided whether it was creatable. Under Mf-z643 the group is
+    INSIDE the project key, so it is pruned before any pass and never a row - a
+    create of it answers ``unknown bundle`` whatever the folder table says.
     """
     write_xbox360(isolated_storage)
     insert_folder_row(XBOX, f"import/{XBOX}")
@@ -6115,13 +6191,14 @@ def test_a_re_offered_group_without_a_folder_row_is_blocked_and_creates_nothing(
         session.delete(folder)
         session.commit()
 
-    row = row_for(detect(client, headers, limit=1000), mount_key())
-    assert row["status"] == "blocked"
-    assert row["blocked_reason"] == "unresolved_directory"
+    report = detect(client, headers, limit=1000)
+    assert [row["key"] for row in report["bundles"]] == [f"import/{XBOX}"]
+    assert row_for(report, f"import/{XBOX}")["existing_project_match"] == "marker"
 
     blocked = create(client, headers, [{"key": mount_key()}])
-    assert blocked["blocked"] == 1
-    assert blocked["results"][0]["reason"] == "unresolved_directory"
+    assert blocked["blocked"] == 0
+    assert blocked["failed"] == 1
+    assert blocked["results"][0]["reason"] == "unknown bundle"
     assert table_counts()["projects"] == 1
 
 
@@ -6156,21 +6233,38 @@ def test_a_second_create_of_a_compound_row_is_already_created(
 
     third = create_for_exclusion(client, headers, [XBOX_GROUP])
 
-    assert third["skipped"] == 1
-    assert third["results"][0]["reason"] == "already_created"
+    # The report's row for the key is re-evaluated over its pruned subtree as a
+    # title row, so the compound match - and its groups - is no longer the
+    # RECOMMENDED shape. An exclusion naming a group the chosen shape does not
+    # carry is a malformed request, never a silent rewrite of the marker.
+    assert third["failed"] == 1
+    assert third["results"][0]["reason"] == "unknown_group"
     with Session(engine) as session:
         assert session.get(Project, project_id).metadata_json == metadata_before
     assert table_counts()["projects"] == 1
     assert member_count(project_id) == XBOX_OWN_MODELS + XBOX_GROUP_MODELS
 
+    # The compound shape is still on offer (`matches`), and choosing it explicitly
+    # validates the exclusion again. Post-create the group has no absorbed row
+    # left (its subtree is the project's), so the exclusion cannot be honoured -
+    # a failed request, never a silent rewrite of the marker.
+    compound_retry = bundle_service.create_bundles(
+        [bundle_service.BundleCreateItem(key=f"import/{XBOX}", shape="compound", exclude_groups=(XBOX_GROUP,))],
+        audit_ctx(),
+    )
+    assert compound_retry["failed"] == 1
+    assert compound_retry["results"][0]["reason"] == "not_separable_group"
 
-def test_a_second_create_of_the_split_group_is_already_created(
+
+def test_a_second_create_of_the_split_group_is_unknown_bundle(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """The split row is a row like any other: a marker hit, and two created rows report.
+    """A descendant of a project key is never a row, so it can never be created.
 
-    Mutation: leave the split candidate out of `by_key` (or key the marker with the
-    compound's key) and the second create makes a second project.
+    This used to witness the split row's idempotency. Since Mf-z643 the mount sits
+    inside the created project's key and is pruned before any pass, so both the
+    first and the second create answer ``unknown bundle`` and only the compound
+    project exists.
     """
     write_xbox360(isolated_storage)
     insert_folder_row(XBOX, f"import/{XBOX}")
@@ -6179,34 +6273,30 @@ def test_a_second_create_of_the_split_group_is_already_created(
     headers = auth_header(client)
     assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1
     split = create(client, headers, [{"key": mount_key()}])
-    assert split["created"] == 1
+    assert split["failed"] == 1
+    assert split["results"][0]["reason"] == "unknown bundle"
 
     second = create(client, headers, [{"key": mount_key()}])
 
-    assert second["skipped"] == 1
-    assert second["results"][0]["reason"] == "already_created"
-    assert row_for(detect(client, headers, limit=1000), mount_key())["existing_project_match"] == "marker"
+    assert second["failed"] == 1
+    assert second["results"][0]["reason"] == "unknown bundle"
 
     report = detect(client, headers, limit=1000)
-    assert len(report["bundles"]) == 2
+    assert [row["key"] for row in report["bundles"]] == [f"import/{XBOX}"]
     assert all(row["existing_project_id"] for row in report["bundles"])
-    assert report["counts"]["already_created"] == 2
+    assert report["counts"]["already_created"] == 1
+    assert table_counts()["projects"] == 1
 
 
-def test_a_hand_made_project_over_the_mount_files_reports_already_created_by_assets(
+def test_a_hand_made_project_over_the_mount_files_is_never_contradicted(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """Asset containment is an identity even with no marker, no source and another name.
+    """A descendant of a project key has no row, so no identity question is asked.
 
-    A project proved by shared files proves the FILES, not the intent, so there
-    is no marker folder to difference against and the row reports
-    ``not_applicable`` with a null count - which is not ``0``: the server never
-    measured a folder it has no record of.
-
-    Mutation: drop the assets leg of `find_existing_project` for the re-offered
-    row (or hand the row only the compound's containment) and this project is
-    reported as creatable, so a create would make a duplicate. Map the
-    asset-matched row to ``known``/0 and the not_applicable assertion reds.
+    The former witness reported the hand-made mount project as an ``assets`` hit on
+    the re-offered mount row. Mf-z643 prunes everything inside the created project
+    key, so the mount has no row to carry that identity - and the report never
+    contradicts the project it cannot see: it simply names the mount nowhere.
     """
     write_xbox360(isolated_storage)
     insert_folder_row(XBOX, f"import/{XBOX}")
@@ -6218,12 +6308,13 @@ def test_a_hand_made_project_over_the_mount_files_reports_already_created_by_ass
         hand_made = project_service.create_project(session, "Someone Else's Mount", None, None, origin="imported")
     project_service.add_assets(hand_made.id, model_asset_ids(mount_key()))
 
-    row = row_for(detect(client, headers, limit=1000), mount_key())
+    report = detect(client, headers, limit=1000)
 
-    assert row["existing_project_id"] == hand_made.id
-    assert row["existing_project_match"] == "assets"
-    assert row["bundle_drift_state"] == "not_applicable"
-    assert row["bundle_drift_count"] is None
+    assert [row["key"] for row in report["bundles"]] == [f"import/{XBOX}"]
+    assert mount_key() not in {row["key"] for row in report["bundles"]}
+    assert project_storage_paths(hand_made.id) == {
+        f"{mount_key()}/bracket-{index}.stl" for index in range(XBOX_GROUP_MODELS)
+    }
     assert table_counts()["projects"] == 2
 
 
@@ -6251,18 +6342,21 @@ def test_the_compound_marker_names_the_groups_and_their_counts(
     scan()
     headers = auth_header(client)
 
+    # The marker is written from the row the create was made from, so the rows are
+    # read BEFORE the create - after it the key's subtree is pruned and the row is
+    # re-evaluated over the whole subtree (Mf-z643), which no longer carries groups.
+    before = {name: service_row(key) for name, key in keys.items()}
     created = create(client, headers, [{"key": key, "name": f"{name} parts"} for name, key in keys.items()])
 
     assert created["created"] == 3
     for name, result in zip(keys, created["results"], strict=True):
         marker = project_marker(result["project_id"])
-        row = service_row(keys[name])
         assert [
             {"name": group["name"], "model_count": group["model_count"], "foreign": group["foreign"]}
             for group in marker["groups"]
         ] == [
             {"name": group["name"], "model_count": group["model_count"], "foreign": group["foreign"]}
-            for group in row["groups"]
+            for group in before[name]["groups"]
         ], name
         assert all(group["included"] is True for group in marker["groups"]), name
 
@@ -6311,16 +6405,17 @@ def test_a_non_compound_marker_is_unchanged_in_both_directions(
         ],
     )
     assert created["created"] == 2
-    split = create(client, headers, [{"key": mount_key()}])
-    assert split["created"] == 1
 
     ordinary = project_marker(created["results"][0]["project_id"])
     compound = project_marker(created["results"][1]["project_id"])
-    split_marker = project_marker(split["results"][0]["project_id"])
-    six = {"key", "detector", "confidence", "rel_dir", "archive", "twin_verified", "origin"}
-    assert set(ordinary) - {"enrichment"} == six
-    assert set(split_marker) - {"enrichment"} == six
-    assert set(compound) - {"enrichment"} == six | {"shape", "groups", "cover"}
+    # Every marker now records the shape it was made from and the rule that offered
+    # it (Mf-z643), so the six keys became eight; the compound adds its groups and
+    # cover, and an ordinary row still does not.
+    eight = {"key", "detector", "confidence", "rel_dir", "archive", "twin_verified", "origin", "shape", "rule"}
+    assert set(ordinary) - {"enrichment"} == eight
+    assert (ordinary["shape"], ordinary["rule"]) == ("root-docs", "thingiverse-readme")
+    assert set(compound) - {"enrichment"} == eight | {"groups", "cover"}
+    assert (compound["shape"], compound["rule"]) == ("compound", "compound-bundle")
 
 
 def test_an_exclusion_of_a_group_that_was_never_a_row_is_refused(
@@ -6455,9 +6550,9 @@ def test_a_split_sent_with_its_parent_in_one_request_fails_on_the_second_item(
     """One request cannot both record an exclusion and create from it.
 
     The report is recomputed once, before any item runs, so the mount is not a row
-    yet when the second item is looked up: ``unknown bundle``. The NEXT read offers
-    it, because by then the marker exists. Mutation: resolve items against a
-    re-scanned report per item and the second item creates a project instead.
+    when the second item is looked up: ``unknown bundle``. The NEXT read does not
+    offer it either - it is inside the created project's key and descendant paths
+    are not detection rows (Mf-z643) - so the answer is stable rather than a race.
     """
     write_xbox360(isolated_storage)
     insert_folder_row(XBOX, f"import/{XBOX}")
@@ -6479,7 +6574,8 @@ def test_a_split_sent_with_its_parent_in_one_request_fails_on_the_second_item(
     assert created["results"][0]["status"] == "created"
     assert created["results"][1]["reason"] == "unknown bundle"
 
-    assert row_for(detect(client, headers, limit=1000), mount_key())["status"] == "ready"
+    assert row_for(detect(client, headers, limit=1000), f"import/{XBOX}")["existing_project_match"] == "marker"
+    assert mount_key() not in {row["key"] for row in detect(client, headers, limit=1000)["bundles"]}
 
 
 def test_the_create_audit_records_the_excluded_groups(client: TestClient, isolated_storage: Path) -> None:
@@ -6515,8 +6611,6 @@ def test_the_create_audit_records_the_excluded_groups(client: TestClient, isolat
         ],
     )
     assert created["created"] == 4
-    split = create(client, headers, [{"key": mount_key()}])
-    assert split["created"] == 1
 
     with Session(engine) as session:
         events = session.exec(select(AuditEvent).where(AuditEvent.action == audit.BUNDLE_CREATE)).all()
@@ -6525,7 +6619,6 @@ def test_the_create_audit_records_the_excluded_groups(client: TestClient, isolat
     assert details[f"import/{XBOX}"]["excluded_groups"] == [XBOX_GROUP]
     assert details[f"import/{XBOX}-copy"]["excluded_groups"] == []
     assert details[f"import/{XBOX}-copy-2"]["excluded_groups"] == [XBOX_GROUP]
-    assert details[mount_key()]["excluded_groups"] == []
     assert details["Ordinary Thing"]["excluded_groups"] == []
 
 
@@ -6830,7 +6923,9 @@ def test_a_pre_c2_marker_re_offers_nothing(client: TestClient, isolated_storage:
 
     assert [row["key"] for row in report["bundles"]] == [f"import/{XBOX}"]
     assert mount_key() not in {row["key"] for row in report["bundles"]}
-    assert refusal_ledger(report)[mount_key()] == "member-of-bundle"
+    # The mount is inside the project's key, so it is named nowhere: not a row and
+    # not in the ledger either (Mf-z643).
+    assert mount_key() not in refusal_ledger(report)
     assert report["counts"]["total"] == 1
 
     blocked = create(client, headers, [{"key": mount_key()}])
@@ -7118,10 +7213,11 @@ def test_service_a_stale_walk_root_reports_unknown_rather_than_a_zero(
     assert row["bundle_drift_count"] is None
     # Measured, not asserted from prose: the presence probe reads the report-wide
     # `registered` index this row already holds, so a whole report over this tree
-    # costs 8 statements (folders, memberships, the registered index, the
-    # compound splits, the settings reads, and this candidate's own reads). A
-    # probe that queried per candidate would be 9.
-    assert len(report_statements()) == 8
+    # costs 9 statements (folders, memberships, the registered index, the
+    # compound splits, the settings reads, this candidate's own reads, and the ONE
+    # `select(Project)` that derives `excluded_keys` before the walk). A probe
+    # that queried per candidate would be 10.
+    assert len(report_statements()) == 9
 
 
 def test_service_the_drift_index_is_one_statement_per_report(
@@ -7154,13 +7250,14 @@ def test_service_the_drift_index_is_one_statement_per_report(
 
     assert len(two_index) == 1, "two candidates, one registered index"
     assert len(five_index) == 1, "five candidates, still one registered index"
-    # Measured, not guessed: six report-wide statements (folders, memberships,
-    # the registered index, the compound splits and the two settings reads) plus
+    # Measured, not guessed: seven report-wide statements (folders, memberships,
+    # the registered index, the compound splits, the two settings reads, and the
+    # one `select(Project)` that derives `excluded_keys` before the walk) plus
     # three per candidate that already existed (its asset read, the marker
     # lookup's project list and its own detect read). Drift adds the one in the
     # middle and nothing per row.
-    assert two_candidates == 12, "two candidates"
-    assert five_candidates == 21, "five candidates: three more rows"
+    assert two_candidates == 13, "two candidates"
+    assert five_candidates == 22, "five candidates: three more rows"
 
 
 
@@ -7885,13 +7982,22 @@ def test_service_a_verified_twin_of_a_two_directory_pile_is_refused_by_the_inher
 
     scan = bundle_service.scan_bundles(isolated_storage)
 
-    assert scan.candidates == [], "a directory of two unnamed model-bearing parts proves nothing"
+    # No RULE row: the pile proves nothing. `import` is the maximal refused root, so
+    # it is offered as the MANUAL scope (Mf-z643) - the rule verdict is the detector.
+    assert [(candidate.key, candidate.manual) for candidate in scan.candidates] == [("import", True)]
     rules = refusal_rules(isolated_storage)
-    assert rules[PILE_ZIP] == bundle_detect.REFUSAL_PROMOTION_NO_OWN_DEPTH_MODEL, (
-        "the pairing verified and the shape guard refused it"
+    # The pile is inside the offered manual scope now, so the ledger relabels the
+    # archive a nested member instead of keeping the promotion's own reason.
+    assert rules[PILE_ZIP] == bundle_service.REFUSAL_NESTED_MEMBER, (
+        "the pairing verified and the shape guard refused it; the manual row then owns it"
     )
-    assert rules[PILE_DIR] == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
-    assert bundle_service.build_report()["bundles"] == []
+    # The pile itself is inside the offered manual scope, so the ledger relabels it
+    # a member of that row rather than keeping the rule that first refused it.
+    assert rules[PILE_DIR] == bundle_service.REFUSAL_MEMBER_OF_BUNDLE
+    report = bundle_service.build_report()
+    assert [row["key"] for row in report["bundles"]] == ["import"]
+    assert report["bundles"][0]["detector"] == "manual"
+    assert report["bundles"][0]["archive"] is None
 
 
 def test_service_a_pile_with_no_archive_at_all_offers_nothing(isolated_storage: Path) -> None:
@@ -7910,9 +8016,12 @@ def test_service_a_pile_with_no_archive_at_all_offers_nothing(isolated_storage: 
 
     scan = bundle_service.scan_bundles(isolated_storage)
 
-    assert scan.candidates == []
+    # The pile is no RULE row; `import` is the maximal refused root and rides the
+    # MANUAL scope (Mf-z643).
+    assert [(candidate.key, candidate.manual) for candidate in scan.candidates] == [("import", True)]
     rules = refusal_rules(isolated_storage)
-    assert rules[PILE_DIR] == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+    # `import/pile` is inside the offered manual scope, so it is a member of it now.
+    assert rules[PILE_DIR] == bundle_service.REFUSAL_MEMBER_OF_BUNDLE
     assert PILE_ZIP not in rules, "there is no archive in this tree to refuse"
 
 
@@ -7933,8 +8042,10 @@ def test_service_a_verified_twin_of_models_at_depth_two_is_refused_by_the_same_b
 
     scan = bundle_service.scan_bundles(isolated_storage)
 
-    assert scan.candidates == []
-    assert refusal_rules(isolated_storage)[DEEP_ZIP] == bundle_detect.REFUSAL_PROMOTION_NO_OWN_DEPTH_MODEL
+    # No rule promotes it; `import` accepts it as the MANUAL scope (Mf-z643).
+    assert [(candidate.key, candidate.manual) for candidate in scan.candidates] == [("import", True)]
+    # The archive is inside that offered scope, so the ledger calls it a nested member.
+    assert refusal_rules(isolated_storage)[DEEP_ZIP] == bundle_service.REFUSAL_NESTED_MEMBER
 
 
 def test_service_a_verified_twin_never_promotes_a_directory_holding_a_strong_bundle(
@@ -8028,8 +8139,14 @@ def test_service_a_twin_directory_that_is_empty_on_disk_is_still_refused_for_wan
 
     scan = bundle_service.scan_bundles(isolated_storage)
 
-    assert scan.candidates == [], "an empty directory contains no payload"
-    assert refusal_rules(isolated_storage)[EMPTY_TWIN_ZIP] == bundle_service.REFUSAL_TWIN_UNVERIFIED
+    # The directory itself proves nothing; `import` is the maximal refused root and
+    # is offered as the MANUAL scope (Mf-z643). The archive's own reason is unchanged.
+    assert [(candidate.key, candidate.manual) for candidate in scan.candidates] == [("import", True)], (
+        "an empty directory contains no payload"
+    )
+    assert refusal_rules(isolated_storage)[EMPTY_TWIN_ZIP] == bundle_service.REFUSAL_NESTED_MEMBER, (
+        "the archive is inside the offered manual scope; the pair still proved nothing"
+    )
 
 
 def test_service_the_measured_live_tower_is_promoted_at_its_real_counts(isolated_storage: Path) -> None:
@@ -9382,40 +9499,13 @@ def test_a_zip_key_cannot_answer_the_creatable_predicate_from_disk(
 def test_an_excluded_group_row_and_its_compound_parent_are_mutually_inert(
     client: TestClient, isolated_storage: Path
 ) -> None:
-    """The re-offered group and the compound that absorbed it: neither may cancel the other.
+    """The compound that absorbed a group is not cancelled by that group's subtree.
 
-    A re-offered group is a report courtesy for a create the operator already made.
-    It is not part of the walk's candidate set, so it is served with ``claims=None``
-    and ``offered_dirs=frozenset()`` - it neither takes models from the rows that do
-    write nor counts as a container against them. Both halves are needed and they are
-    different halves:
-
-    * the compound row (``import/xbox360_shell``) must not be cancelled by the group
-      it re-offers - a compound that "contains" its own re-offered group would
-      self-cancel;
-    * the group row must not be told it owns nothing - it keeps every model its own
-      snapshot names, which is why it stays ``ready`` and creates.
-
-    Mutations (run, five of them - the four singles one at a time, plus one pair -
-    and three of them are NO-OPS, which is the honest half). Pass the real
-    ``claims`` to the re-offer site and the group row answers
-    ``('blocked', 'not_scanned')`` where this pins ``('ready', None)`` - measured,
-    this test plus seven compound witnesses. Passing the real
-    ``offered_dirs`` at the re-offer site ALONE is measured a no-op (214 passed): no
-    offered key lives strictly inside a re-offered group, so that leg is there to
-    keep the row from EVER becoming a container, not because a shape on disk needs it
-    today. Letting the absorbed rows count as CONTAINER evidence at all -
-    ``_offered_dirs([*scan.candidates, *scan.absorbed])`` - is ALSO measured a no-op
-    on its own (214 passed), because ``and not candidate.compound`` in the leg
-    already stops the self-cancel a compound would commit against its own re-offered
-    group. Delete BOTH - the one paired run - and the self-cancel lands immediately
-    and earlier than any status assertion: the compound answers ``blocked``, so the
-    exclusion create that opens this test answers ``0 == 1`` - measured, 23 rows red,
-    and every one of them a compound or re-offered-group witness. Deleting
-    ``not candidate.compound`` ALONE is the third no-op (0 red): the suite builds no
-    shape it exists for (a compound holding a row it did not absorb), which is why
-    that clause is stated as Decision 15's exemption kept as the rule's shape - and
-    this pair is what makes it load-bearing rather than decoration.
+    The former witness re-offered the excluded group as a row and proved the two rows
+    were inert to one another. Mf-z643 prunes everything inside the created project
+    key, so the group has no row at all - but the half that MATTERED is still
+    asserted: the compound row is not cancelled by the (pruned) group it absorbed,
+    and no create can resurrect the group as a second project.
     """
     write_xbox360(isolated_storage)
     insert_folder_row(XBOX, f"import/{XBOX}")
@@ -9423,26 +9513,23 @@ def test_an_excluded_group_row_and_its_compound_parent_are_mutually_inert(
     scan()
     headers = auth_header(client)
     assert create_for_exclusion(client, headers, [XBOX_GROUP])["created"] == 1, (
-        "the compound was created with the group excluded, which is what re-offers it"
+        "the compound was created with the group excluded"
     )
 
     report = detect(client, headers, limit=1000)
 
     compound = row_for(report, f"import/{XBOX}")
-    group = row_for(report, mount_key())
     assert (compound["status"], compound["blocked_reason"]) == ("ready", None), (
-        "the parent is not cancelled by the row it re-offers inside itself"
+        "the parent is not cancelled by the group it excluded"
     )
-    assert (group["status"], group["blocked_reason"]) == ("ready", None), (
-        "and the re-offered group is not stripped of the models its own snapshot names"
-    )
+    assert mount_key() not in {row["key"] for row in report["bundles"]}
 
     created = create(client, headers, [{"key": mount_key(), "name": "the excluded mount"}])
 
-    assert (created["created"], created["blocked"], created["failed"]) == (1, 0, 0), (
-        "the inert row is still a creatable row: one project, not a skip and not a block"
+    assert (created["created"], created["blocked"], created["failed"]) == (0, 0, 1), (
+        "the group is inside the project key, so it is not a row and not creatable"
     )
-    assert created["results"][0]["assets_added"] == XBOX_GROUP_MODELS
+    assert created["results"][0]["reason"] == "unknown bundle"
 
 
 def test_no_blocked_reason_outside_the_published_vocabulary(
@@ -10815,8 +10902,12 @@ def test_the_create_door_asks_the_ownership_map_the_report_answered_with(
     # the same pair the mutual-inert witness runs.
     excluded = create_for_exclusion(client, headers, [XBOX_GROUP])
     assert excluded["created"] == 1
+    # The excluded group is inside the created project key, so there is no re-offered
+    # row to create any more (Mf-z643) - it answers `unknown bundle` and is not an
+    # inert ask because it never reaches the door at all.
     reoffered = create(client, headers, [{"key": mount_key(), "name": "the excluded mount"}])
-    assert reoffered["created"] == 1
+    assert reoffered["failed"] == 1
+    assert reoffered["results"][0]["reason"] == "unknown bundle"
 
     # `create_bundles` re-derives the report before it creates, so every key is asked
     # about by `_report_row` too; only the calls made INSIDE the create are this
@@ -10835,8 +10926,15 @@ def test_the_create_door_asks_the_ownership_map_the_report_answered_with(
 
     # The symmetry half. `absorbed_keys` is read from the walk itself - the same
     # expression `create_bundles` uses - so it is not derived from what the door did.
-    absorbed_keys = {candidate.key for candidate in bundle_service.scan_bundles(bundle_service.STORAGE).absorbed}
-    assert mount_key() in absorbed_keys, "the fixture stopped producing an absorbed group"
+    # The xbox group is inside the created project key now, so nothing is absorbed
+    # and no create may be served the inert answer (Mf-z643).
+    absorbed_keys = {
+        candidate.key
+        for candidate in bundle_service.scan_bundles(
+            bundle_service.STORAGE, excluded_keys=bundle_service._excluded_keys("")
+        ).absorbed
+    }
+    assert absorbed_keys == set(), "the pruned subtree leaves nothing to absorb"
     asked_without_a_map = {key for key, claims in from_create if claims is None}
     created_keys = {
         result["key"]
@@ -10845,12 +10943,10 @@ def test_the_create_door_asks_the_ownership_map_the_report_answered_with(
     }
     assert asked_without_a_map == {key for key in created_keys if key in absorbed_keys}, (
         "the create door was served the inert ownership answer for a row the report does "
-        "not serve it to, or was denied it for the re-offered group it must be served to "
-        "- the two `claims=None` sites are one rule and have to move together"
+        "not serve it to, or was denied it for a row it must be served to"
     )
-    assert asked_without_a_map == {mount_key()}, (
-        "the re-offered group is the ONE inert ask here, so a pass that asks everything "
-        "without a map cannot satisfy the equality above by being uniformly wrong"
+    assert asked_without_a_map == set(), (
+        "no absorbed re-offer exists here, so every create must be asked WITH the map"
     )
     for key, claims in from_create:
         if key in absorbed_keys:
@@ -11162,3 +11258,273 @@ def test_the_zip_row_keeps_its_extract_door_after_its_archive_became_a_project(
     assert list(listing) == [project_id] and listing[project_id]["name"] == twin_rel.rsplit("/", 1)[-1], (
         "the archive's project is still there and still the only thing that was made"
     )
+
+
+# --- detection stops being a gatekeeper (Mf-z643) ---------------------------
+#
+# Every row answers with a LIST of shapes (`matches`), the manual scope is always
+# on offer, and a path inside an existing project's key stops being a detection
+# row. These witness the acceptance criteria from the report's side.
+
+
+def vault_tree(storage: Path) -> Path:
+    """A refused product tree: two products, each with families of models beneath."""
+    vault = storage / "import" / "Vault"
+    # Two products that share no family token, so R7 declines them as a pile -
+    # this is the empty hand, not a compound with another name.
+    for product in ("alpha", "beta"):
+        for family in ("core", "shell"):
+            write_file(vault / product / family / "part.stl", b"s" * 40)
+    write_file(vault / "preview.jpg", b"j" * 50)
+    return vault
+
+
+def test_every_row_carries_the_recommended_match_first_and_the_manual_scope(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-1: ``matches[0]`` is the row's own answer, the manual scope is on offer.
+
+    Mutation: build the match list from a different snapshot (or forget to put the
+    recommended facts first) and the three equality assertions red for some row;
+    a manual row recommends itself, so its manual entry is first and carries the
+    refusal word as its note.
+    """
+    moai_bundle(isolated_storage)
+    write_stagetop(isolated_storage)
+    generic_bundle(isolated_storage, "Generic Thing")
+    vault_tree(isolated_storage)
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    assert len(report["bundles"]) >= 4
+    for row in report["bundles"]:
+        matches = row["matches"]
+        assert matches, row["key"]
+        assert all(match["shape"] and match["rule"] and match["confidence"] for match in matches), row["key"]
+        assert matches[0]["shape"] == row["metadata_shape"], row["key"]
+        if row["metadata_shape"] == "manual":
+            # A manual row recommends the manual entry, whose rule is the refusing
+            # word the scope was built from - the one shape where rule != detector.
+            assert matches[0]["rule"] == matches[0]["note"], row["key"]
+        else:
+            assert matches[0]["rule"] == row["detector"], row["key"]
+        assert matches[0]["confidence"] == row["confidence"], row["key"]
+        assert matches[0]["groups"] == row["groups"], row["key"]
+        assert len({match["shape"] for match in matches}) == len(matches), row["key"]
+        manual = [match for match in matches if match["shape"] == "manual"]
+        assert len(manual) == 1, row["key"]
+        if row["metadata_shape"] != "manual":
+            assert matches[-1] is manual[0], f"{row['key']}: manual is always the last offer"
+        else:
+            assert matches[0] is manual[0], "a manual row recommends itself"
+            assert manual[0]["note"] in bundle_service.REFUSAL_RULES
+        for match in matches:
+            assert match["note"] is None or match["note"] in bundle_service.REFUSAL_RULES, row["key"]
+
+
+def test_a_refused_vault_is_one_manual_row_and_creates_a_manual_project(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-2/AC-3: the dead end dies - a refused tree is one scope, and it creates.
+
+    The vault refuses under R3 (no model at its own depth, two unnamed
+    model-bearing products), the ledger keeps naming it with that same rule, and
+    the create is the operator's choice: ``shape=manual`` in the marker, the
+    refusing word as its rule, and ``detector`` left byte-identical.
+
+    Mutation: make the create gate on ``status`` again and the create answers
+    ``blocked`` instead of writing the project.
+    """
+    vault_tree(isolated_storage)
+    generic_bundle(isolated_storage / "import", "Side Bundle")
+    scan()
+    headers = auth_header(client)
+
+    report = detect(client, headers, limit=1000)
+
+    manual_rows = [row for row in report["bundles"] if row["detector"] == "manual"]
+    assert [row["key"] for row in manual_rows] == ["import/Vault"], "one scope per maximal refused root"
+    row = manual_rows[0]
+    assert row["metadata_shape"] == "manual"
+    manual = next(match for match in row["matches"] if match["shape"] == "manual")
+    assert manual["note"] == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+    assert manual["rule"] == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+    assert refusal_ledger(report)["import/Vault"] == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL, (
+        "the ledger still names the path with the rule that refused it"
+    )
+    assert all(
+        match["note"] is None or match["note"] in bundle_service.REFUSAL_RULES
+        for row in report["bundles"]
+        for match in row["matches"]
+    )
+
+    created = create(client, headers, [{"key": "import/Vault"}])
+
+    assert created["created"] == 1
+    result = created["results"][0]
+    marker = project_marker(result["project_id"])
+    assert marker["shape"] == "manual"
+    assert marker["rule"] == bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL
+    assert marker["detector"] == "manual"
+    assert "groups" not in marker, "manual is a scope, not a compound"
+    assert "cover" not in marker
+    assert result["assets_added"] == 5, "four models and the preview"
+
+
+def test_a_path_inside_an_existing_project_key_is_not_a_detection_row(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """AC-4: the project's subtree is pruned, the key stays, and drift still answers.
+
+    ``import/Stagetop`` is a project key: the report answers no row strictly
+    inside it, keeps the key's own ``already_created`` row, ``GET
+    /project/{id}/bundle-drift`` still answers ``known``, and a SCOPED report at
+    that key answers no rows at all.
+
+    Mutation: filter candidates after detection instead of pruning before it and
+    the ledger/duplicates inside the project leak into the report; exclude the key
+    itself and the ``already_created`` row disappears.
+    """
+    write_stagetop(isolated_storage)
+    insert_folder_row(STAGETOP, f"import/{STAGETOP}")
+    scan()
+    headers = auth_header(client)
+    with Session(engine) as session:
+        project = project_service.create_project(
+            session,
+            "Stagetop project",
+            None,
+            None,
+            origin="imported",
+            metadata={
+                "_bundle": {
+                    "key": f"import/{STAGETOP}",
+                    "detector": "compound-bundle",
+                    "confidence": "low",
+                    "rel_dir": f"import/{STAGETOP}",
+                    "archive": None,
+                    "twin_verified": None,
+                }
+            },
+        )
+
+    report = detect(client, headers, limit=1000)
+
+    inside = [row for row in report["bundles"] if row["key"].startswith(f"import/{STAGETOP}/")]
+    assert inside == [], "every path inside the project key is pruned"
+    key_row = row_for(report, f"import/{STAGETOP}")
+    assert key_row["existing_project_id"] == project.id
+    assert key_row["existing_project_match"] == "marker"
+    assert all(not item["rel_path"].startswith(f"import/{STAGETOP}/") for item in report["refused"])
+
+    drift = bundle_drift_of(client, headers, project.id)
+    assert drift["state"] == "known", "the project still owns its marker's key"
+
+    scoped = detect(client, headers, path=f"import/{STAGETOP}", limit=1000)
+    assert scoped["bundles"] == [], "a report scoped at the project key answers no rows"
+    assert scoped["refused"] == []
+
+
+def test_scan_bundles_accepts_excluded_keys_explicitly_in_marker_spelling(isolated_storage: Path) -> None:
+    """``excluded_keys`` is keyword-only and spelled the way a marker stores it.
+
+    Mutation: treat the keys as walk-relative under a scope (``_qualify`` instead
+    of ``_unqualify``) and a scoped report stops excluding what the marker names.
+    """
+    write_stagetop(isolated_storage)
+
+    scan = bundle_service.scan_bundles(
+        isolated_storage, excluded_keys=frozenset({f"import/{STAGETOP}"})
+    )
+
+    keys = {candidate.key for candidate in scan.candidates}
+    assert f"import/{STAGETOP}" in keys, "the key itself is never excluded"
+    assert not any(key.startswith(f"import/{STAGETOP}/") for key in keys)
+    assert not any(item.rel_path.startswith(f"import/{STAGETOP}/") for item in scan.refusals)
+    assert bundle_service.scan_bundles(isolated_storage).candidates, "the default argument changes nothing"
+
+
+def test_a_create_shape_of_manual_writes_a_manual_marker(client: TestClient, isolated_storage: Path) -> None:
+    """AC-5: the operator's shape decides the marker, and it must be on offer.
+
+    ``shape=manual`` on a generic row creates one project whose marker says
+    ``shape=manual`` and whose rule is the recommended shape's rule; an unoffered
+    shape is ``failed``/``unknown shape``; and a create with no shape records the
+    row's recommended shape exactly as before this field existed.
+
+    Mutation: ignore ``item.shape`` and every ``shape=manual`` assertion reds;
+    accept any shape and the ``unknown shape`` assertion reds.
+    """
+    generic_bundle(isolated_storage, "Generic Thing")
+    scan()
+    row = service_row("Generic Thing")
+    assert row["metadata_shape"] == "generic"
+
+    manual = bundle_service.create_bundles(
+        [bundle_service.BundleCreateItem(key="Generic Thing", shape="manual")], audit_ctx()
+    )
+    assert manual["created"] == 1
+    marker = project_marker(manual["results"][0]["project_id"])
+    assert marker["shape"] == "manual"
+    # The manual entry's rule is the manual detector when nothing refused the row:
+    # there is no refusal word to carry, so the marker says where the scope came from.
+    assert marker["rule"] == "manual"
+    assert marker["detector"] == "generic-bundle"
+
+    bogus = bundle_service.create_bundles(
+        [bundle_service.BundleCreateItem(key="Generic Thing", shape="not-a-shape")], audit_ctx()
+    )
+    assert bogus["failed"] == 1
+    assert bogus["results"][0]["reason"] == "unknown shape"
+
+
+def test_a_create_without_a_shape_records_the_recommended_shape(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """No ``shape`` means the row's own answer, byte-identical to the old marker.
+
+    Mutation: default the chosen shape to anything but ``metadata_shape`` and this
+    reds - the field is additive, never a behaviour change for existing clients.
+    """
+    write_stagetop(isolated_storage)
+    insert_folder_row(STAGETOP, f"import/{STAGETOP}")
+    scan()
+    row = service_row(f"import/{STAGETOP}")
+    assert row["metadata_shape"] == "compound"
+
+    created = bundle_service.create_bundles(
+        [bundle_service.BundleCreateItem(key=f"import/{STAGETOP}")], audit_ctx()
+    )
+
+    assert created["created"] == 1
+    marker = project_marker(created["results"][0]["project_id"])
+    assert marker["shape"] == row["metadata_shape"] == "compound"
+    assert marker["rule"] == row["detector"] == "compound-bundle"
+    assert [group["name"] for group in marker["groups"]] == [
+        group["name"] for group in row["groups"]
+    ], "the compound marker still names the row's groups, in order"
+
+
+def test_a_manual_create_on_a_compound_row_has_no_groups_block(client: TestClient, isolated_storage: Path) -> None:
+    """Choosing ``shape=manual`` on a compound row creates a SCOPE, not a compound.
+
+    Mutation: key the compound marker block on the candidate instead of the chosen
+    shape and the manual marker gains a ``groups``/``cover`` block it cannot
+    justify.
+    """
+    write_stagetop(isolated_storage)
+    insert_folder_row(STAGETOP, f"import/{STAGETOP}")
+    scan()
+
+    created = bundle_service.create_bundles(
+        [bundle_service.BundleCreateItem(key=f"import/{STAGETOP}", shape="manual")], audit_ctx()
+    )
+
+    assert created["created"] == 1
+    marker = project_marker(created["results"][0]["project_id"])
+    assert marker["shape"] == "manual"
+    assert marker["rule"] == "manual", "the manual entry's own rule, not the recommended one"
+    assert "groups" not in marker
+    assert "cover" not in marker

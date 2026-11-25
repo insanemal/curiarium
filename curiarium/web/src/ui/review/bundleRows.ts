@@ -60,9 +60,19 @@ export function isBlocked(row: BundleDetectItem): boolean {
 /** A row this queue can actually create from. Already-created rows are not
  *  creatable: the server can only answer `skipped`/`already_created` for them,
  *  so sending them would be a request that cannot create anything. The id is
- *  the identity, so a nameless project is still settled. */
+ *  the identity, so a nameless project is still settled.
+ *
+ *  `status`/`blocked` is a DATABASE-READINESS signal now, not an import refusal:
+ *  `blocked` says what a scan registered under the row, and a create still works
+ *  from whatever files are there. So this predicate answers the SERVER's gate
+ *  exactly - no existing project, and not the one reason that names another door
+ *  - and no other blocked reason may make a row unimportable. `archive_only`
+ *  still refuses because that row HAS a door of its own (Extract, which registers
+ *  the files and settles the row); a shape mismatch (`not_scanned`) or an
+ *  unregistered folder (`unresolved_directory`) is not a reason to withhold a
+ *  create, and treating it as one was the bug this predicate stops. */
 export function isCreatable(row: BundleDetectItem): boolean {
-  return !isBlocked(row) && !row.existing_project_id;
+  return row.blocked_reason !== BLOCKED_REASON_ARCHIVE_ONLY && !row.existing_project_id;
 }
 
 /** Whether THIS REPORT says the row's key holds registered files. It is a claim about one
@@ -254,7 +264,7 @@ export function bulkEnrichTitle(enrichable: number, selected: number): string | 
 }
 
 /** The one blocked reason that names an extraction instead of a create. */
-const ARCHIVE_ONLY = "archive_only";
+export const BLOCKED_REASON_ARCHIVE_ONLY = "archive_only";
 
 /** The one blocked reason that is a claim about what a scan registered. */
 const NOT_SCANNED = "not_scanned";
@@ -289,7 +299,7 @@ function isArchivePath(path: string): boolean {
  *  the cell, the Enter key, the bulk count, the bulk dialog, the detail door and
  *  the one-step door cannot disagree about which rows have a door. */
 export function extractPathFor(row: BundleDetectItem): string | null {
-  if (row.blocked_reason !== ARCHIVE_ONLY) return null;
+  if (row.blocked_reason !== BLOCKED_REASON_ARCHIVE_ONLY) return null;
   const twin = row.archive?.rel_path;
   if (twin) return twin;
   return isArchivePath(row.rel_path) ? row.rel_path : null;
@@ -436,7 +446,7 @@ export const NOT_SCANNED_REGISTERED_LABEL =
  *  with registered files gets the sentence that says so, and a row with none
  *  keeps the plain lookup byte for byte. */
 export function blockedReasonLabel(row: BundleDetectItem): string {
-  if (row.blocked_reason === ARCHIVE_ONLY) {
+  if (row.blocked_reason === BLOCKED_REASON_ARCHIVE_ONLY) {
     return isArchivePath(row.rel_path)
       ? BLOCKED_REASON_LABELS.archive_only
       : ARCHIVE_ONLY_FOLDER_LABEL;
@@ -454,7 +464,67 @@ export function blockedReasonLabel(row: BundleDetectItem): string {
 
 export function statusLine(row: BundleDetectItem): string {
   if (!isBlocked(row)) return "Ready";
-  return `Blocked - ${blockedReasonLabel(row)}`;
+  // The word follows the gate: only a row no create can be sent for reads
+  // "Blocked -". A blocked row whose Create button is live says its reason
+  // without the refusal, because one predicate owns both the gate and the word
+  // and the pane must never call a row blocked while offering to create it.
+  if (!isCreatable(row)) return `Blocked - ${blockedReasonLabel(row)}`;
+  return blockedReasonLabel(row);
+}
+
+/** The shape that imports everything in the folder as one project: no inferred
+ *  grouping. The server serves it LAST in a row's `matches`, and it is the one
+ *  shape that never carries `exclude_groups` - there are no groups to leave out. */
+export const SHAPE_MANUAL = "manual";
+
+/** The compound shape: one product in several model-bearing groups. It is the
+ *  only shape whose groups the operator may exclude, so the detail pane's group
+ *  chooser is gated on it. */
+export const SHAPE_COMPOUND = "compound";
+
+/** How each shape the server offers reads to an operator. A shape is a token on
+ *  the wire (`root-docs`, `id-name`), and quoting it at somebody deciding what to
+ *  import would be asking them to learn the detector's vocabulary. */
+export const SHAPE_LABELS: Record<string, string> = {
+  [SHAPE_MANUAL]: "Everything in this folder",
+  [SHAPE_COMPOUND]: "One project, grouped parts",
+  generic: "One project from the models here",
+  "root-docs": "One project, the folder's README and licence",
+  "sibling-docs": "One project, docs shipped beside the models",
+  "id-name": "One project, named from its vendor id",
+  "title-name": "One project, named from the folder title",
+  "archive-root": "One project, the archive's root files",
+};
+
+/** The wording for one shape. An unknown shape - a newer server's - is
+ *  prettified rather than printed raw, so the control is still readable without
+ *  this map having heard of it. */
+export function shapeLabel(shape: string): string {
+  const known = SHAPE_LABELS[shape];
+  if (known) return known;
+  const words = shape.replace(/[_-]+/g, " ").trim();
+  if (!words) return "Unrecognised shape";
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** The shapes this row may be imported as, recommended first. A payload from
+ *  before `matches` was served has none, and then the only shape on offer is the
+ *  one the detector reported - which is why an absent field is not a refusal. */
+export function importShapes(row: BundleDetectItem): string[] {
+  const offered = (row.matches ?? [])
+    .map(match => match.shape)
+    .filter(shape => shape !== "");
+  return offered.length > 0 ? offered : [row.metadata_shape];
+}
+
+/** The shape a create would use: the operator's choice when the server still
+ *  offers it, else the recommendation. Asking the row rather than trusting the
+ *  stored choice is what keeps a refetch that changed the offers from sending a
+ *  shape the server no longer accepts. */
+export function activeShape(row: BundleDetectItem, chosen: string | undefined): string {
+  const shapes = importShapes(row);
+  if (chosen !== undefined && shapes.includes(chosen)) return chosen;
+  return shapes[0];
 }
 
 /** The bucket a row falls in for the queue's reveal toggles. This is the

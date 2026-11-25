@@ -859,3 +859,64 @@ def test_the_committed_openapi_fixture_declares_the_group_component() -> None:
     assert "exclude_groups" not in create_item.get("required", []), "the field is additive, never required"
     assert create_item["properties"]["exclude_groups"]["type"] == "array"
     assert create_item["properties"]["exclude_groups"]["items"]["type"] == "string"
+
+
+def test_the_route_serves_every_shape_the_row_could_be(client: TestClient, contributor: Actor, isolated_storage: Path) -> None:
+    """`matches` is on the wire: recommended first, the manual scope on offer.
+
+    Mutation: drop `matches` from ``BundleDetectItemOut`` and the response model
+    silently drops the key - the Mf-nivh/Mf-au4k defect - so this reds.
+    """
+    moai_bundle(isolated_storage)
+    stagetop_bundle(isolated_storage)
+    scan()
+
+    report = report_for(client, contributor)
+
+    for row in report["bundles"]:
+        matches = row["matches"]
+        assert matches, row["key"]
+        assert matches[0]["shape"] == row["metadata_shape"]
+        assert matches[0]["confidence"] == row["confidence"]
+        assert matches[0]["groups"] == row["groups"]
+        assert matches[-1]["shape"] == "manual"
+        assert matches[-1]["confidence"] == "low"
+        assert matches[-1]["note"] is None
+        for match in matches:
+            assert set(match) == {
+                "shape",
+                "rule",
+                "confidence",
+                "model_count",
+                "image_count",
+                "text_count",
+                "other_count",
+                "groups",
+                "note",
+            }
+    compound = next(row for row in report["bundles"] if row["key"] == STAGETOP_KEY)
+    compound_match = next(match for match in compound["matches"] if match["shape"] == "compound")
+    assert [group["name"] for group in compound_match["groups"]] == [
+        group["name"] for group in compound["groups"]
+    ], "a match's groups are the same expression as the row's"
+
+
+def test_the_committed_openapi_fixture_declares_the_match_and_shape_fields() -> None:
+    """The new wire shapes are pinned: a match component, a row list, an optional shape.
+
+    The rewrite run SKIPS, so a skipped regeneration would otherwise leave
+    stale-but-valid JSON: this assertion is what catches it.
+    """
+    fixture = json.loads(OPENAPI_BUNDLES_FIXTURE.read_text(encoding="utf-8"))
+
+    assert "BundleMatchOut" in fixture
+    match = fixture["BundleMatchOut"]
+    assert sorted(match["required"]) == ["confidence", "rule", "shape"]
+    assert match["properties"]["note"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert "matches" in fixture["BundleDetectItemOut"]["properties"]
+    assert fixture["BundleDetectItemOut"]["properties"]["matches"]["items"]["$ref"] == (
+        "#/components/schemas/BundleMatchOut"
+    )
+    create_item = fixture["BundleCreateItemIn"]
+    assert "shape" not in create_item.get("required", []), "the field is additive, never required"
+    assert create_item["properties"]["shape"]["anyOf"] == [{"type": "string"}, {"type": "null"}]

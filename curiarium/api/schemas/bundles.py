@@ -29,6 +29,7 @@ __all__ = [
   "BundleEnrichResponse",
   "BundleEnrichmentOut",
   "BundleGroupOut",
+  "BundleMatchOut",
   "BundleRefusalOut",
   "BundleReportOut",
   "BundleRuleSetOut",
@@ -66,6 +67,27 @@ class BundleGroupOut(BaseModel):
   # which the pure detector cannot know, so `BundleFacts.groups`/`BundleGroup`
   # deliberately stay three-field and the rule-set stamp is untouched.
   separable: bool
+
+
+class BundleMatchOut(BaseModel):
+  """One shape a listing satisfies: the rule that offered it and its counts.
+
+  ``matches[0]`` on a row is the recommended shape and equals the row's own
+  `detector`/`confidence`/`metadata_shape`; the rest are the alternatives. The
+  manual entry (shape `manual`) is always present and last unless the row itself
+  recommends it, and `note` carries the refusal word a manual offer was built
+  from.
+  """
+
+  shape: str
+  rule: str
+  confidence: str
+  model_count: int = 0
+  image_count: int = 0
+  text_count: int = 0
+  other_count: int = 0
+  groups: List[BundleGroupOut] = []
+  note: Optional[str] = None
 
 
 class BundleDuplicateGroupOut(BaseModel):
@@ -109,6 +131,11 @@ class BundleDetectItemOut(BaseModel):
   # several parts). Additive and defaulted, so every pre-existing payload still
   # validates.
   groups: List[BundleGroupOut] = []
+  # Every shape this listing satisfies, recommended first and the manual scope
+  # last. ADDITIVE and defaulted, so a pre-existing payload still validates -
+  # and declared HERE or the response model silently drops it, the same trap
+  # `rule_set` and `refused` fell into.
+  matches: List[BundleMatchOut] = []
   cover: BundleCoverOut
   assets_total: int = 0
   # ready | blocked
@@ -205,6 +232,9 @@ class BundleCreateItemIn(BaseModel):
   # Additive and defaulted, so a pre-existing payload still validates; each name
   # must be a group the report marked `separable`, else the item fails.
   exclude_groups: List[str] = []
+  # One of the row's `matches` shapes; None means the row's recommended shape.
+  # An unoffered shape answers `failed`/`unknown shape`.
+  shape: Optional[str] = None
 
 
 class BundleCreateRequest(BaseModel):
