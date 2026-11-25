@@ -12,7 +12,7 @@ from starlette.concurrency import run_in_threadpool
 import audit
 import seams
 from db import STORAGE, engine
-from file_utils import mime_from_content_type, sanitize_filename
+from file_utils import FilenameHasPath, mime_from_content_type, sanitize_filename
 from models import Asset, AssetFile
 from multipart_stream import StreamedUpload
 from prepared_print import inspect_prepared_print, is_prepared_print_filename, prepared_print_stub
@@ -55,7 +55,19 @@ def list_supporting_files(asset_id: str) -> List[AssetFile]:
 
 
 async def save_asset_file(asset_id: str, staged: StreamedUpload) -> Asset:
-    safe_name = sanitize_filename(staged.filename or "supporting-file")
+    """Store one supporting file, refusing a name that carries a path.
+
+    A supporting file lands in ``bundles/<asset>/<file>/``, a reserved directory
+    with no folder rows, so a path cannot be honoured there: refuse, never
+    mangle.
+    """
+    try:
+        safe_name = sanitize_filename(staged.filename or "supporting-file")
+    except FilenameHasPath as error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Supporting file name must not contain a path: {error.name!r}",
+        ) from None
     role = "prepared" if is_prepared_print_filename(safe_name) else "supporting"
     mime = mime_from_content_type(staged.content_type or "", safe_name)
     return await run_in_threadpool(_store_asset_file, asset_id, staged, safe_name, role, mime)

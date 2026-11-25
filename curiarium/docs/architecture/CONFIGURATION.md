@@ -669,6 +669,42 @@ settings are shared by the instance. Mounted import run history is a table
 (`import_run`), not an `AppConfig` value, so it is bounded separately and never
 parsed as a setting.
 
+### The managed-storage template
+
+The template is the `storage_path_template` `AppConfig` key and it decides the
+relative path a **new** file is written at. The shipped default is
+`{folder}/{filename}`: a file lands directly in the directory of the folder it
+belongs to.
+
+The available tokens are `folder`, `collection` (deprecated, still rendered for
+templates that already contain it), `tags`, `creator`, `model`, `name`,
+`filename` and `id`. `{filename}` must appear exactly once and in the final path
+segment, and every rendered segment is sanitised before it is joined.
+
+The retired default `{folder}/{model}/{filename}` is read as **unset** and logs
+one line per process saying so, but only when the `storage_path_template_chosen`
+marker is absent -- that is a row written before this change, when
+`POST /settings/storage` stored the default it shipped with, and it means the
+install never chose a layout. `POST /settings/storage` sets the marker, so a
+template saved deliberately always wins: an operator who wants the upstream
+one-directory-per-model layout saves `{folder}/{model}/{filename}` and it is
+honoured.
+
+The template affects **new writes only**. Existing files keep the path they were
+written at: the setting never re-arranges the library, and re-arranging an
+existing tree is the approval-gated job of Mf-v9eg, never a silent migration.
+
+One invariant holds over every door that writes bytes -- the plain upload, the
+linked-zip import, the in-library archive extract, the storage scan and a mount
+import: *a directory on disk is either the storage root, a system directory
+(`thumbs`, `bundles`, `.incoming`, `.trash`), or a folder row's directory; the
+tree shows it or the app must not create it.*
+`curiarium/api/tests/test_ingest_layout.py` enforces it by measuring, after each
+door runs, every directory that no folder row's `storage_path` names. The
+archive extract is the one deliberate two-step door -- it writes a twin tree with
+no rows and the following scan registers it - and that test pins the window
+instead of pretending the two steps are one.
+
 Snapshot retention is the policy of the snapshot provider layer. The provider
 resolves it once, at construction, and applies it only to the snapshots that
 layer wrote, so an edit is picked up by the next provider built -- the scheduler

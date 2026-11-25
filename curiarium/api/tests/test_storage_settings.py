@@ -11,6 +11,7 @@ shared for the whole test session, so the template and the rows created here are
 restored at teardown.
 """
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -121,7 +122,7 @@ def test_get_returns_template_default_tokens_and_sample(isolated_storage: Path) 
     # valid-token set minus the deprecated tokens, and nothing else shrinks.
     assert body["allowed_tokens"] == [t for t in STORAGE_TEMPLATE_TOKENS if t not in DEPRECATED_STORAGE_TEMPLATE_TOKENS]
     assert "collection" not in body["allowed_tokens"]
-    assert body["sample_path"] == "Props/Workshop/Cable clip/Cable clip.3mf"
+    assert body["sample_path"] == "Props/Workshop/Cable clip.3mf"
     assert body["moved"] == 0
     assert body["skipped"] == 0
 
@@ -212,3 +213,80 @@ def test_get_still_works_after_a_post(isolated_storage: Path) -> None:
         assert response.status_code == 200, response.text
         assert response.json()["template"] == "{name}/{filename}"
         assert response.json()["sample_path"] == "Cable clip/Cable clip.3mf"
+
+
+def test_a_stored_retired_default_is_read_as_unset(
+    isolated_storage: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A pre-upgrade row is read as unset: the install never chose a layout.
+
+    This is exactly the shape an install that pressed Save before this change
+    carries: `POST /settings/storage` stored the default it shipped with and
+    knew nothing of the marker, so the value exists, the marker does not, and a
+    value equal to the retired spelling means "never chosen". The log explains
+    it once, not once per read.
+    """
+    settings_service.set_setting(settings_service.STORAGE_TEMPLATE_KEY, settings_service.RETIRED_DEFAULT_STORAGE_TEMPLATE)
+    settings_service.set_setting(settings_service.STORAGE_TEMPLATE_CHOSEN_KEY, "0")
+    settings_service._retired_default_logged = False
+    with caplog.at_level(logging.INFO, logger=settings_service.__name__):
+        assert settings_service.get_storage_template() == settings_service.DEFAULT_STORAGE_TEMPLATE
+        assert settings_service.get_storage_template() == settings_service.DEFAULT_STORAGE_TEMPLATE
+    retired = [
+        record
+        for record in caplog.records
+        if settings_service.RETIRED_DEFAULT_STORAGE_TEMPLATE in record.getMessage()
+    ]
+    assert len(retired) == 1
+
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        response = client.get("/settings/storage", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["template"] == settings_service.DEFAULT_STORAGE_TEMPLATE
+        assert response.json()["sample_path"] == "Props/Workshop/Cable clip.3mf"
+
+
+def test_a_deliberately_saved_retired_default_still_wins(isolated_storage: Path) -> None:
+    """A template saved through the route is a choice, so the upstream layout works.
+
+    `POST /settings/storage` writes the marker, which is what tells this apart
+    from the pre-upgrade row above: `{folder}/{model}/{filename}` saved on
+    purpose keeps rendering, so the one-directory-per-model layout is genuinely
+    reachable and `test_asset_name_race.py` can exercise it.
+    """
+    storage = isolated_storage
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        response = client.post("/settings/storage", json={"template": "{folder}/{model}/{filename}"}, headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["template"] == "{folder}/{model}/{filename}"
+        assert response.json()["sample_path"] == "Props/Workshop/Cable clip/Cable clip.3mf"
+
+        response = client.get("/settings/storage", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["template"] == "{folder}/{model}/{filename}"
+
+        upload = client.post("/upload", files={"file": ("cube.stl", b"solid cube\n", "model/stl")}, headers=headers)
+        assert upload.status_code == 200, upload.text
+
+    assert settings_service.get_storage_template() == "{folder}/{model}/{filename}"
+    assert upload.json()["storage_path"] == "Unassigned/cube/cube.stl"
+    assert (storage / "Unassigned/cube/cube.stl").read_bytes() == b"solid cube\n"
+
+
+def test_a_deliberate_template_still_wins(isolated_storage: Path) -> None:
+    """`{model}` stays valid: the upstream one-directory-per-model layout opts in."""
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        response = client.post("/settings/storage", json={"template": "{folder}/{name}/{filename}"}, headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["template"] == "{folder}/{name}/{filename}"
+
+        response = client.get("/settings/storage", headers=headers)
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+    assert settings_service.get_storage_template() == "{folder}/{name}/{filename}"
+    assert body["template"] == "{folder}/{name}/{filename}"
+    assert body["sample_path"] == "Props/Workshop/Cable clip/Cable clip.3mf"

@@ -11,7 +11,7 @@ import logging
 import os
 import stat
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -134,6 +134,141 @@ def apply_asset_path_rewrites(session: Session, rewrites: list[tuple[Asset, str]
     for asset, new_path in rewrites:
         asset.storage_path = new_path
         session.add(asset)
+
+
+def _child_named(session: Session, parent_id: Optional[str], name: str) -> Optional[Folder]:
+    """The existing child of `parent_id` this name already means, or None.
+
+    Matched on the row's name OR on the last segment of its directory, because a
+    deduped directory leaf (`Foo (2)`) and its row name (`Foo`) are two spellings
+    of the same child and an incoming path may use either.
+    """
+    wanted = (name or "").casefold()
+    for child in session.exec(select(Folder).where(Folder.parent_id == parent_id)):
+        if (child.name or "").casefold() == wanted:
+            return child
+        leaf = (child.storage_path or "").rsplit("/", 1)[-1]
+        if leaf.casefold() == wanted:
+            return child
+    return None
+
+
+def get_or_create_child(parent_id: Optional[str], name: str) -> tuple[Folder, bool]:
+    """The child folder `name` means under `parent_id`, creating it if needed.
+
+    Returns `(folder, created)`, where `created` is True only when this call made
+    the row and its directory. The lookup matches the row's name and the leaf of
+    its directory (`_child_named`), so a path that spells a deduped `Foo (2)`
+    either way finds the one child instead of creating a second one beside it.
+
+    Race-safe: two requests can pass the lookup together, and the loser of the
+    `create_folder` 409 re-reads the child and returns it rather than failing.
+    `create_folder` commits, so the row is durable before the caller inserts the
+    asset that lives in it.
+    """
+    from db import engine
+
+    with Session(engine) as session:
+        existing = _child_named(session, parent_id, name)
+        if existing is not None:
+            return existing, False
+        try:
+            return create_folder(session, name, "[]", parent_id), True
+        except HTTPException as error:
+            if error.status_code != 409:
+                raise
+            existing = _child_named(session, parent_id, name)
+            if existing is None:
+                raise
+            return existing, False
+
+
+def _drop_repeated_base_segments(segments: list[str], accepted: set[str], at_most: int) -> list[str]:
+    """Drop the leading incoming segments that merely spell the base again.
+
+    Measured necessity: without this, uploading `elecrow-files/x.stl` into the
+    folder named `elecrow-files` created `elecrow-files (2)/elecrow-files/`,
+    because the base's directory leaf is deduped `(2)` while its row name is not,
+    so a leading segment equal to either spelling is the base itself spelled
+    again. A base you are inside can be spelled at most once, which is what
+    `at_most` bounds the drops to.
+    """
+    remaining = list(segments)
+    for _ in range(at_most):
+        if not remaining or remaining[0].casefold() not in accepted:
+            break
+        remaining.pop(0)
+    return remaining
+
+
+def resolve_folder_chain(base_folder_id: Optional[str], segments: Sequence[str]) -> tuple[Optional[str], list[str]]:
+    """Turn a received path into real folders and return its deepest folder id.
+
+    Returns `(leaf_folder_id, created_folder_ids)`, the second being what a
+    failed request hands to `delete_created_folders` to undo.
+
+    The base folder is converged first (its NULL-path ancestors are persisted),
+    so the accepted spellings of "where we already are" are real directory
+    names. A leading segment that spells the base - its row name or the leaf of
+    its directory, deduped or not - is dropped rather than made into a child:
+    see `_drop_repeated_base_segments` for the measurement that demands it.
+    With no base folder nothing is dropped, because nothing is being repeated.
+
+    Empty `segments` returns the base untouched and never touches the disk.
+    """
+    from db import engine
+
+    if not segments:
+        return base_folder_id, []
+
+    accepted: set[str] = set()
+    base_segments: list[str] = []
+    if base_folder_id:
+        with Session(engine) as session:
+            relative = folder_paths.converge_ancestor_paths(session, base_folder_id)
+            base = session.get(Folder, base_folder_id)
+            base_name = base.name if base is not None else ""
+            session.commit()
+        base_segments = [segment for segment in relative.split("/") if segment]
+        accepted = {base_name.casefold()} | {segment.casefold() for segment in base_segments}
+
+    remaining = _drop_repeated_base_segments(list(segments), accepted, len(base_segments))
+    current = base_folder_id
+    created: list[str] = []
+    for segment in remaining:
+        folder, made = get_or_create_child(current, segment)
+        current = folder.id
+        if made:
+            created.append(folder.id)
+    return current, created
+
+
+def delete_created_folders(folder_ids: Sequence[str]) -> None:
+    """Best-effort undo for a request that created folders and then failed.
+
+    A failed request must not leave a directory the tree can show but nothing
+    owns, so each row is deleted in its own committed session and its directory
+    removed, deepest first (reverse creation order) so a parent is pruned only
+    after its children are gone. Every id is attempted and every failure is a
+    warning: this runs while another exception is on its way out and must never
+    replace it.
+    """
+    from db import engine
+
+    for folder_id in reversed(list(folder_ids)):
+        relative = ""
+        try:
+            with Session(engine) as session:
+                folder = session.get(Folder, folder_id)
+                if folder is None:
+                    continue
+                relative = folder.storage_path or ""
+                session.delete(folder)
+                session.commit()
+            if relative:
+                remove_created_directory(_absolute(relative))
+        except (OSError, HTTPException) as error:
+            log.warning("failed to undo created folder %s (%s): %s", folder_id, relative, error)
 
 
 def create_folder(session: Session, name: str, tags_json: str, parent_id: Optional[str]) -> Folder:
