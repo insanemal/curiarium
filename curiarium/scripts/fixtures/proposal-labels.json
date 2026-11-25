@@ -1,0 +1,47 @@
+[
+ {
+  "key": "import/OutOfMarbles",
+  "expect": "split",
+  "count": 3,
+  "note": "three marble machines from one creator (owner, 2026-11-25)"
+ },
+ {
+  "key": "import/xbox360_shell",
+  "expect": "split",
+  "count": 2,
+  "note": "controller-shell scan + a foreign product carrying its own vendor id"
+ },
+ {
+  "key": "Unsorted",
+  "expect": "split",
+  "count": 2,
+  "note": "two projects imported by hand; both have the per-file subfolder shape"
+ },
+ {
+  "key": "Vault",
+  "expect": "one",
+  "arrange_contains": [
+   "drop the wrapper",
+   "_source/Vault Archive_18.11.2026.zip"
+  ],
+  "note": "794 models, 180 model-bearing dirs, depth 5; the extracted inner zip is packaging"
+ },
+ {
+  "key": "import/Stagetop",
+  "expect": "one",
+  "note": "parts arrive as sibling folders and archives; none carries a product document"
+ },
+ {
+  "key": "import/endorphin",
+  "expect": "one",
+  "note": "a git checkout: tracked = the project, untracked = materials"
+ },
+ {
+  "key": "import/17_ClockworkMonster",
+  "expect": "one",
+  "arrange_contains": [
+   "Fates End - ClockworkMonster"
+  ],
+  "note": "the 17_ is a series index; the title is missing the series name"
+ }
+]
