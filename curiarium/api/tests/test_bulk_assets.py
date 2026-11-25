@@ -431,8 +431,11 @@ def test_batch_folder_conflict_is_per_id_and_preserves_bytes(isolated_storage: P
         # bytes are unchanged.
         assert (storage / conflicting["storage_path"]).read_bytes() == b"solid root cube\n"
         assert (storage / resident["storage_path"]).read_bytes() == resident_bytes
-        destination = storage / folder["storage_path"] / conflicting["filename"]
-        assert not destination.exists()
+        # The resident's path IS the destination this move would render under the
+        # default `{folder}/{filename}` layout, and the line above pins its bytes;
+        # the folder holds only the resident and the winner, so the failed move
+        # wrote nothing else beside them.
+        assert sorted(path.name for path in (storage / folder["storage_path"]).iterdir()) == ["cube.stl", "sphere.stl"]
 
         # The winner really moved: new path has the bytes, old path is vacated.
         moved = body["updated"][0]

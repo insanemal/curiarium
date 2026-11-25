@@ -46,7 +46,7 @@ import settings_service
 from db import engine
 from migrations import run_migrations
 from models import Asset, AssetFile, Folder
-from routers import asset_files
+from routers import asset_files, uploads
 
 BOUNDARY = "mv-stream-boundary"
 
@@ -1093,3 +1093,93 @@ def test_generated_thumbnail_default_cap_boundary(isolated_storage: Path) -> Non
 
     assert incoming_files(storage) == []
     assert list((storage / "thumbs").iterdir()) == []
+
+
+# --- the path a filename carries (Mf-xqvc) -----------------------------------
+
+
+def upload_with_filename(client: TestClient, headers: dict, filename: str, folder_id: Optional[str] = None) -> object:
+    """POST /upload as a browser would, with the given multipart filename."""
+    parts: List[Tuple[str, Optional[str], Optional[str], bytes]] = []
+    if folder_id is not None:
+        parts.append(("folder_id", None, None, folder_id.encode()))
+    parts.append(("file", filename, "model/stl", b"solid payload\n"))
+    return client.post("/upload", content=multipart_body(parts), headers=multipart_headers(headers))
+
+
+def folder_rows() -> List[Folder]:
+    with Session(engine) as session:
+        return list(session.exec(select(Folder)))
+
+
+def test_upload_logs_the_received_multipart_filename(
+    isolated_storage: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The instrument: the received multipart filename is where a path shows up."""
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        with caplog.at_level(logging.INFO, logger=uploads.__name__):
+            response = upload_with_filename(client, auth_header(client), "folder/sub/file.stl")
+    assert response.status_code == 200, response.text
+    assert any("filename='folder/sub/file.stl'" in record.getMessage() for record in caplog.records)
+
+
+def test_a_path_carrying_filename_becomes_folders_and_keeps_its_basename(isolated_storage: Path) -> None:
+    """A path in the received filename is honoured, never flattened or duplicated."""
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        headers = auth_header(client)
+        base = client.post("/folders", json={"name": "elecrow-files"}, headers=headers)
+        assert base.status_code == 200, base.text
+        base_id = base.json()["id"]
+
+        response = upload_with_filename(client, headers, "elecrow-files/body-v201.stl", base_id)
+        assert response.status_code == 200, response.text
+        folders = client.get("/folders", headers=headers).json()
+
+    out = response.json()
+    assert out["name"] == "body-v201"
+    assert out["filename"] == "body-v201.stl"
+    assert out["storage_path"] == "elecrow-files/body-v201.stl"
+    assert out["folder_id"] == base_id
+    # The base-path dedupe pin: a leading segment naming the folder we are
+    # already in is that folder, not a child of itself.
+    assert [folder["name"] for folder in folders] == ["elecrow-files"]
+
+
+def test_a_deeper_path_creates_child_folders(isolated_storage: Path) -> None:
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        headers = auth_header(client)
+        base = client.post("/folders", json={"name": "elecrow-files"}, headers=headers)
+        assert base.status_code == 200, base.text
+        base_id = base.json()["id"]
+
+        response = upload_with_filename(client, headers, "elecrow-files/sub/x.stl", base_id)
+        assert response.status_code == 200, response.text
+        assert response.json()["folder_id"] not in {base_id, None}
+
+    child = next(folder for folder in folder_rows() if folder.name == "sub")
+    assert child.parent_id == base_id
+    assert child.storage_path == "elecrow-files/sub"
+    assert response.json()["storage_path"] == "elecrow-files/sub/x.stl"
+    assert (isolated_storage / "elecrow-files" / "sub" / "x.stl").is_file()
+
+
+def test_a_dot_dot_filename_is_refused_naming_the_entry(isolated_storage: Path) -> None:
+    storage = isolated_storage
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        response = upload_with_filename(client, auth_header(client), "../evil.stl")
+    assert response.status_code == 400, response.text
+    assert "../evil.stl" in response.json()["detail"]
+    assert asset_ids() == set()
+    assert stored_files(storage) == []
+
+
+def test_a_failed_upload_prunes_the_folders_it_created(isolated_storage: Path) -> None:
+    """A failed request must not leave a directory the tree can show but nothing owns."""
+    storage = isolated_storage
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        response = upload_with_filename(client, auth_header(client), "newdir/sub/no-extension")
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "Asset filename must include an extension"
+    assert folder_rows() == []
+    assert not (storage / "newdir").exists()
+    assert asset_ids() == set()

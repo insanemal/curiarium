@@ -115,6 +115,18 @@ def folder_segments(session: Session, folder_id: Optional[str]) -> List[str]:
     return segments or ["Unassigned"]
 
 
+def folder_relative_path(session: Session, folder_id: Optional[str]) -> str:
+    """The directory a folder's own row names, converged; `Unassigned` at root.
+
+    Read from the row, not re-derived from names: a deduped `Foo (2)` must render
+    the directory its row points at, or a new file is written somewhere no row
+    describes - a directory the tree can show but nothing owns.
+    """
+    if not folder_id:
+        return "Unassigned"
+    return folder_paths.converge_ancestor_paths(session, folder_id) or "Unassigned"
+
+
 def render_storage_path(asset: Asset, session: Session, template: Optional[str] = None) -> str:
     safe_template = validate_storage_template(template or get_storage_template())
     try:
@@ -123,7 +135,7 @@ def render_storage_path(asset: Asset, session: Session, template: Optional[str] 
         tags = []
     tag_label = " + ".join(str(tag).strip() for tag in tags if str(tag).strip()) or "Untagged"
     values = {
-        "folder": "/".join(folder_segments(session, asset.folder_id)),
+        "folder": folder_relative_path(session, asset.folder_id),
         "collection": sanitize_path_segment(asset.collection or "Uncollected", "Uncollected"),
         "tags": sanitize_path_segment(tag_label, "Untagged"),
         "creator": sanitize_path_segment(asset.creator or "Unknown creator", "Unknown creator"),

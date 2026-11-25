@@ -137,14 +137,25 @@ class EntryPathRefused(ValueError):
         self.segment = segment
 
 
+def _member_parts(name: str) -> List[str]:
+    """Split a member name on both separators; a zip may spell either.
+
+    Load-bearing, not cosmetic: ``file_utils.sanitize_filename`` now refuses a
+    value carrying a separator instead of flattening it, so every caller that
+    wants segments has to split them out itself.
+    """
+    return (name or "").replace("\\", "/").split("/")
+
+
 def entry_filename(name: str) -> str:
     """The filename a member lands under: its last segment, rendered.
 
-    The last segment only, because ``sanitize_filename`` replaces the separators
-    with ``_`` *and then* takes a basename, so handing it the whole member path
-    would basename the separators away and flatten the name.
+    The last segment only, because a member's path is its placement and its
+    leaf is its filename. Both separators split it, so a hand-made archive's
+    ``a\\b\\c.stl`` keeps its leaf instead of handing the renderer a path it
+    would have to refuse.
     """
-    return sanitize_filename(name.split("/")[-1])
+    return sanitize_filename(_member_parts(name)[-1])
 
 
 def entry_member_segments(name: str) -> List[str]:
@@ -152,27 +163,63 @@ def entry_member_segments(name: str) -> List[str]:
 
     ``file_utils.sanitize_filename`` is the library's one filename renderer, so a
     member lands exactly as it renders it. Per segment on purpose: applied to the
-    whole member name it would basename the separators away and flatten the
-    archive's tree into one directory, so each segment keeps its own place.
+    whole member name it would have to refuse the separators outright, so each
+    segment is split out (on both ``/`` and ``\\``) and rendered on its own,
+    keeping its own place in the tree.
 
     Rendering is also the step that can create a ``.`` or ``..`` segment, and one
     of those is refused here, before any destination is resolved and before
-    staging exists. ``sanitize_filename`` strips whitespace and NULs before taking
-    the basename, so ``".. "``, ``" .."``, ``"\\t.."`` and ``"..\\x00"`` all
-    render to ``".."`` while ``" . "`` renders to ``"."``.
-    ``normalize_zip_entry_path`` rejects an *exact* ``".."`` part, which is a
-    different set: these spellings survive it, and joined into a destination they
-    would walk out of the twin (``twin/../evil.stl``) or collapse the twin itself
-    into the member's file. Refusing keeps the promise that a member lands
-    exactly where its segments render - ``sanitize_path_segment``'s dot-stripping
-    fallback would silently rename the member instead, leaving a file whose name
-    the archive does not have.
+    staging exists. ``sanitize_filename`` strips whitespace and NULs first, so
+    ``".. "``, ``" .."``, ``"\\t.."`` and ``"..\\x00"`` all render to ``".."``
+    while ``" . "`` renders to ``"."``. ``normalize_zip_entry_path`` rejects an
+    *exact* ``".."`` part, which is a different set: these spellings survive it,
+    and joined into a destination they would walk out of the twin
+    (``twin/../evil.stl``) or collapse the twin itself into the member's file.
+    Refusing keeps the promise that a member lands exactly where its segments
+    render - ``sanitize_path_segment``'s dot-stripping fallback would silently
+    rename the member instead, leaving a file whose name the archive does not
+    have.
     """
-    segments = [sanitize_filename(part) for part in name.split("/")]
+    segments = [sanitize_filename(part) for part in _member_parts(name)]
     for segment in segments:
         if segment in (".", ".."):
             raise EntryPathRefused(name, segment)
     return segments
+
+
+class EntryNameRefused(ValueError):
+    """One received name that cannot be honoured as a path, and why.
+
+    ``name`` is the name as received and ``reason`` says what is wrong with it,
+    so a door repeats both instead of paraphrasing.
+    """
+
+    def __init__(self, name: str, reason: str) -> None:
+        super().__init__(f"{name!r} {reason}")
+        self.name = name
+        self.reason = reason
+
+
+def ingest_segments(name: str) -> List[str]:
+    """The folder segments an uploaded filename names, its leaf last.
+
+    The ONE splitter an ordinary upload uses, and the same normalisation a zip
+    member gets (``normalize_zip_entry_path``): a browser that sends
+    ``folder/sub/file.stl`` is naming a place, so that is where the file goes.
+
+    Returns the folder segments followed by the leaf: the caller places the
+    file in the folders and uses the leaf as the filename. It honours the path
+    when it can and refuses what it cannot - an empty name, a directory name, a
+    ``..`` segment - and never mangles: a flattened name is a file the sender
+    never named.
+    """
+    normalized = normalize_zip_entry_path(name)
+    if normalized is None:
+        raw = name or ""
+        if not raw.strip() or raw.endswith("/") or raw.endswith("\\"):
+            raise EntryNameRefused(name, "is empty or names a directory")
+        raise EntryNameRefused(name, "has a '..' segment")
+    return entry_member_segments(normalized)
 
 
 @dataclass(frozen=True)

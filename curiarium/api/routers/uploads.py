@@ -6,6 +6,7 @@ generated-thumbnail route in ``routers.asset_files`` streams through the same
 module and shares that contract as well.
 """
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -14,6 +15,8 @@ from starlette.requests import ClientDisconnect
 
 import asset_service
 import db
+import entry_policy
+import folder_service
 import multipart_stream
 import seams
 from asset_file_service import save_asset_file, size_limit_label
@@ -27,11 +30,12 @@ from asset_service import (
 )
 from auth import AuthContext
 from db import engine
-from file_utils import sanitize_filename
 from models import Asset, AssetFile
 from permissions import require_contribute
 from routers.presenters import to_out
 from schemas import AssetOut
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -88,23 +92,41 @@ async def upload(request: Request, context: Optional[AuthContext] = Depends(requ
     origin = asset_service.AssetOrigin.for_principal(request, context, "upload")
     staging = asset_service.new_staging_path()
     asset: Optional[Asset] = None
+    created_folders: list[str] = []
     try:
         staged = await multipart_stream.stream_file_part(request, staging, max_bytes=seams.max_upload_bytes())
-        safe_name = sanitize_filename(staged.filename)
+        # Mf-xqvc instrument: the received multipart filename is the only place a
+        # path can appear, and the web was measured to never send one.
+        log.info("upload filename=%r", staged.filename)
+        try:
+            segments = entry_policy.ingest_segments(staged.filename)
+        except (entry_policy.EntryNameRefused, entry_policy.EntryPathRefused) as refused:
+            # `str` already names the received entry, so the 400 does too.
+            raise HTTPException(status_code=400, detail=str(refused)) from None
+        leaf = segments[-1]
+        parent_segments = segments[:-1]
+        folder_id = staged.fields.get("folder_id") or None
+        if parent_segments:
+            folder_id, created_folders = folder_service.resolve_folder_chain(folder_id, parent_segments)
         tags = [t.strip() for t in (staged.fields.get("tags") or "").split(",") if t.strip()]
+        # The leaf, never the whole name: `create_asset_record` re-derives the
+        # stem itself, so handing it a path would silently drop the path.
         asset = create_asset_record(
-            safe_name,
+            leaf,
             staged.content_type or "application/octet-stream",
             staged.fields.get("title"),
             staged.fields.get("notes"),
             tags,
-            staged.fields.get("folder_id"),
+            folder_id,
             origin=origin,
         )
         dest = managed_asset_path(asset)
         dest.parent.mkdir(parents=True, exist_ok=True)
         move_managed_file(staging, dest)
     except multipart_stream.UploadTooLarge:
+        # The three streaming failures below cannot have created a folder: the
+        # whole stream is written before the first folder is created, so they
+        # have nothing to undo and call no cleanup.
         raise HTTPException(status_code=413, detail=upload_too_large_detail(seams.max_upload_bytes())) from None
     except multipart_stream.UploadRequestError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
@@ -112,13 +134,16 @@ async def upload(request: Request, context: Optional[AuthContext] = Depends(requ
         return Response(status_code=CLIENT_CLOSED_REQUEST)
     except HTTPException:
         # A move rejected with 409 found foreign bytes at the destination; the
-        # row we created goes, the bytes stay.
+        # row we created goes, the bytes stay. The folders this request made go
+        # too, so a failed upload leaves no directory the tree cannot show.
         if asset:
             delete_asset_row_only(asset.id)
+        folder_service.delete_created_folders(created_folders)
         raise
     except Exception as exc:
         if asset:
             delete_asset_row_only(asset.id)
+        folder_service.delete_created_folders(created_folders)
         raise HTTPException(status_code=500, detail="Failed to store uploaded file") from exc
     finally:
         staging.unlink(missing_ok=True)

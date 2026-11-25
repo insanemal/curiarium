@@ -44,11 +44,37 @@ MODEL_MIME_BY_SUFFIX: Dict[str, str] = {
 MODEL_SUFFIXES = frozenset(MODEL_MIME_BY_SUFFIX)
 
 
+class FilenameHasPath(ValueError):
+    """A filename renderer was handed a path it cannot honestly flatten.
+
+    ``name`` is the value as received, so a door can name it in its 400.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"{name!r} carries a path; a filename renderer cannot flatten it")
+        self.name = name
+
+
 def sanitize_filename(name: str) -> str:
-    name = (name or "").replace("\x00", "").strip()
-    name = name.replace("/", "_").replace("\\", "_")
-    name = os.path.basename(name)
-    return name or "imported-file"
+    """The library's single filename renderer: one segment, or a refusal.
+
+    A filename is a leaf. A value carrying a separator names a place, not a
+    file, and this renderer has nowhere to put the rest of the path - the
+    caller does. ``FilenameHasPath`` says so instead of inventing a flat name:
+    the 2026-11-24 mangling was exactly the silent flattening this refuses, and
+    deleting it is the fix. The earlier ``os.path.basename`` call here was a
+    no-op *after* the separators had been replaced, so every path-carrying name
+    was quietly rewritten into a name the sender never used.
+
+    ``.`` and ``..`` are returned unchanged: dot policy belongs to
+    ``sanitize_path_segment`` and ``entry_policy.entry_member_segments``, which
+    refuse them deliberately, and a renderer that renamed them would hide that
+    from the door that has to answer for it.
+    """
+    cleaned = (name or "").replace("\x00", "").strip()
+    if "/" in cleaned or "\\" in cleaned:
+        raise FilenameHasPath(name)
+    return cleaned or "imported-file"
 
 
 def sanitize_path_segment(value: str, fallback: str = "item") -> str:
@@ -74,15 +100,29 @@ def parse_content_disposition(cd: str) -> Optional[str]:
     return None
 
 
+def _import_filename(name: str) -> str:
+    """Render one import filename, refusing a path with a 400 that names it."""
+    try:
+        return sanitize_filename(name)
+    except FilenameHasPath as exc:
+        raise HTTPException(status_code=400, detail=f"Filename must not contain a path: {exc.name!r}") from None
+
+
 def build_import_filename(url: str, headers, override: Optional[str]) -> str:
+    """The filename a fetched URL or a caller's override lands under.
+
+    This door has no folder placement to offer - it answers a URL, not a
+    directory tree - so a name carrying a path cannot be honoured. It refuses
+    instead of mangling it: a flattened name is a file the sender never named.
+    """
     if override:
-        name = sanitize_filename(override)
+        name = _import_filename(override)
     else:
         dispo = headers.get("Content-Disposition", "")
         name = parse_content_disposition(dispo) or ""
         if not name:
             name = os.path.basename(urlparse(url).path)
-        name = sanitize_filename(name)
+        name = _import_filename(name)
 
     content_type = headers.get("Content-Type", "")
     base, ext = os.path.splitext(name)
