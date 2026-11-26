@@ -1188,6 +1188,53 @@ def test_remove_project_assets_is_idempotent() -> None:
         assert second == {"removed": [], "skipped": [asset["id"]], "failed": []}
 
 
+# --- batched membership edits -----------------------------------------------
+
+
+def test_a_membership_edit_larger_than_one_query_batch_loses_no_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both membership doors read their known ids in batches; no chunk may be lost.
+
+    `add_assets` and `remove_assets` resolve every id through `_known_asset_ids`,
+    which reads `project_service.MEMBER_QUERY_BATCH` ids per statement because
+    SQLite caps how many host variables one may bind. The constant is pinned to 4
+    on the module - not on a local import - so eleven real ids in one request span
+    three chunks however the constant is later tuned.
+
+    Mutations this catches: the original inline unbounded `Asset.id.in_(ids)` in
+    either door, and a helper that returned only the first chunk's rows - that one
+    would drop the last chunk's members, the three beside the bogus id, into
+    `failed` instead of adding them. Only the bogus id may fail, and it must fail
+    per id without aborting the members beside it.
+    """
+    monkeypatch.setattr(project_service, "MEMBER_QUERY_BATCH", 4)
+    with TestClient(main.app) as client:
+        headers = auth_header(client)
+        project = create_project(client, headers)
+        ids = [upload(client, headers, f"batched-{uuid4().hex}.stl")["id"] for _ in range(11)]
+        bogus = uuid4().hex
+
+        # The bogus id rides in the last chunk (members 9-11 plus it), so a chunk
+        # that went missing shows up as those members failing too.
+        addition = add_members(client, headers, project["id"], [*ids, bogus])
+
+        assert addition["added"] == ids, "every member past the first chunk was added, in request order"
+        assert addition["skipped"] == []
+        assert addition["failed"] == [{"id": bogus, "code": "not_found", "status": 404, "error": "Asset not found"}]
+        assert len(project_asset_rows(project["id"])) == 11, "eleven join rows across three chunks"
+
+        removal = remove_members(client, headers, project["id"], ids)
+
+        assert removal == {"removed": ids, "skipped": [], "failed": []}
+        assert project_asset_rows(project["id"]) == [], "the removal chunks took every membership"
+        with Session(engine) as session:
+            assert all(session.get(Asset, asset_id) is not None for asset_id in ids), (
+                "a membership edit never deletes an asset row"
+            )
+        assert set(ids) <= set(library_asset_ids(client, headers)), "the assets are still in the library"
+
+
 # --- the cover reference ----------------------------------------------------
 
 

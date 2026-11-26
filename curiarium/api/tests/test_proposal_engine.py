@@ -671,31 +671,67 @@ def test_plan_digest_is_the_same_plan_twice_and_changes_with_any_move() -> None:
     """
     moves = [{"from": "import/Drop/Product A", "to": "import/Product A", "kind": "dir"}]
     creates = [{"path": "import/Product A", "exists": True}]
-    first = proposal_engine.plan_digest("import/Drop", "split-top-folders", moves, creates)
+    first = proposal_engine.plan_digest("import/Drop", "split-top-folders", moves, creates, [])
     assert first == proposal_engine.plan_digest(
-        "import/Drop", "split-top-folders", list(moves), list(creates)
+        "import/Drop", "split-top-folders", list(moves), list(creates), []
     ), "the same plan must hash the same on the second call"
     assert first == proposal_engine.plan_digest(
-        "import/Drop", "split-top-folders", [{**moves[0], "action": "hoist"}], creates
+        "import/Drop", "split-top-folders", [{**moves[0], "action": "hoist"}], creates, []
     ), "`action` says why the move exists; the digest hashes what it does, so it is ignored"
     assert re.fullmatch(r"[0-9a-f]{64}", first), f"a sha256 hex digest, got {first!r}"
     changed = [
-        proposal_engine.plan_digest("import/Drop", "one-project", moves, creates),
-        proposal_engine.plan_digest("import/Other", "split-top-folders", moves, creates),
-        proposal_engine.plan_digest("import/Drop", "split-top-folders", [], creates),
+        proposal_engine.plan_digest("import/Drop", "one-project", moves, creates, []),
+        proposal_engine.plan_digest("import/Other", "split-top-folders", moves, creates, []),
+        proposal_engine.plan_digest("import/Drop", "split-top-folders", [], creates, []),
         proposal_engine.plan_digest("import/Drop", "split-top-folders", [
             {"from": "import/Drop/Product B", "to": "import/Product A", "kind": "dir"},
-        ], creates),
+        ], creates, []),
         proposal_engine.plan_digest("import/Drop", "split-top-folders", [
             {"from": "import/Drop/Product A", "to": "import/Product B", "kind": "dir"},
-        ], creates),
+        ], creates, []),
         proposal_engine.plan_digest("import/Drop", "split-top-folders", [
             {"from": "import/Drop/Product A", "to": "import/Product A", "kind": "file"},
-        ], creates),
-        proposal_engine.plan_digest("import/Drop", "split-top-folders", moves, []),
+        ], creates, []),
+        proposal_engine.plan_digest("import/Drop", "split-top-folders", moves, [], []),
     ]
     assert len(set(changed)) == len(changed), "two different plans collided"
     assert first not in changed, "an edited plan kept the id of the plan it replaced"
+
+
+def test_plan_digest_covers_the_adoption_delta() -> None:
+    """The digest covers the memberships a plan ADDS, not only the bytes it moves.
+
+    Mutation: leave `adopted` out of the canonical dict and a rescan between preview
+    and apply attaches a larger set under a plan id that still matches - the one path
+    a zero-move adopt is exposed on, because its `moves` and `creates` are both empty
+    on every preview. Mutation: hash the ids in call order and two previews of the
+    same delta answer two ids, so every apply is "stale".
+    """
+    moves: list = []
+    creates: list = []
+    base = proposal_engine.plan_digest("import/Stagetop", "add-to-project", moves, creates, [])
+    assert base == proposal_engine.plan_digest(
+        "import/Stagetop", "add-to-project", moves, creates, []
+    ), "an adopt with no delta must hash stably"
+    ordered = ["a", "b"]
+    assert proposal_engine.plan_digest(
+        "import/Stagetop", "add-to-project", moves, creates, ordered
+    ) == proposal_engine.plan_digest(
+        "import/Stagetop", "add-to-project", moves, creates, list(reversed(ordered))
+    ), "the delta is hashed as a SET: `_asset_rows()` has no ORDER BY"
+    assert base != proposal_engine.plan_digest(
+        "import/Stagetop", "add-to-project", moves, creates, ordered
+    ), "an adopt that adds files must not keep the id of the plan that added none"
+    assert proposal_engine.plan_digest(
+        "import/Stagetop", "add-to-project", moves, creates, ordered
+    ) != proposal_engine.plan_digest(
+        "import/Stagetop", "add-to-project", moves, creates, [*ordered, "c"]
+    ), "one more id is a different plan, so a rescan moves the id"
+    assert proposal_engine.plan_digest(
+        "import/Stagetop", "add-to-project", moves, creates, ["1"]
+    ) == proposal_engine.plan_digest(
+        "import/Stagetop", "add-to-project", moves, creates, [1]
+    ), "ids are coerced to strings: one id has one spelling in the hash"
 
 
 # --- git is behind a switch, and validate() is not a printer ---------------

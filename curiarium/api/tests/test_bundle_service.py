@@ -39,6 +39,7 @@ import archive_project_service
 import asset_file_service
 import asset_service
 import audit
+import bundle_drift
 import bundle_enrich
 import bundle_service
 import db
@@ -4420,8 +4421,22 @@ def test_attaching_backups_creates_no_group_members(
     marker = project_marker(project_id)
 
     assert marker["groups"] == [
-        {"name": "Bracket Set Alpha", "model_count": 2, "foreign": False, "included": True, "attached": 2},
-        {"name": "Bracket Set Beta", "model_count": 1, "foreign": False, "included": True, "attached": 1},
+        {
+            "name": "Bracket Set Alpha",
+            "model_count": 2,
+            "foreign": False,
+            "separable": False,
+            "included": True,
+            "attached": 2,
+        },
+        {
+            "name": "Bracket Set Beta",
+            "model_count": 1,
+            "foreign": False,
+            "separable": False,
+            "included": True,
+            "attached": 1,
+        },
     ], (
         "`attached` is the group's MODEL count: the four backups and the PDF created no "
         "group members, even though all eight files are in the project"
@@ -4448,6 +4463,63 @@ def test_service_a_folder_with_one_model_bearing_group_is_one_row(
     assert row["model_count"] == 2
     assert [group["name"] for group in row["groups"]] == ["one product"]
     assert [item for item in report["bundles"] if item["key"] == "import/wrapper/one product"] == []
+
+
+# --- The marker's group vocabulary, from literals only ----------------------
+
+
+def test_the_marker_groups_carry_an_operators_exclusion_forward_by_name() -> None:
+    """A rewrite that did not re-ask the question cannot resurrect an excluded group.
+
+    ``included`` is carried forward BY NAME from the older marker, so adopting a
+    project an operator already excluded a group from keeps that exclusion even
+    with an empty create-time exclusion list. ``separable`` is copied off the wire
+    as a real bool, and ``attached`` stays a lookup in the create's own counts.
+
+    Mutation: derive ``included`` from ``excluded`` alone and Beta reads ``True``;
+    drop ``separable`` from the written dict and the key-order assertion reds.
+    """
+    wire = [
+        {"name": "Alpha", "model_count": 4, "foreign": False, "separable": True},
+        {"name": "Beta", "model_count": 2, "foreign": True, "separable": False},
+    ]
+    before = [
+        {"name": "Beta", "model_count": 2, "foreign": True, "separable": False, "included": False, "attached": 0},
+    ]
+
+    written = bundle_service.marker_groups(wire, attached={"Alpha": 3}, excluded=set(), before=before)
+
+    assert [group["name"] for group in written] == ["Alpha", "Beta"]
+    for group in written:
+        assert list(group) == ["name", "model_count", "foreign", "separable", "included", "attached"]
+    alpha, beta = written
+    assert alpha["included"] is True, "a name the older marker does not carry falls back to `excluded`"
+    assert beta["included"] is False, "the operator's exclusion survives a rewrite that never asked again"
+    assert (alpha["attached"], beta["attached"]) == (3, 0)
+    assert (alpha["separable"], beta["separable"]) == (True, False)
+    assert isinstance(alpha["separable"], bool)
+
+
+def test_an_excluded_group_is_not_permanent_drift_after_the_marker_is_rewritten() -> None:
+    """The drift guard: only a marker group carrying ``included: False`` subtracts.
+
+    ``bundle_drift.excluded_prefixes`` subtracts a group only when ``included is
+    False``; a group written without the key never subtracts, so the excluded
+    group's parts would read as permanent drift. The helper is what makes the
+    marker carry the flag - the engine's four wire keys alone are exactly the
+    failure mode it prevents.
+
+    Mutation: write the wire shape into the marker verbatim and the first
+    assertion reds while the second still passes.
+    """
+    wire = [{"name": "Alpha", "model_count": 4, "foreign": True, "separable": True}]
+
+    written = bundle_service.marker_groups(wire, attached={}, excluded={"Alpha"})
+
+    assert bundle_drift.excluded_prefixes("import/Thing", {"groups": written}) == ("import/Thing/Alpha/",)
+    assert bundle_drift.excluded_prefixes("import/Thing", {"groups": wire}) == (), (
+        "the engine's four keys carry no `included`, so nothing subtracts - the drift the helper prevents"
+    )
 
 
 # --- C2: excluding a flagged foreign group (Mf-ao6r) -------------------------
@@ -4585,8 +4657,22 @@ def test_service_creating_from_a_grouped_row_makes_one_project_with_every_part(
     assert marker["detector"] == "engine:one-project"
     assert marker["shape"] == "one-project"
     assert marker["groups"] == [
-        {"name": STAGETOP_WAVE_ONE, "model_count": 45, "foreign": False, "included": True, "attached": 45},
-        {"name": STAGETOP_WAVE, "model_count": 15, "foreign": False, "included": True, "attached": 15},
+        {
+            "name": STAGETOP_WAVE_ONE,
+            "model_count": 45,
+            "foreign": False,
+            "separable": False,
+            "included": True,
+            "attached": 45,
+        },
+        {
+            "name": STAGETOP_WAVE,
+            "model_count": 15,
+            "foreign": False,
+            "separable": False,
+            "included": True,
+            "attached": 15,
+        },
     ]
     # Re-expressed, not deleted (Mf-wsdo): `attached` is the MODEL question per group
     # and `assets_added` is the ATTACH answer, so the two are no longer one number. The
@@ -4731,6 +4817,7 @@ def test_service_xbox360_shell_creates_one_project_with_all_31_parts(
             "name": XBOX_GROUP,
             "model_count": XBOX_GROUP_MODELS,
             "foreign": True,
+            "separable": True,
             "included": True,
             "attached": XBOX_GROUP_MODELS,
         }
@@ -4777,6 +4864,7 @@ def test_excluding_the_foreign_group_creates_one_project_of_its_own_27(
             "name": XBOX_GROUP,
             "model_count": XBOX_GROUP_MODELS,
             "foreign": True,
+            "separable": True,
             "included": False,
             "attached": 0,
         }
@@ -5096,6 +5184,35 @@ def test_the_marker_names_the_groups_and_their_counts(
     assert len(xbox_models) - sum(
         group["attached"] for group in xbox_marker["groups"] if group["included"]
     ) == XBOX_OWN_MODELS
+
+
+def test_a_create_with_an_exclusion_writes_the_six_key_marker_group(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """The create door writes every marker group through the one helper, all six keys.
+
+    ``included: False`` is what `bundle_drift.excluded_prefixes` subtracts on, and
+    ``separable`` is the wire's honesty flag, so both must reach the written marker.
+
+    Mutation: build the marker group inline again and drop ``separable`` and the
+    key-order assertion reds; write `included` as `True` unconditionally and the
+    exclusion assertion reds.
+    """
+    write_xbox360(isolated_storage)
+    insert_folder_row(XBOX, f"import/{XBOX}")
+    scan()
+    headers = auth_header(client)
+
+    created = create_for_exclusion(client, headers, [XBOX_GROUP])
+
+    assert created["created"] == 1
+    groups = project_marker(created["results"][0]["project_id"])["groups"]
+    assert len(groups) == 1
+    group = groups[0]
+    assert list(group) == ["name", "model_count", "foreign", "separable", "included", "attached"]
+    assert (group["name"], group["foreign"], group["separable"]) == (XBOX_GROUP, True, True)
+    assert group["included"] is False
+    assert group["attached"] == 0
 
 
 def test_a_group_free_marker_is_unchanged_in_both_directions(

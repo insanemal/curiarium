@@ -7,6 +7,7 @@ import {
   driftNoticeLine,
   driftWantsArrange,
   projectArrangeOffer,
+  undoableArrange,
 } from "./projectBundleDrift";
 
 const DASH = "\u2013";
@@ -133,5 +134,37 @@ describe("driftWantsArrange", () => {
     expect(driftWantsArrange(DRIFT_KNOWN, null)).toBe(false);
     expect(driftWantsArrange(DRIFT_UNKNOWN, null)).toBe(false);
     expect(driftWantsArrange(DRIFT_NOT_APPLICABLE, 3)).toBe(false);
+  });
+});
+
+describe("undoableArrange", () => {
+  it("pins the notice for an arrange that was applied and not undone", () => {
+    // The apply refetches the memberships, the drift count drops to zero and the
+    // drift line goes null - so this ledger is the ONLY thing that can keep the
+    // panel (and its Undo) mounted.
+    expect(undoableArrange({ key: "Hydra", arrange: { applied: true, undone: false } })).toBe(true);
+    // Absent `undone` is "not undone yet": the ledger the apply wrote may not
+    // carry the key at all.
+    expect(undoableArrange({ key: "Hydra", arrange: { applied: true } })).toBe(true);
+  });
+
+  it("pins nothing for an undone, partial or absent ledger", () => {
+    // An undone arrange has nothing left to put back, a partial apply
+    // (`applied: false`) wrote something the server will not undo, and a marker
+    // with no ledger is an ordinary project.
+    expect(undoableArrange({ arrange: { applied: true, undone: true } })).toBe(false);
+    expect(undoableArrange({ arrange: { applied: false } })).toBe(false);
+    expect(undoableArrange({ key: "Hydra", shape: "generic" })).toBe(false);
+  });
+
+  it("pins nothing for a marker that is not an object, or an arrange that is not one", () => {
+    // The marker is arbitrary metadata, not a typed payload: a read of `.arrange`
+    // off null/a string would throw, and `arrange: "yes"` is not a ledger.
+    for (const marker of [null, undefined, "Hydra", 7, []]) {
+      expect(undoableArrange(marker)).toBe(false);
+    }
+    expect(undoableArrange({ arrange: "applied" })).toBe(false);
+    expect(undoableArrange({ arrange: null })).toBe(false);
+    expect(undoableArrange({ arrange: 1 })).toBe(false);
   });
 });

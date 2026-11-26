@@ -2402,13 +2402,23 @@ def arrange_proposal(facts: Facts, chosen: str) -> List[str]:
     return lines
 
 
-def plan_digest(key: str, shape: str, moves, creates) -> str:
+def plan_digest(key: str, shape: str, moves, creates, adopted) -> str:
     """A stable id for one plan: the same list twice, the same id twice.
 
     Canonical JSON (sorted keys, no whitespace) over the key, the shape, the moves as
-    `[from, to, kind]` triples and the creates, so a stale plan is refused by identity
-    rather than by re-reading the disk and hoping. The digest deliberately excludes
-    `action`: it is a label for the move, not part of its effect.
+    `[from, to, kind]` triples, the creates and the ADOPTED asset ids, so a stale plan
+    is refused by identity rather than by re-reading the disk and hoping. The digest
+    deliberately excludes `action`: it is a label for the move, not part of its effect.
+
+    `adopted` is the membership delta, and it belongs in the hash because an adopt can
+    add hundreds of files while leaving `moves` and `creates` empty: without the ids, a
+    rescan between preview and apply would attach a larger set while the plan id still
+    matched, which is exactly the stale-plan case the guard exists for on the one path
+    this digest could otherwise not see. The ids are sorted, so the digest is a function
+    of the SET a plan attaches and not of the order the rows came back in.
+
+    Mutation: hash only key/shape/moves/creates and a rescan between preview and apply
+    attaches every newly registered file under a matching plan id.
     """
     import hashlib
     import json
@@ -2418,6 +2428,10 @@ def plan_digest(key: str, shape: str, moves, creates) -> str:
             "shape": shape,
             "moves": [[move["from"], move["to"], move["kind"]] for move in moves],
             "creates": list(creates),
+            # Sorted by id alone: the digest is a function of the SET a plan
+            # attaches, while the wire's samples are ordered path-then-id. The two
+            # orderings differ on purpose - this one only has to be stable.
+            "adopted": sorted(str(asset_id) for asset_id in adopted),
         },
         sort_keys=True,
         separators=(",", ":"),

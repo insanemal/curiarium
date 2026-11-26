@@ -67,6 +67,7 @@ import {
   driftNoticeLine,
   driftWantsArrange,
   projectArrangeOffer,
+  undoableArrange,
 } from "./projectBundleDrift";
 import { useFileGrants, useLiveFileGrants } from "../lib/useFileGrants";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
@@ -350,6 +351,12 @@ export default function ProjectLanding({
   // Derived once, from the marker itself: the arrange door is offered only when
   // there is a path and a shape to ask the server about.
   const projectOffer = projectArrangeOffer(project.metadata_json?._bundle);
+  // An arrange this project has already applied and not undone. The apply
+  // refetches the memberships, the drift count then reaches zero and
+  // `driftLine` goes null - so the notice is pinned on the ledger instead, or
+  // the panel (and its in-session Undo) would unmount the instant the write
+  // landed.
+  const pinnedArrange = undoableArrange(project.metadata_json?._bundle);
 
   // The one action on the notice, through the membership path that already
   // exists: nothing is attached without the click, and there is no new write
@@ -923,12 +930,14 @@ export default function ProjectLanding({
         {/* One notice for the whole project, never one per group: the marker's
             groups are a creation-time snapshot, so a new subfolder is not a
             group and a per-group notice would miss exactly this growth. */}
-        {driftLine && (
+        {(driftLine || pinnedArrange) && (
           <div
             data-bundle-drift="true"
             className="flex flex-wrap items-center gap-3 rounded-md border border-panel-strong bg-panel-soft px-3 py-2 text-sm"
           >
-            <span className="text-muted">{driftLine}</span>
+            {/* A pinned notice with no drift line has nothing to say about
+                drift: the arrange panel below carries the sentence. */}
+            {driftLine && <span className="text-muted">{driftLine}</span>}
             {/* No ids, no action: a count with nothing to send cannot be honoured. */}
             {canContribute && drift.asset_ids.length > 0 && (
               <button
@@ -944,15 +953,17 @@ export default function ProjectLanding({
                 shape it was created as, so the same door the review queue uses
                 is mounted here - no route, no new state, and no request until
                 the operator asks for a preview. */}
-            {canContribute && driftWantsArrange(drift.state, drift.count) && projectOffer !== null && (
-              <ArrangePlanPanel
-                bundleKey={projectOffer.bundleKey}
-                shape={projectOffer.shape}
-                canContribute={canContribute}
-                onChanged={onAssetsChanged}
-                onUnauthorized={onUnauthorized}
-              />
-            )}
+            {canContribute &&
+              projectOffer !== null &&
+              (driftWantsArrange(drift.state, drift.count) || pinnedArrange) && (
+                <ArrangePlanPanel
+                  bundleKey={projectOffer.bundleKey}
+                  shape={projectOffer.shape}
+                  canContribute={canContribute}
+                  onChanged={onAssetsChanged}
+                  onUnauthorized={onUnauthorized}
+                />
+              )}
           </div>
         )}
       </header>

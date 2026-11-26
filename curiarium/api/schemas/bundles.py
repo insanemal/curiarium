@@ -14,13 +14,16 @@ from .batch import BatchFailure
 
 __all__ = [
   "BundleArchiveOut",
+  "BundleArrangeAdoptionsOut",
   "BundleArrangeAppliedOut",
   "BundleArrangeCreateOut",
+  "BundleArrangeGroupOut",
   "BundleArrangeMoveOut",
   "BundleArrangePlanOut",
   "BundleArrangeRefusalOut",
   "BundleArrangeReportOut",
   "BundleArrangeRequest",
+  "BundleArrangeTargetOut",
   "BundleArrangeUndoOut",
   "BundleCoverCandidateOut",
   "BundleCoverChoiceIn",
@@ -519,11 +522,51 @@ class BundleArrangeReportOut(BaseModel):
   blocked_reason: Optional[str] = None
 
 
+class BundleArrangeTargetOut(BaseModel):
+  """The target root an adoption extends or creates, and which of the two it is."""
+
+  root: str
+  project_id: Optional[str] = None
+  creates_project: bool = False
+
+
+class BundleArrangeGroupOut(BaseModel):
+  """One part group the adoption would grow, in the engine's own order."""
+
+  name: str
+  root: str
+  files: int = 0
+  new: bool = False
+  foreign: bool = False
+  separable: bool = False
+  sample_names: List[str] = []
+
+
+class BundleArrangeAdoptionsOut(BaseModel):
+  """The memberships a plan would ADD: the whole of a zero-move plan.
+
+  ``total`` is every registered file the targets do not hold, ``by_role`` splits
+  it by the scan's own classifier, and ``groups`` partitions it by the engine's
+  groups with an explicit ``(root files)`` bucket, so
+  ``sum(group.files for group in groups) == total`` always holds - a count that
+  can silently shrink is the bug this field exists to end.
+  """
+
+  target: Optional[BundleArrangeTargetOut] = None
+  total: int = 0
+  by_role: Dict[str, int] = {}
+  groups: List[BundleArrangeGroupOut] = []
+  sample_names: List[str] = []
+  unregistered: int = 0
+
+
 class BundleArrangePlanOut(BaseModel):
   """The arrangement preview the apply echoes back by ``plan_id``.
 
   ``text`` is rendered from ``moves``, never beside it, so every sentence the
-  operator reads is backed by a record in the list.
+  operator reads is backed by a record in the list. ``adoptions`` is the other
+  half of a plan's effect: the memberships it adds, which a zero-move plan is
+  made of entirely.
   """
 
   key: str
@@ -533,6 +576,7 @@ class BundleArrangePlanOut(BaseModel):
   text: List[str] = []
   creates: List[BundleArrangeCreateOut] = []
   refusals: List[BundleArrangeRefusalOut] = []
+  adoptions: Optional[BundleArrangeAdoptionsOut] = None
   report: BundleArrangeReportOut
 
 
@@ -569,12 +613,15 @@ class BundleArrangeUndoOut(BaseModel):
 
   ``project_removed`` is False when membership changed after the arrange: the tree
   is restored, the project is left where it is, and the response says so.
+  ``members_removed`` counts the memberships the undo actually dropped: the rows
+  the ledger snapshotted as added, never a guess.
   """
 
   arrange_id: str
   key: str
   undone: bool
   moves: int = 0
+  members_removed: int = 0
   project_removed: bool = False
   projects_removed: List[str] = []
   unseeable: List[str] = []

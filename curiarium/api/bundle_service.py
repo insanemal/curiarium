@@ -124,7 +124,7 @@ import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import AbstractSet, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import AbstractSet, Collection, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 from zipfile import BadZipFile
 
 from fastapi import HTTPException
@@ -1437,8 +1437,11 @@ def _without_owned_subtrees(
     return kept_files, kept_parents
 
 
-def _wire_groups(groups: Sequence[Mapping]) -> List[dict]:
+def wire_groups(groups: Sequence[Mapping]) -> List[dict]:
     """One group list in the wire shape, from the engine's own groups.
+
+    Public because the create path and the adopt path both hand it the engine's
+    groups, so the wire vocabulary has exactly one author.
 
     The engine's groups are hierarchical (`children`), and the wire's
     `BundleGroupOut` is the flat three-field shape the queue renders and the
@@ -1456,6 +1459,59 @@ def _wire_groups(groups: Sequence[Mapping]) -> List[dict]:
         }
         for group in groups
     ]
+
+
+def marker_groups(
+    groups: Sequence[Mapping],
+    *,
+    attached: Mapping[str, int],
+    excluded: Collection[str] = (),
+    before: Optional[Sequence[Mapping]] = None,
+) -> List[dict]:
+    """The ``_bundle`` marker's group list, the ONE place a marker group is built.
+
+    Input is the FLAT wire shape ``wire_groups`` emits (``name``, ``model_count``,
+    ``foreign``, ``separable``) - what a row's ``matches[*].groups`` carry - and the
+    output adds the two decisions a project makes at create time: ``included`` (the
+    operator's answer) and ``attached`` (how many of the group's registered MODEL
+    assets this create actually attached).
+
+    ``included`` is carried forward BY NAME from ``before`` whenever that name is
+    present there, so a rewrite that did not re-ask the question - adopting a
+    project an operator already excluded a group from - can never resurrect the
+    group. Only a name absent from ``before`` falls back to ``excluded``, the
+    operator's exclusion list at CREATE time.
+
+    The key order is part of the contract because ``bundle_drift.excluded_prefixes``
+    subtracts a group only when ``group.get("included") is not False`` fails - i.e.
+    only an explicit ``included: False`` subtracts. A marker group written without
+    that key never subtracts, so an operator's exclusion would read as permanent
+    drift. The create path and the adopt path both call this, so the two can never
+    disagree about the marker's vocabulary.
+    """
+    carried_by_name: Dict[str, object] = {}
+    for previous in before or ():
+        if not isinstance(previous, Mapping):
+            continue
+        name = previous.get("name")
+        if isinstance(name, str):
+            carried_by_name[name] = previous.get("included")
+    written: List[dict] = []
+    for group in groups:
+        name = str(group["name"])
+        carried = carried_by_name.get(name)
+        included = name not in excluded if carried is None else bool(carried)
+        written.append(
+            {
+                "name": name,
+                "model_count": int(group["model_count"]),
+                "foreign": bool(group.get("foreign")),
+                "separable": bool(group.get("separable")),
+                "included": included,
+                "attached": int(attached.get(name, 0)),
+            }
+        )
+    return written
 
 
 def cover_for_registered(
@@ -1744,7 +1800,7 @@ def _match_row(option: proposal_engine.Option, candidate: BundleCandidate) -> di
         "text_count": int(facts.docs),
         "other_count": int(facts.others),
         # An archive's facts carry no groups: its payload is one thing inside a zip.
-        "groups": [] if candidate.is_archive else _wire_groups(facts.groups),
+        "groups": [] if candidate.is_archive else wire_groups(facts.groups),
         "note": note,
         "creatable": creatable,
     }
@@ -2477,16 +2533,7 @@ def _create_one(
             # `IMPORT_MOUNT_INCLUDE_HIDDEN=1` makes it register the sidecars the
             # detector still refuses, which separates the numbers again - named in
             # ADR 0010 Decision 25, off by default and untested.
-            marker["groups"] = [
-                {
-                    "name": group["name"],
-                    "model_count": group["model_count"],
-                    "foreign": group["foreign"],
-                    "included": group["name"] not in excluded_names,
-                    "attached": models_by_group.get(group["name"], 0),
-                }
-                for group in groups
-            ]
+            marker["groups"] = marker_groups(groups, attached=models_by_group, excluded=excluded_names)
             marker["cover"] = {
                 "asset_id": cover["asset_id"],
                 "rel_path": cover_rel_path,

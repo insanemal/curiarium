@@ -413,6 +413,39 @@ export type BundleArrangeRefusal = {
   detail: string;
 };
 
+/** One folder the plan would take INTO the project, with the files that come
+ *  with it. `new` says whether the folder itself does not exist yet,
+ *  `foreign` whether it is somebody else's thing, and `separable` whether the
+ *  server would accept it on its own - the same service fact a compound row's
+ *  `separable` carries. `sample_names` are a handful of the files, for a
+ *  preview that must not enumerate hundreds. */
+export type BundleArrangeAdoptionGroup = {
+  name: string;
+  root: string;
+  files: number;
+  new: boolean;
+  foreign: boolean;
+  separable: boolean;
+  sample_names: string[];
+};
+
+/** What the plan would ADD to the project: the membership half of an arrange,
+ *  beside the moves half. `target` is the project the files would join (a null
+ *  `project_id` means the apply would create it), `by_role` is the same total
+ *  split by asset role, and `unregistered` counts files on disk the library has
+ *  no row for - which is a rescan prompt, not an adoption. */
+export type BundleArrangeAdoptions = {
+  target: { root: string; project_id: string | null; creates_project: boolean } | null;
+  total: number;
+  by_role: Record<string, number>;
+  /** ABSENT on purpose: a payload from before the group list was served omits
+   *  it, so a reader reports an UNKNOWN folder count (the en dash) rather than
+   *  a fabricated zero. */
+  groups?: BundleArrangeAdoptionGroup[];
+  sample_names: string[];
+  unregistered: number;
+};
+
 /** What an arrangement WOULD do, and the `plan_id` that names exactly this plan.
  *  `text` is the engine's own rendering of the moves (never rebuilt here), and
  *  `refusals` holds every objection the apply would raise - so a preview is
@@ -425,6 +458,12 @@ export type BundleArrangePlan = {
   text: string[];
   creates: BundleArrangeCreate[];
   refusals: BundleArrangeRefusal[];
+  /** The memberships the plan would ADD - the whole of a zero-move plan, and
+   *  the field that stops the operator being asked to approve a blank preview.
+   *  OPTIONAL on purpose, like its neighbours: an archive-row preview and an
+   *  older server send null or omit it, and an absent block is an UNKNOWN
+   *  count, never a zero. */
+  adoptions?: BundleArrangeAdoptions | null;
   report: {
     creatable: boolean;
     blocked_reason: string | null;
@@ -459,6 +498,11 @@ export type BundleArrangeUndo = {
   key: string;
   undone: boolean;
   moves: number;
+  /** The memberships the undo actually dropped. The moves count bytes and this
+   *  counts rows, so an adoption-only arrange answers `0` moves and a real
+   *  number here. OPTIONAL like the other older-payload fields: absent means
+   *  the server did not say. */
+  members_removed?: number;
   project_removed: boolean;
   unseeable: string[];
   stale: string[];

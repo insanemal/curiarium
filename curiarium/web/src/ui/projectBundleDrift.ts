@@ -55,6 +55,21 @@ export function driftWantsArrange(state: string, count: number | null): boolean 
   return state === DRIFT_KNOWN && typeof count === "number" && count > 0;
 }
 
+/** Whether this project's marker carries an arrange that can still be undone.
+ *  The ledger is the app's own record of what the arrange added, and it is kept
+ *  in the project's `_bundle` after the apply - so the notice must stay mounted
+ *  while one is live, or the only Undo entry point disappears the instant the
+ *  drift count reaches zero. */
+export function undoableArrange(marker: unknown): boolean {
+  if (typeof marker !== "object" || marker === null) return false;
+  const arrange = (marker as Record<string, unknown>).arrange;
+  if (typeof arrange !== "object" || arrange === null) return false;
+  const ledger = arrange as Record<string, unknown>;
+  // `applied === true` exactly: a partial apply (`applied: false`) wrote
+  // something the server will not undo, and an undone ledger has nothing left.
+  return ledger.applied === true && ledger.undone !== true;
+}
+
 const DRIFT_TAIL = "parts in this folder are not in the project";
 
 /**

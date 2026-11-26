@@ -8,6 +8,8 @@ import {
   arrangeBundles,
   getArrangePlan,
   undoArrange,
+  type BundleArrangeAdoptions,
+  type BundleArrangeAdoptionGroup,
   type BundleArrangeApplied,
   type BundleArrangeMove,
   type BundleArrangePlan,
@@ -16,11 +18,13 @@ import { UnauthorizedError } from "../../lib/api/http";
 import { notifyInfo } from "../../lib/toast";
 import {
   arrangeActionLabel,
-  arrangeMoveCount,
+  arrangeAppliesNothing,
+  arrangeHeadline,
   arrangeMoveCountLabel,
   arrangeMoveLine,
   arrangeRefusalLine,
 } from "./bundleRows";
+import { formatReviewCount } from "./useReviewCounts";
 
 type Props = {
   /** The storage-relative key the plan is measured against. */
@@ -43,11 +47,49 @@ type Applied = {
   unseeable: string[];
   stale: string[];
   alreadyApplied: boolean;
+  /** What the previewed plan said it would ADOPT. Captured with the apply
+   *  because the plan is consumed by it, and the result must still be able to
+   *  say what joined the project - a zero-move plan's whole outcome. */
+  adoptions: BundleArrangeAdoptions | null;
 };
 
 const PRIMARY_BUTTON = "text-xs px-2.5 py-1.5 rounded-md bg-accent disabled:opacity-60";
 const SECONDARY_BUTTON =
   "text-xs px-2.5 py-1.5 rounded-md border border-panel-strong disabled:opacity-60";
+
+/** The roles an operator reads in the adopt block, in a fixed order, each with
+ *  this client's word for it. `by_role`'s keys are the server's tokens, and a
+ *  role outside this list gets no word of its own rather than an invented one. */
+const ADOPT_ROLE_LABELS: { id: string; label: string }[] = [
+  { id: "model", label: "Models" },
+  { id: "image", label: "Images" },
+  { id: "text", label: "Documents" },
+  { id: "archive", label: "Archives" },
+  { id: "other", label: "Other" },
+];
+
+/** The adopt block's role split, one line, every number through the one count
+ *  formatter. A role with nothing in it is skipped: a `Models 0` on an
+ *  image-only folder is noise about a thing that is not happening. A role the
+ *  server did not count renders the formatter's dash, never a fabricated 0. */
+function adoptRolesLine(byRole: Record<string, number>): string {
+  return ADOPT_ROLE_LABELS.filter(({ id }) => (byRole[id] ?? 0) > 0)
+    .map(({ id, label }) => `${label} ${formatReviewCount(byRole[id] ?? null)}`)
+    .join(" \u00b7 ");
+}
+
+/** What the apply ADDED, in memberships. It sits beside `Arranged: N moves`
+ *  because the two sentences say different things: that one counts bytes, this
+ *  one counts rows - and on a zero-move adopt it is the only outcome there is. */
+function addedLine(adoptions: BundleArrangeAdoptions): string {
+  const groups = Array.isArray(adoptions.groups) ? adoptions.groups.length : null;
+  return `Added ${formatReviewCount(adoptions.total)} files in ${formatReviewCount(groups)} folders`;
+}
+
+/** How many files one adoption group brings, in the one count formatter. */
+function adoptGroupFiles(group: BundleArrangeAdoptionGroup): string {
+  return `\u2014 ${formatReviewCount(group.files)} files`;
+}
 
 /** The thrown message, or a neutral fallback when the throw was not an Error.
  *  The API layer already turns the server's `detail` into `Error.message`, so
@@ -144,6 +186,7 @@ export default function ArrangePlanPanel({
         unseeable: result.unseeable,
         stale: result.stale,
         alreadyApplied: result.already_applied,
+        adoptions: current.adoptions ?? null,
       });
       announceApplied(result, previewedMoves);
       onChanged?.();
@@ -197,9 +240,59 @@ export default function ArrangePlanPanel({
           aria-label="Arrangement preview"
           data-arrange-plan="true"
         >
-          <span data-arrange-moves="true">
-            {`Arrangement: ${arrangeMoveCountLabel(arrangeMoveCount(plan))}`}
+          <span
+            data-arrange-moves="true"
+            data-arrange-applies-nothing={arrangeAppliesNothing(plan) ? "true" : undefined}
+          >
+            {arrangeHeadline(plan)}
           </span>
+          {/* The memberships the plan would ADD, when it adds any. This is the
+              whole of a zero-move plan, and without it the operator is asked to
+              apply a preview that looks blank. No button and no tab stop lives
+              here: the sentence only says what the apply would do. */}
+          {plan.adoptions !== null && plan.adoptions !== undefined && plan.adoptions.total > 0 && (
+            <div className="flex flex-col gap-1" data-arrange-adopt="true">
+              <span className="text-muted" data-arrange-adopt-roles="true">
+                {adoptRolesLine(plan.adoptions.by_role)}
+              </span>
+              <ul className="flex flex-col gap-1">
+                {(plan.adoptions.groups ?? []).map(group => (
+                  <li
+                    key={`${group.root}-${group.name}`}
+                    data-arrange-adopt-group="true"
+                    data-arrange-adopt-new={group.new ? "true" : undefined}
+                  >
+                    <span className="font-mono">{group.name}</span>{" "}
+                    {adoptGroupFiles(group)}
+                    {group.new && " new folder"}
+                    {group.sample_names.length > 0 && (
+                      <>
+                        {" "}
+                        <span className="text-muted">{group.sample_names.join(", ")}</span>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              {plan.adoptions.sample_names.length > 0 && (
+                <span data-arrange-adopt-sample="true">
+                  {`e.g. ${plan.adoptions.sample_names.join(", ")}`}
+                </span>
+              )}
+              {/* Files on disk the library has no row for. They cannot be
+                  adopted by this apply, so the only honest action is the
+                  rescan - and an operator who applied without it would see a
+                  project smaller than the folder. */}
+              {plan.adoptions.unregistered > 0 && (
+                <span
+                  className="review-detail-reason text-red-500"
+                  data-arrange-adopt-unregistered="true"
+                >
+                  {`${formatReviewCount(plan.adoptions.unregistered)} files in this folder are on disk but not in the library; rescan before applying`}
+                </span>
+              )}
+            </div>
+          )}
           {/* The moves come from the WIRE ARRAY, never from `plan.text`: the
               prose is a rendering of these records, and a client that read it
               back would be showing a sentence as if it were the operation. A
@@ -276,10 +369,11 @@ export default function ArrangePlanPanel({
               className={PRIMARY_BUTTON}
               data-arrange-apply="true"
               // A plan the server already objects to answers 409, so it may not
-              // look like a working button. A plan with zero moves and zero
-              // creates is still applicable: a grown project's plan legitimately
-              // arranges nothing new.
-              disabled={busy || (plan.refusals ?? []).length > 0}
+              // look like a working button. A membership-only plan IS applicable
+              // (that is the grown-project case this door exists for), while a
+              // plan that changes nothing - no move, no create, no membership -
+              // is not: it would 409 with `nothing_to_arrange`.
+              disabled={busy || (plan.refusals ?? []).length > 0 || arrangeAppliesNothing(plan)}
               onClick={() => void apply(plan)}
             >
               Apply this arrangement
@@ -318,6 +412,13 @@ export default function ArrangePlanPanel({
       </div>
       {applied !== null && (
         <div className="review-detail-facts" role="group" aria-label="Arrangement result">
+          {/* The membership outcome, beside the move count because they count
+              different things: a zero-move adopt moved nothing and added 171
+              files, and a result that only said `Arranged: 0 moves` would read
+              as if nothing had happened. */}
+          {applied.adoptions !== null && applied.adoptions.total > 0 && (
+            <span data-arrange-added="true">{addedLine(applied.adoptions)}</span>
+          )}
           <span data-arrange-applied="true">
             {`Arranged: ${arrangeMoveCountLabel(applied.moves)}`}
           </span>

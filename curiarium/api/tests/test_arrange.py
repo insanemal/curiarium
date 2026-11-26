@@ -39,6 +39,7 @@ import library_scan
 import login_throttle as login_throttle_module
 import main
 import permissions
+import project_service
 import proposal_engine
 import seams
 import settings_service
@@ -292,6 +293,12 @@ def project_members(project_id: str) -> set[str]:
         return set(session.exec(statement))
 
 
+def registered_asset_ids() -> set[str]:
+    """Every registered asset id: the library as the latest scan left it."""
+    with Session(engine) as session:
+        return {asset.id for asset in session.exec(select(Asset))}
+
+
 def arrange_events(action: str, arrange_id: str) -> list[AuditEvent]:
     with Session(engine) as session:
         rows = [
@@ -369,6 +376,61 @@ def grow_stagetop_tree(root: Path, first: int, last: int) -> None:
     """The NEW part folders that appear after the project was made: the growth."""
     for index in range(first, last + 1):
         write_file(root / "import" / "Stagetop" / f"part {index:02d}" / "part.stl")
+
+
+STAGETOP_KEY = "import/Stagetop"
+# The role vocabulary is the scan's, not a suffix table: each suffix below is only
+# how the fixture spells one role, and `library_scan.classify_entry` decides.
+STAGETOP_SUFFIXES = {
+    "model": (".stl",),
+    "image": (".png", ".jpg"),
+    "text": (".txt",),
+    "archive": (".zip",),
+    "other": (".gcode",),
+}
+# The real Stagetop numbers: 60 files in six part folders at create time, 171 more
+# later - 17 in each existing folder and 23 in each of three brand-new ones.
+STAGETOP_CREATE_RECIPE = {"model": 6, "image": 2, "text": 1, "archive": 1}
+STAGETOP_GROWTH_RECIPE = {"model": 10, "image": 3, "text": 2, "archive": 1, "other": 1}
+STAGETOP_NEW_RECIPE = {"model": 14, "image": 3, "text": 2, "archive": 2, "other": 2}
+
+
+def write_recipe(folder: Path, recipe: dict[str, int], *, tag: str) -> None:
+    """Write one folder's files from a count-by-role recipe.
+
+    The numbers live in the recipes, once, so a folder never silently changes the
+    fixture's totals. `.gcode` is the "other" spelling on purpose: `.3dm` is an
+    engine MODEL (`proposal_engine.MODEL_EXTS`) while the scan calls it OTHER, so a
+    `.3dm` here would make the engine's model census disagree with the roles and
+    turn AC-6's own 102 into 114.
+    """
+    for role, count in recipe.items():
+        for index in range(1, count + 1):
+            suffixes = STAGETOP_SUFFIXES[role]
+            path = folder / f"{tag}-{role}-{index:02d}{suffixes[index % len(suffixes)]}"
+            if role == "archive":
+                write_zip(path, {"part.stl": STL_BYTES})
+            else:
+                write_file(path, STL_BYTES)
+
+
+def stagetop_project_tree(root: Path) -> None:
+    """The six part folders the Stagetop project is created from: 60 files."""
+    for index in range(1, 7):
+        write_recipe(root / STAGETOP_KEY / f"part {index:02d}", STAGETOP_CREATE_RECIPE, tag="create")
+
+
+def grow_stagetop_project(root: Path) -> None:
+    """The 171 files that arrive later across those six folders and three new ones.
+
+    `Feet 5414731` is the deliberately separable group: its name carries a 7-digit
+    vendor id, so `separable` AND `foreign` are both a real `True`, while `part 07`
+    and `part 08` match `PART_NAME` and stay `separable: False`.
+    """
+    for index in range(1, 7):
+        write_recipe(root / STAGETOP_KEY / f"part {index:02d}", STAGETOP_GROWTH_RECIPE, tag="grow")
+    for name in ("part 07", "part 08", "Feet 5414731"):
+        write_recipe(root / STAGETOP_KEY / name, STAGETOP_NEW_RECIPE, tag="new")
 
 
 def marbles_tree(root: Path) -> None:
@@ -561,6 +623,255 @@ def test_a_grown_project_extends_its_membership_and_undoes_to_the_pre_arrange_se
     second = client.post(f"/bundles/arrange/{applied['arrange_id']}/undo", headers=bearer(admin.token))
     assert second.status_code == 409, "a second undo answers 409, never 404: the kept project holds the ledger"
     assert "already undone" in second.json()["detail"]
+
+
+def test_the_adoption_preview_names_171_files_in_nine_groups_and_the_apply_updates_them(
+    client: TestClient, admin: Actor, isolated_storage: Path
+) -> None:
+    """Mutation: compute the pending delta and then THROW IT AWAY, so a 171-file
+    adopt previews blank and the operator approves an operation nothing describes.
+
+    Mutation: extend the memberships and leave the marker's `groups` at the six the
+    project was created from, so a project holding 231 files renders 60. Mutation: a
+    `by_role` or `groups` count that does not sum to `total`. Mutation: a ledger
+    without `groups_before`, so undo cannot put the six groups back. Mutation: a
+    plan digest that ignores the adopted ids.
+    """
+    stagetop_project_tree(isolated_storage)
+    scan()
+    project_id = create_bundle(client, admin, STAGETOP_KEY)
+    before_members = project_members(project_id)
+    assert len(before_members) == 60, "six part folders of ten files"
+    before_groups = projects(client, admin)[project_id]["metadata_json"]["_bundle"]["groups"]
+    assert [group["name"] for group in before_groups] == [f"part {index:02d}" for index in range(1, 7)]
+    for group in before_groups:
+        assert "included" in group and "attached" in group, group
+
+    grow_stagetop_project(isolated_storage)
+    scan()
+    assert project_members(project_id) == before_members, (
+        "a rescan registers the growth, it never attaches it"
+    )
+    before_tree = digests(isolated_storage)
+
+    plan = preview(client, admin, STAGETOP_KEY, "add-to-project")
+
+    assert plan["moves"] == [], "the folder is already inside the project"
+    assert plan["creates"] == []
+    assert plan["refusals"] == []
+    adoptions = plan["adoptions"]
+    assert adoptions["total"] == 171
+    assert sum(group["files"] for group in adoptions["groups"]) == 171, (
+        "the groups must PARTITION the total, never sample it"
+    )
+    assert set(adoptions["by_role"]) == {"model", "image", "text", "archive", "other"}, (
+        "every role key is present, even at zero: a missing key reads as no answer"
+    )
+    assert adoptions["by_role"] == {"model": 102, "image": 27, "text": 18, "archive": 12, "other": 12}
+    # The engine sorts roots by name CASEFOLD, so "Feet ..." leads and the parts
+    # follow 01..08: the order is the report's, not this fixture's.
+    assert [group["name"] for group in adoptions["groups"]] == [
+        "Feet 5414731",
+        "part 01",
+        "part 02",
+        "part 03",
+        "part 04",
+        "part 05",
+        "part 06",
+        "part 07",
+        "part 08",
+    ]
+    by_name = {group["name"]: group for group in adoptions["groups"]}
+    for name in [f"part {index:02d}" for index in range(1, 7)]:
+        assert by_name[name]["new"] is False, f"{name} is a group the project already has"
+    for name in ("part 07", "part 08", "Feet 5414731"):
+        assert by_name[name]["new"] is True, f"{name} is a brand new group"
+    assert by_name["Feet 5414731"]["separable"] is True, "a trailing vendor id can stand as its own project"
+    assert by_name["Feet 5414731"]["foreign"] is True, "a 7-digit id is somebody else's product"
+    assert by_name["part 07"]["separable"] is False, "a part name is never a project boundary"
+    assert adoptions["sample_names"], "the preview must name something the operator recognises"
+    assert all("/" not in name for name in adoptions["sample_names"]), "basenames only, never a path list"
+    assert adoptions["target"] == {"root": STAGETOP_KEY, "project_id": project_id, "creates_project": False}
+    assert adoptions["unregistered"] == 0
+
+    # `measure()` counts a `.zip` in `archives` AND falls through to `others` for the
+    # same file, so the on-disk total is the other four: adding `archives` here would
+    # say 249 and the delta would name 18 files that are not missing.
+    facts = proposal_engine.measure(str(isolated_storage / STAGETOP_KEY), STAGETOP_KEY)
+    assert facts.models + facts.images + facts.docs + facts.others == 231, "60 held + 171 pending"
+
+    other_shape = preview(client, admin, STAGETOP_KEY, "one-project")
+    assert other_shape["adoptions"]["total"] == adoptions["total"], "the delta is the tree's, not the shape's"
+    assert other_shape["plan_id"] != plan["plan_id"], "the digest covers the shape"
+
+    response = apply_plan(client, admin, plan)
+
+    assert response.status_code == 200, response.text
+    applied = response.json()
+    assert applied["project_ids"] == [project_id], "the grown project is extended, never doubled"
+    assert applied["moves"] == 0
+    after_members = project_members(project_id)
+    added = after_members - before_members
+    assert len(after_members) == 231
+    assert len(added) == 171, "exactly the delta the preview named"
+
+    bundle = projects(client, admin)[project_id]["metadata_json"]["_bundle"]
+    assert bundle["key"] == STAGETOP_KEY
+    assert bundle["rel_dir"] == STAGETOP_KEY
+    assert bundle["detector"], "the adoption never rewrites the detector"
+    assert bundle["shape"], "the adoption never rewrites the shape the project was created from"
+    groups = bundle["groups"]
+    assert len(groups) == 9, "the three new folders are groups now, not an afterthought"
+    for group in groups:
+        assert list(group) == ["name", "model_count", "foreign", "separable", "included", "attached"], (
+            "the marker's key order is a contract: a group written without `included` never subtracts"
+        )
+        assert group["included"] is True
+    # `attached` is MODEL-scoped by the marker's own vocabulary: 102 grown models plus
+    # the 36 the create phase had, never all 231 members of the project.
+    assert sum(group["attached"] for group in groups) == 138
+
+    ledger = bundle["arrange"]
+    assert set(ledger["projects"][0]["members"]) == added, "the ledger snapshots exactly what it added"
+    assert ledger["projects"][0]["groups_before"] == before_groups, (
+        "undo needs the snapshot it replaced, not a guess"
+    )
+
+    assert digests(isolated_storage) == before_tree, "an adoption moves no byte"
+
+    undo = client.post(f"/bundles/arrange/{applied['arrange_id']}/undo", headers=bearer(admin.token))
+
+    assert undo.status_code == 200, undo.text
+    undone = undo.json()
+    assert undone["members_removed"] == 171
+    assert undone["moves"] == 0
+    assert project_members(project_id) == before_members, "exactly the memberships the arrange added are gone"
+    assert projects(client, admin)[project_id]["metadata_json"]["_bundle"]["groups"] == before_groups, (
+        "undo puts the six groups back byte for byte"
+    )
+    assert digests(isolated_storage) == before_tree
+    assert set(projects(client, admin)) == {project_id}, "the ledger's carrier stays"
+    second = client.post(f"/bundles/arrange/{applied['arrange_id']}/undo", headers=bearer(admin.token))
+    assert second.status_code == 409, "a second undo is a 409, never a 404"
+
+
+def test_the_plan_tells_an_adopt_from_a_new_group_from_a_move(
+    client: TestClient, admin: Actor, isolated_storage: Path
+) -> None:
+    """Mutation: one undifferentiated file list, so an adopt, a new group and a move
+    read alike and the operator cannot tell what the plan is about to do.
+
+    One preview object carries all three: `Rhino models` is a group the project
+    already has (an adopt), `Vault Archive_18.11.2026` is a folder it never held (an
+    adopt that creates a group), and the wrapper child hoisting out of itself is a
+    MOVE - bytes, not membership.
+    """
+    write_tree(
+        isolated_storage,
+        {
+            "Vault/README.txt": THING_README.encode(),
+            "Vault/LICENSE.txt": b"Vault by maker\n",
+            "Vault/Rhino models/rhino.stl": STL_BYTES,
+        },
+    )
+    scan()
+    project_id = create_bundle(client, admin, "Vault")
+    before_groups = projects(client, admin)[project_id]["metadata_json"]["_bundle"]["groups"]
+    assert [group["name"] for group in before_groups] == ["Rhino models"]
+    before_members = project_members(project_id)
+
+    write_tree(
+        isolated_storage,
+        {
+            "Vault/Rhino models/rhino2.stl": STL_BYTES,
+            "Vault/Vault Archive_18.11.2026/parts/part1.stl": STL_BYTES,
+            "Vault/Vault Archive_18.11.2026/Instructions Manual.pdf": PDF_BYTES,
+            "Vault/Vault Archive_18.11.2026/Vault Archive_18.11.2026.zip": ZIP_BYTES,
+        },
+    )
+    scan()
+
+    plan = preview(client, admin, "Vault", "one-project")
+
+    assert plan["moves"], "the inner zip names the wrapper, so this plan moves bytes"
+    assert any(move["action"] == "hoist" for move in plan["moves"]), (
+        "the third case is a MOVE, not an adopt"
+    )
+    adoptions = plan["adoptions"]
+    by_name = {group["name"]: group for group in adoptions["groups"]}
+    assert by_name["Rhino models"]["new"] is False, "a file in a group the project already has is an adopt"
+    assert by_name["Vault Archive_18.11.2026"]["new"] is True, (
+        "a folder the project never held is an adopt that creates a group"
+    )
+    assert sum(group["files"] for group in adoptions["groups"]) == adoptions["total"]
+    assert adoptions["total"] == len(registered_asset_ids() - before_members), (
+        "the delta is every registered file the project does not hold"
+    )
+
+
+def test_an_unregistered_growth_refuses_and_names_the_rescan(
+    client: TestClient, admin: Actor, isolated_storage: Path
+) -> None:
+    """Mutation: attaching the 60 the library knows about while 171 files sit on
+    disk unregistered - a partial set that no preview ever named.
+
+    The refusal is ONE: `unregistered_delta`, never also `nothing_to_arrange`, and
+    the sentence carries the file count, the model share and the rescan that fixes
+    it. Applying the same plan answers the same sentence and attaches nothing.
+    """
+    stagetop_project_tree(isolated_storage)
+    scan()
+    project_id = create_bundle(client, admin, STAGETOP_KEY)
+    before_members = project_members(project_id)
+    assert len(before_members) == 60
+
+    grow_stagetop_project(isolated_storage)
+    # Deliberately NO scan(): the disk holds 231 files, the library knows 60.
+
+    plan = preview(client, admin, STAGETOP_KEY, "add-to-project")
+
+    assert [refusal["reason"] for refusal in plan["refusals"]] == ["unregistered_delta"], (
+        "one refusal, and nothing_to_arrange must not fire beside it"
+    )
+    detail = plan["refusals"][0]["detail"]
+    assert "171" in detail, detail
+    assert "102" in detail, detail
+    assert "rescan" in detail, detail
+    assert plan["adoptions"]["total"] == 0, "nothing unregistered is a member candidate"
+    assert plan["adoptions"]["unregistered"] == 171
+
+    response = apply_plan(client, admin, plan)
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == detail, "the apply answers the preview's own sentence"
+    assert project_members(project_id) == before_members, "nothing was attached"
+
+
+def test_an_adoption_larger_than_one_query_batch_loses_no_member(
+    client: TestClient, admin: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: insert the memberships in one unbounded batch, or stop after the
+    first chunk - 171 > 4 means the loop must run 43 times, and a loop that stopped
+    at the first chunk would leave 4 memberships behind while reporting success.
+    """
+    monkeypatch.setattr(project_service, "MEMBER_QUERY_BATCH", 4)
+    stagetop_project_tree(isolated_storage)
+    scan()
+    project_id = create_bundle(client, admin, STAGETOP_KEY)
+    before_members = project_members(project_id)
+
+    grow_stagetop_project(isolated_storage)
+    scan()
+
+    plan = preview(client, admin, STAGETOP_KEY, "add-to-project")
+    assert plan["adoptions"]["total"] == 171
+
+    response = apply_plan(client, admin, plan)
+
+    assert response.status_code == 200, response.text
+    after_members = project_members(project_id)
+    assert len(after_members - before_members) == 171
+    assert len(after_members) == 231, "a chunked insert loses no row"
 
 
 def test_a_split_hoists_every_product_and_retires_the_container(

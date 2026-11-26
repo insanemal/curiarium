@@ -21,6 +21,7 @@ import {
   arrangeBundles,
   getArrangePlan,
   undoArrange,
+  type BundleArrangeAdoptions,
   type BundleArrangeApplied,
   type BundleArrangePlan,
   type BundleArrangeUndo,
@@ -112,6 +113,40 @@ function undoButton(): HTMLButtonElement {
 
 function planPanel(): HTMLElement {
   return screen.getByRole("group", { name: "Arrangement preview" });
+}
+
+/** The adoptions block a zero-move plan carries: 171 memberships in 9 folders,
+ *  two of them new. This is the whole outcome of the grow-door's plan. */
+function makeAdoptions(overrides: Partial<BundleArrangeAdoptions> = {}): BundleArrangeAdoptions {
+  return {
+    target: { root: "import/Stagetop", project_id: "p1", creates_project: false },
+    total: 171,
+    by_role: { model: 102, image: 27, text: 18, archive: 12, other: 12 },
+    groups: Array.from({ length: 9 }, (_unused, index) => ({
+      name: index === 0 ? "Feet 5414731" : `part ${index}`,
+      root: "import/Stagetop",
+      files: index === 0 ? 23 : 17,
+      new: index === 0,
+      foreign: index === 0,
+      separable: index === 0,
+      sample_names: index === 0 ? ["part.stl", "bracket.stl"] : ["part.stl"],
+    })),
+    sample_names: ["part.stl", "bracket.stl"],
+    unregistered: 0,
+    ...overrides,
+  };
+}
+
+/** The zero-move adopt itself: no moves, no creates, no objection, and a preview
+ *  whose only facts are the memberships. */
+function adoptPlan(overrides: Partial<BundleArrangePlan> = {}): BundleArrangePlan {
+  return makePlan({
+    moves: [],
+    text: [],
+    creates: [],
+    adoptions: makeAdoptions(),
+    ...overrides,
+  });
 }
 
 /** Preview and settle, the first two steps every write test needs. */
@@ -219,13 +254,83 @@ describe("ArrangePlanPanel", () => {
 
   it("keeps Apply enabled for a grown project's zero-move plan with no refusal", async () => {
     // The old `arrangeAppliesNothing` bug: a plan that legitimately has nothing
-    // to move (the folder already matches its shape) is still applicable, and a
-    // disabled button would strand the operator.
-    getArrangePlanMock.mockResolvedValue(makePlan({ moves: [], creates: [], text: [] }));
+    // to move (the folder already matches its shape) is still applicable - its
+    // work is the memberships it would add - and a disabled button would strand
+    // the operator.
+    getArrangePlanMock.mockResolvedValue(adoptPlan());
     renderPanel();
     await preview();
 
     expect(applyButton().disabled).toBe(false);
+  });
+
+  it("names the memberships a zero-move adoption plan would add, and keeps Apply workable", async () => {
+    // The whole point of the grow door: 171 files join the project with no move
+    // at all. A `0 moves` badge beside a live Apply is the operator approving a
+    // blank plan - and a disabled Apply would strand the one case this door was
+    // built for.
+    getArrangePlanMock.mockResolvedValue(adoptPlan());
+    renderPanel();
+    await preview();
+
+    const badge = planPanel().querySelector("[data-arrange-moves]");
+    expect(badge?.textContent).toBe("Adds 171 files in 9 folders");
+    expect(badge?.getAttribute("data-arrange-applies-nothing")).toBeNull();
+    expect(applyButton().disabled).toBe(false);
+
+    // The role split is the panel's own sentence: the badge already said the
+    // total, so this one says what the files ARE.
+    expect(planPanel().querySelector("[data-arrange-adopt-roles]")?.textContent).toBe(
+      "Models 102 \u00b7 Images 27 \u00b7 Documents 18 \u00b7 Archives 12 \u00b7 Other 12",
+    );
+
+    const groups = Array.from(planPanel().querySelectorAll("[data-arrange-adopt-group]"));
+    expect(groups).toHaveLength(9);
+    expect(groups[0].textContent).toContain("Feet 5414731");
+    expect(groups[0].textContent).toContain("\u2014 23 files");
+    expect(groups[0].textContent).toContain("new folder");
+    expect(groups[0].textContent).toContain("part.stl, bracket.stl");
+    // Only the group the apply has to create wears that word: the other eight
+    // already exist, and "new folder" there would promise a directory nothing
+    // creates.
+    expect(groups[0].getAttribute("data-arrange-adopt-new")).toBe("true");
+    expect(groups.filter(group => group.textContent?.includes("new folder"))).toHaveLength(1);
+
+    expect(planPanel().querySelector("[data-arrange-adopt-sample]")?.textContent).toBe(
+      "e.g. part.stl, bracket.stl",
+    );
+    // A zero is not a warning: an unregistered count of 0 renders nothing.
+    expect(planPanel().querySelector("[data-arrange-adopt-unregistered]")).toBeNull();
+  });
+
+  it("names the files on disk the library cannot adopt, and asks for the rescan", async () => {
+    // Those files cannot join the project by this apply, so the operator has to
+    // hear about them before pressing it - otherwise the result is a project
+    // smaller than the folder it came from.
+    getArrangePlanMock.mockResolvedValue(adoptPlan({ adoptions: makeAdoptions({ unregistered: 6 }) }));
+    renderPanel();
+    await preview();
+
+    const warning = planPanel().querySelector("[data-arrange-adopt-unregistered]");
+    expect(warning?.textContent).toBe(
+      "6 files in this folder are on disk but not in the library; rescan before applying",
+    );
+    expect(warning?.className).toContain("text-red-500");
+  });
+
+  it("says a plan that changes nothing applies nothing, and disables Apply for it", async () => {
+    // One predicate, two readers: the badge's verdict and the button's state must
+    // come from the same answer, or the sentence and the button disagree. The
+    // plan here has no move, no create and no adoptions block at all - the shape
+    // the server refuses with `nothing_to_arrange`.
+    getArrangePlanMock.mockResolvedValue(makePlan({ moves: [], creates: [], text: [] }));
+    renderPanel();
+    await preview();
+
+    const badge = planPanel().querySelector("[data-arrange-moves]");
+    expect(badge?.textContent).toBe("Arrangement: applies nothing");
+    expect(badge?.getAttribute("data-arrange-applies-nothing")).toBe("true");
+    expect(applyButton().disabled).toBe(true);
   });
 
   it("disables Apply while the server holds an objection", async () => {
@@ -297,6 +402,24 @@ describe("ArrangePlanPanel", () => {
     await waitFor(() => expect(getToasts()).toHaveLength(1));
     expect(getToasts()[0].message).toBe("Arranged: 1 move");
     expect(getToasts()[0].details).toBeUndefined();
+  });
+
+  it("reports what an apply ADDED, beside the moves it made", async () => {
+    // The post-apply half of the grow door: `Arranged: 0 moves` alone reads as if
+    // nothing happened, so the result also names the memberships. They count
+    // different things - bytes moved and rows joined - and both are true.
+    getArrangePlanMock.mockResolvedValue(adoptPlan());
+    arrangeBundlesMock.mockResolvedValue(makeApplied({ moves: 0 }));
+    renderPanel();
+    await preview();
+
+    fireEvent.click(applyButton());
+
+    await waitFor(() => expect(document.querySelector("[data-arrange-added]")).not.toBeNull());
+    expect(document.querySelector("[data-arrange-added]")?.textContent).toBe(
+      "Added 171 files in 9 folders",
+    );
+    expect(document.querySelector("[data-arrange-applied]")?.textContent).toBe("Arranged: 0 moves");
   });
 
   it("undoes by the id the server issued, and shows a second undo's refusal instead of the button", async () => {

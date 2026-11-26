@@ -20,7 +20,7 @@ household scale and migration 007 stays untouched.
 
 import json
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -267,26 +267,42 @@ def _insert(session: Session, project: Project, member_asset_ids: List[str]) -> 
 # `archive_project_service` imports this module; sharing it would be an import
 # cycle. Batched, fixed size, and a batch is comfortably under the smallest limit
 # any build can carry; the per-batch rows are merged into one set, so the caller
-# cannot tell chunking happened at all.
+# cannot tell chunking happened at all. The membership-edit doors (`add_assets`
+# and `remove_assets`) read their membership sets through the same helper, so this
+# one batch size guards every ``IN`` list this module builds.
 MEMBER_QUERY_BATCH = 500
+
+
+def _known_asset_ids(session: Session, asset_ids: Sequence[str]) -> set[str]:
+    """The ids that name a real asset, read in batches of `MEMBER_QUERY_BATCH`.
+
+    The batch size is read from the module global on every call (not captured at
+    import) so a test can pin the boundary by monkeypatching it, exactly as
+    `tests/test_archive_project.py` pins `RESOLVE_QUERY_BATCH`. The per-batch rows
+    are merged into one set, so chunking is invisible to the caller. An empty list
+    issues no query at all.
+    """
+    if not asset_ids:
+        return set()
+    known: set[str] = set()
+    for offset in range(0, len(asset_ids), MEMBER_QUERY_BATCH):
+        batch = asset_ids[offset : offset + MEMBER_QUERY_BATCH]
+        known.update(session.exec(select(Asset.id).where(Asset.id.in_(batch))).all())
+    return known
 
 
 def _require_assets(session: Session, asset_ids: List[str]) -> None:
     """Refuse a member that is not an asset, before a single row is inserted.
 
-    The ids are read in batches of `MEMBER_QUERY_BATCH` and the rows are unioned,
-    all inside the caller's session: chunking is invisible from here, because the
-    difference is still taken over the whole list at the end, so the 404 names
-    every id it could not find in the order the caller gave them - one missing in
-    the first batch or in the last. The check still runs before anything is added
-    to the session, so a refusal cannot strand an empty project.
+    The known ids come from `_known_asset_ids`, so the read is batched, while the
+    difference is still taken over the whole list at the end: the 404 names every
+    id it could not find in the order the caller gave them - one missing in the
+    first batch or in the last. The check still runs before anything is added to
+    the session, so a refusal cannot strand an empty project.
     """
     if not asset_ids:
         return
-    known: set[str] = set()
-    for offset in range(0, len(asset_ids), MEMBER_QUERY_BATCH):
-        batch = asset_ids[offset : offset + MEMBER_QUERY_BATCH]
-        known.update(session.exec(select(Asset.id).where(Asset.id.in_(batch))).all())
+    known = _known_asset_ids(session, asset_ids)
     missing = [asset_id for asset_id in asset_ids if asset_id not in known]
     if missing:
         raise HTTPException(status_code=404, detail=f"Asset not found: {', '.join(missing)}")
@@ -707,7 +723,7 @@ def add_assets(project_id: str, asset_ids: List[str]) -> Tuple[List[str], List[s
     failed: List[dict] = []
     with Session(engine) as session:
         project = get_project(session, project_id)
-        known = set(session.exec(select(Asset.id).where(Asset.id.in_(ids))).all()) if ids else set()
+        known = _known_asset_ids(session, ids)
         members = _membership_ids(session, project.id)
         stamp = _now()
         for asset_id in ids:
@@ -737,7 +753,7 @@ def remove_assets(project_id: str, asset_ids: List[str]) -> Tuple[List[str], Lis
     failed: List[dict] = []
     with Session(engine) as session:
         project = get_project(session, project_id)
-        known = set(session.exec(select(Asset.id).where(Asset.id.in_(ids))).all()) if ids else set()
+        known = _known_asset_ids(session, ids)
         members = _membership_ids(session, project.id)
         for asset_id in ids:
             if asset_id not in known:

@@ -886,9 +886,59 @@ export function isArrangable(row: BundleDetectItem, shape: string): boolean {
   return match !== undefined && !isEnactable(match);
 }
 
-/** Whether applying this plan would do nothing at all: no move and no directory
- *  to create. The server refuses such a plan (`nothing_to_arrange`) rather than
- *  applying an empty operation, so the pane may not offer the move either. */
+/** How many files the plan would ADD to a project, or null when the payload
+ *  carries no adoptions block at all. A zero is a real answer ("nothing to
+ *  adopt"), so an absent block must never read as one. */
+export function arrangeAdoptionCount(plan: BundleArrangePlan): number | null {
+  const total = plan.adoptions?.total;
+  return typeof total === "number" ? total : null;
+}
+
+/** How many folders those files fall into, or null when the group list is
+ *  absent - the same rule, one level down. */
+export function arrangeAdoptionGroupCount(plan: BundleArrangePlan): number | null {
+  const groups = plan.adoptions?.groups;
+  return Array.isArray(groups) ? groups.length : null;
+}
+
+/** Whether applying this plan would change NOTHING: no move, no directory to
+ *  create, and no membership to add. THE one predicate - the preview's badge and
+ *  the Apply button both read it, so the sentence and the enabled state cannot
+ *  disagree. A membership-only plan is NOT nothing: that is exactly the grown
+ *  project this door exists for.
+ *
+ *  An absent adoptions block on a zero-move plan reads as "applies nothing",
+ *  and that is deliberate: the server refuses that shape with
+ *  `nothing_to_arrange`, so Apply would answer 409 anyway - a button that can
+ *  only be refused may not look like a working one. */
 export function arrangeAppliesNothing(plan: BundleArrangePlan): boolean {
-  return plan.moves.length === 0 && plan.creates.length === 0;
+  // Neither list may be read with a bare `.length`: an ABSENT list means the
+  // server did not say, so it may not be counted as a zero - the same reason
+  // `arrangeMoveCount` exists.
+  const creates = plan.creates;
+  return (
+    arrangeMoveCount(plan) === 0 &&
+    Array.isArray(creates) &&
+    creates.length === 0 &&
+    (arrangeAdoptionCount(plan) ?? 0) === 0
+  );
+}
+
+/** What the preview's badge says. An adoption plan names the files and folders it
+ *  would add - a `0 moves` badge beside an Apply button is what left the operator
+ *  approving a blank plan. A plan that changes nothing says so, and the move
+ *  count is only the badge when moves are what would happen. */
+export function arrangeHeadline(plan: BundleArrangePlan): string {
+  const total = arrangeAdoptionCount(plan);
+  if (total !== null && total > 0) {
+    // An absent group count renders through the one formatter's en dash, never
+    // a fabricated 0: the sentence then says the server did not say how many
+    // folders, which is the truth.
+    const groups = arrangeAdoptionGroupCount(plan);
+    const files = total === 1 ? "file" : "files";
+    const folders = groups === 1 ? "folder" : "folders";
+    return `Adds ${formatReviewCount(total)} ${files} in ${formatReviewCount(groups)} ${folders}`;
+  }
+  if (arrangeAppliesNothing(plan)) return "Arrangement: applies nothing";
+  return `Arrangement: ${arrangeMoveCountLabel(arrangeMoveCount(plan))}`;
 }

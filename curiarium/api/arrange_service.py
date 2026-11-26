@@ -9,10 +9,17 @@ preview, and `apply` raises the first one after the client echoes the plan id ba
 The order `apply` keeps is the contract:
 
 1. the same plan, recomputed - refusals first, then a plan id that no longer
-   matches is a stale preview;
+   matches is a stale preview. The plan id covers the membership delta as well as
+   the moves, so a rescan between preview and apply cannot attach a larger set
+   under an id that still matches;
 2. commit 1: the project row(s) and the ledger in their markers. Durable before a
    single byte moves, so an interrupted arrange is a project with a replayable
-   record, never a project with nothing behind it;
+   record, never a project with nothing behind it. An ADOPTED project also gets
+   its `groups` refreshed from the engine's current measurement here, and the
+   ledger records the snapshot it replaced (`projects[*].groups_before`) so undo
+   can put it back. A plan that MOVES bytes does not rewrite group names: the walk
+   is pre-move, so the paths it would record are ones the moves are about to
+   change - deliberate, and named rather than forgotten;
 3. the move loop, through `asset_service.move_managed_file` - the ONE mover. A
    directory is moved whole by its rename fallback; there is no copy path, so an
    `EXDEV` is translated into a refusal and the ledger records how far it got;
@@ -22,9 +29,10 @@ The order `apply` keeps is the contract:
    never swallowed, and the audit row.
 
 `undo` folds the landed prefix backwards through the same mover, restores the
-rows from the ledger's snapshots and removes exactly the memberships the ledger
-recorded as added - it never deletes a `Project` row, because the ledger lives in
-that project's marker and keeping it is what makes a second undo a 409.
+rows from the ledger's snapshots, puts each adopted project's `groups` snapshot
+back and removes exactly the memberships the ledger recorded as added - it never
+deletes a `Project` row, because the ledger lives in that project's marker and
+keeping it is what makes a second undo a 409.
 
 A `.zip` row is never arranged: there is no copy path, so the refusal names the
 extract door. `move_folder` is never called here; this module writes no second
@@ -68,6 +76,12 @@ ENGINE_SHAPES = frozenset(proposal_engine.ONE_PROJECT_SHAPES) | frozenset(propos
     {"add-to-project"}
 )
 
+# The engine's own word for the depth-0 bucket, so the wire never invents a second one.
+ROOT_FILES = "(root files)"
+# How many basenames an adoption's samples carry: enough to recognise the folder,
+# never a path list.
+ADOPTION_SAMPLES = 5
+
 
 @dataclass(frozen=True)
 class ArrangeItem:
@@ -76,6 +90,19 @@ class ArrangeItem:
     key: str
     shape: str
     plan_id: str
+
+
+@dataclass(frozen=True)
+class TargetDelta:
+    """One target root and the registered files this arrange would ADD to it."""
+
+    target: dict
+    # (asset id, current storage path, size), sorted by (path.casefold(), id) so
+    # every downstream list - samples, the digest - is a function of the tree and
+    # not of the row order `select(Asset)` happens to return.
+    members: List[Tuple[str, str, int]]
+    # The marker's group snapshot, or None when there is no project to snapshot.
+    before_groups: Optional[List[dict]]
 
 
 def _now() -> str:
@@ -119,7 +146,7 @@ def _report_rows(root: Path) -> Dict[str, dict]:
 
 
 def plan(*, key: str, shape: str) -> dict:
-    """The arrangement preview: moves, prose, creates, refusals and the plan id.
+    """The arrangement preview: moves, prose, creates, adoptions, refusals, plan id.
 
     An unknown key raises a 409 - there is nothing to preview. Every refusal
     after that is RETURNED, including the archive row's, because the operator
@@ -137,15 +164,31 @@ def plan(*, key: str, shape: str) -> dict:
             "this row is an archive: extract it first with POST /import/archive, then arrange the "
             "folder it produced (the arrange never copies or unpacks)",
         )
-        return _plan_out(cleaned, shape, [], [], [refusal], row)
+        return _plan_out(cleaned, shape, [], [], [refusal], row, adoptions=_empty_adoptions(), adopted=[])
     facts = proposal_engine.measure(str(root / cleaned), cleaned)
     moves = proposal_engine.arrange_moves(facts, shape)
     text = proposal_engine.arrange_proposal(facts, shape)
     creates = _creates(root, moves)
     targets = _project_targets(cleaned, shape, moves, row)
-    pending = _pending_memberships(targets, moves)
-    refusals = _refusals(root, row=row, key=cleaned, shape=shape, moves=moves, creates=creates, pending=pending)
-    return _plan_out(cleaned, shape, moves, text, refusals, row, creates=creates)
+    asset_rows = _asset_rows()
+    deltas = _pending_memberships(targets, moves, asset_rows)
+    unregistered_files, unregistered_models = _unregistered_delta(facts, deltas, asset_rows)
+    adoptions = _adoptions(facts, deltas, unregistered_files)
+    refusals = _refusals(
+        root,
+        row=row,
+        key=cleaned,
+        shape=shape,
+        moves=moves,
+        creates=creates,
+        pending=deltas,
+        unregistered=unregistered_files,
+        unregistered_models=unregistered_models,
+    )
+    adopted = [asset_id for delta in deltas for asset_id, _path, _size in delta.members]
+    return _plan_out(
+        cleaned, shape, moves, text, refusals, row, creates=creates, adoptions=adoptions, adopted=adopted
+    )
 
 
 def _plan_out(
@@ -157,17 +200,20 @@ def _plan_out(
     row: Mapping,
     *,
     creates: Optional[Sequence[dict]] = None,
+    adoptions: Optional[dict] = None,
+    adopted: Optional[Sequence[str]] = None,
 ) -> dict:
     """The wire payload, with the plan id hashed over exactly what it shows."""
     creates = list(creates or [])
     return {
         "key": key,
         "shape": shape,
-        "plan_id": proposal_engine.plan_digest(key, shape, moves, creates),
+        "plan_id": proposal_engine.plan_digest(key, shape, moves, creates, adopted or []),
         "moves": list(moves),
         "text": list(text),
         "creates": creates,
         "refusals": list(refusals),
+        "adoptions": _empty_adoptions() if adoptions is None else adoptions,
         "report": _report_out(row, shape, refusals),
     }
 
@@ -196,7 +242,9 @@ def _refusals(
     shape: str,
     moves: Sequence[dict],
     creates: Sequence[dict],
-    pending: Sequence[Tuple[dict, Sequence[str]]],
+    pending: Sequence[TargetDelta],
+    unregistered: int = 0,
+    unregistered_models: int = 0,
 ) -> List[dict]:
     """Every reason this plan cannot run, in one answer, never just the first.
 
@@ -206,6 +254,11 @@ def _refusals(
     operation, not about bytes: creating or extending a project changes what the
     library holds even when the move list is empty, so the refusal is only made
     when no move, no created directory AND no missing membership is left.
+
+    A membership-only plan over a folder the library has not finished registering
+    is refused as `unregistered_delta` INSTEAD, never as well: attaching it would
+    attach a partial set, and the sentence says how far off the library is rather
+    than pretending there is nothing to do.
     """
     offered = [match.get("shape") for match in row.get("matches") or [] if isinstance(match, Mapping)]
     known = shape in offered or shape in ENGINE_SHAPES
@@ -215,14 +268,25 @@ def _refusals(
             _refusal(409, "unknown_shape", f'"{shape}" is not a shape "{key}" offers; nothing was planned')
         )
     elif not moves and not creates and not _any_pending(pending):
-        root_rel = pending[0][0]["root"] if pending else key
-        refusals.append(
-            _refusal(
-                409,
-                "nothing_to_arrange",
-                f'this shape would change nothing: no moves, and the project already holds every file under "{root_rel}"',
+        root_rel = pending[0].target["root"] if pending else key
+        if unregistered:
+            refusals.append(
+                _refusal(
+                    409,
+                    "unregistered_delta",
+                    f'{unregistered} files under "{root_rel}" are on disk but not in the library '
+                    f"({unregistered_models} of them models), so attaching this folder would add a partial "
+                    "set; rescan the library, then preview again",
+                )
             )
-        )
+        else:
+            refusals.append(
+                _refusal(
+                    409,
+                    "nothing_to_arrange",
+                    f'this shape would change nothing: no moves, and the project already holds every file under "{root_rel}"',
+                )
+            )
     if len(moves) > MAX_ARRANGE_MOVES:
         refusals.append(
             _refusal(
@@ -361,6 +425,9 @@ def apply(item: ArrangeItem, ctx: audit.AuditContext) -> dict:
         return _finish(item, ledger, project_ids, ctx)
     preview = plan(key=item.key, shape=item.shape)
     if preview["refusals"]:
+        # Re-run BEFORE the digest check, on purpose: a folder that grew without a
+        # rescan is refused here on every attempt, so a partial attach is
+        # structurally impossible rather than merely discouraged.
         first = preview["refusals"][0]
         raise HTTPException(status_code=first["status"], detail=first["detail"])
     if preview["plan_id"] != item.plan_id:
@@ -416,11 +483,12 @@ def _fresh_apply(item: ArrangeItem, preview: Mapping, ctx: audit.AuditContext) -
         "assets": snapshot["assets"],
         "rel_dir": targets[0]["root"] if targets else item.key,
     }
-    project_ids, projects = _create_projects(item, row, targets, moves, asset_rows, ledger)
+    project_ids, projects, markers = _create_projects(item, row, targets, moves, asset_rows, ledger)
     ledger = {**ledger, "projects": projects}
     # Commit 1 is durable before the first byte moves: the projects and the full
-    # ledger (ids included) are one marker write each.
-    _write_ledger(project_ids, ledger)
+    # ledger (ids included) are one marker write each, and an adopted project's
+    # refreshed `groups` land in the same write as the record of what they replaced.
+    _write_ledger(project_ids, ledger, markers=markers)
     _move_forward(root, moves, ledger, project_ids, 0)
     return _after_moves(ledger, project_ids, ctx)
 
@@ -494,7 +562,9 @@ def _asset_rows() -> List[Tuple[str, str, int]]:
         return [(asset.id, asset.storage_path or "", int(asset.size or 0)) for asset in session.exec(select(Asset))]
 
 
-def _pending_memberships(targets: Sequence[dict], moves: Sequence[dict]) -> List[Tuple[dict, List[str]]]:
+def _pending_memberships(
+    targets: Sequence[dict], moves: Sequence[dict], asset_rows: Sequence[Tuple[str, str, int]]
+) -> List[TargetDelta]:
     """Each target with the memberships this arrange would ADD, read without writing.
 
     The delta is what makes `plan` honest about the operation's core case: creating
@@ -502,28 +572,222 @@ def _pending_memberships(targets: Sequence[dict], moves: Sequence[dict]) -> List
     list is empty, so `nothing_to_arrange` is only true when the delta is empty too.
     A membership the project already holds is never pending, so an extend can never
     duplicate one.
+
+    `asset_rows` is read once by the caller and passed in, because this runs twice
+    per apply (preview, then the recomputation behind the stale guard) and
+    `_asset_rows()` has no ORDER BY: the rows are sorted here so the samples and the
+    plan digest are a function of the tree, not of the row order.
+
+    A `reuse` target also carries the project's marker group snapshot - the thing an
+    adopt rewrites and undo must be able to put back.
     """
-    asset_rows = _asset_rows()
-    pending: List[Tuple[dict, List[str]]] = []
+    pending: List[TargetDelta] = []
     with Session(engine) as session:
         for target in targets:
             wanted = [
-                asset_id
-                for asset_id, path, _size in asset_rows
+                (asset_id, path, size)
+                for asset_id, path, size in asset_rows
                 if _under(_project_path(path, moves), target["root"])
             ]
+            before_groups: Optional[List[dict]] = None
             if target.get("reuse"):
-                held = set(
-                    session.exec(select(ProjectAsset.asset_id).where(ProjectAsset.project_id == target["reuse"]))
-                )
-                wanted = [asset_id for asset_id in wanted if asset_id not in held]
-            pending.append((target, wanted))
+                held = set(session.exec(select(ProjectAsset.asset_id).where(ProjectAsset.project_id == target["reuse"])))
+                wanted = [row for row in wanted if row[0] not in held]
+                project = session.get(Project, target["reuse"])
+                snapshot = project_service.bundle_marker_of(project.metadata_json).get("groups") if project else None
+                if isinstance(snapshot, list):
+                    before_groups = snapshot
+            wanted.sort(key=lambda row: (row[1].casefold(), row[0]))
+            pending.append(TargetDelta(target=target, members=wanted, before_groups=before_groups))
     return pending
 
 
-def _any_pending(pending: Sequence[Tuple[dict, Sequence[str]]]) -> bool:
+def _any_pending(pending: Sequence[TargetDelta]) -> bool:
     """Whether any target root is still missing a membership."""
-    return any(members for _target, members in pending)
+    return any(delta.members for delta in pending)
+
+
+def _empty_adoptions() -> dict:
+    """The adoption block of a plan that can add no membership at all."""
+    return {
+        "target": None,
+        "total": 0,
+        "by_role": _role_counts([]),
+        "groups": [],
+        "sample_names": [],
+        "unregistered": 0,
+    }
+
+
+def _role_counts(members: Sequence[Tuple[str, str, int]]) -> Dict[str, int]:
+    """Every registered file counted by the scan's own classifier, all five keys present.
+
+    No suffix table here: `library_scan.classify_entry` is the one author of a role,
+    so the wire's `by_role` and a project's members cannot disagree about one file.
+    """
+    counts = {
+        role: 0
+        for role in (
+            library_scan.MODEL,
+            library_scan.IMAGE,
+            library_scan.TEXT,
+            library_scan.ARCHIVE,
+            library_scan.OTHER,
+        )
+    }
+    for _asset_id, path, size in members:
+        counts[library_scan.classify_entry(path, size)] += 1
+    return counts
+
+
+def _adoptions(facts: proposal_engine.Facts, deltas: Sequence[TargetDelta], unregistered: int) -> dict:
+    """The memberships a plan would ADD, as counts and basenames - never a path list.
+
+    `groups` partitions every pending asset by the engine's own groups, in the
+    engine's own order, plus one explicit `(root files)` bucket per target for the
+    files that sit at the root or in a folder the engine does not group. The
+    partition is exact: `sum(group.files for group in groups) == total`, because a
+    count that can silently shrink is the bug this field exists to end.
+    """
+    buckets: Dict[Tuple[str, str], dict] = {}
+    samples: List[str] = []
+    for delta in deltas:
+        root_rel = delta.target["root"]
+        before_names = {str(group.get("name")) for group in delta.before_groups or () if isinstance(group, Mapping)}
+        for _asset_id, path, _size in delta.members:
+            node = _deepest_group(facts.groups, _walk_dir(path, facts.rel))
+            bucket_key = (root_rel, str(node["path"]) if node is not None else "")
+            record = buckets.get(bucket_key)
+            if record is None:
+                name = str(node["name"]) if node is not None else ROOT_FILES
+                record = {
+                    "name": name,
+                    "root": root_rel,
+                    "files": 0,
+                    "new": name not in before_names,
+                    "foreign": bool(node["foreign"]) if node is not None else False,
+                    "separable": bool(node["separable"]) if node is not None else False,
+                    "sample_names": [],
+                }
+                buckets[bucket_key] = record
+            record["files"] += 1
+            if len(record["sample_names"]) < ADOPTION_SAMPLES:
+                record["sample_names"].append(os.path.basename(path))
+            if len(samples) < ADOPTION_SAMPLES:
+                samples.append(os.path.basename(path))
+    return {
+        "target": _adoption_target(deltas),
+        "total": sum(len(delta.members) for delta in deltas),
+        "by_role": _role_counts([row for delta in deltas for row in delta.members]),
+        "groups": _ordered_buckets(facts.groups, deltas, buckets),
+        "sample_names": samples,
+        "unregistered": unregistered,
+    }
+
+
+def _adoption_target(deltas: Sequence[TargetDelta]) -> Optional[dict]:
+    """The target the adoption is about: the first with files, else the first."""
+    if not deltas:
+        return None
+    chosen = next((delta for delta in deltas if delta.members), deltas[0])
+    return {
+        "root": chosen.target["root"],
+        "project_id": chosen.target.get("reuse"),
+        "creates_project": not chosen.target.get("reuse"),
+    }
+
+
+def _ordered_buckets(
+    groups: Sequence[Mapping], deltas: Sequence[TargetDelta], buckets: Mapping[Tuple[str, str], dict]
+) -> List[dict]:
+    """The buckets in the engine's own order, then one loose bucket per target.
+
+    The engine sorts the roots by name and its children by name, so a preview reads
+    in the same order as the report it came from. A bucket with no pending files is
+    never emitted, and one shared by two deltas of the same root is emitted once.
+    """
+    ordered: List[dict] = []
+    emitted: set = set()
+    for node_path in _group_paths(groups):
+        for delta in deltas:
+            bucket_key = (delta.target["root"], node_path)
+            if bucket_key in buckets and bucket_key not in emitted:
+                ordered.append(buckets[bucket_key])
+                emitted.add(bucket_key)
+    for delta in deltas:
+        bucket_key = (delta.target["root"], "")
+        if bucket_key in buckets and bucket_key not in emitted:
+            ordered.append(buckets[bucket_key])
+            emitted.add(bucket_key)
+    return ordered
+
+
+def _group_paths(groups: Sequence[Mapping]) -> List[str]:
+    """Every group node's path, depth-first pre-order: the engine's own order."""
+    paths: List[str] = []
+    stack = list(reversed(list(groups)))
+    while stack:
+        node = stack.pop()
+        path = node.get("path")
+        if isinstance(path, str) and path:
+            paths.append(path)
+        stack.extend(reversed(node.get("children") or []))
+    return paths
+
+
+def _walk_dir(path: str, rel: str) -> Optional[str]:
+    """A pending path's directory relative to the measured folder, or None outside it."""
+    prefix = f"{rel}/"
+    if not path.startswith(prefix):
+        return None
+    walk = path[len(prefix):]
+    return walk.rsplit("/", 1)[0] if "/" in walk else ""
+
+
+def _deepest_group(groups: Sequence[Mapping], walk_dir: Optional[str]) -> Optional[Mapping]:
+    """The deepest group node whose path IS `walk_dir` or a segment-prefix of it.
+
+    A file in `part 01/parts/alpha/` belongs to `part 01`, not to `parts` and not to
+    the root: the deepest match is the group the engine would show it under.
+    `walk_dir` is None for a path outside the measured folder, which no node owns.
+    """
+    if walk_dir is None:
+        return None
+    best: Optional[Mapping] = None
+    best_length = -1
+    stack = list(groups)
+    while stack:
+        node = stack.pop()
+        path = str(node.get("path") or "")
+        if path and (walk_dir == path or walk_dir.startswith(path + "/")) and len(path) > best_length:
+            best, best_length = node, len(path)
+        stack.extend(node.get("children") or [])
+    return best
+
+
+def _unregistered_delta(
+    facts: proposal_engine.Facts, deltas: Sequence[TargetDelta], asset_rows: Sequence[Tuple[str, str, int]]
+) -> Tuple[int, int]:
+    """(files, models) on disk under the target root that the library has not registered.
+
+    `Facts` keeps counts, never a filename list, so this is a COUNT comparison: the
+    walk's own total against the rows the scan has registered under the same root.
+    It is only meaningful when the measured folder IS the target root; for any other
+    target the two numbers describe different subtrees and their difference would
+    name files that are not missing, so it answers `(0, 0)`.
+
+    `facts.archives` is deliberately NOT added: `measure()` increments it for a
+    `.zip` AND falls through to `others` for the same file, so `archives` is already
+    inside `others` and adding it would count every zip twice.
+    """
+    if facts.truncated:
+        return (0, 0)
+    if not any(delta.target["root"] == facts.rel for delta in deltas):
+        return (0, 0)
+    on_disk = facts.models + facts.images + facts.docs + facts.others
+    registered = [row for row in asset_rows if _under(row[1], facts.rel)]
+    models = sum(1 for row in registered if library_scan.is_counted_model(row[1], row[2]))
+    return (max(0, on_disk - len(registered)), max(0, facts.models - models))
 
 
 def _project_path(path: str, moves: Sequence[dict]) -> str:
@@ -550,16 +814,62 @@ def _create_projects(
     moves: Sequence[dict],
     asset_rows: Sequence[Tuple[str, str, int]],
     ledger: Mapping,
-) -> Tuple[List[str], List[dict]]:
+) -> Tuple[List[str], List[dict], Dict[str, dict]]:
     """Commit 1: one project per target root, with detection marker plus ledger.
 
     A target that names an existing project is EXTENDED: only the memberships it
     is missing are inserted, and the ledger's `members` snapshot is exactly those
     added ids, so undo removes what this arrange added and nothing else.
+
+    A membership-only plan (no moves - the folder keeps its name and its layout) also
+    refreshes an adopted project's `groups` from the engine's CURRENT measurement:
+    a project adopted in November would otherwise still render the six groups it was
+    created from while holding a hundred files more. The ledger records the snapshot
+    it replaced as `projects[*].groups_before` so undo can put it back. A freshly
+    CREATED target gets neither: its groups came from `_detection_marker`, which is
+    this arrange's own write, and undo must leave them alone.
+
+    Returns the project ids, the ledger's per-project entries, and the `_bundle`
+    updates each project's marker needs beyond the ledger itself.
     """
     projected = [(asset_id, path, size, _project_path(path, moves)) for asset_id, path, size in asset_rows]
     project_ids: List[str] = []
     projects: List[dict] = []
+    markers: Dict[str, dict] = {}
+    facts: Optional[proposal_engine.Facts] = None
+
+    def record_groups(project_id: str, entry: dict) -> None:
+        """Record what the adopted project's groups become, and what they were.
+
+        The measurement is taken ONCE, lazily, on the first adopted target: a plan
+        is one folder, so walking it per target would be the same walk again.
+        """
+        nonlocal facts
+        if moves:
+            # The walk is pre-move, so its group paths name folders the moves are
+            # about to change; a moving plan leaves the marker's groups alone.
+            return
+        if facts is None:
+            facts = proposal_engine.measure(str(_root() / item.key), item.key)
+        attached = [
+            (asset_id, new_path, size)
+            for asset_id, _path, size, new_path in projected
+            if _under(new_path, entry["root"])
+        ]
+        refreshed = _refresh_marker_groups(
+            session,
+            project_id,
+            key=item.key,
+            root_rel=entry["root"],
+            facts=facts,
+            members=attached,
+        )
+        if refreshed is None:
+            return
+        before, after = refreshed
+        entry["groups_before"] = before
+        markers[project_id] = {"groups": after}
+
     with Session(engine) as session:
         asset_index = project_create_service.project_assets_index(session)
         for target in targets:
@@ -578,9 +888,9 @@ def _create_projects(
             if target.get("reuse"):
                 added = _extend_project(session, target["reuse"], member_ids)
                 project_ids.append(target["reuse"])
-                projects.append(
-                    {"id": target["reuse"], "root": root_rel, "created": False, "members": added}
-                )
+                entry = {"id": target["reuse"], "root": root_rel, "created": False, "members": added}
+                record_groups(target["reuse"], entry)
+                projects.append(entry)
                 continue
             marker = _detection_marker(row, item.shape, root_rel)
             marker[ARRANGE_KEY] = dict(ledger, done=0, applied=False)
@@ -618,27 +928,80 @@ def _create_projects(
             # A freshly created project holds exactly `member_ids`; a dedupe hit is an
             # existing project the arrange must EXTEND, and the ledger records only
             # what that extend actually added.
+            created = outcome.status == project_create_service.STATUS_CREATED
             added = member_ids
+            entry = {"id": outcome.project_id, "root": root_rel, "created": created, "members": added}
             if outcome.status == project_create_service.STATUS_ALREADY_CREATED:
+                # The same adopt as the reuse branch: the project already existed, so
+                # its groups are the stale ones a rescan grew past.
                 added = _extend_project(session, outcome.project_id, member_ids)
-            projects.append(
-                {
-                    "id": outcome.project_id,
-                    "root": root_rel,
-                    "created": outcome.status == project_create_service.STATUS_CREATED,
-                    "members": added,
-                }
-            )
-    return project_ids, projects
+                entry["members"] = added
+                record_groups(outcome.project_id, entry)
+            projects.append(entry)
+    return project_ids, projects, markers
+
+
+def _refresh_marker_groups(
+    session: Session,
+    project_id: str,
+    *,
+    key: str,
+    root_rel: str,
+    facts: proposal_engine.Facts,
+    members: Sequence[Tuple[str, str, int]],
+) -> Optional[Tuple[Optional[List[dict]], List[dict]]]:
+    """(before_groups, groups_after) for an adopted project, or None if not its folder.
+
+    `root_rel != key` means the plan renames or hoists the folder: the engine's group
+    paths are relative to a name the disk no longer has once the moves land, so a
+    refresh would record folders that do not exist. Only a membership-only plan - the
+    one whose layout is still the current one - rewrites the marker's groups.
+
+    `attached` is MODEL-scoped by the marker's own vocabulary: it counts the counted
+    MODEL members bucketed by the first path segment after the project key, exactly
+    as the create path's `models_by_group` does, so a project's `attached` means the
+    same thing whether it was created or adopted.
+    """
+    if root_rel != key:
+        return None
+    project = session.get(Project, project_id)
+    if project is None:
+        return None
+    bundle = project_service.bundle_marker_of(project.metadata_json)
+    before = bundle.get("groups")
+    prefix = f"{key}/"
+    attached: Dict[str, int] = {}
+    for _asset_id, path, size in members:
+        if not library_scan.is_counted_model(path, size) or not path.startswith(prefix):
+            continue
+        group_name = path[len(prefix):].split("/", 1)[0]
+        attached[group_name] = attached.get(group_name, 0) + 1
+    after = bundle_service.marker_groups(
+        bundle_service.wire_groups(facts.groups),
+        attached=attached,
+        before=before if isinstance(before, list) else None,
+    )
+    return (before if isinstance(before, list) else None, after)
 
 
 def _extend_project(session: Session, project_id: str, member_ids: Sequence[str]) -> List[str]:
-    """Add only the memberships `project_id` is missing, committing them together."""
+    """Add only the memberships `project_id` is missing, one bounded chunk at a time.
+
+    The unit of work is one chunk of `project_service.MEMBER_QUERY_BATCH` rows, so a
+    Vault-sized adopt (800+ memberships) never stages one unbounded batch. The write
+    door reuses the same constant the read door batches by, read off the module at
+    call time so a test can pin the boundary, rather than inventing a second number.
+    It is NOT the SQLite host-variable cap `project_service.add_assets` chunks
+    against - that is a different door with a different reason.
+    """
     held = set(session.exec(select(ProjectAsset.asset_id).where(ProjectAsset.project_id == project_id)))
     added = [asset_id for asset_id in member_ids if asset_id not in held]
     stamp = _now()
-    for asset_id in added:
-        session.add(ProjectAsset(project_id=project_id, asset_id=asset_id, added_at=stamp))
+    batch = max(1, int(project_service.MEMBER_QUERY_BATCH))
+    for offset in range(0, len(added), batch):
+        for asset_id in added[offset : offset + batch]:
+            session.add(ProjectAsset(project_id=project_id, asset_id=asset_id, added_at=stamp))
+        session.flush()
     session.commit()
     return added
 
@@ -695,12 +1058,19 @@ def _any_under(paths: Sequence[str], root: str) -> bool:
     return _is_ancestor_of_any(root, paths)
 
 
-def _write_ledger(project_ids: Sequence[str], ledger: Mapping) -> None:
+def _write_ledger(
+    project_ids: Sequence[str], ledger: Mapping, *, markers: Optional[Mapping[str, Mapping]] = None
+) -> None:
     """Merge the whole ledger into each project's `_bundle`, preserving other keys.
 
     `merge_project_marker` replaces a `_`-prefixed key wholesale, so the WHOLE
     `_bundle` dict is passed - never `{"_bundle": {"arrange": ...}}`, which would
     drop `key`/`detector`/`groups`/`rel_dir` on the floor.
+
+    `markers` carries the `_bundle` keys this write must ALSO move, keyed by project
+    id: a non-`None` value SETS the key (an adopt's refreshed `groups`), and a
+    `None` value REMOVES it - which is how undo puts back a marker that had no
+    `groups` key at all before the arrange touched it.
     """
     with Session(engine) as session:
         for project_id in dict.fromkeys(project_ids):
@@ -708,11 +1078,34 @@ def _write_ledger(project_ids: Sequence[str], ledger: Mapping) -> None:
             if project is None:
                 continue
             bundle = dict(project_service.bundle_marker_of(project.metadata_json))
+            for bundle_key, value in (markers or {}).get(project_id, {}).items():
+                if value is None:
+                    bundle.pop(bundle_key, None)
+                else:
+                    bundle[bundle_key] = value
             bundle[ARRANGE_KEY] = dict(ledger)
             project.metadata_json = project_service.merge_project_marker(project.metadata_json, {"_bundle": bundle})
             project.updated_at = _now()
             session.add(project)
         session.commit()
+
+
+def _groups_before(ledger: Mapping) -> Dict[str, dict]:
+    """The group snapshot each adopted project had, as a `_bundle` update per project.
+
+    Only an entry the adopt recorded carries `groups_before`; a project whose groups
+    were never touched is absent, so undo writes nothing to that marker for this key.
+    A recorded `None` becomes `_write_ledger`'s removal rule - the marker had no
+    `groups` key before the adopt.
+    """
+    snapshot: Dict[str, dict] = {}
+    for entry in ledger.get("projects") or []:
+        if not isinstance(entry, Mapping) or "groups_before" not in entry:
+            continue
+        project_id = entry.get("id")
+        if isinstance(project_id, str) and project_id:
+            snapshot[project_id] = {"groups": entry.get("groups_before")}
+    return snapshot
 
 
 def _move_forward(root: Path, moves: Sequence[dict], ledger: Mapping, project_ids: Sequence[str], start: int) -> int:
@@ -908,7 +1301,9 @@ def undo(arrange_id: str, ctx: audit.AuditContext) -> dict:
     What undo does remove is exactly the memberships the ledger snapshotted as
     added - `projects[*].members`. A membership the operator added since is not in
     that snapshot and is left alone; a move whose two ends disagree refuses rather
-    than guessing.
+    than guessing. It also puts each ADOPTED project's group snapshot
+    (`projects[*].groups_before`) back into its marker, so the project renders the
+    groups it had before the adopt - or, for a marker that had none, renders none.
     """
     matches = _projects_for_arrange(arrange_id)
     if not matches:
@@ -939,7 +1334,9 @@ def undo(arrange_id: str, ctx: audit.AuditContext) -> dict:
             )
     memberships_removed = _restore_rows(root, ledger)
     restored = {**ledger, "undone": True}
-    _write_ledger([project_id for project_id, _ledger in matches], restored)
+    _write_ledger(
+        [project_id for project_id, _ledger in matches], restored, markers=_groups_before(restored)
+    )
     audit.record(
         audit.Event(
             audit.ARRANGE_UNDO,
@@ -960,6 +1357,7 @@ def undo(arrange_id: str, ctx: audit.AuditContext) -> dict:
         "key": restored.get("key") or "",
         "undone": True,
         "moves": len(landed),
+        "members_removed": memberships_removed,
         "project_removed": False,
         "projects_removed": [],
         "unseeable": folder_service.unseeable_directories(root),

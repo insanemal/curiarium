@@ -1381,6 +1381,34 @@ describe("ProjectLanding arrange door", () => {
     expect(getArrangePlanMock).not.toHaveBeenCalled();
   });
 
+  it("keeps the notice and the door mounted while an applied arrange can be undone", async () => {
+    // The apply's `onChanged` refetches the memberships, the drift count reaches
+    // zero and `driftLine` goes null. Gating the notice on the drift line alone
+    // would unmount the panel - and its in-session Undo - the instant the write
+    // landed, leaving the operator no way back.
+    getProjectBundleDriftMock.mockResolvedValue({ state: "known", count: 0, asset_ids: [] });
+    getArrangePlanMock.mockResolvedValue(ARRANGE_PLAN);
+    renderLanding({
+      project: makeProject({
+        metadata_json: {
+          _bundle: {
+            key: "Hydra",
+            shape: "split-top-folders",
+            arrange: { arrange_id: "arrange-7", applied: true, undone: false },
+          },
+        },
+      }),
+    });
+
+    expect(await screen.findByRole("button", { name: "Preview the moves" })).toBeTruthy();
+    expect(driftNotice()).not.toBeNull();
+    // Nothing drifted, so the notice says nothing about drift: the panel carries
+    // the sentence for a plan that only adopts.
+    expect(screen.queryByText(/parts in this folder/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add them" })).toBeNull();
+    expect(getArrangePlanMock).not.toHaveBeenCalled();
+  });
+
   it("offers no door for a zip-project identity marker", async () => {
     // A zip-project's key is an identity, not a path `GET /bundles/arrange`
     // could walk; offering the door would invite a request the server can only

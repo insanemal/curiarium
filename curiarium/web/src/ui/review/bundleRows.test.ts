@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ENRICH_MAX_KEYS,
+  type BundleArrangeAdoptions,
   type BundleArrangePlan,
   type BundleArrangeRefusal,
   type BundleDetectCounts,
@@ -35,7 +36,10 @@ import {
   archiveExtractTitle,
   archiveLine,
   arrangeActionLabel,
+  arrangeAdoptionCount,
+  arrangeAdoptionGroupCount,
   arrangeAppliesNothing,
+  arrangeHeadline,
   arrangeMoveCount,
   arrangeMoveCountLabel,
   arrangeMoveLine,
@@ -2747,6 +2751,77 @@ describe("arranging", () => {
     expect(arrangeAppliesNothing(arrangePlan({ moves: [], creates: [] }))).toBe(true);
     expect(arrangeAppliesNothing(arrangePlan({ creates: [] }))).toBe(false);
     expect(arrangeAppliesNothing(arrangePlan({ moves: [] }))).toBe(false);
+  });
+
+  /** The adoptions block `GET /bundles/arrange` serves beside the moves: a
+   *  zero-move plan whose whole outcome is memberships. */
+  function adoptions(overrides: Partial<BundleArrangeAdoptions> = {}): BundleArrangeAdoptions {
+    return {
+      target: { root: "import/Stagetop", project_id: "p1", creates_project: false },
+      total: 171,
+      by_role: { model: 102, image: 27, text: 18, archive: 12, other: 12 },
+      groups: Array.from({ length: 9 }, (_unused, index) => ({
+        name: `Group ${index}`,
+        root: "import/Stagetop",
+        files: 19,
+        new: index === 0,
+        foreign: false,
+        separable: true,
+        sample_names: ["part.stl"],
+      })),
+      sample_names: ["part.stl", "bracket.stl"],
+      unregistered: 0,
+      ...overrides,
+    };
+  }
+
+  it("never calls a membership-only plan nothing to apply", () => {
+    // The zero-move adopt: no move, no create, and 171 memberships. Reading only
+    // the move and create lists is what asked the operator to approve a blank
+    // plan - and it would disable the one Apply this door exists for.
+    const plan = arrangePlan({ moves: [], creates: [], adoptions: adoptions() });
+    expect(arrangeAppliesNothing(plan)).toBe(false);
+    expect(arrangeAdoptionCount(plan)).toBe(171);
+    expect(arrangeAdoptionGroupCount(plan)).toBe(9);
+  });
+
+  it("names the files and folders an adoption plan would add", () => {
+    // The badge: a `0 moves` beside a live Apply is the bug. The count and the
+    // folder count come from the adoptions block, and the badge says "adds".
+    expect(arrangeHeadline(arrangePlan({ moves: [], creates: [], adoptions: adoptions() }))).toBe(
+      "Adds 171 files in 9 folders",
+    );
+  });
+
+  it("says a plan applies nothing when it has no move and no membership", () => {
+    // A zero total IS an answer ("nothing to adopt"), and an ABSENT block is not
+    // one - but both leave the plan with nothing to do, so both must say so
+    // rather than wear a `0 moves` badge beside a dead Apply.
+    const nothing = arrangePlan({ moves: [], creates: [], adoptions: adoptions({ total: 0 }) });
+    const absent = arrangePlan({ moves: [], creates: [], adoptions: null });
+    for (const plan of [nothing, absent]) {
+      expect(arrangeAppliesNothing(plan)).toBe(true);
+      expect(arrangeHeadline(plan)).toBe("Arrangement: applies nothing");
+    }
+  });
+
+  it("renders an absent folder count as the en dash, never a fabricated 0", () => {
+    // `groups` is optional on the wire: an older server sends a total and no
+    // group list, and "5 files in 0 folders" would be a number it did not
+    // measure. The dash is the one formatter's.
+    const plan = arrangePlan({
+      moves: [],
+      creates: [],
+      adoptions: adoptions({ total: 5, groups: undefined }),
+    });
+    expect(arrangeAdoptionGroupCount(plan)).toBeNull();
+    expect(arrangeHeadline(plan)).toBe("Adds 5 files in \u2013 folders");
+  });
+
+  it("keeps the move count as the badge when moves are what would happen", () => {
+    // The existing wording, byte for byte: a plan that moves files is a moves
+    // plan, adoptions block or not.
+    expect(arrangeHeadline(arrangePlan())).toBe("Arrangement: 2 moves");
   });
 });
 
