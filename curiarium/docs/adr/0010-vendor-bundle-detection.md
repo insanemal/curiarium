@@ -3462,6 +3462,72 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     route, permission row or audit action where the existing create route
     sufficed; or any of the four row fields dropped from `BundleDetectItemOut`.
 
+    **Decision 36 - the probe is a capability of the image, and an unreadable
+    boundary is never a split (`Mf-ky16`).** The engine's git probe is a runtime
+    feature, not a developer convenience: it is what keeps a real checkout from
+    being split, and an image without the binary left the probe silently dead, so
+    `import/endorphin` was answered structurally - eight projects where there is
+    one. `git` therefore ships in the image, on the `base` stage's single pinned
+    `gosu git` apt line, and not in `runtime`, because `runtime` is a SIBLING of
+    the `test` stage that `make verify-api` builds: a git installed only there
+    could never make an in-image assertion pass, so the assertion would keep
+    skipping and the feature would stay exactly as dead as it was. The cost is
+    measured rather than estimated, in
+    `.plans/measurements/Mf-ky16-image-size.txt`: the `runtime` image grows
+    `+98.07 MB` plain and `+95.84 MB` with `--build-arg INSTALL_ZFS=1`, the apt
+    layer going 3.3 MB -> 101 MB, roughly half of it the perl runtime git's
+    porcelain scripts need. The ticket guessed ~40 MB; the bill is 2.4x that, and
+    it is accepted because the alternative is a feature that silently answers
+    wrong.
+
+    **The fallback is non-silent, and that is the contract.** `git_state()` keeps
+    `None` for exactly one thing - NOT a repo: no `.git` at all, or git itself
+    running and refusing with "not a git repository" (a fake or stale `.git` with
+    nothing behind it). When `.git` IS present and the probe cannot run, it
+    returns the error-shaped dict - every key it always returned, plus `git_error`
+    naming the cause: `git is not available` (missing or unexecutable binary),
+    `git timed out` (the shared budget), or `unreadable` (any other failure,
+    including an unexpected `returncode` or empty output). `propose()` with a
+    `git_error` constructs no split shape at all - neither `split-top-folders` nor
+    `split-model-folders` - forces `one-project` to the top above every
+    alternative, and attaches `proposal_engine.unknown_boundary_note`: "git
+    checkout detected, but git could not read it (<cause>): its boundary is
+    unknown, so this is offered as one project, never as a split". That note
+    reaches the row through the new `Option.note`, which
+    `bundle_service._match_row` now carries on a CREATABLE match (it previously
+    only ever emitted a note when `creatable` was false); a non-creatable match
+    still says exactly `needs arranging first: <consequence>`.
+
+    **`medium`, deliberately not `high`.** `one-project` is in
+    `bundle_service.AUTO_SHAPES` and AUTO requires HIGH (Decision 35), so a high
+    band would auto-import a project whose boundary nobody read. Medium sends the
+    row to GUIDED, where the operator reads the note before anything is written;
+    the alternatives are capped at medium for the same reason
+    `_assign_confidence` caps them - an alternative must never outrank the
+    recommendation.
+
+    **Two assertions carry this, and each closes the other's hole.**
+    `curiarium/api/tests/test_git_image.py` runs only IN the image - its
+    discriminator is `/app/Dockerfile`, so it never consults a `HAVE_GIT` skip,
+    and `test_the_image_ships_git` reds on a missing binary instead of skipping -
+    and it pins the endorphin-shaped synthetic checkout reading `git-project` at
+    `high` with a note-free creatable match, plus the same checkout with the exec
+    unavailable reading `one-project` with the cause named and no split shape
+    offered. Because a discriminator that stops matching would SKIP rather than
+    fail, the belt is the `command -v git` line in the Makefile's
+    `verify-zfs-image`, run against the published plain image, where a skip is
+    impossible.
+
+    **What would make this wrong.** `git` dropped from the apt line with CI still
+    green; a `git_error` collapsing back to `None` for a missing binary, which
+    turns an unknown boundary into a licence to split; a split shape still being
+    constructed under `git_error`; the forced recommendation reaching `high` (an
+    auto-import of a boundary nobody read); the note failing to reach `matches[]`
+    because `_match_row` only ever emits notes for non-creatable shapes again;
+    or `None` widening to "anything that failed", which would resurrect the
+    fake-`.git` fixtures as unreadable checkouts and make "not a repo"
+    unanswerable.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -4585,3 +4651,6 @@ This ADR is superseded if any of the following becomes true:
   or a licence appears without an accept;
 - `AUTO_SHAPES` grows beyond the two shapes the create door can enact, or a
   `.zip` row reaches AUTO.
+- the API image loses `git` and CI stays green (Decision 36, `Mf-ky16`), or a
+  probe that cannot run starts answering `None` again instead of carrying a
+  `git_error`.

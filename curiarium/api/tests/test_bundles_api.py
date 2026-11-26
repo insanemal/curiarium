@@ -17,6 +17,7 @@ created; the role fixtures are copied from ``tests/test_contributor_role.py``.
 import json
 import shutil
 import socket
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from zipfile import ZipFile
@@ -243,6 +244,22 @@ def moai_bundle(root: Path) -> Path:
 
 COLLECTION_KEY = "import/Collection"
 AGREEING_KEY = "import/Agreeing"
+
+
+def unknown_boundary_bundle(root: Path) -> Path:
+    """A checkout the probe cannot read, with two product-shaped children.
+
+    A fake `.git` plus two model-bearing children that each carry their own README
+    is the split arm's strongest evidence. With the fix an unreadable boundary is
+    one project carrying a note; without it, this folder is split.
+    """
+    bundle = root / "import" / "Unreadable"
+    (bundle / ".git").mkdir(parents=True)
+    for name in ("Widget One", "Widget Two"):
+        write_text(bundle / name / "README.md", f"# {name}\n")
+        for index in range(3):
+            write_file(bundle / name / f"part{index}.stl", STL_BYTES)
+    return bundle
 
 
 def collection_bundle(root: Path) -> Path:
@@ -962,7 +979,12 @@ def test_the_route_serves_the_engines_whole_ranking(client: TestClient, contribu
             # The one owner of the vocabulary: nothing but the engine ranks, so every
             # rule is the engine's token and every shape the engine's own word.
             assert match["rule"] == "engine:" + match["shape"], match
-            assert match["note"] is None or match["creatable"] is False, match
+            # A non-creatable match always says why; a creatable one carries a note
+            # only when its boundary was unreadable (AC-4, Mf-ky16).
+            if not match["creatable"]:
+                assert match["note"].startswith("needs arranging first: "), match
+            else:
+                assert match["note"] is None or "could not read it" in match["note"], match
         # The engine's census is the row's census: one folder, one measurement.
         assert {(m["model_count"], m["image_count"], m["text_count"], m["other_count"]) for m in matches} == {
             (row["model_count"], row["image_count"], row["text_count"], row["other_count"])
@@ -977,6 +999,37 @@ def test_the_route_serves_the_engines_whole_ranking(client: TestClient, contribu
     assert collection["matches"][1]["note"] is None
     # And a one-product folder offers exactly one reading.
     assert [match["shape"] for match in row_for(report, MOAI)["matches"]] == ["one-project"]
+
+
+def test_a_creatable_match_carries_the_engines_note_when_the_boundary_is_unreadable(
+    client: TestClient, contributor: Actor, isolated_storage: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A creatable `one-project` carries the engine's note when git could not read it.
+
+    Mutation: force the unreadable-boundary recommendation without carrying its note
+    and the operator enacts a project whose boundary nobody read, with no explanation
+    - and with the split arms open it would be split instead. `subprocess.run` is
+    patched so the fake `.git` reads the SAME on a host WITH git, where it would
+    otherwise be a real "not a git repository" refusal that returns None.
+    """
+    unknown_boundary_bundle(isolated_storage)
+    scan()
+
+    def absent(*_args, **_kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", absent)
+    report = report_for(client, contributor)
+
+    row = row_for(report, "import/Unreadable")
+    match = row["matches"][0]
+    assert match["shape"] == "one-project"
+    assert match["creatable"] is True
+    assert match["note"] == proposal_engine.unknown_boundary_note("git is not available")
+    assert "could not read it" in match["note"]
+    assert "git" in match["note"]
+    assert {m["shape"] for m in row["matches"]} & {"split-top-folders", "split-model-folders"} == set()
 
 
 def test_the_committed_openapi_fixture_declares_the_match_and_shape_fields() -> None:

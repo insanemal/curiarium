@@ -25,9 +25,10 @@ import pytest
 
 import proposal_engine
 
-# The API test image is deliberately slim and ships no git; the engine is designed
-# to degrade to `git_state() is None` there. Tests that need a real checkout are
-# host-only, exactly like `test_wave_plan.py`'s serialiser-path case.
+# The API test image ships git now (Mf-ky16, proved in `test_git_image.py`), but a
+# developer host may still lack it. Tests that BUILD a real checkout need the host
+# binary; the engine's behaviour without one is proved by monkeypatching
+# `subprocess.run`, so that test runs everywhere.
 HAVE_GIT = shutil.which("git") is not None
 GIT_REQUIRED = pytest.mark.skipif(not HAVE_GIT, reason="git is required to exercise git_state")
 
@@ -203,20 +204,43 @@ def test_a_repo_with_no_models_does_not_offer_git_project(tmp_path: Path) -> Non
     assert any("no model" in reason for reason in reasons), reasons
 
 
-def test_git_absent_returns_none_without_raising(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing git binary must not fail a proposal.
+def test_git_unavailable_is_an_unknown_boundary_not_a_licence_to_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `.git` whose exec cannot run is UNKNOWN, never "nothing tracked here".
 
-    Mutation: let `FileNotFoundError` escape and the whole measurement dies on a
-    host without git, which is a legal host for the CLI.
+    Mutation: let a missing binary fall back to the structural guess and a real
+    checkout is split into 8 projects in the shipping image - the exact bug Mf-ky16
+    was filed for.
     """
-    folder = tmp_path / "pretend"
+    # A fake `.git` plus two model-bearing top folders, each carrying its own
+    # document: without the fix this is the split arm's strongest evidence.
+    folder = tmp_path / "checkout"
     (folder / ".git").mkdir(parents=True)
+    for name in ("widget-one", "widget-two"):
+        write(folder / name / "README.md", f"# {name}\n")
+        write_models(folder / name, 2)
 
     def absent(*_args, **_kwargs):
         raise FileNotFoundError("git")
 
     monkeypatch.setattr(subprocess, "run", absent)
-    assert proposal_engine.git_state(str(folder)) is None
+
+    state = proposal_engine.git_state(str(folder))
+    assert state is not None
+    assert state["git_error"] == proposal_engine.GIT_NOT_AVAILABLE
+    assert "not available" in state["git_error"]
+    assert state["tracked"] == []
+    assert state["untracked"] == []
+
+    options, reasons, repo = proposal_engine.propose(facts_for(folder), ())
+    assert repo is not None and repo["git_error"] == state["git_error"]
+    assert options[0].shape == "one-project"
+    assert {"split-top-folders", "split-model-folders"} & {o.shape for o in options} == set()
+    note = options[0].note
+    assert note == proposal_engine.unknown_boundary_note(state["git_error"])
+    assert "could not read it" in note and "git" in note
+    assert any("could not read it" in reason for reason in reasons), reasons
 
 
 @GIT_REQUIRED

@@ -237,8 +237,12 @@ would split a confirmed product or merge a confirmed collection fails the run.
 [`curiarium/scripts/fixtures/README.md`](../scripts/fixtures/README.md) describes
 the fixture and its `expect` vocabulary. `curiarium/api/tests/test_proposal_engine.py`
 replays six of those labels over synthetic trees, so a rule change cannot silently
-start fragmenting a library on CI; the git-checkout label `import/endorphin` is
-only scored by the host CLI against a real checkout.
+start fragmenting a library on CI. The endorphin SHAPE is replayed in the image
+too: `curiarium/api/tests/test_git_image.py` builds a synthetic checkout with the
+matrix's own `new_repo`/`git` helpers and asserts `git-project` at `high` with a
+note-free creatable row, because a git shape that only the host CLI can score is
+a shape CI cannot defend. The real library's labels stay host-CLI-only: that
+replay needs the mounted library, so it is unchanged.
 
 The engine's `MODEL_EXTS` is a DELIBERATE superset of the API's five-suffix table:
 a proposal may name a payload no importer accepts, which is exactly what these
@@ -252,12 +256,17 @@ Since `Mf-1agz` the engine is also the ONLY thing that ranks the review queue:
 every row (folder or `.zip`) and serves its option list as `matches`, and the
 invariant is pinned by `curiarium/api/tests/test_bundle_report_engine.py` - for
 every synthetic row the report's recommendation must equal
-`propose(...)[0].shape`, with `engine:<shape>` as every match's rule. Two things
+`propose(...)[0].shape`, with `engine:<shape>` as every match's rule. Three things
 about that seam are easy to break and are named here rather than found later: the
 report passes `git_timeout=5.0` (it DOES probe git - the label corpus needs it -
-but never unbounded), and it passes `project_keys` in STORAGE-relative spelling,
+but never unbounded), it passes `project_keys` in STORAGE-relative spelling,
 because `Facts.rel` is storage-relative and an `add-to-project` reading is
-impossible without them.
+impossible without them. The third is the fallback contract: when a `.git` is
+present and the probe cannot run, `git_state` returns a dict carrying `git_error`
+rather than `None`, `propose()` withholds both split shapes and recommends
+`one-project` at `medium` with a note naming the cause, and `None` now means
+exactly "not a repo" - the image ships `git`, so that path is the exception
+rather than the normal case (`Mf-ky16`).
 
 ## The arrange surface (approving a shape, and undoing it)
 

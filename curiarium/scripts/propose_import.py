@@ -131,19 +131,27 @@ def render(rel: str, options: List[proposal_engine.Option], reasons: List[str],
         if option is not options[0]:
             out.append(f"         -> {option.consequence}")
     if repo is not None:
-        out.append(
-            f"  git       {(repo.get('branch') or ('detached at ' + (repo.get('sha') or '?')))} "
-            f"@ {(repo['head'].split() or ['?'])[0]} · "
-            f"{len(repo['tracked'])} tracked · {len(repo['untracked'])} untracked"
-            + (" · truncated" if repo.get('truncated') else "")
-        )
-        for item in (peel or []):
-            mark = "twin  " if item["twin"] else "      "
-            vid = f" id={item['vendor_id']}" if item["vendor_id"] else ""
+        if repo.get("git_error"):
+            # The probe could not read the boundary. Printing "0 tracked · 0 untracked"
+            # here would be the lie that nothing is tracked, so name the cause instead.
             out.append(
-                f"            {mark}{item['name'][:40]:<40} {item['kind']:<11}"
-                f"{vid} -> {item['labels'][0]}"
+                f"  git       checkout detected, git could not read it ({repo['git_error']}) "
+                f"· boundary unknown, so no tracked/untracked counts are claimed"
             )
+        else:
+            out.append(
+                f"  git       {(repo.get('branch') or ('detached at ' + (repo.get('sha') or '?')))} "
+                f"@ {(repo['head'].split() or ['?'])[0]} · "
+                f"{len(repo['tracked'])} tracked · {len(repo['untracked'])} untracked"
+                + (" · truncated" if repo.get('truncated') else "")
+            )
+            for item in (peel or []):
+                mark = "twin  " if item["twin"] else "      "
+                vid = f" id={item['vendor_id']}" if item["vendor_id"] else ""
+                out.append(
+                    f"            {mark}{item['name'][:40]:<40} {item['kind']:<11}"
+                    f"{vid} -> {item['labels'][0]}"
+                )
     out.append("  arrange   " + arrange[0])
     for extra in arrange[1:]:
         out.append("            " + extra)

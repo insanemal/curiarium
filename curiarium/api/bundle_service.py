@@ -1726,9 +1726,15 @@ def _match_row(option: proposal_engine.Option, candidate: BundleCandidate) -> di
     ``matches[0]`` IS the recommendation the operator acts on. ``rule`` is the
     ``engine:<shape>`` token the dissent shim already used, which is also the
     create marker's ``rule`` - one token, one owner.
+
+    A non-creatable offer always says why it cannot be enacted. A creatable one
+    normally carries no note, and carries one only when the engine has something
+    the operator must not miss - today the unreadable-boundary `one-project`
+    (Mf-ky16).
     """
     facts = candidate.facts
     creatable = option.shape in candidate.creatable_shapes
+    note = option.note if creatable else f"needs arranging first: {option.consequence}"
     return {
         "shape": option.shape,
         "rule": f"engine:{option.shape}",
@@ -1739,7 +1745,7 @@ def _match_row(option: proposal_engine.Option, candidate: BundleCandidate) -> di
         "other_count": int(facts.others),
         # An archive's facts carry no groups: its payload is one thing inside a zip.
         "groups": [] if candidate.is_archive else _wire_groups(facts.groups),
-        "note": None if creatable else f"needs arranging first: {option.consequence}",
+        "note": note,
         "creatable": creatable,
     }
 

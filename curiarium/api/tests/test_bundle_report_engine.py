@@ -200,10 +200,12 @@ def assert_row_agrees(row: dict, options, *, expected_kind: str) -> None:
             else bundle_service.DIRECTORY_CREATABLE_SHAPES
         )
         assert match["creatable"] is creatable, (row["key"], match)
-        # A non-creatable offer always says why, in the engine's own words.
-        assert (match["note"] is None) is creatable, (row["key"], match)
+        # A non-creatable match always says why; a creatable one carries a note
+        # only when its boundary was unreadable (AC-4, Mf-ky16).
         if not creatable:
             assert match["note"].startswith("needs arranging first: "), match["note"]
+        else:
+            assert match["note"] is None or option.note == match["note"], (row["key"], match)
     # The row's own three wire fields ARE `matches[0]`, by construction.
     assert row["metadata_shape"] == options[0].shape
     assert row["confidence"] == options[0].confidence

@@ -94,6 +94,11 @@ verify-smoke:
 # check can only prove the userspace: `zfs --version` prints the package version
 # and then exits 1 with "zfs_version_kernel() failed", which is why the version
 # line is matched rather than the exit status.
+#
+# The git check is the belt to `tests/test_git_image.py`'s braces (Mf-ky16).
+# That test's discriminator is `/app/Dockerfile`, and a discriminator that
+# silently stops matching would SKIP rather than fail, so the capability is
+# asserted here too, against the published image, where a skip is impossible.
 verify-zfs-image:
 	status=0; \
 	docker build -t $(API_PLAIN_IMAGE) curiarium/api || status=$$?; \
@@ -102,6 +107,9 @@ verify-zfs-image:
 	fi; \
 	if [ $$status -eq 0 ]; then \
 		docker run --rm --entrypoint /bin/sh $(API_PLAIN_IMAGE) -c 'if command -v zfs; then echo "the plain API image contains zfs; only the -zfs variant may (Mf-qirh)" >&2; exit 1; fi' || status=$$?; \
+	fi; \
+	if [ $$status -eq 0 ]; then \
+		docker run --rm --entrypoint /bin/sh $(API_PLAIN_IMAGE) -c 'command -v git || { echo "the API image has no git binary: the proposal engine git probe is silently dead without it (Mf-ky16)" >&2; exit 1; }' || status=$$?; \
 	fi; \
 	if [ $$status -eq 0 ]; then \
 		docker run --rm --entrypoint /bin/sh $(API_ZFS_IMAGE) -c 'command -v zfs || { echo "the -zfs API image has no zfs binary" >&2; exit 1; }; zfs --version 2>&1 | grep -E "^zfs-[0-9]" || { echo "zfs --version printed no userspace version" >&2; exit 1; }' || status=$$?; \

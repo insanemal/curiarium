@@ -354,6 +354,28 @@ def _porcelain_untracked(status: str) -> List[str]:
     return out
 
 
+# A `git` that cannot run is an UNKNOWN boundary, never a licence to split. The
+# cause is a phrase a note can quote verbatim, so the report and the tests agree.
+GIT_NOT_AVAILABLE = "git is not available"
+GIT_TIMED_OUT = "git timed out"
+GIT_UNREADABLE = "unreadable"
+UNKNOWN_BOUNDARY_NOTE = (
+    "git checkout detected, but git could not read it ({cause}): "
+    "its boundary is unknown, so this is offered as one project, never as a split"
+)
+
+
+def unknown_boundary_note(cause: str) -> str:
+    """The sentence an operator reads when a checkout's boundary could not be read.
+
+    A boundary that cannot be read is a fact about the OBSERVER, not about the
+    folder: the only honest reading is "this is one project until someone can read
+    the boundary". The sentence names the cause so a missing binary is visible in
+    the row, not hidden behind a structural guess (Mf-ky16).
+    """
+    return UNKNOWN_BOUNDARY_NOTE.format(cause=cause)
+
+
 def git_state(
     path: str, *, max_tracked: Optional[int] = None,
     max_untracked: Optional[int] = None,
@@ -362,8 +384,16 @@ def git_state(
     """The repo's own declaration of what belongs to it, read without writing.
 
     `--no-optional-locks` + GIT_OPTIONAL_LOCKS=0 keep `status` from refreshing the
-    index, so asking this question never writes to the working tree. Returns None
-    for a non-repo, or when git is absent: a missing tool must not fail a proposal.
+    index, so asking this question never writes to the working tree.
+
+    `None` means EXACTLY "not a repo": either no `.git` at all, or git itself ran
+    and refused with "not a git repository" (a fake or stale `.git` with nothing
+    behind it). When `.git` is present but the probe cannot read the checkout -
+    git is missing, cannot be executed, times out, or its output is unreadable -
+    this returns the error shape with a non-empty `git_error`, never `None`. That
+    distinction is the contract: an unreadable boundary is an UNKNOWN, and silence
+    can never be mistaken for "nothing tracked here" and licence a structural
+    split of a real checkout (Mf-ky16).
 
     `.git` may be a DIRECTORY (normal repo) or a FILE (linked worktree, submodule)
     - `os.path.exists` covers both deliberately. A detached HEAD is reported as
@@ -378,10 +408,16 @@ def git_state(
         return None
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
     deadline = time.monotonic() + budget
+    cause: Optional[str] = None
+    refused = False
 
     def run(*args: str) -> Optional[str]:
+        nonlocal cause, refused
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            # The shared budget is spent: the boundary is unknown, not empty.
+            if cause is None:
+                cause = GIT_TIMED_OUT
             return None
         try:
             import subprocess
@@ -389,9 +425,41 @@ def git_state(
                 ["git", "--no-optional-locks", "-C", path, *args],
                 capture_output=True, text=True, timeout=remaining, env=env,
             )
-        except (OSError, subprocess.SubprocessError):
+        except subprocess.TimeoutExpired:
+            # A subclass of SubprocessError, so it must be caught first.
+            if cause is None:
+                cause = GIT_TIMED_OUT
             return None
-        return out.stdout if out.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            # The binary is missing or cannot be executed; the checkout is real
+            # but its boundary is unreadable from here.
+            if cause is None:
+                cause = GIT_NOT_AVAILABLE
+            return None
+        if out.returncode != 0:
+            if "not a git repository" in (out.stderr or "").lower():
+                refused = True
+            elif cause is None:
+                cause = GIT_UNREADABLE
+            return None
+        if out.stdout is None:
+            if cause is None:
+                cause = GIT_UNREADABLE
+            return None
+        return out.stdout
+
+    def error_state() -> dict:
+        return {
+            "branch": None,
+            "detached": False,
+            "head": "",
+            "sha": "",
+            "toplevel": None,
+            "truncated": False,
+            "tracked": [],
+            "untracked": [],
+            "git_error": cause or GIT_UNREADABLE,
+        }
 
     branch = (run("rev-parse", "--abbrev-ref", "HEAD") or "").strip()
     head = (run("log", "-1", "--format=%h %ci") or "").strip()
@@ -399,7 +467,9 @@ def git_state(
     tracked_raw = run("ls-files")
     status = run("status", "--porcelain", "-z", "--untracked-files=normal")
     if tracked_raw is None or status is None:
-        return None
+        if refused and cause is None:
+            return None
+        return error_state()
     detached = branch in ("HEAD", "")
     sha = head.split()[0] if head else ""
     truncated = False
@@ -432,6 +502,7 @@ def git_state(
         "truncated": truncated,
         "tracked": tracked,
         "untracked": sorted(set(untracked), key=str.casefold),
+        "git_error": None,
     }
 
 
@@ -1540,7 +1611,7 @@ def _build_twin(facts: Facts) -> dict:
 
 class Option:
     def __init__(self, shape: str, label: str, detail: str, consequence: str,
-                 score: int, confidence: str = "low"):
+                 score: int, confidence: str = "low", note: Optional[str] = None):
         self.shape = shape
         self.label = label
         self.detail = detail
@@ -1550,6 +1621,11 @@ class Option:
         # the guided flow medium and low only choose a DEFAULT; they never remove
         # an option.
         self.confidence = confidence
+        # What the row must tell the operator when the option needs explaining.
+        # Normally absent; today only the unreadable-boundary `one-project` carries
+        # one, because its confidence is deliberately medium and the note is why
+        # (Mf-ky16).
+        self.note = note
 
     def as_dict(self) -> dict:
         return {
@@ -1559,6 +1635,7 @@ class Option:
             "consequence": self.consequence,
             "score": self.score,
             "confidence": self.confidence,
+            "note": self.note,
         }
 
 
@@ -1620,7 +1697,12 @@ def propose(facts: Facts, project_keys: Sequence[str], *,
     doc = parse_document_kind(facts)
 
     repo = git_state(facts.path, timeout=git_timeout) if probe_git else None
-    if repo is not None:
+    git_error = repo.get("git_error") if repo is not None else None
+    if git_error:
+        # Name the cause in the same sentence the row carries: the operator must see
+        # that the boundary could not be read, not merely that something was skipped.
+        reasons.append(unknown_boundary_note(git_error))
+    if repo is not None and git_error is None:
         tracked_models = sum(
             1 for rel in repo["tracked"] if os.path.splitext(rel)[1].lower() in MODEL_EXTS
         )
@@ -1702,8 +1784,9 @@ def propose(facts: Facts, project_keys: Sequence[str], *,
         one_score,
     ))
 
-    # Split. Only plausible when the children look like products, not parts.
-    if len(tops) >= 2:
+    # Split. Only plausible when the children look like products, not parts. An
+    # unreadable checkout is never evidence FOR a split: the split arms stay shut.
+    if len(tops) >= 2 and git_error is None:
         ids = facts.children_with_vendor_id()
         split_score = 20 + (30 if own_meta else 0) + (15 if ids else 0) + (10 if not part_like else 0)
         if ids:
@@ -1728,7 +1811,7 @@ def propose(facts: Facts, project_keys: Sequence[str], *,
 
     # Split by the shallowest model-bearing folders (the fine-grained variant).
     shallow = [d for d in facts.model_dirs if d != "." and d.count(os.sep) + 1 == 1]
-    if len(shallow) >= 3 and len(shallow) > len(tops):
+    if git_error is None and len(shallow) >= 3 and len(shallow) > len(tops):
         options.append(Option(
             SPLIT_SHAPES[1],
             f"split into {len(shallow)} projects",
@@ -1748,6 +1831,8 @@ def propose(facts: Facts, project_keys: Sequence[str], *,
 
     options.sort(key=lambda o: (-o.score, o.shape))
     _assign_confidence(options, facts)
+    if git_error:
+        _force_unknown_boundary(options, git_error)
     return options, reasons, repo
 
 
@@ -1831,6 +1916,42 @@ def _assign_confidence(options: List[Option], facts: Facts) -> None:
     for option in options[1:]:
         if _CONFIDENCE_RANK[option.confidence] > top_band:
             option.confidence = options[0].confidence
+
+
+def _force_unknown_boundary(options: List[Option], git_error: str) -> None:
+    """Make the unreadable-boundary `one-project` the recommendation, and say why.
+
+    A boundary that cannot be read is a fact about the OBSERVER, not about the
+    folder, so the only honest reading is "this is one project until someone can
+    read the boundary". The recommendation is forced AFTER sorting and confidence
+    assignment because the structural evidence may well argue otherwise - and that
+    argument is exactly the one that must not win.
+
+    Its band is `medium`, deliberately NOT `high`: `one-project` is in
+    `AUTO_SHAPES` and AUTO requires HIGH, so a high band would auto-import a project
+    whose boundary nobody read. Medium sends the row to GUIDED, where the operator
+    reads the note. Every remaining option is capped at medium for the same reason
+    `_assign_confidence` caps alternatives: an `add-to-project` at high beside a
+    medium recommendation would break the documented INVARIANT that an alternative
+    never outranks the recommendation.
+    """
+    if not options:
+        return
+    recommendation = next((option for option in options if option.shape == "one-project"), None)
+    if recommendation is None:
+        return
+    others = [option.score for option in options if option is not recommendation]
+    options.remove(recommendation)
+    options.insert(0, recommendation)
+    # Above EVERY alternative, whatever the structure says: the boundary is unknown
+    # and the only defensible answer is "one project".
+    if others:
+        recommendation.score = max(others) + 5
+    recommendation.confidence = "medium"
+    recommendation.note = unknown_boundary_note(git_error)
+    for option in options[1:]:
+        if _CONFIDENCE_RANK[option.confidence] > _CONFIDENCE_RANK["medium"]:
+            option.confidence = "medium"
 
 
 def peel_proposals(facts: Facts, repo: dict) -> List[dict]:

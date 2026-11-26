@@ -1,6 +1,26 @@
 FROM python:3.12-slim AS base
 WORKDIR /app
 
+# git is a runtime feature here, not a convenience (Mf-ky16): the proposal
+# engine asks a checkout what it tracks (`proposal_engine.git_state`), and in
+# the shipped image that probe returned `None` for a real checkout, so the
+# engine fell back to a structural guess and answered "split into 8 projects"
+# for `import/endorphin`, which is ONE project. Splitting a project is the
+# failure mode the whole bundle-detection effort exists to prevent.
+#
+# It goes in `base` and not in `runtime` because `runtime` is a SIBLING of the
+# test stages (`FROM base AS runtime` beside `FROM lint AS test`) and `make
+# verify-api` builds `--target test`, so a git installed only in `runtime`
+# could never make the in-image capability assertion (`tests/test_git_image.py`)
+# pass -- the test would keep skipping, which is the exact trap this ticket is
+# about. `gosu` rides the same line because it was the only other apt package
+# and one apt layer is one cache entry.
+#
+# Measured cost (Mf-ky16): +98.07 MB plain, +95.84 MB with INSTALL_ZFS=1 (runtime target).
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends gosu git \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
 
@@ -16,9 +36,6 @@ FROM lint AS test
 CMD ["python", "-m", "pytest", "-q"]
 
 FROM base AS runtime
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends gosu \
-  && rm -rf /var/lib/apt/lists/*
 
 # The published image is deliberately slim, so the ZFS userspace is opt-in
 # (Mf-qirh): INSTALL_ZFS=1 builds the `-zfs` variant the ZFS snapshot provider
