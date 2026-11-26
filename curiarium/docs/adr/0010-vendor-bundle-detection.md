@@ -93,6 +93,111 @@ operator can still approve, preview and undo. Each move the preview returns carr
 token. The detection decision below is unchanged - the arrange reads the row, it
 never rewrites what a rule offered).
 
+**Status of the mechanics, as of 2026-11-27.** Every RULING recorded below
+stands. A large part of the MECHANICS prose no longer names the code: the
+detector this document was written about - `curiarium/api/bundle_detect.py`,
+its `R1`-`R7` rule set, `detect_bundle`, the snapshots and facts, the document
+parsers and the rule-set stamp - was deleted by Decision 34 (`Mf-1agz`, commit
+`9ef7664`, 2026-11-26), and Decision 28 (`Mf-8acz`) had already replaced
+Decision 18's promoter with one ownership guard. Detection is now
+`proposal_engine` (`proposal_engine.propose`), the row walk is
+`bundle_service._build_candidates`, and a file's role is
+`library_scan.classify_entry`. Those mechanisms are recorded where they were
+replaced - Decisions 28, 32, 33, 34, 35 and 36 - and two things this document
+had not yet said are recorded at the end of the `## Decision` list: Decision 37
+(the engine is the source of the FACTS, not only of the ranking) and Decision
+38 (the promotion lineage, from Decision 17/18 through `Mf-8acz` to the walk
+that deleted its last guard).
+
+**How to read the markers.** A **Superseded by Decision N** paragraph is
+INSERTED after the passage it covers; it never replaces text and never amends a
+ruling. Each one names what is dead, the decision and ticket that removed it,
+and the symbol `git grep` finds today - or says "no successor symbol". This
+document stays append-only: no decision text above is rewritten, no decision is
+renumbered, and the seven `##` headings are the ones it always had.
+
+**Superseded mechanics, and what exists today.** One bullet per mechanism; the
+passages it governs carry the markers below it. Recorded / removed / live:
+
+* **`bundle_detect.py` itself**, with its snapshot-and-facts contract and its
+  purity rule - recorded by Decisions 1 and 33; deleted by Decision 34
+  (`Mf-1agz`). Live: `proposal_engine.propose` (`proposal_engine.py:1661`) ranks,
+  `bundle_service._build_candidates` (`bundle_service.py:596`) walks. No
+  successor module.
+* **`R1`-`R7` and `detect_bundle`'s four-rule order** - recorded by Decisions 1
+  and 18-23; deleted by Decision 34 (`Mf-1agz`). Live: the engine's own shapes
+  (`proposal_engine.ONE_PROJECT_SHAPES`, `proposal_engine.py:2079`;
+  `SPLIT_SHAPES`, `:2086`) and `rule = engine:<shape>`. No rule id anywhere.
+* **`shape_matches` and the ordered `matches[]` it built** - recorded by
+  Decision 31; deleted by Decision 34 (`Mf-1agz`). Live:
+  `proposal_engine.propose` returns `Option`s that
+  `bundle_service._match_row` (`bundle_service.py:1778`) maps field-for-field.
+* **`INFERRED_CONFIDENCES` / `STRONG_CONFIDENCES`** - recorded by Decisions 15,
+  18 and 20; deleted by Decision 34 (`Mf-1agz`). Live:
+  `proposal_engine._CONFIDENCE_RANK` (`proposal_engine.py:731`, a rank map,
+  not a band set) and `Option.confidence`, with one literal left in the create
+  belt (`bundle_service.py:2512`). Nothing membership-tests a band.
+* **`pair_only` / `pair_only_specs` / `offers_archive_only`** - recorded by
+  Decisions 7 and 18; deleted by Decision 34 (`Mf-1agz`). No successor symbol.
+* **`archive_owned` / `archive_owned_facts`** - recorded by Decisions 18 and 19;
+  deleted by Decision 34 (`Mf-1agz`). No successor symbol.
+* **`archive_only` as a per-row verdict** - recorded by Decisions 7 and 18;
+  retired as a verdict by Decision 34 (`Mf-1agz`)'s fourth bullet. Still live
+  as the NAME of the Extract door: `bundle_service.ARCHIVE_ONLY`
+  (`bundle_service.py:199`), assigned at `:1855`, read at `:2362`, and its
+  refusal token `REFUSAL_ARCHIVE_ONLY` at `:265`.
+* **`claimed_ancestors`** - recorded by Decisions 15, 18 and 20; replaced by one
+  ownership guard `_promotion_would_double_own` in `Mf-8acz` (Decision 28), and
+  that guard's walk deleted by Decision 34 (`Mf-1agz`). No successor symbol -
+  Decision 38 records the lineage.
+* **`_single_claimed_child_subtree` / `_holds_stronger_candidate`** - recorded by
+  Decision 28 (`Mf-ny89`); folded into `_promotion_would_double_own` by `Mf-8acz`
+  and deleted with its walk by Decision 34 (`Mf-1agz`). No successor symbol; the
+  strong-child preference is absorbed into the engine's ranking of the parent
+  plus `bundle_service.DESCEND_SHAPES` (Decision 38).
+* **`PROJECT_MEMBER_SUFFIXES`** - recorded by Decisions 24, 30 and 31; deleted by
+  `Mf-7oow` (Decision 32). Live: `bundle_service._members_of`
+  (`bundle_service.py:1076`) returning `MembersOf` (`:1066`).
+* **`member_asset_ids` as the member-set SEAM, and its `kinds=` argument** -
+  recorded by Decisions 29 and 30; the seam's rule was deleted by `Mf-7oow`
+  (Decision 32), with that argument. Live: `bundle_service._members_of`
+  (`bundle_service.py:1076`) at the door; the insert primitive keeps the
+  parameter and writes the list it is given
+  (`project_service.create_project_with_members`, `project_service.py:153`,
+  the argument at `:158`).
+* **`BundleSnapshot` / `BundleFacts` / the detector's `RULE_SET_STAMP`** -
+  recorded by Decisions 1 and 33; deleted by Decision 34 (`Mf-1agz`). Live:
+  `proposal_engine.Facts` (`proposal_engine.py:541`) and
+  `proposal_engine.rule_set()` (`:2548`), version `"2"` (`:2455`).
+* **"No subprocess on a GET" (`probe_git=False`)** - recorded by Decision 33
+  (`Mf-yitm`); amended inside Decision 33 by `Mf-1agz` and recorded by Decision
+  36 (`Mf-ky16`). Live: `bundle_service.GIT_PROBE_TIMEOUT = 5.0`
+  (`bundle_service.py:179`) threaded to `propose(git_timeout=...)`, with the
+  engine's own `proposal_engine.GIT_TIMEOUT_SECONDS` (`proposal_engine.py:172`)
+  as the unbounded default the CLI keeps.
+* **The document parsers** `_scan_doc`, `_merge_pair`, `_root_pair_paths`,
+  `_sibling_pair_paths`, `_LICENSE_LINE`, `MAX_DOC_CANDIDATES` - recorded by
+  Decision 16; deleted by Decision 34 (`Mf-1agz`). No successor symbol; the
+  engine's record of what it read is `Facts.metadata`/`Facts.provenance`.
+* **`is_bundle_member` / `is_macosx_artifact` / `is_generic_container_root`** -
+  recorded by Decision 17; moved by Decision 34 (`Mf-1agz`). Live: `file_utils`
+  (`file_utils.py:227`/`:215`/`:245`).
+* **`classify_entry`, `display_name`, `is_counted_*`, `thingiverse_id_from_name`,
+  the duplicate-archive identity** - recorded by Decisions 2, 4, 20, 24 and 25;
+  moved by Decision 34 (`Mf-1agz`). Live: `library_scan`
+  (`library_scan.py:261`/`:323`/`:280`/`:302`/`:339`/`:174`).
+* **`twin_key` / `common_entry_root` / `archive_payload_contained`** - recorded by
+  Decisions 4 and 19; moved by Decision 34 (`Mf-1agz`). Live:
+  `proposal_engine` (`proposal_engine.py:1371`/`:1384`/`:1408`), called by
+  `bundle_service._stem_pair_verified` (`:1175`) and `_entry_root_pair` (`:905`).
+* **`TITLE_NAME_BUNDLES_ENABLED` / `COMPOUND_BUNDLES_ENABLED` and the R5/R7
+  post-passes** - recorded by Decisions 21 and 23; deleted by Decision 34
+  (`Mf-1agz`). No successor symbol and no switch; the shapes are the engine's.
+* **The refusal words `R3:no-own-depth-model` / `R4:...` / `R6:...` / `R7:...`,
+  and `DETECTOR_MANUAL` / `SHAPE_MANUAL`** - recorded by Decisions 9 and 31;
+  deleted by Decision 34 (`Mf-1agz`). Live: `bundle_service.REFUSAL_*`
+  (`bundle_service.py:252`-`:271`), which use the engine's own readings verbatim.
+
 ## Context
 
 A library filled by `rsync`, a mount import or a bulk unzip arrives the way the
@@ -139,6 +244,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    a metadata shape. `detect_bundle` evaluates four of the seven - **R1, R2, R4,
    R3**, in that order - and the first one that fires decides the row:
 
+   **Superseded by Decision 34 (`Mf-1agz`): the seven rules, the
+   `BundleSnapshot`/`BundleFacts` contract and `detect_bundle`'s four-rule order
+   were `curiarium/api/bundle_detect.py`'s, and that module is deleted. A row now
+   comes from `bundle_service._build_candidates` (`bundle_service.py:596`), which
+   asks `proposal_engine.propose` (`proposal_engine.py:1661`) about each directory
+   and descends when the answer is in `bundle_service.DESCEND_SHAPES`
+   (`bundle_service.py:160`). The ruling is unchanged.**
+
    | # | Detector | Confidence | Shape | Fires when |
    |---|---|---|---|---|
    | R1 | `thingiverse-readme` | `high` | `root-docs` | the bundle root holds `README.txt` and/or `LICENSE.txt` - **at least one** of the two - and between them the pair carries both of Thingiverse's markers **in whichever document they were shipped**: `created by Thingiverse user <name>` with `licensed under <token>` on one side, `<title> by <creator> on Thingiverse: <url>` on the other |
@@ -147,6 +260,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    | R3 | `generic-bundle` | `low` | `generic` | nothing parses, but the tree still looks like one thing: at least one model **at the bundle's own depth** - depth 0, depth 1 under `files/`, or depth 1 under exactly one model-bearing subdirectory - plus one image and one text entry |
    | R6 | `archive-bundle` | `low` | `archive-root` | an ARCHIVE whose payload - at least one model and at least one image - sits under a SINGLE root entry directory and ships no text file |
    | R7 | `compound-bundle` | `low` | `compound` | a FOLDER holds one product in several model-bearing parts - no model at its own strict depth and at least two model-bearing groups sharing a family token (Leg A), or it holds models of its own, every group below it is foreign, its own models are the strict majority, and at least one group carries a vendor id (Leg B) - and it is carried as one row with a group breakdown; `detect_bundle` never reaches it |
+
+   **Superseded by Decision 34 (`Mf-1agz`): this table was the detector's rule
+   set and `bundle_detect.py` is deleted, so no rule id is served anywhere today -
+   the wire's `rule` is `engine:<shape>` (`bundle_service._match_row`,
+   `bundle_service.py:1778`) over the engine's own shapes
+   (`proposal_engine.ONE_PROJECT_SHAPES`, `proposal_engine.py:2079`;
+   `SPLIT_SHAPES`, `:2086`). No successor table, and nothing left for an R-number
+   to disagree with.**
 
    **R5 `title-name` / `low` is the fifth rule, and `detect_bundle` never
    reaches it.** Its judgement lives in the same pure module - `is_title_name`
@@ -159,6 +280,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    read in one place (Decision 21) - which puts it below every document rule and
    outside the order above: `low`, `title-name`, every provenance field `None`.
 
+   **Superseded by Decision 34 (`Mf-1agz`): R5, `is_title_name`,
+   `title_name_facts` and `TITLE_NAME_BUNDLES_ENABLED` were `bundle_detect.py`'s
+   and are deleted with it - no successor symbol. A name-shaped reading is now one
+   of the engine's own options, ranked by `proposal_engine.propose`; nothing reads
+   a switch to admit it.**
+
    **R6 `archive-bundle` / `low` is the sixth rule, and it is archive-only.** A
    directory never reaches it: `bundle_service` calls `archive_bundle_decision`
    on the archive carrier alone. That function is a wrapper around
@@ -166,6 +293,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    all refused** and can never re-report a HIGH (or medium, or R3 trio) row
    lower. A directory whose payload is the same shape stays refused exactly as
    it always was.
+
+   **Superseded by Decision 34 (`Mf-1agz`): R6, `archive_bundle_decision` and
+   `detect_bundle_decision` were deleted with the module - no successor symbol. An
+   archive is measured by `proposal_engine.measure_archive`
+   (`proposal_engine.py:2617`) and ranked by `proposal_engine.propose_archive`
+   (`:2666`), and its door is still the `archive_only` string
+   (`bundle_service.ARCHIVE_ONLY`, `bundle_service.py:199`).**
 
    **R7 `compound-bundle` / `low` is the seventh rule, and it runs after every
    other pass.** `compound_bundle_facts` lives in the same pure module, so it is
@@ -184,10 +318,23 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    `compound-bundle`, `compound`, every provenance field `None`. Decision 23 has
    the clauses, the markers, the two legs and the measurement.
 
+   **Superseded by Decision 34 (`Mf-1agz`): R7, `compound_bundle_facts`,
+   `_compound_pass` and `COMPOUND_BUNDLES_ENABLED` were deleted with the module -
+   no successor symbol, and no switch. A compound reading is now one of the
+   engine's shapes, and its breakdown arrives as `proposal_engine.Facts.groups`
+   (`proposal_engine.py:541`). Decision 23's ruling - one folder of one product's
+   parts is one row carrying its breakdown - is unchanged.**
+
    The module lists seven rules and `detect_bundle` runs four, so the order R1,
    R2, R4, R3 is that function's and never the rule set's. R5, R6 and R7 are the
    three rules that fire outside it, and none of them can rewrite a row another
    produced.
+
+   **Superseded by Decision 34 (`Mf-1agz`): the module and its four-rule order
+   are deleted. That nothing rewrites another reading's row now holds
+   structurally: `proposal_engine.propose` returns one ordered list per row and
+   `bundle_service._match_row` maps it field-for-field, so there is no second
+   producer to disagree with.**
 
    `high` therefore means *the vendor told us*, never *there is a `.txt` file*.
    A README that exists but lacks the markers is not R1: both high-confidence
@@ -202,6 +349,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    carried the created-by sentence, and it is `None` when nothing did. The cover
    is the largest image, ties broken by path.
 
+   **Superseded by Decision 34 (`Mf-1agz`): the parsing described here belonged
+   to `bundle_detect`'s document readers (`_scan_doc`, `_merge_pair`,
+   `_LICENSE_LINE`), deleted with the module - no successor symbol. The engine
+   fills `Facts.metadata`/`Facts.provenance` (`proposal_engine.py:541`) from the
+   documents it opens, and still echoes an unknown licence token with no URL. The
+   ruling - `high` means the vendor told us - is unchanged.**
+
    R4 sits **before** R3 in that order, so an id-named directory that would also
    satisfy R3's trio reads `medium` and not `low`: an id inferred from the
    operator-visible name is strictly more than a shape guess, because it says
@@ -210,6 +364,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    in a document the vendor wrote* - and it is a confidence of its own rather
    than a shade of `low`, which is why the report counts it separately as
    `counts.medium`.
+
+   **Superseded by Decision 34 (`Mf-1agz`): R3, R4 and their order were deleted
+   with `bundle_detect.py`. `counts.medium` is still served and still means
+   provenance inferred from the operator-visible name; a row's band is now
+   `proposal_engine.Option.confidence` (`proposal_engine.py:1612`). The ruling
+   here - `medium` is a confidence of its own, never a shade of `low` - is
+   unchanged.**
 
    The model evidence for R3 is bounded to the bundle's own depth, in one of
    three shapes: a model at depth 0; a model at depth 1 under the named
@@ -248,6 +409,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    calls `_own_depth_model_count` once and both R4 and R3 gate on the result - so
    the one cardinality rule governs a name-only offer exactly as it governs a
    shape-only one.
+
+   **Superseded by Decision 34 (`Mf-1agz`): `R3_MODEL_DIRS`,
+   `_own_depth_model_count` and this depth/allowed-shape bound were deleted with
+   the module - no successor symbol. What a row is judged on now is the engine's
+   own census (`proposal_engine.Facts.model_dirs`, `.child_models`, `.children`,
+   `proposal_engine.py:541`). The measurement quoted here is the record of a rule
+   that no longer ships.**
 
 2. **Classification is suffix-only, and never looks at a stem.**
    `classify_entry` maps an entry to `model` / `image` / `text` / `archive` /
@@ -362,6 +530,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    the same shape stays silent by this rule (Decision 18), save for R5's separate
    name signal (Decision 21).
 
+   **Superseded by Decision 34 (`Mf-1agz`): the pairing predicates named here
+   moved out of the deleted module - `proposal_engine.archive_payload_contained`
+   (`proposal_engine.py:1408`), over `proposal_engine.twin_key` (`:1371`) and
+   `proposal_engine.common_entry_root` (`:1384`) - and the two call sites are
+   `bundle_service._stem_pair_verified` (`bundle_service.py:1175`) and
+   `bundle_service._entry_root_pair` (`:905`). Decision 19's containment ruling is
+   unchanged.**
+
    `twin_verified` therefore no longer means "always true by construction" on a
    verified route: an entry-root pairing and a promoted or pair-only stem pairing
    are **re-verified at report time** by that same containment predicate, so a
@@ -443,6 +619,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
      need (the archive-containment strip and the twin attachment), never as a
      verdict.
 
+     **Superseded by Decision 34 (`Mf-1agz`): `pair_only` and
+     `offers_archive_only` were candidate flags of the deleted vocabulary - no
+     successor symbol. The read-out this paragraph records is `registered_assets`
+     asked for every row, and the `archive_only` STRING still exists:
+     `bundle_service.ARCHIVE_ONLY` (`bundle_service.py:199`), assigned at `:1855`
+     and read as the Extract door at `:2362`. What is gone is its use as a per-row
+     verdict. The ruling - a flag never short-circuits the lookup - is unchanged.**
+
    So a legacy R2 bundle reports `detector: thingiverse-sibling-docs`,
    `confidence: high` **and** `status: blocked`. That combination is the point:
    the detection is good and the refusal is about the directory row. Heal the
@@ -450,6 +634,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
    creatable with no code change, because nothing keys on which rule fired. A
    create request recomputes the report and refuses a `blocked` key outright, so
    a stale client cannot create one either.
+
+   **Superseded by Decision 34 (`Mf-1agz`): `thingiverse-sibling-docs` was a
+   `bundle_detect` detector name and is deleted - `detector` is now
+   `matches[0].shape`, and its rule token is `engine:<shape>`. The `blocked` half
+   is untouched: it comes from the `Folder` row
+   (`bundle_service.UNRESOLVED_DIRECTORY`, `bundle_service.py:197`), never from a
+   rule's name.**
 
 8. **Dismissals are keyed by the relative path, and a rename silently
    un-dismisses.** The key is the storage-root-relative directory (or the zip's
@@ -715,6 +906,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     is a guess, and a guess must never swallow a subtree, including a subtree
     made of other inferred candidates.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `iter_bundle_candidates`, the
+    claimed-children set and the inferred-confidence exemption were the walk the
+    deleted passes fed - no successor symbol. The walk is
+    `bundle_service._build_candidates` (`bundle_service.py:596`) under
+    `bundle_service.DESCEND_SHAPES` (`:160`): a `leave` or `archive-only` reading
+    descends and offers no row. The container ruling itself is unchanged and is
+    enforced by descent, not by a confidence test.**
+
     The attach set was unchanged by this Decision, and Decision 30 widened it: what a
     created project attaches is what its own snapshot names - the models then, and the
     images as well since Mf-wsdo. One limit is worth naming beside it: the
@@ -764,6 +963,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     re-judged, and `contains_bundles` is untouched: a compound answers that belt
     because its snapshot is the whole subtree rather than a claimed-children view,
     not because it is exempt from it.
+
+    **Superseded by Decision 34 (`Mf-1agz`): `_compound_pass`,
+    `_strictly_inside_any`, the `key in offered` guard and
+    `COMPOUND_BUNDLES_ENABLED` were deleted with the module - no successor symbol
+    for the pass. In the walk the same promise is structural: one ordered list per
+    row from `proposal_engine.propose`, so no pass exists that could rewrite
+    another pass's row.**
 
     **The ONE bounded exception above is now the first of two (`Mf-ao6r`).** A
     path the ledger names `member-of-bundle` may be OFFERED AGAIN only when a
@@ -840,6 +1046,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
       loses its leading part, which is indistinguishable from a sentence of
       prose sitting before the marker.
 
+      **Superseded by Decision 34 (`Mf-1agz`): `_scan_doc`, `_merge_pair`,
+      `_root_pair_paths`, `_sibling_pair_paths` and `MAX_DOC_CANDIDATES` were
+      `bundle_detect`'s and are deleted - no successor symbol. The named-pair rule
+      itself (one document carrying both markers is enough; a stray `notes.txt` is
+      not a pair) survives in the engine's own document reading, whose record is
+      `Facts.documents` (`proposal_engine.py:541`).**
+
     This changes DETECTION, never READINESS. `status` and `blocked_reason`
     still come from the database alone - the resolved `Folder.storage_path` and
     the registered model assets - so detection cannot flip any bundle's
@@ -895,6 +1108,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     already suppressed (when it was not). The report never invites deleting a
     file that is part of a live bundle, and nothing is extracted or written.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `is_bundle_member` moved out of the
+    deleted module and is `file_utils.is_bundle_member` (`file_utils.py:227`),
+    asked by the walk at `bundle_service.py:632` and labelled
+    `bundle_service.REFUSAL_NESTED_MEMBER` (`:254`). `pair_only`, the promotion
+    strip and the member filter it interacted with are deleted - no successor
+    symbol. Decision 17's ruling - a nested archive is a member, never a candidate
+    and never evidence - is unchanged and is now that one predicate.**
+
 18. **A verified archive makes an offered-nowhere directory a low bundle, and
     only that directory.** A directory no detector offers on its own, but for
     which a pairing has verified that an archive beside it is *this* directory's
@@ -910,6 +1131,16 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     description) stays `None`, because an entry root or a stem is evidence of
     which thing this is, never of who made it; the row's `archive` field is the
     identity, not a claim about authorship.
+
+    **Superseded by Decision 34 (`Mf-1agz`): the verified pairing that promoted
+    this row (`archive_owned_facts`, `_own_depth_model_count`) was deleted with the
+    module - no successor symbol. An archive is attached today by
+    `bundle_service._stem_pair_verified` (`bundle_service.py:1175`) or
+    `_entry_root_pair` (`:905`) through
+    `proposal_engine.archive_payload_contained` (`proposal_engine.py:1408`), and
+    the DIRECTORY's row is whatever `proposal_engine.propose` answers for it.
+    Decision 18's ruling - a verified archive makes an offered-nowhere directory a
+    low row, and only that directory - is unchanged.**
 
     The own-depth/cardinality bound is now the *only* shape guard, and it is
     load-bearing: the archive says WHICH thing a directory is, never that a pile
@@ -929,6 +1160,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     still refused when it holds a bundle, sits inside one, or is already a row.
     This is the first of the two sentences that rule falsified - the other is the
     residual-silence paragraph in Decision 20.
+
+    **Superseded by Decision 34 (`Mf-1agz`): R5 as a separate signal is deleted
+    with `bundle_detect.py` - no successor symbol. Decision 21's ruling stands as a
+    statement about the name-shaped offer; the mechanism behind it is now one of
+    the engine's own options.**
 
     The container rule still wins: a directory that *holds* bundles keeps the
     blocked `archive_only` row and creates nothing, so a pile of models with one
@@ -966,6 +1202,15 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     report hid the thing the operator had on disk. That is the superseding
     condition this amendment closes.
 
+    **Superseded by Decision 28 (`Mf-8acz`) and then by Decision 34
+    (`Mf-1agz`): the `claimed_ancestors` branch named here lived in
+    `bundle_service`, was replaced by one ownership guard
+    `_promotion_would_double_own`, and the walk that guard lived in was deleted with
+    the cutover. `git grep -n 'claimed_ancestors' -- curiarium/api` is empty, and
+    `_promotion_would_double_own` survives only in one historical comment in
+    `tests/test_bundle_service.py:6035` - no successor symbol. Decision 38 records
+    the lineage; the ruling this amendment states is unchanged.**
+
     The owner's ruling, with his reason: he sometimes extracts a file and copies
     the zip in beside it, so such a parent is a container he made by hand and
     the child is the real bundle. Prefer the child. The rule as shipped refuses
@@ -976,6 +1221,15 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `bundle_dirs`, so `_nested_archives` would mark the strong child a member
     and the member filter would delete it, which is the same swallow by another
     route.
+
+    **Superseded by Decision 28 (`Mf-8acz`) and by Decision 34 (`Mf-1agz`):
+    `bundle_detect.STRONG_CONFIDENCES` was deleted with the module, and the refusal
+    it powered (`_holds_stronger_candidate`, then `_promotion_would_double_own`) has
+    no successor symbol - the strong-child preference is no longer a row, a flag or
+    a helper any more (Decision 38). What decides a parent today is the engine's own
+    reading of it (`proposal_engine.propose`) plus the walk's stop rule
+    `bundle_service.DESCEND_SHAPES` (`bundle_service.py:160`). Decision 18's ruling
+    is unchanged and is not re-litigated here.**
 
     The residual, stated fully rather than argued away: the parent is silent.
     The refused pair's archive attaches to no row - the stem or entry-root route
@@ -1011,6 +1265,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     should not have been a member; the reachable shapes now report the group
     again.
 
+    **Superseded by Decision 28 (`Mf-8acz`) and by Decision 34 (`Mf-1agz`): the
+    `claimed_ancestors` branch, the promotion and the row-site leg this paragraph
+    bounds were deleted with the promoter - no successor symbol. `archive_only` is
+    still the name of the Extract door (`bundle_service.ARCHIVE_ONLY`,
+    `bundle_service.py:199`) and has not been a directory row's verdict since
+    Decision 34. The rulings here - the container rule at both sites, and a pile
+    staying visible beside its child - are unchanged.**
+
     `test_service_a_promoted_row_does_not_swallow_a_nested_high_bundle` and
     `test_service_a_promoted_row_does_not_swallow_a_nested_medium_bundle` pin
     it; `test_service_a_promoted_row_still_wins_over_a_nested_low_member` and
@@ -1030,6 +1292,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     routes decide whether the payload fits through **one** predicate,
     `bundle_detect.archive_payload_contained`, so they cannot disagree about what
     an archive's payload is or about when it fits a folder.
+
+    **Superseded by Decision 34 (`Mf-1agz`):
+    `bundle_detect.archive_payload_contained` is now
+    `proposal_engine.archive_payload_contained` (`proposal_engine.py:1408`).
+    Decision 19's ruling - two routes, one containment predicate, so they cannot
+    disagree about what a payload is - is unchanged and is still one function.**
 
     **The wrapper is decided once, for the whole archive.** With an entry root
     the predicate is the strict strip-and-compare it always was: every entry's
@@ -1098,11 +1366,25 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
       so the entry root could never name it; and its stem was consumed before any
       pass could verify it.
 
+      **Superseded by Decision 34 (`Mf-1agz`): `archive_owned_facts`,`archive_owned` and the stem/entry-root refusal order inside
+      `_build_candidates` were deleted with the module - no successor symbol, and
+      this measurement is the record of a rule that no longer ships. The surviving
+      pairing code is `bundle_service._stem_pair_verified`
+      (`bundle_service.py:1175`) and `_entry_root_pair` (`:905`), and
+      `file_utils.is_generic_container_root` (`file_utils.py:245`) still refuses a
+      `files/` root on the entry-root route.**
+
 20. **A Thingiverse id in the name is provenance, and it is the only provenance
     a name can buy.** R4 reads `^(\d{4,})_` off the name and buys exactly one
     thing with it: a `source_url`, and the `thing_id` derived back out of that
     URL. Every other provenance field stays `None` - by construction, not by
     discipline.
+
+    **Superseded by Decision 34 (`Mf-1agz`): R4 is deleted with the module - no
+    successor symbol. The id-in-the-name reading survives as
+    `library_scan.thingiverse_id_from_name` (`library_scan.py:339`), which the
+    enrich door asks for a `source_url` and nothing else. Decision 20's ruling - an
+    id buys provenance and never attribution - is unchanged.**
 
     **The fault, measured.** On the owner's live library (131 top-level
     directories, 8 of them named with a leading numeric id), 7 of the 8 are
@@ -1118,6 +1400,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     library. Mutation: delete the R4 block from `detect_bundle` and that snapshot
     returns `None` - with no image and no text, R3 cannot fire either - so the
     report comes back empty and every assertion in the witness reds.
+
+    **Superseded by Decision 34 (`Mf-1agz`): the mutation named here - deleting
+    the R4 block from `detect_bundle` - is not available today, because the module
+    and the block are deleted; this paragraph is the record of the measurement that
+    put the id reading in. The live reader is
+    `library_scan.thingiverse_id_from_name` (`library_scan.py:339`).**
 
     **The bound is the regex, and each bound is load-bearing.** `^(\d{4,})_` is
     three decisions in seven characters, and each one has a named mutation and a
@@ -1177,6 +1465,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     before R1 and the same bundle comes back `medium` carrying the wrong id. Both
     reds are pinned.
 
+    **Superseded by Decision 34 (`Mf-1agz`): the R4-before-R3 order and the two
+    mutations that pinned it were deleted with `bundle_detect.py` - no successor
+    symbol. The ordering fact it records - an operator-visible id is more specific
+    than a shape guess - is an argument in Decisions 20 and 33, not a live code
+    path.**
+
     **R4 always beats the archive-promotion pass, because both gate on the same
     predicate.** The promotion pass skips any key already in `found`, and R4's own
     gate is the same `_own_depth_model_count(snapshot) >= 1` bound, so an id-named
@@ -1187,6 +1481,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     key; removing either skip alone changes nothing, because the other still
     protects the row.
 
+    **Superseded by Decision 34 (`Mf-1agz`): the `found` set, the
+    archive-promotion pass and the `archive_owned` candidate were deleted with the
+    module - no successor symbol. Today the twin is attached to an existing row by
+    `bundle_service._build_candidates` (`bundle_service.py:596`) before any archive
+    row is built, and a consumed twin is labelled
+    `bundle_service.REFUSAL_TWIN_CONSUMED` (`:255`).**
+
     The measured consequence is in `twin_verified`. A plain stem twin of a
     directory some rule detects keeps the **names-only** basename comparison as an
     operator remark (Decision 19), where before R4 that directory was promoted
@@ -1195,6 +1496,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     answer: a `medium` row carrying a source URL is worth more than a `low` row
     carrying a stronger verification string, and it is names-only on both routes
     anyway - no bytes are read either way.
+
+    **Superseded by Decision 34 (`Mf-1agz`): `twin_verified` as the deleted
+    pairing pass computed it, and the R4-promotion interaction measured here, went
+    with the module - no successor symbol for that pass. The engine's own record of
+    a twin is `Facts.twin` (`proposal_engine.py:541`).**
 
     **An id-named pile that still carries a model at its own depth gets
     `pair_only` from a verified twin; one that does not stays absent.** Two
@@ -1223,6 +1529,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     creatable `medium` / `ready` row beside its own two children, so the report
     gains a third row and create-all makes three projects instead of two.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `pair_only_specs`,
+    `archive_owned_facts`, `claimed_ancestors` and the id-shaped-pile refusal
+    described here were deleted with the module and the promoter - no successor
+    symbol. A pile's absence is now the engine's reading of it, written into the
+    ledger as `bundle_service.REFUSAL_LEAVE` (`bundle_service.py:264`). The rulings
+    this paragraph states - a refusal is never stamped with the id it was refused
+    for, and a pile has no own-depth model - are unchanged.**
+
     **The archive-snapshot widening is accepted.** `_zip_snapshot` names an
     archive's snapshot from the zip's **stem**, so `detect_bundle` sees an
     id-shaped name for a `5390184_x.zip` exactly as it does for a directory, and
@@ -1235,6 +1549,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     directories only and the same zip reads `generic-bundle` / `low` with no URL -
     the medium reading is what the widening buys, and the create stays blocked
     either way, which is exactly why it costs nothing.
+
+    **Superseded by Decision 34 (`Mf-1agz`): `_zip_snapshot`, `detect_bundle`'s
+    reading of an archive snapshot and the R4 firing that depended on them were
+    deleted with the module - no successor symbol. An archive is its own row only
+    through `proposal_engine.measure_archive`/`propose_archive`
+    (`proposal_engine.py:2617`/`:2666`), and a zip row still carries
+    `bundle_service.ARCHIVE_ONLY` (`bundle_service.py:199`) as its door rather than
+    a verdict.**
 
     **Both guard sites and the create-time belt are the whole regression surface,
     so all three comparisons are one set.** The three `== CONFIDENCE_LOW` tests in
@@ -1249,6 +1571,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     fourth inferred confidence could not escape any of them by omission, because
     the guards ask about the set rather than about a list of literals.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `bundle_detect.INFERRED_CONFIDENCES`,
+    `claimed_ancestors` and the three `== CONFIDENCE_LOW` sites were deleted with
+    the module and the promoter - no successor symbol for the set or for the guards
+    it fed. The one surviving band test is a literal in the create belt:
+    `bundle_service.py:2512` (`row["confidence"] != "high"`). The rulings here -
+    one set decides every guard site, and a fourth inferred confidence cannot escape
+    by omission - are unchanged.**
+
     **Residual silence, stated rather than hidden.** A doc-less, image-less,
     model-only folder **without** a numeric id is still not offered *by this
     rule*, and that is R3 unchanged rather than an oversight: a random folder of
@@ -1262,6 +1592,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `Mf-hvck`'s territory was wrong about where it would be solved, and it is
     still nobody's rule. This is the second of the two sentences `Mf-hvck`
     corrected; the first is Decision 18's silence sentence.
+
+    **Superseded by Decision 34 (`Mf-1agz`): R3's residual silence and R5's share
+    of it (`_own_depth_model_count`) were deleted with the module - no successor
+    symbol. A doc-less, model-only folder's fate is now the engine's reading of it,
+    and this paragraph stands as the record of a rule that no longer ships.**
 
 21. **A title-shaped name is a `low` bundle, and the rule is a service
     post-pass rather than a detection branch.** The owner's decision
@@ -1330,6 +1665,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     distinguishable on the wire from a vendor row's
     `thingiverse-readme`/`root-docs`/`high`.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `title_name_facts`,
+    `_name_only_facts` and the R5 title reading were deleted with the module - no
+    successor symbol. The ruling it states - a name proves nothing about who made a
+    thing - survives in the engine's own band: `proposal_engine.Option.confidence`
+    (`proposal_engine.py:1612`) with `_CONFIDENCE_RANK` (`:731`).**
+
     **One switch, read in one place.** `TITLE_NAME_BUNDLES_ENABLED` is read inside
     `title_name_facts` and nowhere else, so turning the rule off is one edit and
     the scan, the report and the create pass all follow: the post-pass asks for
@@ -1351,6 +1692,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `ultimate-card-box-v4-model_files` keep reading `generic-bundle`. The pass is
     shallowest-first and every accepted key joins the taken set, so a title
     parent claims its title child and never the other way round.
+
+    **Superseded by Decision 34 (`Mf-1agz`): the R5 post-pass, the pass order of
+    `_build_candidates` and the sixteen witnesses named here were deleted with the
+    module - no successor symbol. There is no placement question left to get right:
+    the walk has one pass and its order is the stack in
+    `bundle_service._directory_rows` (`bundle_service.py:496`).**
 
     **The container rule applies at the new site through `_relates_to_any`, with
     three legs.** A key is skipped when it IS a row (claimed, promoted or
@@ -1374,6 +1721,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     turning it into a row of its own would count the same signal twice and add
     archive-only noise that can never create.
 
+    **Superseded by Decision 34 (`Mf-1agz`): R5's folders-only asymmetry and the
+    `_zip_snapshot` widening it compares itself against were deleted with the module
+    - no successor symbol. An archive is offered on its own measurement
+    (`proposal_engine.measure_archive`, `proposal_engine.py:2617`), never on a
+    name.**
+
     **Stagetop is a caveat, not a blocker, and `Mf-5dnx` owns the class.** The
     owner reports `Stagetop` as a COMPOUND project - one folder holding several
     distinct things - so this rule WILL offer it as one `low` bundle and that
@@ -1396,6 +1749,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `test_service_the_switch_off_restores_every_absorbed_row` pins on the
     fixture's eleven child rows.
 
+    **Superseded by Decision 34 (`Mf-1agz`): R7, `COMPOUND_BUNDLES_ENABLED` and
+    the eleven-child measurement this amendment quotes were deleted with the module
+    - no successor symbol. The refusal path it names is now the walk's ledger
+    (`bundle_service.REFUSAL_*`, `bundle_service.py:252`-`:271`), which still names
+    why a path is not a row.**
+
     **The scope is wider than the measured eleven, and the risks are stated
     rather than hidden.** A title-named folder holding models plus an image, or
     models plus a text file, is also offered - shapes R3 refuses for want of the
@@ -1412,6 +1771,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     library beyond the eleven directories the ticket counted; this ADR's counts
     predate the rule.
 
+    **Superseded by Decision 34 (`Mf-1agz`): the title-name shape,
+    `_relates_to_any` and the closed exclusion set described here were deleted with
+    the module - no successor symbol. This paragraph is the record of a rule's
+    risks, not a description of shipping code.**
+
 22. **A single-root archive with models and images is a `low` bundle, and the
     rule is archive-only.** `Mf-tcrw` adds R6 `archive-bundle` / `low` /
     `archive-root`. An archive is a vendor artifact: someone zipped it
@@ -1426,6 +1790,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     proves it is one thing; it says nothing about who made it or what it may be
     reused for.
 
+    **Superseded by Decision 34 (`Mf-1agz`): R6 `archive-bundle`,
+    `single_root_archive_facts` and `_name_only_facts` were deleted with the module
+    - no successor symbol. An archive's composition is now
+    `proposal_engine.measure_archive` (`proposal_engine.py:2617`), ranked by
+    `propose_archive` (`:2666`). Decision 22's ruling - a single-root archive with
+    models and images is one low row and every provenance field stays `None` - is
+    unchanged.**
+
     **The single root is the pile guard, and it replaces `_own_depth_model_count`
     here deliberately.** R3's own-depth bound is what misses
     `Fates End - DiceJails.zip`: 8 models under **four** subdirectories
@@ -1438,6 +1810,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     prefix cannot make a real bundle rootless. This is not a loosening of R3: the
     clause is consulted only when every stronger rule refused, never by
     `detect_bundle` and never on a directory.
+
+    **Superseded by Decision 34 (`Mf-1agz`): `_own_depth_model_count`, R6's
+    single-root clause and the `common_entry_root` reuse inside it were deleted with
+    the module - no successor symbol. The engine has its own
+    `proposal_engine.common_entry_root` (`proposal_engine.py:1384`), and an
+    archive's root is one of the facts `measure_archive` records.**
 
     **The measured delta on the owner's library is 26 archives to 6 consumed to
     20 new rows.** 26 archives have this composition. Six are consumed by
@@ -1456,6 +1834,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     own (R5), two uncreatable rows for what may be one thing, which the operator
     rejects in the queue rather than the code guessing.
 
+    **Superseded by Decision 34 (`Mf-1agz`): the 26-to-6-to-20 measurement belongs
+    to a rule that no longer ships, and R6's row production is deleted with it - no
+    successor symbol. Rows are counted now by Decision 34's own artifacts
+    (`.plans/measurements/Mf-1agz-after-summary.md`).**
+
     **The restraint is a model and an image, and model-only archives stay
     refused.** Nine measured archives are models and nothing else: six with
     entries at the zip root (`606df4f71f663_fates-end-dice-tower-free-wizard-tower.zip`,
@@ -1472,6 +1855,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     restraint: a listing that ships a document is R3's business, so
     `Fates End_Bonus_Delivery-Banks.zip` (33 models, 3 images, one text, one root
     `_Bonus_Delivery`, own-depth 0) stays refused exactly as it was.
+
+    **Superseded by Decision 34 (`Mf-1agz`): R6's restraint and the nine refused
+    archives are the record of a deleted rule - no successor symbol. The engine
+    measures every archive (`proposal_engine.measure_archive`,
+    `proposal_engine.py:2617`); what it does with a models-only archive is its own
+    ranking, not this clause.**
 
     **The guards, each measured.** `All Pokemon.zip` stays refused as a pile: 607
     root entry directories, 2096 images, 607 text, and 2 files the detector
@@ -1491,6 +1880,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     archives - so no new `REFUSAL_*` word exists and the refusal ledger's
     vocabulary is unchanged.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `detect_bundle_decision`, the
+    primary-refusal vocabulary (`R3:no-own-depth-model`, `R3:trio-no-image`) and
+    R6's guards were deleted with the module - no successor symbol. The ledger's
+    words today are `bundle_service.REFUSAL_*` (`bundle_service.py:252`-`:271`), and
+    the engine's own readings are used verbatim as ledger words.**
+
 23. **One folder holding one product in several parts is ONE `low` row, and the
     rule is a post-pass with a vocabulary of shapes rather than of refusals.**
     `Mf-8xrc` adds R7 `compound-bundle` / `low` / `compound`. The owner's
@@ -1501,6 +1896,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     breakdown, or one row per part - and the ticket chose the breakdown, because
     a row can name the parts and say they belong together while eleven separate
     rows on the measured library cannot.
+
+    **Superseded by Decision 34 (`Mf-1agz`): R7 and its vocabulary of shapes were
+    deleted with the module - no successor symbol. Decision 23's ruling - one folder
+    holding one product in several parts is ONE low row - is unchanged; the shape it
+    names is now the engine's, and its breakdown is `proposal_engine.Facts.groups`
+    (`proposal_engine.py:541`).**
 
     **The ticket's four discriminators, quoted verbatim, because each one is
     decided below.** *"VARIANT FAMILY: groups share a family token
@@ -1591,6 +1992,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     alone leaves it refused, which is why neither leg is load-bearing by itself
     and why a name with no witness could go.
 
+    **Superseded by Decision 34 (`Mf-1agz`): the repository-metadata markers and
+    R5's `TITLE_PART_NAMES` were `bundle_detect`'s tables and are deleted - no
+    successor symbol. The engine reads the documents it opens into `Facts.meta` and
+    `Facts.documents` (`proposal_engine.py:541`), on the tree it measures.**
+
     **Leg A is the ticket's rule sentence, and it has TWO measured witnesses.**
     No model at the folder's own depth - `root_model_count`, which counts
     STRICTLY depth 0 and is deliberately not `_own_depth_model_count`, because
@@ -1644,6 +2050,10 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     same-sized things rather than one product. It is declined for the reason R5's
     suffix table is declined - a table of counts is a guess about sizes somebody
     chose, and this rule keeps its evidence to words and ids.
+
+    **Superseded by Decision 34 (`Mf-1agz`): R7's declined equal-model-count leg is
+    the record of a deleted rule - no successor symbol. There is no rule table left
+    in which a leg could be declined or added.**
 
     **The row is `low` and name-derived: nothing here states provenance.** It is
     built by `_name_only_facts`, which has no parameter that could set them, so
@@ -1727,6 +2137,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     bound refuses. Without the bound the rule would lower two undisputed `high`
     verdicts to one `low` row.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `_compound_absorbs`,
+    `root_model_count` and `bundle_detect.STRONG_CONFIDENCES` were deleted with the
+    module - no successor symbol, and the absorption bound this paragraph records no
+    longer exists as code. The preference it protected - a weaker reading never
+    replaces a stronger one - belongs to one authority now:
+    `proposal_engine.propose` orders the options and nothing else votes.**
+
     **The measurement, quoted from the artifacts.** before/after on the owner's
     library, base `585f12917cd2b12c0c5f91f435a1fe8dffb55796`, root
     `/mnt/ceph/3D_models`, `--limit 400`, rule set `2026-11-04.2` /
@@ -1758,6 +2175,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     like-for-like corpus comparison is exactly what a rule-set stamp exists to
     refuse. The database counts read **NOT MEASURED**, `assets` and `projects`
     both `null`, because the development database is empty - nulls, not zeros.
+
+    **Superseded by Decision 34 (`Mf-1agz`): this before/after was taken on a rule
+    set (`2026-11-05.1`) that no longer ships, with a stamp hash from the deleted
+    module - the numbers are the record of a measurement, not of today's report. The
+    live stamp is `proposal_engine.rule_set()` (`proposal_engine.py:2548`), version
+    `"2"` (`:2455`).**
 
 24. **Creating from a compound row is an ATTACH decision, and an excluded
     group's survival is justified by the created project's own marker, not by the
@@ -1811,6 +2234,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     an offered one `member-of-bundle`, so a ledger-derived answer would make every
     group separable and `not_separable_group` dead code.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `BundleFacts.groups`, `BundleGroup`,
+    the detector's `RULE_SET_VERSION`/`RULE_SET_STAMP` and the `separable`
+    derivation described here were deleted with the module - no successor symbol. A
+    group now arrives as a dict in `proposal_engine.Facts.groups`
+    (`proposal_engine.py:541`), and the stamp is the engine's
+    (`proposal_engine.rule_set_stamp`, `:2533`).**
+
     **The attach set.** It is every registered MODEL or IMAGE asset under the key that
     is not under an excluded prefix - `bundle_service.PROJECT_MEMBER_SUFFIXES`, the
     ATTACH table Decision 30 introduced; this sentence said MODEL only until then, and
@@ -1825,6 +2255,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     compound row from the belt" is the named anti-fix that was refused, and the
     belt stays live on a `low` compound row
     (`test_a_registered_asset_that_vanished_from_the_disk_still_answers_the_belt`).
+
+    **Superseded by Decision 32 (`Mf-7oow`) and Decision 34 (`Mf-1agz`):
+    `bundle_service.PROJECT_MEMBER_SUFFIXES` was deleted by `Mf-7oow`, and the
+    detector tables it was built from by `Mf-1agz` - no successor constant. The
+    attach set is every registered asset under the key, and the one function is
+    `bundle_service._members_of` (`bundle_service.py:1076`) returning `MembersOf`
+    (`:1066`). The belt this paragraph restates - `assets`/`own_assets` are never
+    filtered by an exclusion - is unchanged and is `bundle_service.py:2512`.**
 
     **The marker shape, verbatim.** Every marker carries the six keys `key`,
     `detector`, `confidence`, `rel_dir`, `archive`, `twin_verified`, plus
@@ -1881,6 +2319,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `test_an_exclusion_of_a_group_that_was_never_a_row_is_refused`, whose Leg B
     fixture's foreign group is named for a vendor id, holds four models and
     nothing else, and therefore reads `separable: false`.
+
+    **Superseded by Decision 34 (`Mf-1agz`): the rule-numbered reasoning here (R3's
+    trio, R1's markers, R5's names) was deleted with the module - no successor
+    symbol. The three exclusion refusals themselves are unchanged: they are
+    `failed`, never `blocked`.**
 
     **The cover, re-picked and named.** `_cover` is reused verbatim, never a
     second cover rule: largest registered image, then `facts.cover_entry` (an
@@ -1969,6 +2412,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
         group list that moved between the two can diverge; the only divergence
         direction is a checkbox that then refuses, which is the safe one.
 
+        **Superseded by Decision 34 (`Mf-1agz`) at residual 9: `pair_only` is deleted
+        with the candidate flags - no successor symbol. The other residuals stand as
+        statements about compound and re-offer behaviour; the mechanism they were
+        measured through is the walk in `bundle_service._build_candidates`
+        (`bundle_service.py:596`).**
+
     **One consequence of the confirmation surface, stated because a reader will
     find it.** The exclusion checkbox lives only in the detail pane's "Create
     project"; the bulk doors ("Create selected", "Create low as name-only") send
@@ -2010,6 +2459,16 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `classify_entry` stays SUFFIX-ONLY and `is_macosx_artifact` stays
     TOP-LEVEL-ONLY, because each answers a different question.
 
+    **Superseded by Decision 34 (`Mf-1agz`): the re-export of `is_skipped_name`
+    from `bundle_detect`, `is_counted_entry`/`is_counted_model` there, and the
+    detector stamp over those tables, were deleted with the module. Today the
+    predicate is `library_scan.is_skipped_name` (`library_scan.py:622`), the
+    counters are `library_scan.is_counted_entry`/`is_counted_model`
+    (`:280`/`:302`), and the stamp that covers them is the engine's
+    (`proposal_engine.rule_set_tables`, `proposal_engine.py:2463`). The rulings here
+    - one predicate asked by both doors, suffix-only `classify_entry`,
+    top-level-only `is_macosx_artifact` - are unchanged.**
+
     **The predicate is the scanner's actual rule, and the junk vocabulary is
     deliberately NOT the one asked.** `entry_policy.is_junk_entry` was the
     scheduler's first proposal and the plan gate measured it wrong: the scan
@@ -2045,6 +2504,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `test_a_sidecar_only_preview_still_offers_the_row`,
     `test_the_document_candidates_keep_the_walk_reading_too`).
 
+    **Superseded by Decision 34 (`Mf-1agz`): `detect_bundle_decision`'s trio gate,
+    the `R3:trio-no-image`/`-no-text` reasons and `_walk_has_role` were deleted with
+    the module - no successor symbol. The engine's evidence readers are its own
+    walk (`proposal_engine.measure`, `proposal_engine.py:664`); the count-versus-
+    evidence distinction this paragraph draws is one walk's internal fact now, not
+    two reading modes a caller can mix.**
+
     **Two rules decide FROM the counts, so they move with them - deliberately.**
     R6's archive trio (`single_root_archive_facts`: text, model and image
     presence) and R7's group leg (`compound_groups`, `root_model_count`, and the
@@ -2056,6 +2522,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `._README.txt` no longer keeps R6 out of the missing-document hole, and
     groups whose models are all sidecars name no group at all. Neither direction
     fired on the measured tree.
+
+    **Superseded by Decision 34 (`Mf-1agz`): `single_root_archive_facts`,
+    `compound_groups`, `root_model_count` and the count-driven doors named here were
+    deleted with the module - no successor symbol. The engine measures counts and
+    shapes in one walk (`proposal_engine.Facts`, `proposal_engine.py:541`), so there
+    is no second count for them to disagree with.**
 
     **The tables and the stamp move with the rule.** `SKIPPED_FILENAMES` and
     `HIDDEN_NAME_PREFIX` join `rule_set_tables()` by value and the declared-table
@@ -2082,6 +2554,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     precedent rather than an error - a rule-set stamp exists to refuse a
     like-for-like comparison across a rule change. Row-level artifacts live under
     `.plans/measurements/` and are never committed.
+
+    **Superseded by Decision 34 (`Mf-1agz`): this before/after and its rule-set
+    stamps (`2026-11-05.1` -> `.2`) belong to the deleted detector and are not
+    comparable to today's report - the live stamp is `proposal_engine.rule_set()`
+    (`proposal_engine.py:2548`). The measurement stands as the record it is.**
 
     **One residual stays, ticketed rather than widened.** A zip LISTING's
     `__MACOSX/foo/plain.stl` is still counted although extraction refuses it: the
@@ -2348,6 +2825,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     the second is the accepted nested-bundle cost recorded below; and the
     excluded-group subtraction is a third place drift is deliberately STRICTER.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `bundle_detect.is_counted_model` is
+    `library_scan.is_counted_model` (`library_scan.py:302`), and the report's own
+    containment set it distinguishes itself from (`_own_paths` tested for a model
+    suffix) is no longer built in `bundle_service` - the census is
+    `proposal_engine.Facts` (`proposal_engine.py:541`). The drift ruling -
+    MODEL-scoped, never every asset - is unchanged.**
+
     **`groups` is the wrong basis for the notice.** The marker's group list is a
     creation-time snapshot: a non-compound detection marker has no `groups` yet
     is drift-able, and a brand-new subfolder is not a group at all - a per-group
@@ -2405,6 +2889,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     of them are left exactly as written, including 18's guard, which this decision
     reuses rather than redefines.
 
+    **Superseded by Decision 28 (`Mf-8acz`) and by Decision 34 (`Mf-1agz`): the
+    `claimed_ancestors` mark and Decision 18's branch this decision answers were
+    deleted with the promoter - no successor symbol. `git grep -n
+    'claimed_ancestors' -- curiarium/api` is empty, and Decision 38 records the
+    lineage. The ruling Decision 28 states - a wrapper of one claimed child is one
+    row of its own - is unchanged; what decides it now is the engine's reading of
+    the wrapper plus `bundle_service.DESCEND_SHAPES` (`bundle_service.py:160`).**
+
     **The single-subtree promotion.** The `claimed_ancestors` leg of the pairing
     loop now asks one shape question before it answers: does this directory's whole
     payload sit inside one child? `bundle_service._single_claimed_child_subtree`
@@ -2427,6 +2919,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     describe are the caller's decision, not evidence for this one. No walk, no
     stat, no store - a pure read of two listings the pass already built.
 
+    **Superseded by `Mf-8acz` and by Decision 34 (`Mf-1agz`):
+    `_single_claimed_child_subtree`, the `claimed_ancestors` leg, `pair_only_specs`
+    and the `archive_owned` row named here were deleted - `Mf-8acz` replaced the
+    shape question with one ownership guard `_promotion_would_double_own`, and the
+    cutover deleted the walk that guard lived in. No successor symbol; Decision 38
+    records the lineage.**
+
     **Confidence stays `low`: promotion is not new evidence about the shape.**
     `bundle_detect.archive_owned_facts` is the one facts function and it is the same
     call the non-ancestor promotion makes, so `detector` stays `generic-bundle`, the
@@ -2439,6 +2938,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     measures naming evidence. Decision 7's orthogonality is what makes that
     coherent: what promotion changed is `status`, which the database owns, and not
     `confidence`, which the rules own.
+
+    **Superseded by Decision 34 (`Mf-1agz`): `bundle_detect.archive_owned_facts`,
+    the `generic-bundle` detector name and the `archive_owned` flag were deleted
+    with the module - no successor symbol. The ruling here - promotion is not new
+    evidence about the shape, so a badge never rises on it - is unchanged, and the
+    badge today is `proposal_engine.Option.confidence`
+    (`proposal_engine.py:1612`).**
 
     **The child's dissolve, and the honesty of it.** Every non-archive candidate
     strictly below the promoted parent is dissolved with `REFUSAL_MEMBER_OF_BUNDLE`
@@ -2460,6 +2966,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     pass still owns that answer, and the dissolution's `not candidate.is_archive`
     filter is what leaves it alone.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `_compound_pass`, the deferred-commit
+    branch and the dissolve of a promoted parent's children were deleted with the
+    module and the promoter - no successor symbol for the branch. The words survive:
+    `bundle_service.REFUSAL_MEMBER_OF_BUNDLE` (`bundle_service.py:258`) and
+    `REFUSAL_NESTED_MEMBER` (`:254`) are still what the ledger writes for a path
+    another row holds.**
+
     **The dissolve is a deferred commit, and that is load-bearing.** The branch
     RECORDS the keys it intends to take; the ledger entries and the row removals are
     applied later, once the nested-member pass has had its chance to veto the
@@ -2475,6 +2988,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     and applying it after the prune is what makes that structural rather than lucky;
     `test_service_a_promotion_the_nested_member_prune_vetoes_takes_no_rows_at_all`
     pins it, and moving the commit back into the branch reds that test alone.
+
+    **Superseded by Decision 34 (`Mf-1agz`): `_nested_archives` and the
+    `archive_owned` candidate it could prune were deleted with the module and the
+    promoter - no successor symbol. The invariant it states - no `member-of-bundle`
+    entry may name a row that does not exist - is unchanged, and the ledger is
+    settled by one function, `bundle_service._reconcile_refusals`
+    (`bundle_service.py:728`), from the FINAL row set.**
 
     **One route cannot reach this branch: the entry root.** The pairing above this
     branch is reached by the STEM rule in practice. `bundle_service._entry_root_pair`
@@ -2513,6 +3033,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     see that today; what he sees is one `ready` row titled from the directory whose
     cover, counts and create all run through `01_Wizard`.
 
+    **Superseded by Decision 34 (`Mf-1agz`): `BundleFacts.groups`,
+    `compound_bundle_facts`, `archive_owned_facts` and the
+    `replace(facts, groups=groups)` writer were deleted with the module - no
+    successor symbol. A breakdown is now `proposal_engine.Facts.groups`
+    (`proposal_engine.py:541`), recorded by the one walk, and a row that has none
+    ships `groups: []` exactly as this paragraph says.**
+
     **A stronger child still wins, and the parent keeps the `pair_only` row
     Decision 18 gave it.** `bundle_service._holds_stronger_candidate` is UNCHANGED -
     same subtree scan, same `bundle_detect.STRONG_CONFIDENCES` membership test, same
@@ -2543,6 +3070,16 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     the parent stays `blocked` / `archive_only` and the dragon keeps its own `ready`
     `medium` row). The two together are what stop either leg being "tidied" into the
     other.
+
+    **Superseded by `Mf-8acz` and by Decision 34 (`Mf-1agz`):
+    `_holds_stronger_candidate`, `_single_claimed_child_subtree`, the
+    `claimed_ancestors` branch and `bundle_detect.STRONG_CONFIDENCES` were all
+    deleted - `Mf-8acz` folded the two legs into
+    `_promotion_would_double_own`, and the cutover deleted the walk that guard lived
+    in. No successor symbol, and nothing in `bundle_service` compares two rows'
+    strengths any more (Decision 38). The ruling - a parent must not take a row a
+    stronger reading owns - is unchanged, and the single authority that decides it
+    is the engine's ranking of the parent.**
 
     **The witnesses, and which leg each one actually pins.**
     `test_service_the_measured_live_tower_is_promoted_at_its_real_counts` is the
@@ -2577,6 +3114,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     it, Decision 18's swallow wearing the shape rule's clothes, with no other test
     in the file reding when it happens.
 
+    **Superseded by `Mf-8acz` and by Decision 34 (`Mf-1agz`): every witness named
+    here belongs to the promoter's test surface and was deleted with it, except the
+    historical comment block in `tests/test_bundle_service.py:6035`.
+    `bundle_detect.R3_MODEL_DIRS` is deleted with the module - no successor symbol.
+    Decision 38 records where the preference lives instead of a witness list.**
+
     **The R7 absorbability residual: monitored, not disproved.** A promoted parent
     is a real row, so R7 can now see it as absorbable - the absorbing side's only
     row-set guard is `not candidate.pair_only`, and while this directory was
@@ -2589,6 +3132,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     we have and not a proof about trees we do not have - so this is recorded as an
     open residual under observation, and the thing to look for is a compound row
     whose absorbed set contains an `archive_owned` key.
+
+    **Superseded by Decision 34 (`Mf-1agz`): the `not candidate.pair_only`
+    exemption, `compound_bundle_facts` and the `archive_owned` key this residual
+    watches were deleted with the module and the promoter - no successor symbol, and
+    the residual is closed rather than monitored: with no candidate flags there is
+    no promoted parent for an absorb side to take. The ruling it protects - a
+    compound never takes the operator's only creatable line - is unchanged.**
 
     **The measured before/after, on the live-shape fixture, AT THE BUILD BEFORE
     `Mf-quv4` took the status off the flag.** Before (that build only - restoring the
@@ -2625,6 +3175,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     clothes, and it reds the two strength witnesses, not the tower one: a LOW child
     is exactly what this branch exists to promote.
 
+    **Superseded by `Mf-8acz` and by Decision 34 (`Mf-1agz`): the
+    `_single_claimed_child_subtree` and `_holds_stronger_candidate` legs this
+    paragraph's mutations name were deleted - the first by `Mf-8acz`, both by the
+    cutover - and no successor symbol exists. The measurement stands as the record
+    it is; the row it describes is now the engine's reading of the wrapper.**
+
 29. **One door in, one identity check, one write, for every door that makes a
     project.** Three doors create a project: `POST /projects` from a typed form,
     the bundle door (`POST /bundles/create`) from a directory the detector read, and
@@ -2660,6 +3216,16 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     through the real route - the seam answers `["no-such-asset"]`, the item is
     `failed` with no project id, and the `Project` table is empty - and its mutation
     is the split itself, put back into two commits.
+
+    **Superseded by Decision 32 (`Mf-7oow`): the bundle door's member-set rule
+    `member_asset_ids(candidates, *, kinds=None)` is deleted, along with its
+    `kinds=` argument - no successor symbol at that door. The member set is
+    `bundle_service._members_of` (`bundle_service.py:1076`) returning `MembersOf`
+    (`:1066`). The insert primitive is untouched and still writes the list it is
+    given - `project_service.create_project_with_members`
+    (`project_service.py:153`, its `member_asset_ids` argument at `:158`) - which
+    is a different thing from the deleted seam. The dedupe and one-commit
+    rulings here are unchanged.**
 
     **A door asks only with the identities it actually holds.** `Dedupe`'s five fields
     are all optional and each leg is skipped when its identity is falsy - an empty
@@ -2706,6 +3272,14 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     inside this rule - the report is not a create, and its model filter stays where the
     row is built.)
 
+    **Superseded by Decision 32 (`Mf-7oow`): the `kinds=` parameter,
+    `member_asset_ids` as the member-set seam and
+    `bundle_service.PROJECT_MEMBER_SUFFIXES` were all deleted - no successor symbol
+    for the seam. `bundle_service._members_of` (`bundle_service.py:1076`) decides
+    the member set and the role comes from `library_scan.classify_entry`
+    (`library_scan.py:261`); no door hands a suffix table down. The ruling - two
+    questions, held apart - is unchanged.**
+
     **The archive door asks with two identities, and asks with no name.** Its
     `Dedupe` is `Dedupe(key=twin_rel, archive=normalized)`: the archive it was told to
     extract, and the directory its bytes were promised to. The twin is asked as a KEY
@@ -2730,6 +3304,11 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `already_created` would be the dedupe claiming two products are one, which no
     operator can undo.
 
+    **Superseded by Decision 34 (`Mf-1agz`) where it names
+    `bundle_detect.display_name()`: that symbol is `library_scan.display_name`
+    (`library_scan.py:323`). The archive door's identity - `Dedupe(key=twin_rel,
+    archive=normalized)`, and no name leg - is unchanged.**
+
     **The create-time belt stayed a bundle rule; only its answer moved.** The
     `contains_bundles` reason is still computed in `bundle_service._create_one`, from
     `INFERRED_CONFIDENCES` and the row's own `assets` against `own_assets`, with
@@ -2741,6 +3320,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     project already, and that is the more useful sentence than one about a create that
     never happens - while a refusal still writes nothing, so "the refusal comes before
     the project row" survives the move intact.
+
+    **Superseded by Decision 32 (`Mf-7oow`) and Decision 34 (`Mf-1agz`):
+    `INFERRED_CONFIDENCES` was deleted with the module that defined it, and the
+    belt's test is a literal now - `bundle_service.py:2512`,
+    `row["confidence"] != "high"` - so no set decides it. The ruling is unchanged:
+    the belt is computed in `_create_one`, handed to the primitive as `refuse`
+    (`bundle_service.py:2577`), and asked AFTER the dedupe and BEFORE the write.**
 
     **The create door asks the report's ownership question.** `_create_one`'s attach
     set now comes from the same `_own_assets` / `_claimed_assets` pair `_report_row`
@@ -2876,6 +3462,15 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     nested archive is a member of the bundle and never of the project - Decision 17
     survives this ticket untouched.
 
+    **Superseded by Decision 32 (`Mf-7oow`) and Decision 34 (`Mf-1agz`):
+    `bundle_service.PROJECT_MEMBER_SUFFIXES = bundle_detect.MODEL_SUFFIXES |
+    bundle_detect.IMAGE_SUFFIXES` was deleted, and `bundle_detect.MODEL_SUFFIXES`
+    with it - no successor constant. The member set is every registered asset under
+    the key, its role decided by `library_scan.classify_entry` (`library_scan.py:261`)
+    over tables that live in `library_scan` (`MODEL_SUFFIXES` `:163`,
+    `IMAGE_SUFFIXES` `:132`, `BUNDLE_TEXT_EXTS` `:168`). Decision 32 is where the
+    `text` ruling lives now; Decision 17 is untouched.**
+
     **Two questions, two tables, one seam.** "Which files does the project HOLD?" is the
     ATTACH question, answered with `PROJECT_MEMBER_SUFFIXES` and asked of
     `create_project_from_members(kinds=...)`. "Which files are the MODELS of this
@@ -2889,6 +3484,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     before, which is why widening the member set looked like a one-word edit and is not
     one - see the containment paragraph below.
 
+    **Superseded by Decision 32 (`Mf-7oow`): both questions are one question now -
+    `bundle_service._members_of` (`bundle_service.py:1076`) answers "which files
+    does the project hold", `bundle_service.PROJECT_MEMBER_SUFFIXES` and the
+    `member_asset_ids` seam are deleted, and `bundle_detect.MODEL_SUFFIXES` is
+    `library_scan.MODEL_SUFFIXES` (`library_scan.py:163`). No successor seam.**
+
     **Why the constant is not in `bundle_detect`.** `rule_set_stamp()` hashes
     `MODEL_SUFFIXES` and `IMAGE_SUFFIXES` by value, so a member table parked beside them
     could move the stamp and re-rank every cached report row the first time anyone tuned
@@ -2899,6 +3500,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     source pin. Neither detector table was edited, and the stamp's literal in
     `tests/test_bundle_detect.py` - untouched, and imported by the new witness rather than
     copied - is what proves it.
+
+    **Superseded by Decision 32 (`Mf-7oow`) and Decision 34 (`Mf-1agz`):
+    `PROJECT_MEMBER_SUFFIXES` is deleted, and the `rule_set_stamp()` it was kept
+    out of is `proposal_engine.rule_set_stamp` (`proposal_engine.py:2533`) over
+    `rule_set_tables` (`:2463`). The reasoning holds and needs no constant to hold
+    it: a membership decision is not a detection rule, and there is no member table
+    left to park anywhere.**
 
     **Three model tables, and the `.lbrn` / `.obj` ruling.** `bundle_detect.MODEL_SUFFIXES`
     (`.stl .3mf .step .stp .lbrn .lbrn2`), `file_utils.MODEL_SUFFIXES` (`.stl .3mf
@@ -2913,6 +3521,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     disagreement this ruling refuses. `test_an_obj_file_is_registered_but_is_neither_a_member_nor_a_model`
     pins both halves, including the cover: `.obj` is not in `PREVIEW_SUFFIXES` either, so
     it can never be a face.
+
+    **Superseded by Decision 32 (`Mf-7oow`) and Decision 34 (`Mf-1agz`): the three
+    tables are two - `library_scan.MODEL_SUFFIXES` (`library_scan.py:163`) and
+    `file_utils.MODEL_SUFFIXES` (`file_utils.py:44`, the one
+    `check_model_table.py` guards) - and the ATTACH table is deleted. The `.lbrn` /
+    `.obj` ruling is unchanged and is carried by `library_scan.classify_entry`
+    (`:261`) plus `library_scan.is_counted_model` (`:302`).**
 
     **The cover invariant: by construction, plus a belt.** The row's cover and the
     create's cover are one expression now. `_report_row` answers
@@ -3049,6 +3664,15 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     `blocked`/`unresolved_directory`, i.e. twenty invitations to fragment a product.
     A rule that matches nothing is therefore no longer a dead end.
 
+    **Superseded by Decision 34 (`Mf-1agz`): the seven-rule gate is deleted with
+    the module. The two failures this decision records are answered structurally by
+    the walk now: `bundle_service._build_candidates` (`bundle_service.py:596`)
+    offers a row for a claiming top and descends on `leave`/`archive-only`
+    (`bundle_service.DESCEND_SHAPES`, `:160`), and `import/` is
+    `bundle_service.TRANSPARENT_DIRS` (`:157`) reading
+    `bundle_service.REFUSAL_IMPORT_AREA` (`:268`). Decision 31's ruling - the rules
+    advise, they do not gate - is unchanged and is the engine's own vocabulary.**
+
     **The report offers the matches; `detector`/`confidence` stay the
     recommendation.** `bundle_detect.shape_matches` returns a `ShapeMatch(shape,
     rule, confidence, counts, groups, note)` for every shape a listing satisfies,
@@ -3066,6 +3690,15 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     stays served, and a manual row is the ONE path the ledger may name that is also
     a row, because that word is the row's own note. `shape_matches` is pure, like
     every rule above it: it reads the snapshot and the documents it was handed.
+
+    **Superseded by Decision 34 (`Mf-1agz`): `shape_matches` and `ShapeMatch` were
+    deleted with the module - no successor symbol, and
+    `tests/test_bundle_report_engine.py:311` refuses the name's return. `matches[]`
+    is now `proposal_engine.propose`'s own ordered `Option` list mapped
+    field-for-field by `bundle_service._match_row` (`bundle_service.py:1778`), so
+    `matches[0]` equals the row's `detector`/`confidence`/`metadata_shape` by
+    construction - and no manual entry is produced at all any more, so the note leg
+    this paragraph describes has no producer.**
 
     **The create gate no longer reads `status`.** It reads
     `blocked_reason == archive_only`, which is the one reason that names another
@@ -3090,6 +3723,13 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     whole subtree, no groups - and never the member set, which stays
     `PROJECT_MEMBER_SUFFIXES` (Mf-7oow owns member kinds). An unoffered shape
     answers `failed`/`unknown shape` instead of silently creating something else.
+
+    **Superseded by Decision 32 (`Mf-7oow`): the member set is not
+    `PROJECT_MEMBER_SUFFIXES` (deleted) but every registered asset under the key,
+    decided by `bundle_service._members_of` (`bundle_service.py:1076`). The marker
+    ruling this paragraph states - `shape`/`rule`/`detector`/`confidence` recorded
+    per create, an unoffered shape refused - is unchanged; `rule` is
+    `engine:<shape>`.**
 
     **Project keys join the detection exclusion, and that is the whole fix for the
     twenty Stagetop rows.** `scan_bundles(root, *, excluded_keys=...)` prunes every
@@ -3528,6 +4168,125 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     fake-`.git` fixtures as unreadable checkouts and make "not a repo"
     unanswerable.
 
+    **Decision 37 - the engine owns the FACTS, not only the ranking (`Mf-m18p`).**
+    Decision 33 opened by dividing the work: the detector decided what a
+    listing IS, the engine decided what a folder COULD become. The first half
+    of that sentence described a module that no longer exists. Since Decision
+    34 the SAME walk that ranks a directory also produces every fact the row
+    serves, which is why the report has one authority rather than two that
+    must be kept in step.
+
+    **One walk, two outputs.** `bundle_service._measure_row`
+    (`bundle_service.py:483`) calls `proposal_engine.measure`
+    (`proposal_engine.py:664`) and hands back `proposal_engine.Facts`
+    (`:541`): the census (`models`, `images`, `docs`, `others`, `archives`,
+    `bytes`, `entries`, `truncated`), the shape inputs (`model_dirs`, `meta`,
+    `dir_product_docs`, `children`, `child_models`, `child_meta`) and the fact
+    sheet the report renders (`metadata`, `provenance`, `groups`, `twin`,
+    `cover`, `documents`). `proposal_engine.propose` (`:1661`) reads the same
+    object and returns `Option`s, and `bundle_service._match_row` (`:1778`)
+    maps them field-for-field. A fact and a rank therefore cannot disagree:
+    they are one walk, and the ranking is a pure function of the facts beside
+    it.
+
+    **What that buys, stated as a contract.** The row's counts are the
+    engine's counts; its `groups` are the engine's hierarchical groups; its
+    `cover`, `provenance`, `metadata_suggestions`, `cover_candidates`, `images`
+    and twin facts are the engine's (`_match_row`, and `BundleDetectItemOut`,
+    Decisions 34 and 35). Nothing re-derives a fact in the service, so a cover
+    cannot be picked twice, a group list cannot be rebuilt from a marker on one
+    path and measured on another, and a count cannot move between the ranking
+    that used it and the sentence that reports it. The fact sheet is also
+    ADDITIVE by construction: `Facts` carries a comment saying so, and no fact
+    field may change a score, a shape or an `arrange` line.
+
+    **Why the purity contract survived the move.** `proposal_engine` is
+    stdlib-only, imports no app module and touches no database, so the
+    operator's tight loop still runs it from a bare host python against the
+    live mount - which is also why the report may not hand it a `Session`, and
+    why `project_keys` are injected rather than queried (Decision 34). The
+    detector's old contract - facts from a handed-in snapshot, no I/O - is not
+    replaced by a second facts module: it is replaced by one walk that does the
+    I/O itself, under the engine's own budgets (`MAX_SCAN_ENTRIES`,
+    `Facts.truncated`, `proposal_engine.GIT_TIMEOUT_SECONDS`).
+
+    **What does NOT change.** Every ruling that keeps a fact and a verdict
+    apart stands: confidence is not creatability (Decision 7), the report
+    writes nothing (Decision 3), detection attributes nothing on its own
+    (Decision 20 / `Mf-nivh`), and a create marker records the shape it was
+    made from (Decision 31). The engine states facts; what an operator may DO
+    with them is still decided by the create and arrange doors.
+
+    **What would make this wrong.** If `bundle_service` re-derived a fact the
+    engine already measured - a cover picked again, a group list rebuilt from
+    the marker, a count recounted from `Asset` rows and stored on the row; if
+    the report measured the same subtree twice, so two readings could
+    disagree; if a fact field in `Facts` started moving a score, a shape or an
+    `arrange` line; if `proposal_engine` gained a `Session`, an app import or a
+    query, which would end the bare-host contract and make the facts
+    unavailable without a database; or if a client derived a fact the engine
+    had already stated and let the two disagree on screen.
+
+    **Decision 38 - the promotion lineage: a guard, then no row (`Mf-m18p`).**
+    Decisions 17 and 18 recorded the behaviour: a nested archive is a member
+    and never evidence, a verified archive may name the directory beside it,
+    and a promoted directory never swallows a STRONGER candidate - it gets no
+    row at all rather than a pair-only row that would mark the strong child a
+    member and delete it.
+    Decision 28 (`Mf-ny89`) implemented that answer as three pieces: a
+    `claimed_ancestors` pairing branch, a shape question
+    `_single_claimed_child_subtree` ("the child's name, or None"), and a
+    strength leg `_holds_stronger_candidate` over `STRONG_CONFIDENCES`.
+    `Mf-8acz` then replaced the pairing branch and the shape question with ONE
+    ownership guard, `_promotion_would_double_own` - the inverted question,
+    True meaning REFUSE, asked once at the single decision site in
+    `_build_candidates` - and measured 0 rows changed across two corpora. It
+    reversed no ruling in this document, which is why the document was
+    deliberately left unedited at the time.
+
+    **Then the walk that guard lived in was deleted.** Decision 34 (`Mf-1agz`)
+    removed the candidate passes, `found`, `pair_only_specs` and every guard
+    inside them, because `proposal_engine` now ranks every row and nothing else
+    votes, dissents or falls back. Today:
+
+    * `git grep -n '_promotion_would_double_own\|claimed_ancestors' --
+      curiarium/api` returns NOTHING outside one historical comment block in
+      `curiarium/api/tests/test_bundle_service.py:6035`. Neither name has a
+      successor symbol, and neither is a helper a reader can follow.
+    * The strong-child preference is not a row, a flag or a test any more. It
+      is absorbed into two things: the engine's own ranking of the PARENT,
+      which reads `Facts.child_models`/`Facts.child_meta`/`Facts.model_dirs`
+      and answers `one-project`, `split-*`, `leave` or `archive-only` for the
+      wrapper; and the walk's stop rule `bundle_service.DESCEND_SHAPES`
+      (`bundle_service.py:160`), which descends - offering the parent no row
+      and no claim - whenever the parent's reading is `leave` or
+      `archive-only`. A parent the engine reads as a claim is a row and
+      descent stops there, by Decision 34's own rule, so one reading decides
+      the child's fate.
+    * The pairing a wrapper was promoted through is still live code, in another
+      place: `bundle_service._stem_pair_verified` (`bundle_service.py:1175`)
+      and `_entry_root_pair` (`:905`) through
+      `proposal_engine.archive_payload_contained` (`proposal_engine.py:1408`).
+
+    **Why record a deletion nobody asked to record.** Because the alternative
+    is a reader who greps for the guard, finds one comment in a test file, and
+    concludes either that the guard still runs or that the ruling it served was
+    withdrawn. Neither holds: Decision 18's ruling is intact, and its
+    enforcement moved from a comparison between two rows to one engine reading
+    of one parent plus the walk's descent rule. That is a smaller surface with
+    one owner, which is why the deletion was taken.
+
+    **What would make this wrong.** If `claimed_ancestors` or
+    `_promotion_would_double_own` or `_holds_stronger_candidate` or a
+    `pair_only` flag came back anywhere in `curiarium/api` - a second authority
+    beside the engine deciding whether a row exists; if the walk offered a row
+    for a parent the engine reads `leave`/`archive-only` AND stopped
+    descending, which would swallow the child - Decision 18's failure wearing a
+    new name; if a walk pass reintroduced row suppression as a filter applied
+    after the rows were built instead of as the descent rule; or if
+    `Facts.child_models` stopped being measured, so the engine could no longer
+    see that a child exists.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -3653,6 +4412,15 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   compound row is the same as for any other `low` row - reject it, dismiss it, or
   fix the created project.
 
+  **Superseded by Decision 34 (`Mf-1agz`) where this list describes the
+  detector's output: R3's guesses, `archive_owned_facts`'s promotion and the
+  `archive_only` verdict are deleted with the module, and `archive_only` survives
+  ONLY as the Extract door's name (`bundle_service.ARCHIVE_ONLY`,
+  `bundle_service.py:199`) - a directory row is never `archive_only` again. The
+  live row set and its counts are Decision 34's measured artifacts. The
+  consequences that describe the product - a create attaches the row's own files,
+  the report writes nothing - are unchanged.**
+
 * **A grown bundle folder is no longer silent, and adding is still deliberate.**
   The project view shows one notice with one bulk add when the folder holds parts
   the project does not, the Review queue's already-created row says the same
@@ -3689,6 +4457,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   the `not candidate.pair_only` filter used to forbid - monitored by
   `scan.absorbed == ()` on the live fixture, not proven impossible.
 ## Alternatives considered
+
+  **Superseded by Decision 34 (`Mf-1agz`) where it names the promoter: the
+  wrapper-of-one-claimed-child row and the `not candidate.pair_only` filter are
+  deleted with it - no successor symbol (Decision 38). The rest of this list is
+  unchanged, including the accepted nested-bundle cost and the one-statement
+  read.**
 
 - **A `bundle_candidates` table, populated by a scan, confirmed later.**
   Rejected: it needs a migration, a staleness policy for rows whose directory
@@ -3775,6 +4549,12 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
   `test_service_a_project_holding_some_of_the_files_does_not_claim_the_bundle`
   is the witness: 11 of 12 models claims nothing.
 
+  **Superseded by Decision 34 (`Mf-1agz`) where it names rules: the alternatives
+  rejected here were rejected against the detector's rule set, which is deleted.
+  The reasoning - no stored candidate set, no second source of truth, no migration
+  - is unchanged, and it is what the walk keeps
+  (`bundle_service._build_candidates`, `bundle_service.py:596`).**
+
 ## Rollback
 
 Revertible without a schema rollback: there is no migration. Reverting removes
@@ -3787,6 +4567,12 @@ ever writes `_`-prefixed keys). Projects created through the report are ordinary
 them is `DELETE /project/{project_id}` like any other, and their assets are
 untouched by their membership being removed. Detection leaves nothing on disk to
 clean up, because it never writes.
+
+  **Superseded by Decision 34 (`Mf-1agz`): a revert no longer removes
+  `bundle_detect` - it is already gone - and the module to revert is
+  `curiarium/api/proposal_engine.py`. The rest of the rollback is unchanged: no
+  migration, the `_bundle` markers and the dismissals row are inert data, and
+  detection writes nothing.**
 
 Operationally: an operator who preferred the old flow loses only the report
 screen. The library, the scan, the import door and every `Asset` row are
@@ -4425,6 +5211,18 @@ unchanged.
   `.plans/measurements/2026-11-06-zip-project-mfqbji-{before,after}.json`; the
   statement cost is measured in the same pair rather than quoted.
 
+  **Superseded by Decision 34 (`Mf-1agz`): the witnesses this section names are
+  `tests/test_bundle_detect.py`'s (deleted with the module, 2,961 lines) and the
+  rule-level half of the service tests, so the R1-R7 readings, `detect_bundle`,
+  `INFERRED_CONFIDENCES`, `archive_owned_facts`, `shape_matches`,
+  `claimed_ancestors` and the detector's rule-set stamps below have no test to
+  match them any more. What stands in their place is
+  `tests/test_bundle_report_engine.py` - it asserts the report's recommendation IS
+  `propose(...)[0].shape` for every synthetic row and refuses any match whose rule
+  is not `engine:<shape>` - plus Decision 34's measured artifacts. Every
+  service-level contract below (one project per row, the marker, the ledger, the
+  doors, the permissions and audit sweeps) is unchanged and still tested.**
+
 - Bundle drift (Decision 27) is pinned from literals in
   `tests/test_bundle_drift.py`:
   `test_walk_root_reads_each_marker_shape` (the detection key, the zip
@@ -4654,3 +5452,26 @@ This ADR is superseded if any of the following becomes true:
 - the API image loses `git` and CI stays green (Decision 36, `Mf-ky16`), or a
   probe that cannot run starts answering `None` again instead of carrying a
   `git_error`.
+
+  **Superseded by Decision 34 (`Mf-1agz`) for the conditions below that name
+  deleted symbols - R3's depth shapes and `R3_MODEL_DIRS`,
+  `bundle_detect.archive_payload_contained`, `STRONG_CONFIDENCES`,
+  `INFERRED_CONFIDENCES`, `archive_owned_facts`, `_own_depth_model_count` - which
+  cannot be watched as written. Each one's ruling survives in the engine's terms
+  (Decisions 33, 34, 37, 38): containment is
+  `proposal_engine.archive_payload_contained` (`proposal_engine.py:1408`), the
+  bands are `proposal_engine._CONFIDENCE_RANK` (`:731`), the shape guard is the
+  engine's own ranking plus `bundle_service.DESCEND_SHAPES`
+  (`bundle_service.py:160`), and the create belt is the literal at
+  `bundle_service.py:2512`. The conditions that name live symbols are unchanged.**
+
+- a promotion guard reappears beside the engine - `claimed_ancestors`,
+  `_promotion_would_double_own`, `_holds_stronger_candidate` or a `pair_only`
+  flag - so whether a row exists is decided by two authorities again, or the
+  walk offers a row for a parent the engine reads `leave`/`archive-only` and
+  stops descending, which is how Decision 18's swallow would come back
+  (Decision 38);
+- the report re-derives a fact the engine measured - a cover picked again in
+  `bundle_service`, a group list rebuilt from the marker, a count recounted from
+  `Asset` rows - or `proposal_engine` gains a `Session` or an app import, so a
+  fact and a rank can no longer be one walk (Decision 37).
