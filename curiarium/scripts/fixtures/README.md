@@ -42,3 +42,16 @@ where the candidate IS the wrapper. Both must print `drop the wrapper`,
 
 `arrange_contains` asserts text the proposal must print, so a rename or
 flattening rule cannot silently disappear.
+
+## Running the harness
+
+The engine is app-free (no FastAPI, no database) but it is no longer stdlib-only:
+it uses a PDF library for document text and info. Run the harness with the repo's
+virtualenv, which installs `curiarium/api/requirements*.lock`:
+
+```
+.venv/bin/python curiarium/scripts/propose_import.py --only Vault
+```
+
+"App-free" is the property that matters and is tested: the engine imports no app
+module, so it runs outside a request, outside a database, and outside Docker.

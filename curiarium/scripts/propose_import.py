@@ -20,7 +20,8 @@ proposes are a hypothesis to be measured, and the arranging half (rename, move,
 hard-link) is a separate, approval-gated step that does not exist yet.
 
 WHAT THIS FILE IS, since Mf-yitm: measurements and interpretations live in
-`curiarium/api/proposal_engine.py`, a stdlib-only module with no app import, so
+`curiarium/api/proposal_engine.py`, an app-free module (no FastAPI, no database),
+so
 the API can call the same rules a route needs without a subprocess or a second
 copy. What is left here is argv, the sys.path bootstrap that lets a bare host
 python find that module, and the text rendering - which is why nothing below
