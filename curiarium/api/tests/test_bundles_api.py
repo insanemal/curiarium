@@ -1198,3 +1198,470 @@ def test_creating_a_split_recommendation_fails_with_needs_arrange_and_writes_not
     marker = project_by_id(client, contributor, project_id)["metadata_json"]["_bundle"]
     assert marker["shape"] == "one-project", "the creatable shape is still created from its own offer"
     assert marker["rule"] == "engine:one-project"
+
+
+# --- AUTO and the guided create (Mf-yz9e) -----------------------------------
+#
+# AUTO is one action on a high-confidence row the engine's own plan would not move.
+# Every other band, shape and status is a `failed` with a reason, server-side, so a
+# client can never decide a band. GUIDED writes exactly the metadata the operator
+# accepted: a field absent from the map - a licence the operator dismissed - is
+# never written, which is a server rule and not a client one.
+
+VENDOR_KEY = "import/Moai statue -No overhang"
+MEDIUM_KEY = "import/Widget kit"
+PILE_KEY = "import/pile"
+PDF_URL = "https://www.thingiverse.com/thing:1234567"
+PDF_WHERE = "manual.pdf p2"
+
+
+def write_pdf_pages(path: Path, pages: list[str]) -> None:
+    """A minimal, uncompressed PDF whose pages carry the given text, in order.
+
+    Hand-written like ``tests/test_proposal_engine_matrix.py``'s writer, extended to
+    N pages: object 1 is the catalog, 2 the page tree, 3 the font, and every page
+    takes a page object plus a content stream from 4 upwards. `pypdf` opens it and
+    extracts each page's text, which is the point - the engine's page number in
+    ``where`` ("manual.pdf p2") comes from reading the page, not from the suffix.
+    """
+    objects = {}
+    kids = []
+    number = 4
+    for text in pages:
+        page_number = number
+        content_number = number + 1
+        number += 2
+        kids.append(page_number)
+        lines = text.splitlines() or [""]
+        escaped = [line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)") for line in lines]
+        ops = "BT /F1 12 Tf 72 720 Td " + " ".join(f"({line}) Tj 0 -16 Td" for line in escaped) + " ET"
+        stream = ops.encode("latin-1")
+        objects[page_number] = (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 3 0 R >> >> /Contents "
+            + str(content_number).encode() + b" 0 R >>"
+        )
+        objects[content_number] = (
+            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
+        )
+    objects[1] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    objects[2] = (
+        b"<< /Type /Pages /Kids [" + b" ".join(f"{kid} 0 R".encode() for kid in kids)
+        + b"] /Count " + str(len(kids)).encode() + b" >>"
+    )
+    objects[3] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = {}
+    last = max(objects)
+    for object_number in sorted(objects):
+        offsets[object_number] = len(out)
+        out += f"{object_number} 0 obj\n".encode() + objects[object_number] + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 " + str(last + 1).encode() + b"\n0000000000 65535 f \n"
+    for object_number in range(1, last + 1):
+        out += f"{offsets[object_number]:010d} 00000 n \n".encode()
+    out += (
+        b"trailer\n<< /Size " + str(last + 1).encode() + b" /Root 1 0 R >>\nstartxref\n"
+        + str(xref).encode() + b"\n%%EOF\n"
+    )
+    write_file(path, bytes(out))
+
+
+def vendor_bundle(root: Path) -> Path:
+    """A HIGH documented product: a vendor README and LICENSE, two images, two part folders.
+
+    MEASURED: one-project 50 `high` with `split-top-folders` 20 `low` as the second
+    match, `arrange_moves(facts, "one-project") == []`, licence/creator/source URL
+    `high` from LICENSE.txt and the licence `high` from README.txt, description
+    `medium`. That is the row AUTO may run on: high, one-project, nothing to move.
+    """
+    bundle = root / "import" / "Moai statue -No overhang"
+    write_text(bundle / "README.txt", README_TEXT)
+    write_text(bundle / "LICENSE.txt", LICENSE_TEXT)
+    write_file(bundle / "images" / "a.jpg", b"j" * 100)
+    write_file(bundle / "images" / "b.jpg", b"j" * 900)
+    for folder in ("Base", "Head"):
+        for index in range(2):
+            write_file(bundle / folder / f"part{index}.stl", STL_BYTES)
+    return bundle
+
+
+def medium_parts_bundle(root: Path) -> Path:
+    """A product in two part folders with no document at all.
+
+    MEASURED: `one-project` 45 `medium` - the band a client must not be able to
+    promote, and the one AUTO refuses.
+    """
+    bundle = root / "import" / "Widget kit"
+    for index in range(8):
+        write_file(bundle / "Body" / f"part{index}.stl", STL_BYTES)
+    for index in range(2):
+        write_file(bundle / "Lid" / f"part{index}.stl", STL_BYTES)
+    write_file(bundle / "cover.jpg", b"j" * 220)
+    return bundle
+
+
+def pdf_pile_bundle(root: Path) -> Path:
+    """A LOW pile whose two-page manual names a Thingiverse URL on page TWO.
+
+    MEASURED: row confidence `low`, `one-project` 40 `low`, and the manual's second
+    page is the ONLY evidence - `metadata` carries `source_url` `medium` at
+    "manual.pdf p2" and the provenance candidate is the same URL at the same place.
+    """
+    bundle = root / "import" / "pile"
+    write_file(bundle / "x0.stl", STL_BYTES)
+    write_file(bundle / "x1.stl", STL_BYTES)
+    write_file(bundle / "spare" / "y.stl", STL_BYTES)
+    write_pdf_pages(
+        bundle / "manual.pdf",
+        ["Assembly notes.", f"See the original at {PDF_URL} for updates."],
+    )
+    return bundle
+
+
+def create_items(client: TestClient, actor: Actor, items: list[dict]) -> dict:
+    response = client.post("/bundles/create", json={"items": items}, headers=bearer(actor.token))
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def bundle_audit_rows(key: str) -> list[dict]:
+    with Session(engine) as session:
+        rows = list(
+            session.exec(
+                select(AuditEvent).where(AuditEvent.action == audit.BUNDLE_CREATE)
+            )
+        )
+    return [json.loads(row.detail_json or "{}") for row in rows if row.target == key]
+
+
+def test_the_row_serves_the_metadata_suggestions_provenance_and_cover_faces(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """The row carries what a document claimed and WHERE, plus the faces a chooser may set.
+
+    Mutation: drop `metadata_suggestions`/`provenance`/`cover_candidates`/`images`
+    from `BundleDetectItemOut` and the response model silently drops them, so every
+    assertion here reds even though the service computed them.
+    """
+    pdf_pile_bundle(isolated_storage)
+    vendor_bundle(isolated_storage)
+    scan()
+
+    report = report_for(client, contributor)
+
+    pile = row_for(report, PILE_KEY)
+    assert {
+        "field": "source_url",
+        "value": PDF_URL,
+        "where": PDF_WHERE,
+        "confidence": "medium",
+    } in pile["metadata_suggestions"], "the manual's second page is the only evidence there is"
+    assert pile["provenance"]["candidates"][0]["where"] == PDF_WHERE
+    assert pile["provenance"]["candidates"][0]["url"] == PDF_URL
+
+    vendor = row_for(report, VENDOR_KEY)
+    assert vendor["images"], "the vendor fixture has two registered previews"
+    image_ids = {image["asset_id"] for image in vendor["images"]}
+    assert vendor["cover"]["asset_id"] in image_ids, "the offered face must be one the chooser can see"
+    registered = [entry for entry in vendor["cover_candidates"] if entry["asset_id"] is not None]
+    assert registered, "a candidate backed by a registered asset is resolvable"
+    assert all(entry["url"] for entry in registered), "a resolvable candidate serves its bytes"
+    assert vendor["cover_candidates"][0]["rel_path"] == "images/b.jpg", "ranked by size, largest first"
+    assert vendor["images"][0]["asset_id"] == vendor["cover_candidates"][0]["asset_id"]
+
+
+def test_auto_creates_one_project_on_a_high_row(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """AUTO on a high row writes one project, the high metadata only, and says it was auto.
+
+    Mutation: write every mined field instead of the `high` ones and the medium
+    `description` appears; drop the marker's `operator` block and the record of the
+    operator's decision is gone; drop the audit fields and the history loses the band.
+    """
+    vendor_bundle(isolated_storage)
+    scan()
+
+    body = create_items(client, contributor, [{"key": VENDOR_KEY, "auto": True}])
+
+    assert (body["created"], body["failed"]) == (1, 0), body
+    project_id = body["results"][0]["project_id"]
+    project = project_by_id(client, contributor, project_id)
+    assert project["name"] == "Moai statue -No overhang"
+    assert project["licence"] == "CC BY-NC", "the licence is a HIGH field, so auto writes it"
+    assert project["creator"] == "moai_maker"
+    assert project["licence_url"] is not None, "also a HIGH field"
+    assert project["description"] is None, "the mined description is MEDIUM and stays a suggestion"
+    marker = project["metadata_json"]["_bundle"]
+    assert marker["operator"]["auto"] is True
+    assert marker["operator"]["cover"] == "engine"
+    audit_rows = bundle_audit_rows(VENDOR_KEY)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["auto"] is True
+    assert audit_rows[0]["accepted_fields"] == ["creator", "licence", "licence_url", "source_url"]
+
+
+def test_auto_is_refused_for_medium_and_low_rows_server_side(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """AUTO on a medium or low row is a per-item `failed`, and nothing is written.
+
+    Mutation: gate auto on the client only - i.e. drop the band check from
+    ``_auto_refusal`` - and both rows create a project, so the empty listing reds.
+    """
+    medium_parts_bundle(isolated_storage)
+    pdf_pile_bundle(isolated_storage)
+    scan()
+
+    body = create_items(
+        client,
+        contributor,
+        [{"key": MEDIUM_KEY, "auto": True}, {"key": PILE_KEY, "auto": True}],
+    )
+
+    assert body["failed"] == 2 and body["created"] == 0, body
+    assert [result["status"] for result in body["results"]] == ["failed", "failed"]
+    assert [result["reason"] for result in body["results"]] == ["auto requires high confidence"] * 2
+    assert project_ids(client, contributor) == [], "a refused auto writes nothing at all"
+
+
+def test_auto_refuses_a_high_row_that_needs_arranging(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """A HIGH row whose own plan renames the folder is refused, not half-moved.
+
+    `import/2493386_Moai_statue_-No_overhang` is high, one-project, and its folder
+    name is not canonical, so `arrange_moves` returns exactly one rename. AUTO must
+    never move a folder itself.
+
+    Mutation: drop the `arrange_moves` gate and the create succeeds without the
+    rename, leaving a project whose folder is not what the engine's plan said.
+    """
+    moai_bundle(isolated_storage)
+    scan()
+    row = row_for(report_for(client, contributor), MOAI)
+    assert row["confidence"] == "high", "the fixture must be the HIGH row this test refuses"
+    facts = proposal_engine.measure(str(isolated_storage / MOAI), MOAI)
+    moves = proposal_engine.arrange_moves(facts, "one-project")
+    assert len(moves) == 1 and moves[0]["action"] == "rename", moves
+
+    body = create_items(client, contributor, [{"key": MOAI, "auto": True}])
+
+    assert (body["created"], body["failed"]) == (0, 1), body
+    reason = body["results"][0]["reason"]
+    assert reason.startswith("auto needs arranging first:"), reason
+    assert project_ids(client, contributor) == [], "a refused auto writes no project"
+
+
+def test_a_second_auto_run_recognises_the_project_and_says_so(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """AUTO is idempotent: the second click skips with `already_created`.
+
+    Mutation: bypass the dedupe on the auto path and the second run writes a second
+    project, so both the status and the one-id listing red.
+    """
+    vendor_bundle(isolated_storage)
+    scan()
+
+    first = create_items(client, contributor, [{"key": VENDOR_KEY, "auto": True}])
+    assert first["created"] == 1, first
+
+    second = create_items(client, contributor, [{"key": VENDOR_KEY, "auto": True}])
+
+    assert second["results"][0]["status"] == "skipped", second
+    assert second["results"][0]["reason"] == "already_created"
+    assert len(project_ids(client, contributor)) == 1
+
+
+def test_guided_writes_only_the_metadata_the_operator_accepted(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """GUIDED writes the accepted fields and nothing else - a dismissal included.
+
+    `licence` accepted, `creator` mapped to None (dismissed), everything else absent
+    from the map. The row's own high `creator`/`licence_url` must NOT appear.
+
+    Mutation: fall back to ``_enrichment`` for the fields absent from the map and
+    `creator` becomes `moai_maker` and `licence_url` becomes the page's URL.
+    """
+    vendor_bundle(isolated_storage)
+    scan()
+    row = row_for(report_for(client, contributor), VENDOR_KEY)
+    assert row["creator"] == "moai_maker" and row["licence_url"] is not None
+
+    body = create_items(
+        client,
+        contributor,
+        [{"key": VENDOR_KEY, "metadata": {"licence": "CC BY-NC", "creator": None}}],
+    )
+
+    assert (body["created"], body["failed"]) == (1, 0), body
+    project = project_by_id(client, contributor, body["results"][0]["project_id"])
+    assert project["licence"] == "CC BY-NC"
+    assert project["creator"] is None, "the dismissed creator is never written"
+    assert project["licence_url"] is None, "a field absent from the map is never written"
+    marker = project["metadata_json"]["_bundle"]
+    assert marker["operator"]["accepted"] == ["licence"]
+
+
+def test_a_dismissed_licence_is_never_written(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """Only the creator was accepted, so the row's licence and its URL stay unwritten.
+
+    Mutation: write the row's licence when it is absent from the accepted map and
+    both assertions red.
+    """
+    vendor_bundle(isolated_storage)
+    scan()
+
+    body = create_items(
+        client, contributor, [{"key": VENDOR_KEY, "metadata": {"creator": "moai_maker"}}]
+    )
+
+    assert (body["created"], body["failed"]) == (1, 0), body
+    project = project_by_id(client, contributor, body["results"][0]["project_id"])
+    assert project["creator"] == "moai_maker"
+    assert project["licence"] is None, "a licence is never written without an explicit accept"
+    assert project["licence_url"] is None
+
+
+def test_the_operator_cover_overrides_the_engine_choice(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """The chooser's pick wins over the engine's largest image, and is recorded as `asset`.
+
+    Mutation: ignore `item.cover` in ``_create_one`` and the project keeps the row's
+    cover (the largest image), so the inequality reds.
+    """
+    vendor_bundle(isolated_storage)
+    scan()
+    row = row_for(report_for(client, contributor), VENDOR_KEY)
+    images = {image["rel_path"]: image["asset_id"] for image in row["images"]}
+    smallest = images[f"{VENDOR_KEY}/images/a.jpg"]
+    assert row["cover"]["asset_id"] != smallest, "the engine's pick must not be the one chosen here"
+
+    body = create_items(
+        client,
+        contributor,
+        [{"key": VENDOR_KEY, "cover": {"mode": "asset", "asset_id": smallest}}],
+    )
+
+    assert (body["created"], body["failed"]) == (1, 0), body
+    project = project_by_id(client, contributor, body["results"][0]["project_id"])
+    assert project["cover_asset_id"] == smallest
+    assert project["cover_asset_id"] != row["cover"]["asset_id"]
+    marker = project["metadata_json"]["_bundle"]
+    assert marker["operator"]["cover"] == "asset"
+
+
+def test_the_operator_may_choose_no_cover_at_all(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """`mode: none` means no cover, which is NOT the same request as omitting the field.
+
+    Mutation: treat `none` as "the engine decides" and the project keeps the row's
+    largest image, so `cover_asset_id is None` reds.
+    """
+    vendor_bundle(isolated_storage)
+    scan()
+    row = row_for(report_for(client, contributor), VENDOR_KEY)
+    assert row["cover"]["asset_id"] is not None, "the engine would have picked a face"
+
+    body = create_items(client, contributor, [{"key": VENDOR_KEY, "cover": {"mode": "none"}}])
+
+    assert (body["created"], body["failed"]) == (1, 0), body
+    project = project_by_id(client, contributor, body["results"][0]["project_id"])
+    assert project["cover_asset_id"] is None
+    marker = project["metadata_json"]["_bundle"]
+    assert marker["operator"]["cover"] == "none"
+
+
+def test_a_cover_asset_outside_the_bundle_is_refused(
+    client: TestClient, contributor: Actor, isolated_storage: Path
+) -> None:
+    """A cover asset that is not one of this row's files fails the item and writes nothing.
+
+    Mutation: drop the membership resolution in ``_create_one`` and an unknown id
+    reaches `create_project_from_members`, which refuses with a different reason
+    (`cover asset is not a member of the project`) - or, worse, writes a dangling one.
+    """
+    vendor_bundle(isolated_storage)
+    scan()
+
+    body = create_items(
+        client,
+        contributor,
+        [{"key": VENDOR_KEY, "cover": {"mode": "asset", "asset_id": "not-an-asset"}}],
+    )
+
+    assert (body["created"], body["failed"]) == (0, 1), body
+    assert body["results"][0]["reason"] == "cover asset is not in this bundle"
+    assert project_ids(client, contributor) == [], "a refused cover writes no project"
+
+
+def test_a_split_shape_from_a_high_row_is_refused_and_the_arrange_door_creates_the_operators_split(
+    client: TestClient, admin: Actor, isolated_storage: Path
+) -> None:
+    """The create refuses a split with `needs-arrange`; the arrange door enacts it, and undo returns the tree.
+
+    Mutation: let the create enact a split itself and the first refusal reds and a
+    project named after the product exists; drop the undo's reverse moves and the
+    two part folders stay hoisted beside the bundle.
+    """
+    bundle = vendor_bundle(isolated_storage)
+    scan()
+    row = row_for(report_for(client, admin), VENDOR_KEY)
+    assert any(
+        match["shape"] == "split-top-folders" and match["creatable"] is False
+        for match in row["matches"]
+    ), "the fixture must offer the split this test refuses"
+
+    refused = create_items(
+        client, admin, [{"key": VENDOR_KEY, "shape": "split-top-folders"}]
+    )
+
+    assert (refused["created"], refused["failed"]) == (0, 1), refused
+    assert refused["results"][0]["reason"] == "needs-arrange"
+    assert project_ids(client, admin) == [], "a refused split writes no project"
+
+    preview = client.get(
+        "/bundles/arrange",
+        params={"key": VENDOR_KEY, "shape": "split-top-folders"},
+        headers=bearer(admin.token),
+    )
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()
+    hoisted = sorted(move["to"].rsplit("/", 1)[-1] for move in plan["moves"] if move["kind"] == "dir")
+    assert hoisted == ["Base", "Head"], plan["moves"]
+
+    applied_response = client.post(
+        "/bundles/arrange",
+        json={"key": VENDOR_KEY, "shape": "split-top-folders", "plan_id": plan["plan_id"]},
+        headers=bearer(admin.token),
+    )
+    assert applied_response.status_code == 200, applied_response.text
+    applied = applied_response.json()
+    assert applied["applied"] is True
+    assert len(applied["project_ids"]) == 2, applied
+    names = {
+        project_by_id(client, admin, project_id)["name"]
+        for project_id in applied["project_ids"]
+    }
+    assert names == {"Base", "Head"}, names
+
+    undo = client.post(
+        f"/bundles/arrange/{applied['arrange_id']}/undo", headers=bearer(admin.token)
+    )
+
+    assert undo.status_code == 200, undo.text
+    assert (bundle / "Base").is_dir() and (bundle / "Head").is_dir(), "the tree is returned"
+    assert not (isolated_storage / "import" / "Base").exists()
+    assert not (isolated_storage / "import" / "Head").exists()
+    remaining = {
+        project_by_id(client, admin, project_id)["name"]
+        for project_id in project_ids(client, admin)
+    }
+    assert "Moai statue -No overhang" not in remaining

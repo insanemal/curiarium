@@ -41,19 +41,23 @@ vi.mock("../ModelViewer", () => ({
   generateModelSnapshot: vi.fn(),
 }));
 
-// The arrange door imports the domain module directly, so its calls are mocked
-// there rather than on the barrel. The original is spread back so the suite's
-// other bundle imports keep working.
+// The arrange door and the guided panel import the domain module directly, so
+// their calls are mocked there rather than on the barrel. The original is spread
+// back so the suite's other bundle imports keep working.
 const arrangeApi = vi.hoisted(() => ({
   getArrangePlan: vi.fn(),
   arrangeBundles: vi.fn(),
   undoArrange: vi.fn(),
+  createBundles: vi.fn(),
+  enrichBundles: vi.fn(),
 }));
 vi.mock("../../lib/api/bundles", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/bundles")>()),
   getArrangePlan: arrangeApi.getArrangePlan,
   arrangeBundles: arrangeApi.arrangeBundles,
   undoArrange: arrangeApi.undoArrange,
+  createBundles: arrangeApi.createBundles,
+  enrichBundles: arrangeApi.enrichBundles,
 }));
 
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
@@ -179,6 +183,15 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
   // fixture ended up with. A test that needs no `matches` at all deletes it, the
   // way the payload-shape witnesses delete `assets_total`.
   return { ...row, matches: overrides.matches ?? servedMatches(row) };
+}
+
+/** A row the detail pane offers its one-step create on: high confidence, ready,
+ *  and a shape the server's AUTO run accepts. Only such a row renders
+ *  `Create project`; every other live row is a guided review. A row with groups
+ *  still recommends `compound` (that is where `exclude_groups` is built), so the
+ *  AUTO fixture is about the BAND and the door, not the chosen shape. */
+function autoRow(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem {
+  return makeBundle({ ...overrides, metadata_shape: "one-project" });
 }
 
 const moai = makeBundle();
@@ -502,6 +515,19 @@ const splitTopFolders = makeBundle({
     },
   ],
 });
+
+/** The compound row the pane's `Create project` body is reachable on. Only an
+ *  AUTO row renders that door now, and AUTO is decided by the BAND and the
+ *  detector's shape - not the chosen reading - so the fixture is high/one-project
+ *  while the served recommendation stays `compound` (from its groups), which is
+ *  where `exclude_groups` is built. The exclusion wiring is what these tests
+ *  cover; the guided panel does not carry it. */
+const autoCompound = autoRow({ ...compound, confidence: "high" });
+
+/** The same repin for the chooser rows: a `generic`/low folder is a guided
+ *  review now, so the tests about a chosen reading refusing the create door need
+ *  the AUTO band that door renders on. The served readings are untouched. */
+const autoSplitTopFolders = autoRow({ ...splitTopFolders, confidence: "high" });
 
 function makeReport(
   bundles: BundleDetectItem[],
@@ -990,11 +1016,16 @@ describe("BundleReviewView confidence", () => {
   it("gives each confidence its own colour", () => {
     renderView(makeState({ report: makeReport([moai, mediumDragon, cableClip]) }));
 
-    // The confidence span carries `title={confidenceLabel(...)}`, so the label is
-    // the stable handle on the right cell.
-    const high = screen.getByTitle("High confidence");
-    const medium = screen.getByTitle("Medium confidence");
-    const low = screen.getByTitle("Low confidence");
+    // The cell's own class, scoped to its row: its `title` is now the actable
+    // reason for a row with a door, so only the text/content identifies the cell.
+    const cell = (key: string): HTMLElement => {
+      const node = rowElement(key).querySelector<HTMLElement>(".review-row-confidence");
+      if (!node) throw new Error(`no confidence cell for ${key}`);
+      return node;
+    };
+    const high = cell(moai.key);
+    const medium = cell(mediumDragon.key);
+    const low = cell(cableClip.key);
 
     expect(high.className).toContain("text-emerald-400");
     expect(medium.className).toContain("text-amber-400");
@@ -1191,7 +1222,7 @@ describe("BundleReviewView existing-project chips", () => {
 
 describe("BundleReviewView writes", () => {
   it("creates the active bundle under the typed name, or with no name when cleared", () => {
-    const state = makeState({ report: makeReport([moai]) });
+    const state = makeState({ report: makeReport([autoRow()]) });
     renderView(state);
 
     const input = screen.getByLabelText("Name for Moai statue") as HTMLInputElement;
@@ -1201,13 +1232,15 @@ describe("BundleReviewView writes", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 
     expect(state.create).toHaveBeenCalledTimes(1);
-    expect(state.create).toHaveBeenCalledWith([{ key: "Moai", name: "typed" }]);
+    // The detail pane's one-step door is AUTO now: the flag rides with the item,
+    // and the server decides whether this band/shape may run unattended.
+    expect(state.create).toHaveBeenCalledWith([{ key: "Moai", name: "typed", auto: true }]);
 
     vi.mocked(state.create).mockClear();
     fireEvent.change(input, { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 
-    expect(state.create).toHaveBeenCalledWith([{ key: "Moai" }]);
+    expect(state.create).toHaveBeenCalledWith([{ key: "Moai", auto: true }]);
   });
 
   it("creates only the creatable selected rows and counts only those", () => {
@@ -1429,6 +1462,88 @@ describe("BundleReviewView writes", () => {
     expect(within(detail()).queryByRole("button", { name: "Create project" })).toBeNull();
     expect(within(detail()).queryByLabelText("Name for Moai created")).toBeNull();
     expect(within(detail()).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+});
+
+describe("BundleReviewView guided import door", () => {
+  /** A plan with nothing to move, so the panel's Apply is not held by an
+   *  arrangement it cannot make. */
+  function planWithoutMoves(): BundleArrangePlan {
+    return makeArrangePlan({ moves: [], creates: [], text: [], refusals: [] });
+  }
+
+  /** The server's sentence when it refuses AUTO. */
+  const AUTO_REFUSAL = "auto needs arranging first: 1 move(s); review it instead";
+
+  /** A 200 whose one result refused AUTO: the create door's per-item verdict. */
+  function refusalResponse(): BundleCreateResponse {
+    return {
+      created: 0,
+      skipped: 0,
+      blocked: 0,
+      failed: 1,
+      results: [
+        {
+          key: "Moai",
+          status: "failed",
+          project_id: null,
+          name: null,
+          assets_added: 0,
+          skipped_assets: 0,
+          failed_assets: [],
+          reason: AUTO_REFUSAL,
+        },
+      ],
+    };
+  }
+
+  it("offers Create and Review for a high row", () => {
+    renderView(makeState({ report: makeReport([autoRow()]) }));
+
+    const create = within(detail()).getByRole("button", { name: "Create project" });
+    expect(create.getAttribute("data-guided-auto")).toBe("true");
+    const review = within(detail()).getByRole("button", { name: "Review first" });
+    expect(review.getAttribute("data-guided-open")).toBe("true");
+  });
+
+  it("offers only Review and import for a medium row", () => {
+    renderView(makeState({ report: makeReport([autoRow({ confidence: "medium" })]) }));
+
+    const review = within(detail()).getByRole("button", { name: "Review and import" });
+    expect(review.getAttribute("data-guided-open")).toBe("true");
+    // No plain create for a band the server will not run unattended: "do it
+    // anyway" is the panel, never a silent auto.
+    expect(within(detail()).queryByRole("button", { name: "Create project" })).toBeNull();
+  });
+
+  it("opens the guided panel and sends auto on Create", async () => {
+    getArrangePlanMock.mockResolvedValue(planWithoutMoves());
+    const state = makeState({ report: makeReport([autoRow()]) });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Review first" }));
+    expect(within(detail()).getByText("What the app parsed")).toBeTruthy();
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Create project" }));
+
+    await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(state.create).mock.calls[0][0][0]).toMatchObject({ key: "Moai", auto: true });
+  });
+
+  it("falls back to the guided panel when the server refuses auto", async () => {
+    getArrangePlanMock.mockResolvedValue(planWithoutMoves());
+    const state = makeState({
+      report: makeReport([autoRow()]),
+      create: vi.fn(async () => refusalResponse()),
+    });
+    renderView(state);
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Create project" }));
+
+    // The refusal is not a silent no-op: the panel that can finish the job is
+    // open and the server's own sentence stands above the action row.
+    await waitFor(() => expect(within(detail()).getByText("What the app parsed")).toBeTruthy());
+    expect(detail().querySelector("[data-auto-failure]")?.textContent).toBe(AUTO_REFUSAL);
   });
 });
 
@@ -2009,33 +2124,36 @@ describe("BundleReviewView offers only the actions that can succeed", () => {
     expect(reason?.getAttribute("role")).toBeNull();
   });
 
-  it("offers enrichment on the blocked row that now has a create", () => {
-    // REPINNED: the orphan used to be refused both doors. Its create is live now,
+  it("offers enrichment on the blocked row that now has a guided import", () => {
+    // REPINNED: the orphan used to be refused both doors. Its import is live now,
     // so the theorem this block exists for holds the other way round - enrichment
-    // is never the ONLY live action, because Create stands beside it.
+    // is never the ONLY live action, because the import door stands beside it.
+    // A `not_scanned` row is not a band/shape AUTO may run unattended, so that
+    // door is the guided panel's.
     const orphan = orphanRow();
     renderView(makeState({ report: makeReport([orphan]) }));
 
     expect(within(detail()).getByRole("button", { name: "Enrich from source page" })).toBeTruthy();
-    const create = within(detail()).getByRole("button", {
-      name: "Create project",
+    const gate = within(detail()).getByRole("button", {
+      name: "Review and import",
     }) as HTMLButtonElement;
-    expect(create.disabled).toBe(false);
+    expect(gate.disabled).toBe(false);
+    expect(gate.getAttribute("data-guided-open")).toBe("true");
     // Nothing is refused, so the pane says nothing about a missing door.
     expect(detail().querySelector("[data-bundle-enrich-reason]")).toBeNull();
     expect(screen.queryByText(NO_PAYLOAD_DOOR_REASON)).toBeNull();
   });
 
-  it("keeps the create live and the extract door absent on that same row", () => {
+  it("keeps the guided import live and the extract door absent on that same row", () => {
     const orphan = orphanRow();
     renderView(makeState({ report: makeReport([orphan]) }));
 
     // REPINNED: `not_scanned` is a readiness fact, not an import refusal, so the
     // primary door is live - and the row's own cell must not call it blocked.
-    const create = within(detail()).getByRole("button", {
-      name: "Create project",
+    const gate = within(detail()).getByRole("button", {
+      name: "Review and import",
     }) as HTMLButtonElement;
-    expect(create.disabled).toBe(false);
+    expect(gate.disabled).toBe(false);
     expect(statusCell(orphan.key).textContent).not.toContain("Blocked - ");
     // And no extraction in place, no one-step: `extractPathFor` answers null, so
     // neither control renders.
@@ -2915,7 +3033,7 @@ describe("BundleReviewView compound groups", () => {
   });
 
   it("creates the project without an unchecked foreign group", () => {
-    const state = makeState({ report: makeReport([compound]) });
+    const state = makeState({ report: makeReport([autoCompound]) });
     renderView(state);
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Include Gearbox" }));
@@ -2924,32 +3042,33 @@ describe("BundleReviewView compound groups", () => {
     // The name is part of the body as it always was; the exclusion is the only
     // new key, and it carries the group's own name verbatim.
     expect(state.create).toHaveBeenCalledWith([
-      { key: "StageTop", name: "StageTop Wave One", exclude_groups: ["Gearbox"] },
+      { key: "StageTop", name: "StageTop Wave One", exclude_groups: ["Gearbox"], auto: true },
     ]);
   });
 
   it("omits exclude_groups entirely when nothing was unchecked", () => {
-    const state = makeState({ report: makeReport([compound]) });
+    const state = makeState({ report: makeReport([autoCompound]) });
     renderView(state);
 
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 
     const item = vi.mocked(state.create).mock.calls[0][0][0];
     // Absent, not present-and-empty: the server reads the missing field as
-    // "include every group", and the old body stays byte-identical.
+    // "include every group", and the old body stays byte-identical (modulo the
+    // AUTO flag this door now carries).
     expect(item).not.toHaveProperty("exclude_groups");
-    expect(item).toEqual({ key: "StageTop", name: "StageTop Wave One" });
+    expect(item).toEqual({ key: "StageTop", name: "StageTop Wave One", auto: true });
   });
 
   it("renders no group block for an empty list and sends the old body", () => {
-    const state = makeState({ report: makeReport([makeBundle({ groups: [] })]) });
+    const state = makeState({ report: makeReport([autoRow({ groups: [] })]) });
     renderView(state);
 
     expect(screen.queryByRole("group", { name: "Groups in this bundle" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 
-    expect(state.create).toHaveBeenCalledWith([{ key: "Moai", name: "Moai statue" }]);
+    expect(state.create).toHaveBeenCalledWith([{ key: "Moai", name: "Moai statue", auto: true }]);
   });
 
   it("keeps bulk doors on include-every-group even after an exclusion was toggled", () => {
@@ -3092,7 +3211,7 @@ describe("BundleReviewView import-as chooser", () => {
     // The contract change: choosing a reading the server cannot enact must not
     // silently create the recommendation. It selects, the Create button refuses
     // with the server's own reason, and the arrange door takes its place.
-    const state = makeState({ report: makeReport([splitTopFolders]) });
+    const state = makeState({ report: makeReport([autoSplitTopFolders]) });
     renderView(state);
 
     const split = within(importAs()).getByRole("radio", {
@@ -3130,7 +3249,7 @@ describe("BundleReviewView import-as chooser", () => {
     // `needs-arrange` and writes nothing, so the body must never carry that
     // shape. The click is made first, so a build that only shades the disabled
     // control is caught here too: a disabled button fires no handler.
-    const state = makeState({ report: makeReport([splitTopFolders]) });
+    const state = makeState({ report: makeReport([autoSplitTopFolders]) });
     renderView(state);
 
     fireEvent.click(
@@ -3151,8 +3270,8 @@ describe("BundleReviewView import-as chooser", () => {
     // and the stored choice must now shut the create door rather than snap back to
     // the recommendation and create something the operator did not choose.
     const enactable = makeBundle({
-      ...splitTopFolders,
-      matches: splitTopFolders.matches?.map(match =>
+      ...autoSplitTopFolders,
+      matches: autoSplitTopFolders.matches?.map(match =>
         match.shape === "split-top-folders" ? { ...match, creatable: true } : match,
       ),
     });
@@ -3165,7 +3284,7 @@ describe("BundleReviewView import-as chooser", () => {
       (within(importAs()).getByRole("radio", { checked: true }) as HTMLInputElement).value,
     ).toBe("split-top-folders");
 
-    const refetched = makeState({ report: makeReport([splitTopFolders]) });
+    const refetched = makeState({ report: makeReport([autoSplitTopFolders]) });
     view.rerender(
       <BundleReviewView
         state={refetched}
@@ -3205,7 +3324,7 @@ describe("BundleReviewView import-as chooser", () => {
   });
 
   it("sends the chosen shape and never an exclusion when manual is picked", () => {
-    const state = makeState({ report: makeReport([compound]) });
+    const state = makeState({ report: makeReport([autoCompound]) });
     renderView(state);
 
     // An exclusion the operator made on the recommended compound shape...
@@ -3215,7 +3334,7 @@ describe("BundleReviewView import-as chooser", () => {
 
     // ...must not travel with a manual import: there are no groups to leave out.
     expect(state.create).toHaveBeenCalledWith([
-      { key: "StageTop", name: "StageTop Wave One", shape: SHAPE_MANUAL },
+      { key: "StageTop", name: "StageTop Wave One", shape: SHAPE_MANUAL, auto: true },
     ]);
     const item = vi.mocked(state.create).mock.calls[0][0][0];
     expect(item).not.toHaveProperty("exclude_groups");
@@ -3271,14 +3390,15 @@ describe("BundleReviewView import-as chooser", () => {
     expect(within(detail()).getByText("Ready")).toBeTruthy();
   });
 
-  it("keeps Create live on a creatable blocked row and shut on the archive-only row", () => {
+  it("keeps the guided door live on a creatable blocked row and shut on the archive-only row", () => {
     renderView(makeState({ report: makeReport([legacyVase]) }));
 
-    // `unresolved_directory` is a readiness fact now: the create is live, and the
-    // row does not call itself blocked beside a live Create button.
+    // `unresolved_directory` is a readiness fact now: the import door is live, and
+    // the row does not call itself blocked beside it. A generic low row is a
+    // guided review, so that live door is the panel's.
     expect(statusCell(legacyVase.key).textContent).toBe("no matching folder on disk");
     expect(
-      (within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement)
+      (within(detail()).getByRole("button", { name: "Review and import" }) as HTMLButtonElement)
         .disabled,
     ).toBe(false);
     cleanup();
@@ -3862,7 +3982,7 @@ describe("BundleReviewView extract and create", () => {
         }),
     );
     const state = makeState({
-      report: makeReport([moai, enrichableZip()]),
+      report: makeReport([autoRow(), enrichableZip()]),
       afterExtract,
     });
     renderView(state);
@@ -4377,6 +4497,7 @@ describe("BundleReviewView project list hand-off", () => {
     const state = handoff(
       { create: vi.fn(async () => createResponse([createdItem()])) },
       { onProjectImported },
+      makeReport([autoRow()]),
     );
     fireEvent.click(within(detail()).getByRole("button", { name: "Create project" }));
 

@@ -296,6 +296,90 @@ The service's rules are in `curiarium/api/arrange_service.py`; the HTTP proofs a
 `tests/test_arrange.py` (preview, apply, the four evidence layouts) and
 `tests/test_arrange_undo.py` (the fold backwards, the row restore, the replay).
 
+## The import flow (auto for high confidence, guided for the rest)
+
+Detection says what a row is and the arrange says what a shape costs. This is the
+door that writes: one project per row, with the cover and the metadata the
+operator accepted and nothing else. `Mf-yz9e` built it without a new route.
+
+**The band is the engine's.** `proposal_engine._assign_confidence` sets each
+`Option.confidence`: `high` when documentary evidence sits at the candidate's OWN
+root (a document in a child documents the child) or when the reading is `git-project`
+/ `add-to-project`; `medium` for structural evidence with a >=15-point margin over
+the runner-up; `low` for a contested or guessed reading. `matches[0].confidence` is
+served as the row's `confidence` and that is the only band the client ever sees -
+it never derives one. The engine also holds the invariant that an alternative never
+outranks the recommendation, so a HIGH row's recommendation is always a
+one-project reading rather than a hopeful alternative.
+
+**One predicate on the client.** `bundleRows.actableMode(row)` returns
+`"auto" | "guided" | null`, and the same function feeds the row's confidence-cell
+title (`actableReason`), the detail pane's buttons and the panel, so a badge and a
+button cannot disagree. A settled row (`existing_project_id`) and an archive-only
+row are `null`; `isCreatable` is the server's own gate, asked rather than
+re-implemented; `"auto"` needs a HIGH row that is `ready` with a shape in
+`AUTO_SHAPES`; anything else is `"guided"`.
+
+**AUTO is a flag on the existing create route**, not a new one: `POST /bundles/create`
+with `{"items": [{"key": ..., "auto": true}]}`. `bundle_service.AUTO_SHAPES` is
+`{"one-project", "git-project"}` - small and explicit, the two shapes the create
+door can enact in place. `add-to-project` is deliberately excluded: it is not in
+`creatable_shapes`, its whole operation is the arrange door, and auto must never
+half-do one. `_auto_refusal` runs BEFORE any write and refuses, in this order: a
+non-HIGH band (`auto requires high confidence`), a shape outside `AUTO_SHAPES`, an
+operator-supplied shape that differs from the recommendation, a row that is not
+`ready`, and a recommended shape whose `proposal_engine.arrange_moves(facts, shape)`
+is non-empty (`auto needs arranging first: N move(s)`). Every refusal is a refusal,
+never a half-auto: the fallback is the guided panel. AUTO writes only the metadata
+facts the engine itself calls `high` (a parsed `medium`/`low` field stays a
+suggestion), takes the engine's cover, and reuses create's `already_created` for
+idempotency. There is no new route, no new `permissions.ROUTE_PERMISSIONS` row and
+no new audit action: the existing `bundle.create` event gained `auto`, `shape`,
+`cover` and `accepted_fields`.
+
+**GUIDED is the same route with a map**: `POST /bundles/create` with
+`cover: {"mode": "asset", "asset_id": ...}` or `{"mode": "none"}` and
+`metadata: {field: value | null}`. `bundle_service._metadata_write` reads that map
+BEFORE it would fall back to `_enrichment`: a field absent from the map, or mapped
+to `null`, is never written. That is what makes "a licence the operator did not
+accept is never written" a server rule rather than a client courtesy. `metadata`
+accepts only `creator`/`licence`/`licence_url`/`source_url`/`description`; a
+project's title is its `name` field, so a `title` key is refused as an unknown
+metadata field instead of being silently dropped. Omitting both `cover` and
+`metadata` is the legacy create, byte-identical to before this ticket.
+
+**The panel** is `curiarium/web/src/ui/review/GuidedImportPanel.tsx`, self-contained
+like `ArrangePlanPanel`: it imports the domain module `lib/api/bundles` and never
+the barrel, owns its own plan read and its own write, and renders nothing for a
+viewer. It shows the cover chooser (the engine's choice, no cover, or the row's
+registered images - an engine candidate with no registered asset is shown inert as
+"not registered - cannot be chosen"), the metadata source field with "Use this
+source" and on-demand enrichment, the parsed suggestions each accepted, edited or
+dismissed with the `where` that produced them and nothing pre-accepted, the shape
+chooser over `matches` (a `creatable: false` shape, or a plan with moves, says
+"Needs arranging" and mounts `ArrangePlanPanel` instead of writing), and the move
+list from `GET /bundles/arrange` before anything is written.
+
+**Four additive row fields** carry that panel: `metadata_suggestions`, `provenance`,
+`cover_candidates` and `images`. All are defaulted, and all are declared on
+`BundleDetectItemOut` - a field the response model does not declare is dropped on
+the way out, which is the `rule_set`/`refused` trap this repo has already fallen
+into once. They are pinned by the set-equality test in
+`curiarium/api/tests/test_bundles_api.py` and by the regenerated OpenAPI component
+fixture.
+
+**Archive rows are not a special case, they are a consequence.** `propose_archive`
+never assigns a band, so every archive option keeps the `Option` default `low`.
+AUTO therefore never runs on a `.zip`; its door stays the Extract route.
+`/bundles/create` refusing a zip auto is the honest reading of that, and nobody
+should "fix" it by inventing a band in the client.
+
+The proofs live in `curiarium/api/tests/test_bundles_api.py` (auto success, refusal
+and idempotency; guided accepted-only metadata; a dismissed licence; an operator
+cover; split -> arrange -> undo) and in
+`curiarium/web/src/ui/review/GuidedImportPanel.test.tsx` plus `bundleRows.test.ts`
+for the predicate.
+
 ## Build warnings in the web bundle
 
 `npm run build` in `curiarium/web` is expected to emit exactly the warnings below,

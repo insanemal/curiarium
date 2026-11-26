@@ -84,6 +84,11 @@ def create_bundles(
     The report is recomputed first and every key is looked up in it, so a key the
     client sends is never trusted on its own. A bundle that is blocked, or that
     already became a project, creates nothing and says so per item.
+
+    An `auto` create is server-gated: only a high-confidence row whose recommended
+    shape needs no arranging ever runs, and every other row is refused with a
+    reason instead of half-done. A guided create writes only the metadata the
+    operator accepted, so a licence the operator dismissed is never written.
     """
     # Mf-ao6r: a declared-but-unforwarded field is the silent no-op `extra="forbid"`
     # cannot catch - nothing is unknown to the schema, the value is just dropped.
@@ -94,6 +99,9 @@ def create_bundles(
             name_only=item.name_only,
             exclude_groups=tuple(item.exclude_groups),
             shape=item.shape,
+            auto=item.auto,
+            cover=(item.cover.model_dump() if item.cover is not None else None),
+            metadata=dict(item.metadata) if item.metadata is not None else None,
         )
         for item in body.items
     ]

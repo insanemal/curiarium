@@ -1790,7 +1790,7 @@
   },
   "/bundles/create": {
     "post": {
-      "description": "Create one project per confirmed bundle; partial success is the contract.\n\nThe report is recomputed first and every key is looked up in it, so a key the\nclient sends is never trusted on its own. A bundle that is blocked, or that\nalready became a project, creates nothing and says so per item.",
+      "description": "Create one project per confirmed bundle; partial success is the contract.\n\nThe report is recomputed first and every key is looked up in it, so a key the\nclient sends is never trusted on its own. A bundle that is blocked, or that\nalready became a project, creates nothing and says so per item.\n\nAn `auto` create is server-gated: only a high-confidence row whose recommended\nshape needs no arranging ever runs, and every other row is refused with a\nreason instead of half-done. A guided create writes only the metadata the\noperator accepted, so a licence the operator dismissed is never written.",
       "operationId": "create_bundles_bundles_create_post",
       "requestBody": {
         "content": {

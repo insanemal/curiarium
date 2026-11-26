@@ -8,15 +8,18 @@ import {
   type BundleDetectItem,
   type BundleEnrichment,
   type BundleMatch,
+  type BundleSuggestion,
 } from "../../lib/api/bundles";
 import {
   ARCHIVE_ONLY_FOLDER_LABEL,
+  AUTO_SHAPES,
   BLOCKED_REASON_LABELS,
   BLOCKED_REASON_ARCHIVE_ONLY,
   BLOCKED_REASON_UNRESOLVED,
   EXTRACT_AND_CREATE_HINT,
   EXTRACT_AND_CREATE_LABEL,
   EXTRACT_AND_CREATE_ROW_TITLE,
+  METADATA_FIELDS,
   NO_PAYLOAD_DOOR_REASON,
   NO_SOURCE_PAGE_REASON,
   NOT_SCANNED_REGISTERED_LABEL,
@@ -26,6 +29,8 @@ import {
   SHAPE_COMPOUND,
   SHAPE_LABELS,
   SHAPE_MANUAL,
+  actableMode,
+  actableReason,
   activeShape,
   archiveExtractTitle,
   archiveLine,
@@ -75,6 +80,8 @@ import {
   rowStateChip,
   shapeLabel,
   statusLine,
+  suggestionFieldLabel,
+  suggestionSourceLine,
   typedName,
 } from "./bundleRows";
 // The namespace import is the deletion witness: a re-added `ENRICH_NONE_REASON`
@@ -2742,3 +2749,105 @@ describe("arranging", () => {
     expect(arrangeAppliesNothing(arrangePlan({ moves: [] }))).toBe(false);
   });
 });
+
+describe("actableMode", () => {
+  /** A row the engine read as `shape`, with the high/ready band unless a test
+   *  overrides it. The `matches` are served from the same shape, so the row and
+   *  its recommendation cannot disagree in a fixture. */
+  function actableRow(
+    shape: string,
+    overrides: Partial<BundleDetectItem> = {},
+  ): BundleDetectItem {
+    return makeBundle({ metadata_shape: shape, ...overrides });
+  }
+
+  it("runs AUTO on the two shapes the create door can enact, at high and ready", () => {
+    expect(actableMode(actableRow("one-project"))).toBe("auto");
+    expect(actableMode(actableRow("git-project"))).toBe("auto");
+  });
+
+  it("never runs AUTO on a shape outside the list", () => {
+    // `split-top-folders` needs arranging before a create can be sent, so the
+    // server refuses it: the client must not call it auto either.
+    expect(actableMode(actableRow("split-top-folders"))).toBe("guided");
+  });
+
+  it("guides every band below high", () => {
+    expect(actableMode(actableRow("one-project", { confidence: "medium" }))).toBe("guided");
+    expect(actableMode(actableRow("one-project", { confidence: "low" }))).toBe("guided");
+  });
+
+  it("guides a blocked row even at high confidence and an auto shape", () => {
+    expect(actableMode(actableRow("one-project", { status: "blocked" }))).toBe("guided");
+  });
+
+  it("settles a row with an existing project and the archive-only row", () => {
+    expect(
+      actableMode(
+        actableRow("one-project", { existing_project_id: "p1", existing_project_name: "Moai" }),
+      ),
+    ).toBeNull();
+    expect(
+      actableMode(actableRow("one-project", { blocked_reason: "archive_only" })),
+    ).toBeNull();
+  });
+
+  it("gives the reason for a live row and silence for a settled one", () => {
+    expect(actableReason(actableRow("one-project"))).toContain("one step");
+    expect(actableReason(actableRow("split-top-folders"))).toBe(
+      "Review what the app parsed before anything is written.",
+    );
+    expect(
+      actableReason(actableRow("one-project", { existing_project_id: "p1" })),
+    ).toBeNull();
+  });
+});
+
+describe("suggestionSourceLine", () => {
+  it("quotes the server's own where", () => {
+    const fromPdf: BundleSuggestion = {
+      field: "source_url",
+      value: "https://www.thingiverse.com/thing:2493386",
+      where: "manual.pdf p2",
+      confidence: "medium",
+    };
+    expect(suggestionSourceLine(fromPdf)).toBe("Suggested from manual.pdf p2");
+  });
+
+  it("says a suggestion with no page is from a document without one", () => {
+    expect(
+      suggestionSourceLine({ field: "licence", value: "CC BY-NC", where: "  ", confidence: "high" }),
+    ).toBe("Suggested from a document with no page");
+  });
+});
+
+describe("suggestionFieldLabel", () => {
+  it("names the known fields and falls back to the wire token", () => {
+    expect(suggestionFieldLabel("licence_url")).toBe("Licence URL");
+    expect(suggestionFieldLabel("source_url")).toBe("Source URL");
+    // An unknown field from a newer server still has to render something.
+    expect(suggestionFieldLabel("print_time")).toBe("print_time");
+  });
+});
+
+describe("AUTO_SHAPES", () => {
+  it("stays the two shapes the create door enacts in place", () => {
+    expect([...AUTO_SHAPES]).toEqual(["one-project", "git-project"]);
+  });
+});
+
+describe("METADATA_FIELDS", () => {
+  it("names the five fields a create may write, and never the project's title", () => {
+    // `title` has its own field on the create, and the server refuses an unknown
+    // metadata key, so it must not be in this list.
+    expect([...METADATA_FIELDS]).toEqual([
+      "creator",
+      "licence",
+      "licence_url",
+      "source_url",
+      "description",
+    ]);
+    expect(METADATA_FIELDS).not.toContain("title");
+  });
+});
+

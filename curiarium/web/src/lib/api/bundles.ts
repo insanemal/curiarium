@@ -112,6 +112,51 @@ export type BundleMatch = {
   creatable?: boolean;
 };
 
+/** One value the engine mined from a document, and WHERE it read it. A
+ *  suggestion, never a fact: nothing is written unless the operator accepts it.
+ *  `where` is the document and page, e.g. "manual.pdf p2". */
+export type BundleSuggestion = {
+  field: string;
+  value: string;
+  where: string;
+  confidence: string;
+};
+
+export type BundleProvenanceCandidate = {
+  url: string;
+  provider: string;
+  subject_id: string | null;
+  where: string;
+  confidence: string;
+  also_in?: { where: string; confidence: string }[];
+};
+export type BundleProvenanceUnresolved = { text: string; where: string; reason: string };
+export type BundleProvenance = {
+  candidates: BundleProvenanceCandidate[];
+  unresolved: BundleProvenanceUnresolved[];
+  confidence: string;
+};
+
+/** One face the engine's walk found, bundle-relative. `asset_id`/`url`/`thumb_url`
+ *  are set exactly when the same file is a registered asset, so a chooser only
+ *  ever offers a face the create can set. */
+export type BundleCoverCandidate = {
+  rel_path: string;
+  reason: string;
+  bytes: number;
+  asset_id: string | null;
+  url: string | null;
+  thumb_url: string | null;
+};
+
+/** One registered image of the row: the chooser's selectable faces. */
+export type BundleImage = {
+  asset_id: string;
+  rel_path: string;
+  url: string;
+  thumb_url: string | null;
+};
+
 /** One detected bundle. `status` and `confidence` are orthogonal. */
 export type BundleDetectItem = {
   key: string;
@@ -172,6 +217,17 @@ export type BundleDetectItem = {
   // must keep compiling. `undefined` means "the server did not say"; `null` is
   // the server saying this row took nothing from the page.
   enrichment?: BundleEnrichment | null;
+  // The four fields below are OPTIONAL for the same reason as their neighbours:
+  // a payload from before they were served omits them, and `undefined` means
+  // "the server did not say" - never "the document suggested nothing".
+  /** What a document CLAIMED and where, for the guided panel. */
+  metadata_suggestions?: BundleSuggestion[];
+  /** The provider URLs the engine mined; null for a row whose facts carry none. */
+  provenance?: BundleProvenance | null;
+  /** Every face the walk found, registered or not. */
+  cover_candidates?: BundleCoverCandidate[];
+  /** The row's registered images: the covers a create can actually set. */
+  images?: BundleImage[];
   /** Does the bundle folder behind this already-created row still hold parts
    *  the project does not? `bundle_drift_state` is the server's word
    *  (`known | unknown | not_applicable`) and `bundle_drift_count` is null
@@ -262,6 +318,16 @@ export type BundleCreateItem = {
    *  the server's recommendation stands, so an untouched row's request body is
    *  the one it always was. */
   shape?: string | null;
+  /** AUTO: one action, high confidence only. The server refuses every other band
+   *  and every shape it cannot do safely, so this flag never decides a band. */
+  auto?: boolean;
+  /** The cover the operator chose; OMITTED means the engine's choice stands (a
+   *  deliberate "no cover" is a different request, not a null id). */
+  cover?: { mode: "asset" | "none"; asset_id?: string | null } | null;
+  /** The metadata the operator ACCEPTED: field -> value (an edit) or null (a
+   *  dismiss). Present means nothing outside the map is written, so a licence the
+   *  operator did not accept is never written. */
+  metadata?: Record<string, string | null> | null;
 };
 
 export type BundleCreateItemResult = {

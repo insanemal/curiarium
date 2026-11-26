@@ -165,6 +165,14 @@ DESCEND_SHAPES = frozenset({"leave", "archive-only"})
 # path refuses with `needs-arrange` (or, for the zip, the Extract door).
 DIRECTORY_CREATABLE_SHAPES = frozenset(proposal_engine.ONE_PROJECT_SHAPES)
 ARCHIVE_CREATABLE_SHAPES = frozenset({"archive-project", "archive-split"})
+# The shapes AUTO runs on: small, explicit, and only the two the create door can
+# enact in place. Anything else - an archive row, a split, an add-to-project, a
+# shape that needs a move - falls back to guided with a reason. `add-to-project`
+# is excluded on purpose: it is not in `creatable_shapes`, its whole operation is
+# the arrange door, and auto must never half-do one.
+AUTO_SHAPES = frozenset({"one-project", "git-project"})
+# The project metadata fields a create may write, in one place.
+METADATA_FIELDS = ("creator", "licence", "licence_url", "source_url", "description")
 # The bound the report gives `git_state` per row (Mf-1agz). The report probes git
 # because the label corpus is 7/7 with probing and 6/7 without; this is what keeps
 # one hung checkout from costing a GET the full `GIT_TIMEOUT_SECONDS`.
@@ -204,6 +212,8 @@ CREATE_CREATED = "created"
 CREATE_SKIPPED = "skipped"
 CREATE_BLOCKED = "blocked"
 CREATE_FAILED = "failed"
+# The one band AUTO runs at. The band is the ENGINE's, never a client's word.
+AUTO_NEEDS_HIGH = "auto requires high confidence"
 
 # The two shapes the engine can read a folder as SEVERAL projects are its own
 # vocabulary (``proposal_engine.SPLIT_SHAPES``), read here rather than restated. A
@@ -1614,6 +1624,74 @@ def _name_source_url(name: str) -> Optional[str]:
     return THINGIVERSE_THING_URL.format(thing_id)
 
 
+def _metadata_suggestions(facts) -> List[dict]:
+    """Every value the engine mined, sorted by field, with its source.
+
+    The row's `title`/`creator`/... display fields answer "what would a create
+    write"; these answer "what did a document claim, and where" - the guided
+    panel shows them as suggestions an operator accepts, edits or dismisses.
+    """
+    metadata = getattr(facts, "metadata", {}) or {}
+    return [
+        {"field": field, "value": str(entry.get("value")), "where": str(entry.get("where") or ""),
+         "confidence": str(entry.get("confidence") or "low")}
+        for field, entry in sorted(metadata.items())
+        if (entry or {}).get("value")
+    ]
+
+
+def _provenance_out(facts) -> Optional[dict]:
+    """The engine's provider-URL ledger, or None for a `.zip`'s facts."""
+    prov = getattr(facts, "provenance", None)
+    if not isinstance(prov, dict):
+        return None
+    return {
+        "candidates": [dict(item) for item in prov.get("candidates") or []],
+        "unresolved": [dict(item) for item in prov.get("unresolved") or []],
+        "confidence": prov.get("confidence") or "suggested",
+    }
+
+
+def _cover_candidates(facts, *, key: str, owned_assets: Sequence[RegisteredAsset]) -> List[dict]:
+    """The engine's ranked faces, with the registered ones resolvable.
+
+    The engine's `rel_path` is BUNDLE-relative; a registered asset's path is
+    storage-relative. Resolve each candidate to the row's own asset so the panel
+    only offers a face the create can actually set, and keep the unregistered
+    ones visible as evidence (no asset_id).
+    """
+    cover = getattr(facts, "cover", None) or {}
+    by_path = {asset.path: asset for asset in owned_assets}
+    out = []
+    for entry in cover.get("candidates") or []:
+        rel = entry.get("path")
+        if not rel:
+            continue
+        asset = by_path.get(f"{key}/{rel}") or by_path.get(rel)
+        item = {"rel_path": rel, "reason": entry.get("reason") or "largest-image",
+                "bytes": int(entry.get("bytes") or 0), "asset_id": None, "url": None, "thumb_url": None}
+        if asset is not None:
+            item.update({"asset_id": asset.id,
+                         "url": asset_urls.primary_url(asset.id, asset.filename),
+                         "thumb_url": asset_urls.thumb_url(asset.id, asset.thumb_version)})
+        out.append(item)
+    return out
+
+
+def _images(owned_assets: Sequence[RegisteredAsset]) -> List[dict]:
+    """The row's registered images, largest first - the chooser's faces."""
+    images = sorted(
+        (asset for asset in owned_assets if _suffix(asset.path) in library_scan.IMAGE_SUFFIXES),
+        key=lambda asset: (-asset.size, asset.path),
+    )
+    return [
+        {"asset_id": asset.id, "rel_path": asset.path,
+         "url": asset_urls.primary_url(asset.id, asset.filename),
+         "thumb_url": asset_urls.thumb_url(asset.id, asset.thumb_version)}
+        for asset in images
+    ]
+
+
 def _row_facts(candidate: BundleCandidate) -> dict:
     """The display fields a row renders, read off the engine's fact sheet.
 
@@ -1793,6 +1871,10 @@ def _report_row(
         "bundle_drift_state": drift_state,
         "bundle_drift_count": drift_count,
         "dismissed": key in dismissals,
+        "metadata_suggestions": _metadata_suggestions(facts),
+        "provenance": _provenance_out(facts),
+        "cover_candidates": _cover_candidates(facts, key=key, owned_assets=owned_assets),
+        "images": _images(owned_assets),
     }
 
 
@@ -2003,6 +2085,15 @@ class BundleCreateItem:
     name_only: bool = False
     exclude_groups: Tuple[str, ...] = ()
     shape: Optional[str] = None
+    # AUTO: one click, high confidence only. The server gates the band and the
+    # shape; a client never decides either.
+    auto: bool = False
+    # The operator's cover decision (`{"mode": ..., "asset_id": ...}`); absent
+    # means the engine's own choice stands.
+    cover: Optional[Mapping[str, Optional[str]]] = None
+    # The metadata the operator ACCEPTED, field -> value or None. Present means
+    # nothing outside the map is written; absent means the legacy create.
+    metadata: Optional[Mapping[str, Optional[str]]] = None
 
 
 def _result(
@@ -2039,6 +2130,89 @@ def _enrichment(row: Mapping, name_only: bool) -> dict:
         "source_url": row["source_url"],
         "description": row["description_excerpt"],
     }
+
+
+def _auto_refusal(
+    item: BundleCreateItem, row: Mapping, candidate: Optional[BundleCandidate]
+) -> Optional[str]:
+    """Why AUTO may not run on this row, or None. Server-side, before any write.
+
+    The band is the ENGINE's (`row["confidence"]`, i.e. `matches[0].confidence`);
+    the client never decides one. The shape list is explicit and small; the move
+    question is asked of the engine's own plan, so auto can never half-move a
+    folder it cannot finish cleanly - it falls back to guided with a reason.
+    """
+    if not item.auto:
+        return None
+    if row.get("confidence") != "high":
+        return AUTO_NEEDS_HIGH
+    if candidate is None:
+        return "auto requires a measured bundle"
+    recommended = row.get("metadata_shape") or row.get("detector") or ""
+    if recommended not in AUTO_SHAPES:
+        return f"auto does not run on {recommended}; review it instead"
+    if item.shape and item.shape != recommended:
+        return "auto runs the recommended shape; review the shape instead"
+    if row.get("status") != READY:
+        reason = row.get("blocked_reason") or row.get("status") or "unknown"
+        return f"auto requires a ready row: {reason}"
+    moves = proposal_engine.arrange_moves(candidate.facts, recommended)
+    if moves:
+        return f"auto needs arranging first: {len(moves)} move(s); review it instead"
+    return None
+
+
+def _metadata_write(
+    item: BundleCreateItem, row: Mapping, candidate: Optional[BundleCandidate]
+) -> Tuple[dict, Optional[str]]:
+    """The five project metadata values this create may write, and a refusal.
+
+    Three sources, in this order:
+    * `item.metadata` present - GUIDED. Only the fields in the map are written;
+      a field absent from it, or mapped to None, is never written. That is what
+      makes "a licence is never written without an explicit accept" true on the
+      server, not in the client.
+    * `item.auto` - AUTO. Only fields the ENGINE calls `high` confidence; a
+      parsed medium/low suggestion is the guided panel's job, not auto's default.
+    * neither - the legacy create path, byte-identical to before this change.
+    """
+    empty = {field: None for field in METADATA_FIELDS}
+    if item.metadata is not None:
+        if item.name_only:
+            return empty, "name_only and metadata are exclusive"
+        unknown = sorted(set(item.metadata) - set(METADATA_FIELDS))
+        if unknown:
+            return empty, f"unknown metadata field: {unknown[0]}"
+        values = dict(empty)
+        for field, value in item.metadata.items():
+            values[field] = value if isinstance(value, str) and value.strip() else None
+        return values, None
+    if item.auto:
+        facts = getattr(candidate, "facts", None) if candidate is not None else None
+        metadata = getattr(facts, "metadata", {}) or {}
+        values = dict(empty)
+        for field in METADATA_FIELDS:
+            entry = metadata.get(field) or {}
+            if entry.get("confidence") == "high" and entry.get("value"):
+                values[field] = entry["value"]
+        return values, None
+    return _enrichment(row, item.name_only), None
+
+
+def _cover_write(item: BundleCreateItem) -> Tuple[Optional[dict], Optional[str]]:
+    """The operator's cover decision, validated as a request (not against disk).
+
+    The membership guard lives in `create_project_from_members`, which is the one
+    place that knows the member set; this only rejects a malformed mode.
+    """
+    if item.cover is None:
+        return None, None
+    mode = item.cover.get("mode")
+    if mode not in {"asset", "none"}:
+        return None, f"unknown cover mode: {mode}"
+    if mode == "asset" and not item.cover.get("asset_id"):
+        return None, "cover mode asset needs an asset_id"
+    return {"mode": mode, "asset_id": item.cover.get("asset_id") if mode == "asset" else None}, None
 
 
 def _exclusion_prefixes(
@@ -2110,6 +2284,15 @@ def _create_one(
     key = (item.key or "").strip()
     if row is None or candidate is None:
         return _result(key, CREATE_FAILED, reason="unknown bundle")
+    refusal = _auto_refusal(item, row, candidate)
+    if refusal is not None:
+        return _result(key, CREATE_FAILED, reason=refusal)
+    metadata_values, metadata_refusal = _metadata_write(item, row, candidate)
+    if metadata_refusal is not None:
+        return _result(key, CREATE_FAILED, reason=metadata_refusal)
+    cover_choice, cover_refusal = _cover_write(item)
+    if cover_refusal is not None:
+        return _result(key, CREATE_FAILED, reason=cover_refusal)
     # ``blocked`` still means database readiness (Mf-um7x) and the Extract door
     # still keys on ``archive_only`` - but a shape or scan mismatch is not a
     # refusal. A `.zip` row is blocked/archive_only because its only door is
@@ -2151,7 +2334,6 @@ def _create_one(
         return _result(key, CREATE_FAILED, reason=refusal)
     excluded_names = set(item.exclude_groups)
     name = (item.name or "").strip() or row["name_suggestion"]
-    enrichment = _enrichment(row, item.name_only)
     marker = {
         "key": key,
         "detector": row["detector"],
@@ -2169,6 +2351,12 @@ def _create_one(
     # vendor's word from a human's; `name_only` deliberately records none.
     if not item.name_only and row.get("enrichment"):
         marker["enrichment"] = row["enrichment"]
+    if item.auto or item.cover is not None or item.metadata is not None:
+        marker["operator"] = {
+            "auto": bool(item.auto),
+            "cover": "engine" if cover_choice is None else cover_choice["mode"],
+            "accepted": sorted(f for f, value in metadata_values.items() if value is not None),
+        }
     with Session(engine) as session:
         # The same set the report used: the files this bundle's snapshot names,
         # never a nested child bundle's models under the recursive prefix. Hoisted
@@ -2214,7 +2402,16 @@ def _create_one(
             group_name = member.path[len(key_prefix):].split("/", 1)[0]
             models_by_group[group_name] = models_by_group.get(group_name, 0) + 1
         cover = row["cover"]
-        if prefixes:
+        if cover_choice is not None and cover_choice["mode"] == "none":
+            cover = _cover_none_fields(None, COVER_NONE)
+        elif cover_choice is not None:
+            chosen_asset = next(
+                (asset for asset in owned_assets if asset.id == cover_choice["asset_id"]), None
+            )
+            if chosen_asset is None:
+                return _result(key, CREATE_FAILED, reason="cover asset is not in this bundle")
+            cover = _cover_of(chosen_asset, "operator")
+        if prefixes and cover_choice is None:
             # Same cover rule, re-asked over the INCLUDED parts of the OWNED set: a
             # second rule here would be free to disagree with the report's, and a
             # wider set than `owned_assets` would be free to disagree with the
@@ -2306,7 +2503,7 @@ def _create_one(
                 dedupe=project_create_service.Dedupe(
                     key=key,
                     archive=(row["archive"] or {}).get("rel_path"),
-                    source_url=enrichment["source_url"],
+                    source_url=metadata_values["source_url"],
                     name=name,
                     # Containment is this door's identity to hold: it is asking about a
                     # folder a scan registered, and a hand-made project over those same
@@ -2325,12 +2522,12 @@ def _create_one(
                 ),
                 cover_asset_id=cover["asset_id"],
                 refuse=belt,
-                description=enrichment["description"],
-                creator=enrichment["creator"],
-                source_url=enrichment["source_url"],
+                description=metadata_values["description"],
+                creator=metadata_values["creator"],
+                source_url=metadata_values["source_url"],
                 project_origin="imported",
-                licence=enrichment["licence"],
-                licence_url=enrichment["licence_url"],
+                licence=metadata_values["licence"],
+                licence_url=metadata_values["licence_url"],
                 asset_index=asset_index,
             )
         except HTTPException as exc:
@@ -2370,6 +2567,12 @@ def _create_one(
                 "detector": row["detector"],
                 "confidence": row["confidence"],
                 "name_only": bool(item.name_only),
+                "auto": bool(item.auto),
+                "shape": chosen,
+                "cover": "engine" if cover_choice is None else cover_choice["mode"],
+                "accepted_fields": sorted(
+                    f for f, value in metadata_values.items() if value is not None
+                ),
                 # Always present, `[]` when nothing was excluded, so a reader can
                 # tell "no exclusion" from a row that predates the field.
                 "excluded_groups": [group["name"] for group in groups if group["name"] in excluded_names],

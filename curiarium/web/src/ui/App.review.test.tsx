@@ -217,7 +217,7 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
     source_url: null,
     detector: "thingiverse-readme",
     confidence: "high",
-    metadata_shape: "root-docs",
+    metadata_shape: "one-project",
     description_excerpt: null,
     model_count: 1,
     image_count: 1,
@@ -456,7 +456,10 @@ describe("App review destination", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 
     await waitFor(() => expect(createBundlesMock).toHaveBeenCalledTimes(1));
-    expect(createBundlesMock.mock.calls[0][0]).toEqual([{ key: "Moai", name: "Moai statue" }]);
+    // The detail pane's one-step door is AUTO now: the flag rides with the item.
+    expect(createBundlesMock.mock.calls[0][0]).toEqual([
+      { key: "Moai", name: "Moai statue", auto: true },
+    ]);
     await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(badgeText()).toBe("0"));
     // Both remaining rows are settled - one created, one dismissed - and the

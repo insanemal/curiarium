@@ -335,6 +335,89 @@
     "title": "BundleArrangeUndoOut",
     "type": "object"
   },
+  "BundleCoverCandidateOut": {
+    "description": "One image the engine's walk would accept as a face, bundle-relative.\n\n`asset_id`/`url`/`thumb_url` are set exactly when the same file is also a\nREGISTERED asset of this row, so the chooser can only offer a face it can set.",
+    "properties": {
+      "asset_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Asset Id"
+      },
+      "bytes": {
+        "default": 0,
+        "title": "Bytes",
+        "type": "integer"
+      },
+      "reason": {
+        "title": "Reason",
+        "type": "string"
+      },
+      "rel_path": {
+        "title": "Rel Path",
+        "type": "string"
+      },
+      "thumb_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Thumb Url"
+      },
+      "url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Url"
+      }
+    },
+    "required": [
+      "rel_path",
+      "reason"
+    ],
+    "title": "BundleCoverCandidateOut",
+    "type": "object"
+  },
+  "BundleCoverChoiceIn": {
+    "additionalProperties": false,
+    "description": "The operator's cover decision on the guided panel.\n\n`mode` is `asset` (set this registered image) or `none` (no cover). OMITTING\nthe whole field means the engine's own choice stands, which is why the field\nis optional rather than a nullable asset id: an absent choice and a deliberate\n\"no cover\" must not be the same request.",
+    "properties": {
+      "asset_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Asset Id"
+      },
+      "mode": {
+        "title": "Mode",
+        "type": "string"
+      }
+    },
+    "required": [
+      "mode"
+    ],
+    "title": "BundleCoverChoiceIn",
+    "type": "object"
+  },
   "BundleCoverOut": {
     "description": "The cover a created project would get, and why that one was chosen.",
     "properties": {
@@ -397,6 +480,21 @@
     "additionalProperties": false,
     "description": "One confirmed bundle; a key the fresh report does not know is `failed`.",
     "properties": {
+      "auto": {
+        "default": false,
+        "title": "Auto",
+        "type": "boolean"
+      },
+      "cover": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BundleCoverChoiceIn"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "exclude_groups": {
         "default": [],
         "items": {
@@ -408,6 +506,27 @@
       "key": {
         "title": "Key",
         "type": "string"
+      },
+      "metadata": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Metadata"
       },
       "name": {
         "anyOf": [
@@ -684,6 +803,14 @@
       "cover": {
         "$ref": "#/components/schemas/BundleCoverOut"
       },
+      "cover_candidates": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleCoverCandidateOut"
+        },
+        "title": "Cover Candidates",
+        "type": "array"
+      },
       "creator": {
         "anyOf": [
           {
@@ -771,6 +898,14 @@
         "title": "Image Count",
         "type": "integer"
       },
+      "images": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleImageOut"
+        },
+        "title": "Images",
+        "type": "array"
+      },
       "key": {
         "title": "Key",
         "type": "string"
@@ -809,6 +944,14 @@
         "title": "Metadata Shape",
         "type": "string"
       },
+      "metadata_suggestions": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleSuggestionOut"
+        },
+        "title": "Metadata Suggestions",
+        "type": "array"
+      },
       "model_count": {
         "default": 0,
         "title": "Model Count",
@@ -822,6 +965,16 @@
         "default": 0,
         "title": "Other Count",
         "type": "integer"
+      },
+      "provenance": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BundleProvenanceOut"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "rel_path": {
         "title": "Rel Path",
@@ -1173,6 +1326,41 @@
     "title": "BundleGroupOut",
     "type": "object"
   },
+  "BundleImageOut": {
+    "description": "One registered image of the row: the chooser's selectable faces.",
+    "properties": {
+      "asset_id": {
+        "title": "Asset Id",
+        "type": "string"
+      },
+      "rel_path": {
+        "title": "Rel Path",
+        "type": "string"
+      },
+      "thumb_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Thumb Url"
+      },
+      "url": {
+        "title": "Url",
+        "type": "string"
+      }
+    },
+    "required": [
+      "asset_id",
+      "rel_path",
+      "url"
+    ],
+    "title": "BundleImageOut",
+    "type": "object"
+  },
   "BundleMatchOut": {
     "description": "One shape a listing satisfies: the rule that offered it and its counts.\n\n``matches[0]`` on a row is the recommended shape and equals the row's own\n`detector`/`confidence`/`metadata_shape`; the rest are the alternatives. The\nmanual entry (shape `manual`) is always present and last unless the row itself\nrecommends it, and `note` carries the refusal word a manual offer was built\nfrom.\n\nA match the server cannot enact yet is still offered, because withholding it\nwould hide the reading that disagrees with the detector - an honest reading is\nworth more than a short list. ``creatable=False`` plus a ``note`` saying why\nis the contract: the client must not let the operator pick such a shape, and\nthe create path refuses it with ``needs-arrange``. ``creatable`` means \"this\nshape is enactable once the row is ready; the row's own ``status`` still gates\nthe create\".",
     "properties": {
@@ -1239,6 +1427,125 @@
       "confidence"
     ],
     "title": "BundleMatchOut",
+    "type": "object"
+  },
+  "BundleProvenanceAlsoInOut": {
+    "description": "A second sighting of a provider subject the engine already listed.",
+    "properties": {
+      "confidence": {
+        "title": "Confidence",
+        "type": "string"
+      },
+      "where": {
+        "title": "Where",
+        "type": "string"
+      }
+    },
+    "required": [
+      "where",
+      "confidence"
+    ],
+    "title": "BundleProvenanceAlsoInOut",
+    "type": "object"
+  },
+  "BundleProvenanceCandidateOut": {
+    "description": "A provider URL the engine found in a document, and where it saw it.",
+    "properties": {
+      "also_in": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleProvenanceAlsoInOut"
+        },
+        "title": "Also In",
+        "type": "array"
+      },
+      "confidence": {
+        "title": "Confidence",
+        "type": "string"
+      },
+      "provider": {
+        "title": "Provider",
+        "type": "string"
+      },
+      "subject_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Subject Id"
+      },
+      "url": {
+        "title": "Url",
+        "type": "string"
+      },
+      "where": {
+        "title": "Where",
+        "type": "string"
+      }
+    },
+    "required": [
+      "url",
+      "provider",
+      "where",
+      "confidence"
+    ],
+    "title": "BundleProvenanceCandidateOut",
+    "type": "object"
+  },
+  "BundleProvenanceOut": {
+    "description": "The provider URLs the engine mined, for the guided panel's source field.",
+    "properties": {
+      "candidates": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleProvenanceCandidateOut"
+        },
+        "title": "Candidates",
+        "type": "array"
+      },
+      "confidence": {
+        "default": "suggested",
+        "title": "Confidence",
+        "type": "string"
+      },
+      "unresolved": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/BundleProvenanceUnresolvedOut"
+        },
+        "title": "Unresolved",
+        "type": "array"
+      }
+    },
+    "title": "BundleProvenanceOut",
+    "type": "object"
+  },
+  "BundleProvenanceUnresolvedOut": {
+    "description": "A provider URL with no model id (a truncated extraction), never an invented id.",
+    "properties": {
+      "reason": {
+        "title": "Reason",
+        "type": "string"
+      },
+      "text": {
+        "title": "Text",
+        "type": "string"
+      },
+      "where": {
+        "title": "Where",
+        "type": "string"
+      }
+    },
+    "required": [
+      "text",
+      "where",
+      "reason"
+    ],
+    "title": "BundleProvenanceUnresolvedOut",
     "type": "object"
   },
   "BundleRefusalOut": {
@@ -1351,6 +1658,35 @@
       "stamp"
     ],
     "title": "BundleRuleSetOut",
+    "type": "object"
+  },
+  "BundleSuggestionOut": {
+    "description": "One value the engine mined from a document, with WHERE it came from.\n\nA SUGGESTION, never a fact: nothing is written unless the operator accepts it.\n`where` is the document and page the engine read, e.g. \"manual.pdf p2\".",
+    "properties": {
+      "confidence": {
+        "title": "Confidence",
+        "type": "string"
+      },
+      "field": {
+        "title": "Field",
+        "type": "string"
+      },
+      "value": {
+        "title": "Value",
+        "type": "string"
+      },
+      "where": {
+        "title": "Where",
+        "type": "string"
+      }
+    },
+    "required": [
+      "field",
+      "value",
+      "where",
+      "confidence"
+    ],
+    "title": "BundleSuggestionOut",
     "type": "object"
   }
 }

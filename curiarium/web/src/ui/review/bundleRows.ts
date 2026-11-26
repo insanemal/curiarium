@@ -10,6 +10,7 @@ import {
   type BundleDetectCounts,
   type BundleDetectItem,
   type BundleMatch,
+  type BundleSuggestion,
 } from "../../lib/api/bundles";
 import { DRIFT_KNOWN, DRIFT_NOT_APPLICABLE } from "../projectBundleDrift";
 // Declaration-only import cycles, proved green by these suites: this module
@@ -508,6 +509,71 @@ export function statusLine(row: BundleDetectItem): string {
   }
   return blockedReasonLabel(row);
 }
+
+/** The shapes AUTO runs on. Mirrors the server's `bundle_service.AUTO_SHAPES`:
+ *  small, explicit, and only the two the create door can enact in place. A shape
+ *  outside this list is never auto - and the SERVER refuses it too, so this
+ *  constant can only make the client more cautious, never less. */
+export const AUTO_SHAPES: readonly string[] = ["one-project", "git-project"];
+
+export type ActableMode = "auto" | "guided";
+
+/** THE one predicate for "can this row be acted on", shared by the row's badge,
+ *  the detail pane's buttons and the guided panel. A row with a project is
+ *  settled, and `isCreatable` is the server's own gate; anything else is a
+ *  guided review. The band is the ENGINE's (`row.confidence`, i.e.
+ *  `matches[0].confidence`); the client never derives one. */
+export function actableMode(row: BundleDetectItem): ActableMode | null {
+  if (row.existing_project_id) return null;
+  if (!isCreatable(row)) return null;
+  if (
+    row.confidence === "high" &&
+    row.status === "ready" &&
+    AUTO_SHAPES.includes(row.metadata_shape)
+  ) {
+    return "auto";
+  }
+  return "guided";
+}
+
+/** The sentence the badge's title and both buttons share, from the same predicate. */
+export function actableReason(row: BundleDetectItem): string | null {
+  const mode = actableMode(row);
+  if (mode === "auto") {
+    return "High confidence: Create imports it in one step. Review opens the same steps first.";
+  }
+  if (mode === "guided") return "Review what the app parsed before anything is written.";
+  return null;
+}
+
+export const SUGGESTION_FIELD_LABELS: Record<string, string> = {
+  title: "Title",
+  creator: "Creator",
+  licence: "Licence",
+  licence_url: "Licence URL",
+  source_url: "Source URL",
+  description: "Description",
+};
+
+export function suggestionFieldLabel(field: string): string {
+  return SUGGESTION_FIELD_LABELS[field] ?? field;
+}
+
+/** The suggestion's provenance line, said by the server's own `where`. */
+export function suggestionSourceLine(suggestion: BundleSuggestion): string {
+  const where = (suggestion.where ?? "").trim();
+  return where ? `Suggested from ${where}` : "Suggested from a document with no page";
+}
+
+/** The five fields a create may write. `title` is NOT one of them: the project's
+ *  name has its own field, and the server refuses an unknown metadata key. */
+export const METADATA_FIELDS: readonly string[] = [
+  "creator",
+  "licence",
+  "licence_url",
+  "source_url",
+  "description",
+];
 
 /** The shape that imports everything in the folder as one project: no inferred
  *  grouping. The server serves it LAST in a row's `matches`, and it is the one

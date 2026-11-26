@@ -35,6 +35,8 @@ import {
   EXTRACT_AND_CREATE_HINT,
   EXTRACT_AND_CREATE_LABEL,
   SHAPE_COMPOUND,
+  actableMode,
+  actableReason,
   activeShape,
   archiveExtractTitle,
   archiveLine,
@@ -96,6 +98,7 @@ import {
   type BulkRunResult,
 } from "./extractAndCreate";
 import ArrangePlanPanel from "./ArrangePlanPanel";
+import GuidedImportPanel from "./GuidedImportPanel";
 import ReviewQueueView from "./ReviewQueueView";
 import ScanFidelityNotice from "./ScanFidelityNotice";
 import ScanStorageAction from "./ScanStorageAction";
@@ -464,6 +467,12 @@ export default function BundleReviewView({
   // recommendation would put `shape` on the wire for a choice nobody made.
   const [chosenShape, setChosenShape] = React.useState<Record<string, string>>({});
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
+  // Which row's guided panel is open, keyed by row AND shape: a stale key simply
+  // stops matching, so a row or shape change closes the panel without an effect.
+  const [guidedForKey, setGuidedForKey] = React.useState<string | null>(null);
+  // The server's own sentence for a refused AUTO create, shown above the action
+  // row while that row's guided panel is open (the row the attempt belongs to).
+  const [autoFailure, setAutoFailure] = React.useState<string | null>(null);
   // One dialog serves all three doors (card, blocked row, bulk bar). `returnKey`
   // is the row to put focus back on when it closes, so a keyboard user who
   // pressed Enter is not dropped on <body>.
@@ -867,10 +876,37 @@ export default function BundleReviewView({
     void state.refresh();
   };
 
+  // The row-and-shape identity the guided panel is opened under.
+  const guidedKey = activeRow === null ? "" : `${activeRow.key}/${activeShapeName}`;
+
+  // The inert button of a row with no door keeps its old handler: a disabled
+  // create must still behave exactly as it always did.
   const createActive = () => {
     if (!activeRow) return;
     void primeModelCovers([activeRow], { mediaUrl: fileUrl });
     void createAndReport(createItems([activeRow], { excludeGroups: true }));
+  };
+
+  /** The one-step door, with the guided panel as its fallback: the server decides
+   *  whether AUTO landed, and a per-item refusal is a 200, so its sentence is
+   *  surfaced here rather than swallowed. */
+  const createActiveAuto = async (): Promise<void> => {
+    if (!activeRow) return;
+    setAutoFailure(null);
+    void primeModelCovers([activeRow], { mediaUrl: fileUrl });
+    const items = createItems([activeRow], { excludeGroups: true }).map(item => ({
+      ...item,
+      auto: true,
+    }));
+    const response = await state.create(items);
+    reportBulkCreate(items, response);
+    const result = response?.results[0];
+    if (result === undefined || result.status === "created" || result.status === "skipped") return;
+    // The server refused AUTO (a band, a shape, or a plan that needs arranging).
+    // Never a disabled button's silence: say the server's sentence and hand the
+    // operator the guided panel, which is the path that can finish the job.
+    setAutoFailure(result.reason ?? null);
+    setGuidedForKey(guidedKey);
   };
 
   // One action, four named phases, and the server as the readiness authority:
@@ -1211,7 +1247,7 @@ export default function BundleReviewView({
         <span className="review-row-path" title={row.rel_path}>{row.rel_path}</span>
         <span
           className={`review-row-confidence ${confidenceClass(row.confidence)}`}
-          title={confidenceLabel(row.confidence)}
+          title={actableReason(row) ?? confidenceLabel(row.confidence)}
         >
           {row.confidence}
         </span>
@@ -1749,6 +1785,14 @@ export default function BundleReviewView({
                         />
                       </label>
                     )}
+                    {autoFailure !== null && guidedForKey === guidedKey && (
+                      // The server refused AUTO: its sentence, verbatim. Gated on
+                      // the panel's key so it never follows the operator to
+                      // another row.
+                      <span className="review-detail-reason" role="alert" data-auto-failure="true">
+                        {autoFailure}
+                      </span>
+                    )}
                     <div className="review-detail-actions">
                       {/* The one-step door. A zip-only row is blocked, so the plain Create button
                           beside it is disabled - this is the action that makes the row creatable
@@ -1765,18 +1809,62 @@ export default function BundleReviewView({
                           {EXTRACT_AND_CREATE_LABEL}
                         </button>
                       )}
+                      {/* One predicate, three renders: AUTO gets the one-step
+                          button plus the panel's door, a guided row gets only
+                          that door ("do it anyway" is a review, never a silent
+                          auto), and a row with no door keeps the inert button. */}
                       {!activeRow.existing_project_id && (
-                        <button
-                          type="button"
-                          className={PRIMARY_BUTTON}
-                          disabled={
-                            actionsLocked || !isCreatable(activeRow) || activeShapeUnenactable
-                          }
-                          title={activeShapeUnenactable ? activeShapeReason : undefined}
-                          onClick={createActive}
-                        >
-                          Create project
-                        </button>
+                        <>
+                          {actableMode(activeRow) === "auto" && (
+                            <>
+                              <button
+                                type="button"
+                                className={PRIMARY_BUTTON}
+                                data-guided-auto="true"
+                                disabled={actionsLocked || activeShapeUnenactable}
+                                title={activeShapeUnenactable ? activeShapeReason : undefined}
+                                onClick={() => void createActiveAuto()}
+                              >
+                                Create project
+                              </button>
+                              <button
+                                type="button"
+                                className={SECONDARY_BUTTON}
+                                data-guided-open="true"
+                                disabled={actionsLocked}
+                                title={actableReason(activeRow) ?? undefined}
+                                onClick={() => setGuidedForKey(guidedKey)}
+                              >
+                                Review first
+                              </button>
+                            </>
+                          )}
+                          {actableMode(activeRow) === "guided" && (
+                            <button
+                              type="button"
+                              className={PRIMARY_BUTTON}
+                              data-guided-open="true"
+                              disabled={actionsLocked}
+                              title={actableReason(activeRow) ?? undefined}
+                              onClick={() => setGuidedForKey(guidedKey)}
+                            >
+                              Review and import
+                            </button>
+                          )}
+                          {actableMode(activeRow) === null && (
+                            <button
+                              type="button"
+                              className={PRIMARY_BUTTON}
+                              disabled={
+                                actionsLocked || !isCreatable(activeRow) || activeShapeUnenactable
+                              }
+                              title={activeShapeUnenactable ? activeShapeReason : undefined}
+                              onClick={createActive}
+                            >
+                              Create project
+                            </button>
+                          )}
+                        </>
                       )}
                       <button
                         type="button"
@@ -1830,6 +1918,23 @@ export default function BundleReviewView({
                         </span>
                       )}
                     </div>
+                    {/* The guided door, mounted below the action row beside the
+                        arrange door so one read can finish the import. A stale
+                        key never matches, so a row or shape change unmounts it. */}
+                    {canContribute && guidedForKey === guidedKey && (
+                      <GuidedImportPanel
+                        key={guidedKey}
+                        row={activeRow}
+                        canContribute={canContribute}
+                        initialName={typedName(names, activeRow)}
+                        onLanded={projectId => {
+                          if (projectId) onProjectImported?.(projectId);
+                          else onProjectsChanged?.();
+                        }}
+                        onChanged={() => void state.refresh()}
+                        onUnauthorized={onUnauthorized}
+                      />
+                    )}
                   </>
                 )}
                 {/* The zip-only door. The queue passes the real capability

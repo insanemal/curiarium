@@ -3423,6 +3423,45 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     client went back to a count-free truncation sentence; or if a `.zip` row
     stopped being its own row, in either direction.
 
+    **Decision 35 - the import flow: auto for high confidence, guided for the
+    rest (`Mf-yz9e`).** Detection ranks a row; this decides what the click does
+    with that rank. The band decides the DEFAULT, never what is AVAILABLE: a HIGH
+    row offers Create (auto) AND Review (one click, fully editable), and the
+    guided panel is reachable for every row the queue can act on. A medium or low
+    row gets Review as the primary path, and "do it anyway" opens that same panel
+    rather than performing a silent create.
+
+    **AUTO is the existing create route with `auto: true`**, gated server-side in
+    `bundle_service._auto_refusal`, before any write: a non-HIGH band, a shape
+    outside `AUTO_SHAPES` (`one-project`/`git-project` - the two the create door
+    can enact in place; `add-to-project` is excluded because its whole operation
+    is the arrange door), an operator shape that differs from the recommendation,
+    a row that is not `ready`, and a recommended shape whose
+    `proposal_engine.arrange_moves(facts, shape)` is non-empty. The strongest
+    proof that auto never runs on a medium or low row is therefore that the
+    server refuses it and writes nothing - not that a button was disabled. A
+    refusal is never a half-auto: it falls back to guided.
+
+    **GUIDED's accepted-only metadata is a SERVER rule.** `_metadata_write` reads
+    the operator's `metadata` map before `_enrichment` considers guessing: a field
+    absent from the map, or mapped to `null`, is never written, so an unaccepted
+    licence cannot be written by any client, however it is spelled.
+
+    **The four additive row fields** - `metadata_suggestions`, `provenance`,
+    `cover_candidates`, `images` - are declared on `BundleDetectItemOut`, because
+    an undeclared field is dropped on the way out; predicting them from the
+    service is not enough. That trap has a name here already (`rule_set` and
+    `refused`, Decision 34), so they are pinned twice: the set-equality test in
+    `tests/test_bundles_api.py` and the regenerated OpenAPI component fixture.
+
+    **What would make this wrong.** A client deriving its own band; an auto
+    create on a row whose `arrange_moves` is non-empty (a half-auto); an auto
+    refusal that wrote a project, an asset or a marker; a guided create falling
+    back to `_enrichment` for a field the operator's map omitted; a licence
+    written without an explicit accept; an archive row reaching AUTO; a new
+    route, permission row or audit action where the existing create route
+    sufficed; or any of the four row fields dropped from `BundleDetectItemOut`.
+
 ## Consequences
 
 * One directory per vendor bundle becomes one project, with creator, licence,
@@ -4539,4 +4578,10 @@ This ADR is superseded if any of the following becomes true:
 - a second copy of the engine's rules appears in
   `curiarium/scripts/propose_import.py` - the shim and the engine must stay one
   module object - or `proposal_engine` gains an app import that breaks the
-  bare-host tight loop.
+  bare-host tight loop;
+- auto runs on a band other than the engine's `high`, or on a row whose
+  `arrange_moves` is non-empty (Decision 35);
+- a guided create writes a metadata field the operator's map omitted or nulled,
+  or a licence appears without an accept;
+- `AUTO_SHAPES` grows beyond the two shapes the create door can enact, or a
+  `.zip` row reaches AUTO.

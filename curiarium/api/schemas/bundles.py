@@ -6,7 +6,7 @@ is prefixed `Bundle` because the OpenAPI fixtures pin bare component refs and a
 generic `CountsOut` would collide with a future domain.
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,6 +22,8 @@ __all__ = [
   "BundleArrangeReportOut",
   "BundleArrangeRequest",
   "BundleArrangeUndoOut",
+  "BundleCoverCandidateOut",
+  "BundleCoverChoiceIn",
   "BundleCoverOut",
   "BundleCreateItemIn",
   "BundleCreateItemOut",
@@ -37,10 +39,16 @@ __all__ = [
   "BundleEnrichResponse",
   "BundleEnrichmentOut",
   "BundleGroupOut",
+  "BundleImageOut",
   "BundleMatchOut",
+  "BundleProvenanceAlsoInOut",
+  "BundleProvenanceCandidateOut",
+  "BundleProvenanceOut",
+  "BundleProvenanceUnresolvedOut",
   "BundleRefusalOut",
   "BundleReportOut",
   "BundleRuleSetOut",
+  "BundleSuggestionOut",
 ]
 
 
@@ -126,6 +134,80 @@ class BundleEnrichmentOut(BaseModel):
   fields: List[str] = []
 
 
+class BundleSuggestionOut(BaseModel):
+  """One value the engine mined from a document, with WHERE it came from.
+
+  A SUGGESTION, never a fact: nothing is written unless the operator accepts it.
+  `where` is the document and page the engine read, e.g. "manual.pdf p2".
+  """
+
+  field: str  # title | creator | licence | licence_url | source_url | description
+  value: str
+  where: str
+  confidence: str  # the engine's band for THIS field: high | medium | low
+
+
+class BundleProvenanceAlsoInOut(BaseModel):
+  """A second sighting of a provider subject the engine already listed."""
+
+  where: str
+  confidence: str
+
+
+class BundleProvenanceCandidateOut(BaseModel):
+  """A provider URL the engine found in a document, and where it saw it."""
+
+  url: str
+  provider: str
+  subject_id: Optional[str] = None
+  where: str
+  confidence: str
+  # The engine keeps every weaker sighting of the same subject, bounded, so the
+  # strongest location is `where` above and the rest are here. Additive and
+  # defaulted, so a payload from before this field still validates.
+  also_in: List[BundleProvenanceAlsoInOut] = []
+
+
+class BundleProvenanceUnresolvedOut(BaseModel):
+  """A provider URL with no model id (a truncated extraction), never an invented id."""
+
+  text: str
+  where: str
+  reason: str
+
+
+class BundleProvenanceOut(BaseModel):
+  """The provider URLs the engine mined, for the guided panel's source field."""
+
+  candidates: List[BundleProvenanceCandidateOut] = []
+  unresolved: List[BundleProvenanceUnresolvedOut] = []
+  confidence: str = "suggested"
+
+
+class BundleCoverCandidateOut(BaseModel):
+  """One image the engine's walk would accept as a face, bundle-relative.
+
+  `asset_id`/`url`/`thumb_url` are set exactly when the same file is also a
+  REGISTERED asset of this row, so the chooser can only offer a face it can set.
+  """
+
+  rel_path: str
+  reason: str  # largest-image | model-preview
+  bytes: int = 0
+  asset_id: Optional[str] = None
+  url: Optional[str] = None
+  thumb_url: Optional[str] = None
+
+
+class BundleImageOut(BaseModel):
+  """One registered image of the row: the chooser's selectable faces."""
+
+  asset_id: str
+  rel_path: str
+  url: str
+  thumb_url: Optional[str] = None
+
+
 class BundleDetectItemOut(BaseModel):
   """One detected bundle: what it is, what it counts, and whether it can be created."""
 
@@ -192,6 +274,15 @@ class BundleDetectItemOut(BaseModel):
   # response model silently drops it - the way `rule_set` and `refused` were
   # lost before.
   enrichment: Optional[BundleEnrichmentOut] = None
+  # What a document CLAIMED and where, for the guided panel's accept/edit/dismiss
+  # list. Every one of the four below is ADDITIVE and defaulted, so a pre-existing
+  # payload still validates - and each is declared HERE or the response model
+  # silently drops it, the same trap `rule_set` and `refused` fell into.
+  metadata_suggestions: List[BundleSuggestionOut] = []
+  # None means the row is a `.zip`, whose facts carry no provenance at all.
+  provenance: Optional[BundleProvenanceOut] = None
+  cover_candidates: List[BundleCoverCandidateOut] = []
+  images: List[BundleImageOut] = []
 
 
 class BundleDetectCountsOut(BaseModel):
@@ -254,6 +345,20 @@ class BundleReportOut(BaseModel):
   refused: List[BundleRefusalOut] = []
 
 
+class BundleCoverChoiceIn(BaseModel):
+  """The operator's cover decision on the guided panel.
+
+  `mode` is `asset` (set this registered image) or `none` (no cover). OMITTING
+  the whole field means the engine's own choice stands, which is why the field
+  is optional rather than a nullable asset id: an absent choice and a deliberate
+  "no cover" must not be the same request.
+  """
+
+  model_config = ConfigDict(extra="forbid")
+  mode: str
+  asset_id: Optional[str] = None
+
+
 class BundleCreateItemIn(BaseModel):
   """One confirmed bundle; a key the fresh report does not know is `failed`."""
 
@@ -268,6 +373,15 @@ class BundleCreateItemIn(BaseModel):
   # One of the row's `matches` shapes; None means the row's recommended shape.
   # An unoffered shape answers `failed`/`unknown shape`.
   shape: Optional[str] = None
+  # AUTO (Mf-yz9e): one action, high confidence only. The server refuses every
+  # other band and every shape it cannot do safely; a client never decides a band.
+  auto: bool = False
+  # The cover the operator chose; absent means the engine's choice.
+  cover: Optional[BundleCoverChoiceIn] = None
+  # The metadata the operator ACCEPTED, field -> value (an edit) or None (a
+  # dismiss). When present, fields absent from this map are NEVER written, so a
+  # licence the operator did not accept is never written. Absent = legacy create.
+  metadata: Optional[Dict[str, Optional[str]]] = None
 
 
 class BundleCreateRequest(BaseModel):
