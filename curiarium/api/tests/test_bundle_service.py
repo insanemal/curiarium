@@ -214,8 +214,15 @@ def _file_sha256(path: Path) -> str:
 def _git_head() -> str:
     """``git rev-parse HEAD``, or the word ``unavailable`` - never an exception.
 
-    The API image has no ``.git`` and no ``git`` binary, and a measurement that
-    crashed the suite for wanting a build id would be a measurement nobody ran.
+    The API build context is ``curiarium/api``, which holds no ``.git``, so ``COPY . .``
+    cannot put one in ``/app``. The binary, though, is on PATH - the Dockerfile's base
+    stage installs ``gosu git`` - so ``git rev-parse HEAD`` there exits non-zero: we
+    observed returncode ``128`` and ``fatal: not a git repository``. ``check=True``
+    raises ``subprocess.CalledProcessError``, a ``subprocess.SubprocessError`` subclass
+    the ``except`` catches, so the helper returns the sentinel rather than raising.
+    ``OSError`` is still live, but only for a host with no git binary - it is no longer
+    this image's branch. ``_git_head()`` runs once, in ``_member_artifact``, which
+    returns early unless ``MV_MEMBER_ARTIFACT`` is set.
     """
     try:
         completed = subprocess.run(
