@@ -79,6 +79,8 @@ function makeBundle(overrides: Partial<BundleDetectItem> = {}): BundleDetectItem
 
 const emptyCounts = {
   total: 0,
+  offered: 0,
+  withheld: 0,
   high: 0,
   low: 0,
   ready: 0,

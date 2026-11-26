@@ -177,7 +177,7 @@ def test_drift_is_model_scoped_so_support_files_are_never_drift() -> None:
     outside the root and a model under an excluded group. Exactly the one
     unattached model comes back.
 
-    Mutation: drop ``bundle_detect.is_counted_model`` and the image, the text and
+    Mutation: drop ``library_scan.is_counted_model`` and the image, the text and
     the AppleDouble sidecar count too - the naive difference the ticket measured
     as 26 at creation where the honest answer is 0.
     """

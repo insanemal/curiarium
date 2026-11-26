@@ -22,6 +22,8 @@ function makeReport(overrides: Partial<BundleReport>): BundleReport {
     truncated: false,
     counts: {
       total: 0,
+      offered: 0,
+      withheld: 0,
       high: 0,
       medium: 0,
       low: 0,

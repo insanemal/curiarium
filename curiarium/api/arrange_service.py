@@ -44,10 +44,10 @@ from sqlmodel import Session, select
 
 import asset_service
 import audit
-import bundle_detect
 import bundle_service
 import folder_paths
 import folder_service
+import library_scan
 import project_create_service
 import project_service
 import proposal_engine
@@ -99,7 +99,12 @@ def _report_rows(root: Path) -> Dict[str, dict]:
     One walk serves the row lookup; the report is the only door that owns
     `excluded_keys`, so a key a create recognises is a key this preview does too.
     """
-    scan = bundle_service.scan_bundles(root, excluded_keys=bundle_service._excluded_keys(""))
+    known = bundle_service._marker_keys()
+    scan = bundle_service.scan_bundles(
+        root,
+        excluded_keys=bundle_service._excluded_keys("", known=known),
+        project_keys=known,
+    )
     report = bundle_service._report_from_scan(
         scan,
         root=root,
@@ -565,7 +570,7 @@ def _create_projects(
             model_ids = [
                 asset_id
                 for asset_id, path, size, new_path in projected
-                if _under(new_path, root_rel) and bundle_detect.is_counted_model(path, size)
+                if _under(new_path, root_rel) and library_scan.is_counted_model(path, size)
             ]
             member_ids = [member.asset_id for member in members]
             if target.get("reuse"):

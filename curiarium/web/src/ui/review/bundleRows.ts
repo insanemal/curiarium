@@ -478,13 +478,34 @@ export function blockedReasonLabel(row: BundleDetectItem): string {
   return BLOCKED_REASON_LABELS[row.blocked_reason] ?? row.blocked_reason;
 }
 
+/** The row's recommended reading: the engine's first option, mirrored on the row
+ *  as `matches[0]`. A payload from before the chooser existed has no `matches` at
+ *  all, and then there is no recommendation to name - never an invented one. */
+export function recommendedMatch(row: BundleDetectItem): BundleMatch | undefined {
+  return row.matches?.[0];
+}
+
+/** Whether the row's recommendation is one a door can enact. A payload that
+ *  carries no `matches` predates the field, and such a row was always actionable,
+ *  so an absent offer is not a refusal. Otherwise the engine's own `creatable`
+ *  decides, through `isEnactable` so the strict `!== false` lives in one place. */
+export function recommendationEnactable(row: BundleDetectItem): boolean {
+  const match = recommendedMatch(row);
+  if (!match) return true;
+  return isEnactable(match);
+}
+
 export function statusLine(row: BundleDetectItem): string {
   if (!isBlocked(row)) return "Ready";
-  // The word follows the gate: only a row no create can be sent for reads
-  // "Blocked -". A blocked row whose Create button is live says its reason
-  // without the refusal, because one predicate owns both the gate and the word
-  // and the pane must never call a row blocked while offering to create it.
-  if (!isCreatable(row)) return `Blocked - ${blockedReasonLabel(row)}`;
+  // The word follows the DOOR that exists, not the server's create gate. A
+  // `.zip` row is always outside `isCreatable` - that is how the Extract door is
+  // named (`extractPathFor` keys on `archive_only`) - yet an `archive-project` /
+  // `archive-split` reading has a door, so calling it "Blocked -" while offering
+  // Extract would be false. Only a row with neither a create nor an enactable
+  // recommendation reads as blocked.
+  if (!isCreatable(row) && !recommendationEnactable(row)) {
+    return `Blocked - ${blockedReasonLabel(row)}`;
+  }
   return blockedReasonLabel(row);
 }
 
@@ -517,6 +538,23 @@ export const SHAPE_LABELS: Record<string, string> = {
   // arranged, and the server's own `note` carries that reason.
   "split-top-folders": "Split into one project per top folder",
   "split-model-folders": "Split into one project per model folder",
+  // The shapes the proposal engine recommends for a directory row. `one-project`
+  // is the plain "import the folder as one project", and `git-project` is the
+  // same thing when the folder is a checkout whose own content is the product
+  // (the repo's files, not its working tree). `add-to-project` keeps the folder
+  // where it is and adds its parts to a project that already exists.
+  "one-project": "One project",
+  "git-project": "One project, the repo's own content",
+  "add-to-project": "Add as parts to an existing project",
+  // The archive engine's readings. A zip's recommendation is what the Extract
+  // door enacts, so the words say what the archive would become.
+  "archive-project": "One project from this archive",
+  "archive-split": "Split the archive into projects",
+  // The engine's no-row readings: nothing to import here. `archive-leave` is the
+  // archive engine's spelling of the same answer.
+  leave: "Nothing to import",
+  "archive-leave": "Nothing to import",
+  "archive-only": "Archives only - extract first",
 };
 
 /** The wording for one shape. An unknown shape - a newer server's - is

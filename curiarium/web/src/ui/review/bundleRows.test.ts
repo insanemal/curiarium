@@ -68,6 +68,8 @@ import {
   newPartsLine,
   noPayloadDoor,
   payloadOnDisk,
+  recommendationEnactable,
+  recommendedMatch,
   rowBucket,
   rowStateChip,
   shapeLabel,
@@ -158,6 +160,8 @@ const readyLow = makeBundle({ key: "Cable_clip", confidence: "low" });
 function makeCounts(overrides: Partial<BundleDetectCounts> = {}): BundleDetectCounts {
   return {
     total: 0,
+    offered: 0,
+    withheld: 0,
     high: 0,
     low: 0,
     ready: 0,
@@ -443,6 +447,16 @@ describe("shapeLabel", () => {
       // cardinality choice, never the rule set's token.
       "split-top-folders",
       "split-model-folders",
+      // The proposal engine's ordinary directory readings.
+      "one-project",
+      "git-project",
+      "add-to-project",
+      // The archive engine's readings, and its two no-row answers.
+      "archive-project",
+      "archive-split",
+      "archive-leave",
+      "leave",
+      "archive-only",
     ]) {
       expect(SHAPE_LABELS[shape]).toBeTruthy();
       expect(shapeLabel(shape)).toBe(SHAPE_LABELS[shape]);
@@ -450,6 +464,14 @@ describe("shapeLabel", () => {
     // Both split shapes say what they would MAKE, and neither leaks its token.
     expect(SHAPE_LABELS["split-top-folders"]).toBe("Split into one project per top folder");
     expect(SHAPE_LABELS["split-model-folders"]).toBe("Split into one project per model folder");
+    // The engine's ordinary readings name what the row becomes, not the token.
+    expect(SHAPE_LABELS["one-project"]).toBe("One project");
+    expect(SHAPE_LABELS["git-project"]).toBe("One project, the repo's own content");
+    expect(SHAPE_LABELS["add-to-project"]).toBe("Add as parts to an existing project");
+    expect(SHAPE_LABELS["archive-project"]).toBe("One project from this archive");
+    expect(SHAPE_LABELS["archive-split"]).toBe("Split the archive into projects");
+    expect(SHAPE_LABELS.leave).toBe("Nothing to import");
+    expect(SHAPE_LABELS["archive-only"]).toBe("Archives only - extract first");
     // The manual shape says what it does rather than naming itself: the operator
     // is choosing files, not vocabulary.
     expect(SHAPE_LABELS[SHAPE_MANUAL]).toBe("Everything in this folder");
@@ -707,10 +729,11 @@ describe("statusLine", () => {
   });
 
   it("translates each known blocked reason", () => {
-    // REPINNED: the prefix follows the gate. A blocked row whose Create button is
-    // live says its reason without calling itself blocked; only a row no create
-    // can be sent for keeps the `Blocked - ` prefix, so the pane can never say
-    // both "Blocked" and "Create project" about the same row.
+    // REPINNED: the prefix follows the DOOR. A blocked row with a live Create
+    // button, or with an enactable recommendation of its own (the Extract door on
+    // a zip), says its reason without calling itself blocked; only a row no door
+    // can enact keeps the `Blocked - ` prefix, so the pane can never say
+    // "Blocked" beside a control that really acts on the row.
     expect(statusLine(makeBundle({ status: "blocked", blocked_reason: "unresolved_directory" }))).toBe(
       "no matching folder on disk",
     );
@@ -720,26 +743,111 @@ describe("statusLine", () => {
     // `makeBundle`'s default `rel_path` is `Moai statue`, a DIRECTORY, so the
     // honest sentence for this row is the folder one. What used to be asserted
     // here called that folder a zip - the exact lie this ticket is about - so the
-    // corrected expectation is the fix, not a regression. The prefix stays: an
-    // `archive_only` row is the one shape no create is sent for.
+    // corrected expectation is the fix, not a regression. No prefix: the row's
+    // served recommendation sets no `creatable: false`, so the Extract door is
+    // what its reason names and the word follows that door, not the create gate.
     expect(statusLine(makeBundle({ status: "blocked", blocked_reason: "archive_only" }))).toBe(
-      "Blocked - folder only - this row is a folder, not an archive",
+      "folder only - this row is a folder, not an archive",
     );
   });
 
   it("keeps the word off a live create, whatever the blocked reason", () => {
     // One predicate owns the gate and the word: every reason that leaves a create
-    // live reads without the refusal prefix, and the one that shuts it reads with
-    // it. Pinned as a table so a new reason has to choose a side on purpose.
+    // live reads without the refusal prefix, and a reason whose row still has a
+    // door reads without it too. Pinned as a table so a new reason has to choose
+    // a side on purpose.
     for (const blocked_reason of ["unresolved_directory", "not_scanned", "future-reason"]) {
       const row = makeBundle({ status: "blocked", blocked_reason });
       expect(isCreatable(row)).toBe(true);
       expect(statusLine(row)).toBe(blockedReasonLabel(row));
       expect(statusLine(row)).not.toContain("Blocked - ");
     }
+    // REPINNED: an `archive_only` row is still outside the server's create gate,
+    // but its served recommendation is enactable (no `creatable: false`), and the
+    // word follows the DOOR - the Extract door - so it is not called blocked.
     const archiveOnly = makeBundle({ status: "blocked", blocked_reason: "archive_only" });
     expect(isCreatable(archiveOnly)).toBe(false);
-    expect(statusLine(archiveOnly)).toBe(`Blocked - ${blockedReasonLabel(archiveOnly)}`);
+    expect(recommendationEnactable(archiveOnly)).toBe(true);
+    expect(statusLine(archiveOnly)).toBe(blockedReasonLabel(archiveOnly));
+  });
+
+  it("reads an archive-project zip as extractable, not blocked", () => {
+    // The engine's verdict for a `.zip` that becomes a project is
+    // `creatable: true`, and the Extract door is what enacts it. `isCreatable`
+    // stays false on purpose - a zip is never sent to Create - so the refusal
+    // word must come from the recommendation, not from that gate.
+    const row = makeBundle({
+      key: "import/Moai.zip",
+      rel_path: "import/Moai.zip",
+      status: "blocked",
+      blocked_reason: "archive_only",
+      detector: "engine:archive-project",
+      metadata_shape: "archive-project",
+      matches: [
+        {
+          shape: "archive-project",
+          rule: "engine:archive-project",
+          confidence: "low",
+          model_count: 1,
+          image_count: 0,
+          text_count: 0,
+          other_count: 0,
+          note: null,
+          creatable: true,
+        },
+      ],
+    });
+    expect(isCreatable(row)).toBe(false);
+    expect(recommendedMatch(row)?.shape).toBe("archive-project");
+    expect(recommendationEnactable(row)).toBe(true);
+    expect(statusLine(row)).toBe(
+      "zip only - extract the archive in place, then the scan registers it",
+    );
+    expect(statusLine(row)).not.toContain("Blocked");
+    expect(statusLine(row)).toContain("zip only");
+  });
+
+  it("calls an archive-leave zip blocked, because no door can enact it", () => {
+    // The one `archive_only` row that has no door: the engine recommends
+    // `archive-leave` (nothing inside), so `creatable` is false and the refusal
+    // word is the honest one - there is no Create and no Extract to offer.
+    const row = makeBundle({
+      key: "import/Empty.zip",
+      rel_path: "import/Empty.zip",
+      status: "blocked",
+      blocked_reason: "archive_only",
+      detector: "engine:archive-leave",
+      metadata_shape: "archive-leave",
+      matches: [
+        {
+          shape: "archive-leave",
+          rule: "engine:archive-leave",
+          confidence: "low",
+          model_count: 0,
+          image_count: 0,
+          text_count: 0,
+          other_count: 0,
+          note: "needs arranging first: no models inside",
+          creatable: false,
+        },
+      ],
+    });
+    expect(recommendedMatch(row)?.shape).toBe("archive-leave");
+    expect(recommendationEnactable(row)).toBe(false);
+    expect(statusLine(row)).toBe(
+      "Blocked - zip only - extract the archive in place, then the scan registers it",
+    );
+  });
+
+  it("treats a payload with no matches at all as enactable, not blocked", () => {
+    // A report from before the chooser existed carries no recommendation. Absent
+    // is not a refusal: the server could always act on such a row, so it keeps
+    // the words it had.
+    const row = makeBundle({ status: "blocked", blocked_reason: "archive_only" });
+    delete row.matches;
+    expect(recommendedMatch(row)).toBeUndefined();
+    expect(recommendationEnactable(row)).toBe(true);
+    expect(statusLine(row)).toBe(blockedReasonLabel(row));
   });
 
   it("says which of the two a not_scanned row is once the report calls it non-empty", () => {
@@ -800,7 +908,9 @@ describe("blockedReasonLabel", () => {
     // "extract the archive in place" is true of the thing on disk.
     const row = zipRow("import/01_Fates End - Wizard Tower.zip");
     expect(blockedReasonLabel(row)).toBe(ZIP_SENTENCE);
-    expect(statusLine(row)).toBe(`Blocked - ${ZIP_SENTENCE}`);
+    // No prefix: the row's served recommendation is enactable, so the Extract
+    // door beside this sentence is the door the words follow.
+    expect(statusLine(row)).toBe(ZIP_SENTENCE);
   });
 
   it("reads the same suffix predicate the door reads, case included", () => {
@@ -825,7 +935,7 @@ describe("blockedReasonLabel", () => {
     });
     expect(isArchiveOnly(folder)).toBe(true);
     expect(blockedReasonLabel(folder)).toBe(ARCHIVE_ONLY_FOLDER_LABEL);
-    expect(statusLine(folder)).toBe(`Blocked - ${ARCHIVE_ONLY_FOLDER_LABEL}`);
+    expect(statusLine(folder)).toBe(ARCHIVE_ONLY_FOLDER_LABEL);
     expect(statusLine(folder)).not.toBe(`Blocked - ${ZIP_SENTENCE}`);
     // No count is claimed in a status cell: the en dash belongs to the one count
     // formatter, and an unknown number must never become a false zero here.
@@ -847,7 +957,7 @@ describe("blockedReasonLabel", () => {
     });
     expect(isArchiveOnly(twinless)).toBe(false);
     expect(extractPathFor(twinless)).toBeNull();
-    expect(statusLine(twinless)).toBe(`Blocked - ${ARCHIVE_ONLY_FOLDER_LABEL}`);
+    expect(statusLine(twinless)).toBe(ARCHIVE_ONLY_FOLDER_LABEL);
   });
 
   it("passes an unknown reason through unchanged", () => {

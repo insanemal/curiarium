@@ -5,7 +5,7 @@ an operator who `rsync`ed 169 vendor archives into ``import/`` had no door at
 all: bundle detection reported every one of them `archive_only` forever. This
 module is that door, and it writes into the same place the vendor would have:
 ``<parent>/<stem>`` next to ``<parent>/<stem>.zip``, which is exactly the pair
-``bundle_detect.twin_key`` already recognises. The detector therefore needs no
+``proposal_engine.twin_key`` already recognises. The detector therefore needs no
 change - once the files exist and a scan registers them, the same bundle becomes
 `ready`.
 
@@ -55,8 +55,8 @@ from zipfile import BadZipFile, ZipFile
 from fastapi import HTTPException
 
 import audit
-import bundle_detect
 import entry_policy
+import proposal_engine
 import seams
 import snapshot_guard
 import snapshots
@@ -289,7 +289,7 @@ def _twin_rel(normalized: str) -> str:
     """``<parent>/<sanitised stem>``: the directory a twin detector pairs with the zip.
 
     Building a plausible name is not enough: the whole point is that
-    ``bundle_detect.twin_key`` pairs the zip with this directory, so the key it
+    ``proposal_engine.twin_key`` pairs the zip with this directory, so the key it
     would compute for the twin must equal the key it computes for the archive.
     Sanitising agrees for clean names and disagrees for a trailing space, a
     whitespace-only stem or a doubled suffix - and a twin that never pairs would
@@ -309,13 +309,13 @@ def _twin_rel(normalized: str) -> str:
         )
     twin_rel = posixpath.join(parent, zip_service.sanitize_folder_name(stem))
     twin_name = posixpath.basename(twin_rel)
-    if bundle_detect.twin_key(twin_name) != bundle_detect.twin_key(archive_name):
+    if proposal_engine.twin_key(twin_name) != proposal_engine.twin_key(archive_name):
         raise HTTPException(
             status_code=400,
             detail=(
                 f"{normalized!r} cannot be extracted into a paired twin: {twin_rel!r} would be keyed "
-                f"{bundle_detect.twin_key(twin_name)!r} but the archive is keyed "
-                f"{bundle_detect.twin_key(archive_name)!r}, so bundle detection would never pair them "
+                f"{proposal_engine.twin_key(twin_name)!r} but the archive is keyed "
+                f"{proposal_engine.twin_key(archive_name)!r}, so bundle detection would never pair them "
                 "and the extraction would never become a bundle. Rename the archive first."
             ),
         )

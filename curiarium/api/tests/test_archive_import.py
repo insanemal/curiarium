@@ -4,7 +4,7 @@ The defect this closes: 28 detected bundles reported `blocked_reason:
 archive_only` because the library was full of `.zip` files and nothing could
 extract one that was *already there* - the only zip doors started from bytes the
 server had just fetched. `POST /import/archive` extracts in place into
-`<parent>/<stem>`, which is the directory `bundle_detect.twin_key` already pairs,
+`<parent>/<stem>`, which is the directory `proposal_engine.twin_key` already pairs,
 so the detector needs no change: a scan registers the files and the same bundle
 becomes `ready`.
 
@@ -242,9 +242,10 @@ def test_an_archive_only_bundle_becomes_ready_after_extract_and_scan(
     ready = row_for(after, "Moai")
     assert ready["status"] == "ready"
     assert ready["blocked_reason"] is None
-    # The same detector produced the ready row: R1 read the documents the extract
-    # wrote, and the archive it came from is its provenance, not a second bundle.
-    assert ready["detector"] == "thingiverse-readme"
+    # The engine read the documents the extract wrote - documented at the root, so
+    # `high` - and the archive it came from is its provenance, not a second bundle.
+    assert ready["detector"] == "engine:one-project"
+    assert ready["metadata_shape"] == "one-project"
     assert ready["confidence"] == "high"
     assert ready["archive"]["rel_path"] == "Moai.zip"
     assert ready["archive"]["twin_verified"] is True
@@ -471,7 +472,7 @@ def test_an_archive_whose_twin_would_not_pair_is_refused_before_any_write(
     archive_name: str,
     unpaired_twin: str,
 ) -> None:
-    """`_twin_rel` builds a name `bundle_detect.twin_key` would never pair.
+    """`_twin_rel` builds a name `proposal_engine.twin_key` would never pair.
 
     Such an extraction would succeed on disk and leave the bundle `archive_only`
     forever, so it is a 400 naming the rename, with nothing written.

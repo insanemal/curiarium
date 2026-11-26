@@ -34,7 +34,7 @@ an asset" is true of the archive-member route, not of the library as a whole.
 Two narrower, pre-existing vocabularies stay where they are. This module does
 not replace them and they are not wired to this predicate:
 
-* ``bundle_detect.is_macosx_artifact`` matches only a *top-level* ``__MACOSX``
+* ``file_utils.is_macosx_artifact`` matches only a *top-level* ``__MACOSX``
   segment, because bundle pairing and root detection ask the narrower question
   "is this entry outside the archive's payload root";
 * ``library_scan.IGNORED_FILENAMES`` is a scan-level list of exactly three names

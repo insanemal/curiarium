@@ -248,6 +248,9 @@ function makeReport(bundles: BundleDetectItem[]): BundleReport {
     truncated: false,
     counts: {
       total: bundles.length,
+      // Every row this fixture builds is on the wire: nothing is withheld.
+      offered: bundles.length,
+      withheld: 0,
       high: bundles.filter(row => row.confidence === "high").length,
       low: bundles.filter(row => row.confidence === "low").length,
       ready,

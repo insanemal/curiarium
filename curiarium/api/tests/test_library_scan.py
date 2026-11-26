@@ -19,6 +19,7 @@ import asset_service
 import audit
 import library_scan
 import main
+from config import IMPORT_ALLOWED_EXTS
 from db import STORAGE, engine
 from library_scan import scan_storage_root
 from migrations import run_migrations
@@ -777,7 +778,7 @@ def test_counters_account_for_every_library_file(temp_library: Path) -> None:
 def test_is_skipped_name_is_the_one_rule_both_doors_ask() -> None:
     """The basename predicate the scan registers by, and what a hidden-name door means.
 
-    `bundle_detect` asks this exact function for its model count, so the truth
+    `classify_entry`/`is_counted_model` ask this exact function, so the truth
     table is the shared contract rather than a copy of one door's behaviour.
     Mutation: change either half of the expression (a debris name admitted, or the
     hidden half made unconditional) and a line below reds. It is a pure
@@ -1636,3 +1637,173 @@ def test_an_upload_name_is_respected_by_a_later_scan(temp_library: Path) -> None
                 session, asset_service.model_name_from_filename("part.3mf"), folder_id
             )
     assert excinfo.value.status_code == 409
+
+
+# --- bundle-member vocabulary (Mf-1agz) -------------------------------------
+# Moved here with the helpers: `library_scan` owns the tables and the pure
+# helpers now, so these tests import from the module that defines them.
+
+CLOCKWORK_ROOT = "17_ClockworkMonster"
+
+
+def test_the_suffix_tables_are_the_shared_ones() -> None:
+    """Proves the reuse: a second private table would silently drift."""
+    assert library_scan.MODEL_SUFFIXES == frozenset(IMPORT_ALLOWED_EXTS - {".zip"})
+    assert library_scan.IMAGE_SUFFIXES == {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "role"),
+    [
+        ("part.stl", library_scan.MODEL),
+        ("part.STL", library_scan.MODEL),
+        ("part.3MF", library_scan.MODEL),
+        ("part.step", library_scan.MODEL),
+        ("bundle.zip", library_scan.ARCHIVE),
+        ("bundle.ZIP", library_scan.ARCHIVE),
+        ("notes.txt", library_scan.TEXT),
+        ("guide.md", library_scan.TEXT),
+        ("manual.pdf", library_scan.TEXT),
+        ("page.html", library_scan.TEXT),
+        ("preview.jpg", library_scan.IMAGE),
+        ("preview.PNG", library_scan.IMAGE),
+        ("preview.webp", library_scan.IMAGE),
+        ("README", library_scan.OTHER),
+        ("archive.7z", library_scan.OTHER),
+        ("", library_scan.OTHER),
+    ],
+)
+def test_classify_entry_reads_the_suffix_only(rel_path: str, role: str) -> None:
+    assert library_scan.classify_entry(rel_path, 0) == role
+
+
+def test_display_name_strips_the_ordinal_and_the_underscores() -> None:
+    assert library_scan.display_name("2493386_Moai_statue_-No_overhang") == "Moai statue -No overhang"
+
+
+@pytest.mark.parametrize("name", ["", "   ", "_", "123_"])
+def test_display_name_is_never_empty(name: str) -> None:
+    assert library_scan.display_name(name)
+
+
+DUPLICATE_DIGEST = "a" * 64
+
+
+def identity(rel_path: str, size: int, digest: str = DUPLICATE_DIGEST) -> library_scan.ArchiveIdentity:
+    return library_scan.ArchiveIdentity(rel_path=rel_path, size=size, digest=digest)
+
+
+def duplicate_group(paths: tuple, size: int = 500, digest: str = DUPLICATE_DIGEST) -> library_scan.DuplicateGroup:
+    return library_scan.DuplicateGroup(digest=digest, size=size, paths=paths)
+
+
+def test_equal_size_archive_groups_keeps_only_shared_sizes() -> None:
+    """A size that occurs once is never hashed: it cannot be a duplicate."""
+    groups = library_scan.equal_size_archive_groups([("a.zip", 10), ("b.zip", 10), ("c.zip", 11)])
+
+    assert groups == ((10, ("a.zip", "b.zip")),)
+
+
+def test_duplicate_groups_puts_the_shortest_name_first() -> None:
+    group = library_scan.duplicate_groups([identity("x/Copy (1).zip", 500), identity("x/Copy.zip", 500)])
+
+    assert len(group) == 1
+    assert group[0].digest == DUPLICATE_DIGEST
+    assert group[0].size == 500
+    assert group[0].paths[0] == "x/Copy.zip", "the browser duplicate appends characters, so the shortest is the original"
+    assert group[0].reclaimable_bytes == 500
+
+
+def test_duplicate_groups_ignores_a_lone_digest() -> None:
+    assert library_scan.duplicate_groups([identity("only.zip", 500)]) == ()
+
+
+def test_duplicate_groups_ignores_equal_sizes_with_different_digests() -> None:
+    archives = [identity("a.zip", 500, digest="a" * 64), identity("b.zip", 500, digest="b" * 64)]
+
+    assert library_scan.duplicate_groups(archives) == ()
+
+
+def test_duplicate_archive_paths_excludes_the_authoritative_path() -> None:
+    groups = (duplicate_group(("x/Copy.zip", "x/Copy (1).zip", "x/Copy (2).zip")),)
+
+    assert library_scan.duplicate_archive_paths(groups) == ("x/Copy (1).zip", "x/Copy (2).zip")
+
+
+def test_duplicate_report_text_is_empty_without_groups() -> None:
+    assert library_scan.duplicate_report_text(()) == ""
+
+
+def test_duplicate_report_text_keeps_one_path_and_lists_the_copies() -> None:
+    groups = (duplicate_group(("x/Copy.zip", "x/Copy (1).zip"), size=500),)
+
+    text = library_scan.duplicate_report_text(groups)
+    lines = text.splitlines()
+
+    assert lines[0] == "# duplicate archives: 1 group(s), 500 bytes reclaimable"
+    assert f"# sha256 {DUPLICATE_DIGEST} size 500 reclaimable 500" in lines
+    assert "keep\t500\tx/Copy.zip" in lines
+    assert "duplicate\t500\tx/Copy (1).zip" in lines
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("5390184_ARTICULATED_ice_dragon__fixed_", "5390184"),
+        ("2024_parts", "2024"),
+        ("2024-10-31_backup", None),
+        ("my_5390184_thing", None),
+        ("606cdf0d5199b_thing", None),
+        ("539_x", None),
+        ("ARTICULATED_ice_5390184", None),
+    ],
+)
+def test_the_id_in_a_name_needs_a_digit_floor_a_separator_and_the_start(name: str, expected: Optional[str]) -> None:
+    """The extractor's four decisions, each killable by one mutation.
+
+    * ``\\d{4,}`` -> ``\\d+`` reds ``539_x`` (the four-digit floor);
+    * the mandatory ``_`` -> ``_?`` reds ``2024-10-31_backup`` (a date is not an
+      export);
+    * dropping ``^`` AND switching ``.match`` for ``.search`` reds
+      ``my_5390184_thing`` (the anchor).
+
+    Dropping ``^`` alone, or ``.match`` -> ``.search`` with ``^`` kept, are
+    provable no-ops: ``.match`` already anchors at position 0 and ``^`` already
+    anchors inside ``.search``, so the combined mutation is the killable one.
+    ``2024_parts`` is the knowingly accepted false positive of the digit floor;
+    it is pinned so a stricter regex that starts refusing it is a visible change.
+    """
+    assert library_scan.thingiverse_id_from_name(name) == expected
+
+
+def test_is_counted_entry_asks_the_scan_its_own_predicate() -> None:
+    """One rule, two doors: the detector re-exports the scanner's own predicate.
+
+    The truth table includes the case the plan gate had to correct - a non-dot
+    file under a nested ``__MACOSX`` is REGISTERED - and ``include_hidden=True``
+    is asked of the same function rather than re-derived. Mutation: give the
+    detector its own copy of the rule and the identity assertions red before any
+    count can drift.
+    """
+    assert library_scan.is_counted_entry("a.stl") is True
+
+    counted = {
+        "a.stl": True,
+        "._a.stl": False,
+        ".hidden.stl": False,
+        "__MACOSX/a.stl": True,
+        "g/__MACOSX/g/plain.stl": True,
+        "g/plain.stl": True,
+        "Thumbs.db": False,
+    }
+    for rel_path, expected in counted.items():
+        assert library_scan.is_counted_entry(rel_path) is expected, rel_path
+
+    # The nested `__MACOSX` entry above is the premise the whole fix rests on, and
+    # the SCANNER side of it is pinned where it belongs:
+    # `test_library_scan.py::test_a_nested_macosx_tree_registers_its_dead_file_and_skips_the_sidecar`.
+
+    # The hidden door is the SAME function, so admitting dot names is one flag.
+    assert library_scan.is_skipped_name("._a.stl", include_hidden=True) is False
+    assert library_scan.is_skipped_name(".hidden.stl", include_hidden=True) is False
+    assert library_scan.is_skipped_name(".DS_Store", include_hidden=True) is True

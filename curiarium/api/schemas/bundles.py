@@ -197,6 +197,8 @@ class BundleDetectItemOut(BaseModel):
 class BundleDetectCountsOut(BaseModel):
   """The headline numbers, computed over the rows the report actually shows."""
 
+  # The rows this report HAS. `total` keeps that meaning (Mf-1agz): it is not the
+  # number the wire carried.
   total: int = 0
   high: int = 0
   medium: int = 0
@@ -205,6 +207,12 @@ class BundleDetectCountsOut(BaseModel):
   blocked: int = 0
   dismissed: int = 0
   already_created: int = 0
+  # What the wire actually carried, and how many rows the `limit` kept back
+  # (Mf-1agz). Defaulted, so every pre-existing payload still validates; a report
+  # bound that said only `truncated: true` made the operator guess whether the row
+  # they were looking for was one of the ones dropped.
+  offered: int = 0
+  withheld: int = 0
 
 
 class BundleRuleSetOut(BaseModel):

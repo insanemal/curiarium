@@ -2,7 +2,7 @@ import mimetypes
 import os
 import re
 from pathlib import PurePosixPath
-from typing import Dict, Optional
+from typing import AbstractSet, Dict, Optional
 from urllib.parse import unquote, urlparse
 
 from fastapi import HTTPException
@@ -189,3 +189,59 @@ def guess_mime_from_path(path: os.PathLike) -> str:
         return known
     guessed, _ = mimetypes.guess_type(str(path))
     return guessed or "application/octet-stream"
+
+
+# --- bundle-member paths (Mf-1agz) ------------------------------------------
+# The path vocabulary a bundle's membership is judged by. It lives here because
+# these are path predicates like every other one in this module, and because the
+# detector, the archive door and the service all have to agree on them.
+
+# Directory names that say nothing about what a bundle IS: they are the shape a
+# download or a hand extraction lands in, not a name a vendor chose. The live
+# library measured 51 of 57 archive entry roots pointing at one of these, so a
+# root-matching rule without this guard would pair half the library to the wrong
+# directory. An EXACT casefolded set, never a prefix or a fuzzy match: `my files/`
+# and `files_and_docs/` are real bundle roots, and loose matching is exactly the
+# mis-pairing the guard exists to stop.
+GENERIC_CONTAINER_ROOTS = frozenset({"files", "images", "models", "stl"})
+
+# The directory rsync and hand extraction leave behind: an AppleDouble artifact,
+# never a vendor's choice. Named rather than grown into a junk list, because the
+# next junk name would be a guess. Public here because `bundle_detect` binds it
+# as `_MACOSX_ROOT` for its rule-set stamp (Mf-1agz).
+MACOSX_ROOT = "__macosx"
+
+
+def is_macosx_artifact(rel_path: str) -> bool:
+    """Whether this entry is AppleDouble cruft rather than a file of the bundle.
+
+    Only the first ``/`` segment decides, so ``__MACOSX/17_Thing/._a.stl`` and a
+    bare top-level ``__MACOSX`` both count. The one place this vocabulary lives:
+    both the pure root rule and the disk-side pairing rule skip through it, so
+    they cannot disagree about what an archive's payload is.
+    """
+    head, _separator, _rest = (rel_path or "").partition("/")
+    return head.casefold() == MACOSX_ROOT
+
+
+def is_bundle_member(rel_path: str, bundle_dirs: AbstractSet[str]) -> bool:
+    """Whether ``rel_path`` is a file of one of the detected bundle directories.
+
+    Membership is strict and raw: the path must sit BELOW the directory, so a
+    ``<name>.zip`` beside a ``<name>/`` is that directory's twin (provenance),
+    not one of its files, and the comparison is case-sensitive exactly like the
+    container strip and ``_forget_claimed_subtree`` it has to agree with. This
+    is the one place the Mf-74x5 rule is expressed: a nested archive is a
+    supporting file of the enclosing bundle, never a bundle of its own.
+    """
+    head, separator, _rest = (rel_path or "").rpartition("/")
+    while separator:
+        if head in bundle_dirs:
+            return True
+        head, separator, _rest = head.rpartition("/")
+    return False
+
+
+def is_generic_container_root(name: str) -> bool:
+    """Whether ``name`` says nothing about which bundle an archive holds."""
+    return (name or "").strip().casefold() in GENERIC_CONTAINER_ROOTS

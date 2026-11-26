@@ -35,13 +35,12 @@ function apiSourceOrThrow(name: string): string {
   return text;
 }
 
-// The backend's own TEXT-role table, read verbatim: the cross-language pin below
-// fails if the web set and `bundle_detect.BUNDLE_TEXT_EXTS` drift apart.
-const bundleDetectSource = apiSource("bundle_detect.py");
-// The scan's image table, read verbatim for the same reason: it is the suffix
-// set `classify_entry` asks for the IMAGE role.
+// The scan's own tables, read verbatim: the cross-language pins below fail if the
+// web sets and the backend's drift apart. Since Mf-1agz the TEXT and MODEL role
+// tables live in `library_scan.py` (with `classify_entry`, the one owner of a
+// member's role); `bundle_detect.py` is deleted.
 const libraryScanSource = apiSource("library_scan.py");
-// The import allow-list, from which `bundle_detect.MODEL_SUFFIXES` is DERIVED
+// The import allow-list, from which `library_scan.MODEL_SUFFIXES` is DERIVED
 // (`frozenset(IMPORT_ALLOWED_EXTS - {".zip"})`). Read verbatim so the model
 // role is parsed from its real source instead of restated as a literal here.
 const configSource = apiSource("config.py");
@@ -157,12 +156,12 @@ describe("isDocumentAsset", () => {
 });
 
 describe("DOCUMENT_EXTS", () => {
-  it.skipIf(bundleDetectSource === null)("mirrors bundle_detect.BUNDLE_TEXT_EXTS", () => {
+  it.skipIf(libraryScanSource === null)("mirrors library_scan.BUNDLE_TEXT_EXTS", () => {
     // Parsed, not imported: the Python table is the other side of a language
     // boundary, and reading it here fails the web suite the moment the two
     // tables drift rather than waiting for a Python mirror test.
     const literal = /BUNDLE_TEXT_EXTS\s*=\s*frozenset\(\{([^}]*)\}\)/.exec(
-      apiSourceOrThrow("bundle_detect.py"),
+      apiSourceOrThrow("library_scan.py"),
     );
     expect(literal).not.toBeNull();
     const pythonExts = (literal?.[1].match(/["']\.[^"']*["']/g) ?? []).map(quoted =>
@@ -171,7 +170,7 @@ describe("DOCUMENT_EXTS", () => {
     const webExts = [...DOCUMENT_EXTS].map(ext => "." + ext);
     expect(
       new Set(webExts),
-      "the web DOCUMENT_EXTS and bundle_detect.BUNDLE_TEXT_EXTS drifted",
+      "the web DOCUMENT_EXTS and library_scan.BUNDLE_TEXT_EXTS drifted",
     ).toEqual(new Set(pythonExts));
   });
 });
@@ -230,13 +229,13 @@ describe("member role tables", () => {
     ).toEqual(new Set(pythonExts));
   });
 
-  it.skipIf(bundleDetectSource === null || configSource === null)(
+  it.skipIf(libraryScanSource === null || configSource === null)(
     "mirrors config.IMPORT_ALLOWED_EXTS minus .zip",
     () => {
     // The DERIVATION first, so a change to how the model table is built fails here
     // and tells a reader to re-derive, rather than comparing this web set against
     // a table that no longer means the same thing.
-    expect(apiSourceOrThrow("bundle_detect.py")).toMatch(
+    expect(apiSourceOrThrow("library_scan.py")).toMatch(
       /MODEL_SUFFIXES\s*=\s*frozenset\(\s*IMPORT_ALLOWED_EXTS\s*-\s*\{[\s\S]*?\.zip[\s\S]*?\}\s*\)/,
     );
     const literal = /^IMPORT_ALLOWED_EXTS\s*=\s*\{([^}]*)\}/m.exec(

@@ -43,10 +43,11 @@ import sys
 import zipfile
 from pathlib import Path
 from types import ModuleType
+from typing import List, Optional, Tuple
 
 import pytest
 
-import bundle_detect
+import library_scan
 import proposal_engine
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
@@ -70,7 +71,7 @@ SHIM_FORBIDDEN_FUNCTIONS = ("propose", "measure", "arrange_proposal", "validate"
 # bare host python, the rest drag the app's session/HTTP world into a read-only walk.
 APP_MODULES = (
     "fastapi", "sqlalchemy", "db", "models", "config", "schemas",
-    "bundle_detect", "bundle_service", "file_utils", "zip_service",
+    "bundle_service", "file_utils", "library_scan", "zip_service",
 )
 
 # The wrapper layout every Vault-shaped fixture is built around, and the one the
@@ -163,7 +164,7 @@ ALLOWED_THIRD_PARTY = {"pypdf"}
 def test_the_engine_imports_no_app_module() -> None:
     """No app import may reach the engine, and `pypdf` is its only third-party one.
 
-    Mutation: `import fastapi` (or `db`, or `bundle_detect`) makes the engine drag
+    Mutation: `import fastapi` (or `db`, or `library_scan`) makes the engine drag
     the session/HTTP world into a read-only walk and breaks the host tight loop;
     a second third-party dependency slipped in silently would do the same on a
     machine without it. Both are caught mechanically, at every import depth.
@@ -208,11 +209,11 @@ def test_the_engine_model_table_is_a_deliberate_superset() -> None:
     for the four copies that must agree with `file_utils.MODEL_MIME_BY_SUFFIX`; this
     set is not one of them and that gate must not be widened to cover it.
     """
-    assert bundle_detect.MODEL_SUFFIXES <= proposal_engine.MODEL_EXTS, (
+    assert library_scan.MODEL_SUFFIXES <= proposal_engine.MODEL_EXTS, (
         "the engine must accept every suffix the app imports, or a proposal would deny a "
         "payload the importer happily stores"
     )
-    wider = proposal_engine.MODEL_EXTS - bundle_detect.MODEL_SUFFIXES
+    wider = proposal_engine.MODEL_EXTS - library_scan.MODEL_SUFFIXES
     for suffix in (".3dm", ".obj"):
         assert suffix in wider, (
             f"{suffix} must stay in the engine's wider table: it is a real payload with no "
@@ -686,7 +687,7 @@ def test_probe_git_false_never_reaches_git(tmp_path: Path, monkeypatch: pytest.M
     facts = proposal_engine.measure(str(tmp_path / "Product"), "Product")
     calls: list[str] = []
 
-    def explode(path: str) -> None:
+    def explode(path: str, timeout: float | None = None) -> None:
         calls.append(path)
         raise AssertionError("git_state must not be called when probe_git=False")
 
@@ -698,6 +699,281 @@ def test_probe_git_false_never_reaches_git(tmp_path: Path, monkeypatch: pytest.M
     with pytest.raises(AssertionError, match="probe_git=False"):
         proposal_engine.propose(facts, ())
     assert calls == [str(facts.path)], "the default path must still ask git"
+
+
+def test_git_timeout_reaches_git_state_and_none_leaves_it_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report's bounded probe is the point of the kwarg (Mf-1agz).
+
+    A hung checkout must cost the report at most `git_timeout` seconds, not
+    `GIT_TIMEOUT_SECONDS`. Mutation: drop the kwarg from the `git_state` call (or
+    ignore it) and the report is back to a 120 s tail inside a GET; this test is
+    what says so.
+    """
+    write_models(tmp_path / "Product", 2)
+    facts = proposal_engine.measure(str(tmp_path / "Product"), "Product")
+    seen: list[float | None] = []
+
+    def capture(path: str, timeout: float | None = None):
+        seen.append(timeout)
+        return None
+
+    monkeypatch.setattr(proposal_engine, "git_state", capture)
+    proposal_engine.propose(facts, (), git_timeout=5.0)
+    proposal_engine.propose(facts, ())
+    assert seen == [5.0, None], f"the bound must reach git_state verbatim: {seen}"
+
+
+def test_the_rule_set_stamp_is_pinned_so_a_table_edit_cannot_go_unnoticed() -> None:
+    """The ONE engine stamps its own tables (Mf-1agz).
+
+    A report row records this stamp, so two reports are comparable by construction or
+    explicitly not. Mutation: edit any row-deciding table and this pin reds, which is
+    the whole point - the alternative is finding out months later that two artifacts
+    were never describing the same rules. An intentional change updates the pin in the
+    same commit that changes the table.
+    """
+    assert proposal_engine.RULE_SET_VERSION == "2"
+    assert proposal_engine.RULE_SET_STAMP == proposal_engine.rule_set_stamp()
+    assert proposal_engine.RULE_SET_STAMP == (
+        "061c9b969c3f5debe357fe8ff96f5e29857a8731fed4d7fb5daf078c37cebc36"
+    ), "a rule table changed: update this pin in the same commit, on purpose"
+    assert proposal_engine.rule_set() == {
+        "version": "2", "stamp": proposal_engine.RULE_SET_STAMP,
+    }
+
+
+def test_a_table_edit_moves_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stamp is read from the module NOW, not frozen at import (Mf-1agz).
+
+    Mutation: compute the stamp once into a literal and the pin above becomes the only
+    protection - a test that changes one table and re-derives the stamp is what proves
+    the table is actually inside it.
+    """
+    before = proposal_engine.rule_set_stamp()
+    monkeypatch.setattr(proposal_engine, "GROUPS_MAX_CHILDREN", 63)
+    assert proposal_engine.rule_set_stamp() != before
+    monkeypatch.setattr(proposal_engine, "BOILERPLATE_TITLES", set())
+    assert proposal_engine.rule_set_stamp() != before
+
+
+def test_archive_payload_contained_keeps_both_pairing_routes_one_predicate() -> None:
+    """THE containment predicate, at the engine, for both routes (Mf-1agz).
+
+    The stem route decides its own wrapper once; the entry-root route is told which one
+    to strip, and must never fall back to a second guess. Both are asserted here because
+    `bundle_service`'s pairing now calls this function for both, so a divergence between
+    the routes would be a pairing that disagrees with its own evidence.
+    """
+    folder = [("a.stl", 10), ("b.stl", 20), ("notes.txt", 5)]
+    # identity, then ONE strip
+    assert proposal_engine.archive_payload_contained(folder, folder) is True
+    assert proposal_engine.archive_payload_contained(
+        [("Wrapper/a.stl", 10), ("Wrapper/b.stl", 20)], folder
+    ) is True
+    # cruft is never payload
+    assert proposal_engine.archive_payload_contained(
+        [("__MACOSX/._a.stl", 3), ("a.stl", 10)], folder
+    ) is True
+    # two strips are refused on purpose
+    assert proposal_engine.archive_payload_contained(
+        [("Outer/Inner/a.stl", 10)], folder
+    ) is False
+    # a size mismatch is not containment
+    assert proposal_engine.archive_payload_contained([("a.stl", 11)], folder) is False
+    # an entry outside a NAMED root is refused, with no second strip
+    assert proposal_engine.archive_payload_contained(
+        [("Wrapper/a.stl", 10), ("loose.stl", 10)],
+        folder + [("a.stl", 10), ("loose.stl", 10)],
+        entry_root="Wrapper",
+    ) is False
+    # the named root route strips exactly that root
+    assert proposal_engine.archive_payload_contained(
+        [("Wrapper/a.stl", 10), ("Wrapper/b.stl", 20)], folder, entry_root="wrapper"
+    ) is True
+    # an archive of cruft alone has verified nothing
+    assert proposal_engine.archive_payload_contained([("__MACOSX/._a.stl", 3)], folder) is False
+    assert proposal_engine.archive_payload_contained([], folder) is False
+
+
+
+# --- the pairing vocabulary the engine owns (moved from test_bundle_detect) ---
+#
+# The renamed extraction this vocabulary exists for: the directory and its archive
+# share nothing but an ordinal prefix, so the archive's entry root is the evidence.
+CLOCKWORK_ROOT = "17_ClockworkMonster"
+#
+# Mf-1agz deleted `bundle_detect`; these predicates and their assertions moved to
+# the module that owns them, unchanged apart from the name in front of the dot.
+
+
+def contained(
+    archive: List[Tuple[str, int]],
+    folder: List[Tuple[str, int]],
+    entry_root: Optional[str] = None,
+) -> bool:
+    """``archive_payload_contained`` from two ``(rel_path, size)`` literals."""
+    return proposal_engine.archive_payload_contained(archive, folder, entry_root)
+
+
+@pytest.mark.parametrize(
+    ("token", "display", "url"),
+    [
+        ("cc-by", "CC BY", "https://creativecommons.org/licenses/by/4.0/"),
+        ("CC BY", "CC BY", "https://creativecommons.org/licenses/by/4.0/"),
+        ("cc-by-sa", "CC BY-SA", "https://creativecommons.org/licenses/by-sa/4.0/"),
+        ("cc-by-nc", "CC BY-NC", "https://creativecommons.org/licenses/by-nc/4.0/"),
+        ("cc-nc", "CC BY-NC", "https://creativecommons.org/licenses/by-nc/4.0/"),
+        ("cc-by-nc-sa", "CC BY-NC-SA", "https://creativecommons.org/licenses/by-nc-sa/4.0/"),
+        ("cc-nc-sa", "CC BY-NC-SA", "https://creativecommons.org/licenses/by-nc-sa/4.0/"),
+        ("cc-by-nd", "CC BY-ND", "https://creativecommons.org/licenses/by-nd/4.0/"),
+        ("cc-by-nc-nd", "CC BY-NC-ND", "https://creativecommons.org/licenses/by-nc-nd/4.0/"),
+        ("cc-nc-nd", "CC BY-NC-ND", "https://creativecommons.org/licenses/by-nc-nd/4.0/"),
+        ("cc0", "CC0", "https://creativecommons.org/publicdomain/zero/1.0/"),
+        ("cc-zero", "CC0", "https://creativecommons.org/publicdomain/zero/1.0/"),
+        ("public-domain", "CC0", "https://creativecommons.org/publicdomain/zero/1.0/"),
+    ],
+)
+def test_licence_from_token_maps_every_known_token(token: str, display: str, url: str) -> None:
+    assert proposal_engine.licence_from_token(token) == (display, url)
+
+
+def test_licence_from_token_never_invents_a_url() -> None:
+    assert proposal_engine.licence_from_token("WTFPL") == ("WTFPL", None)
+    assert proposal_engine.licence_from_token(None) == (None, None)
+
+
+def test_twin_key_casefolds_and_drops_one_trailing_zip() -> None:
+    assert proposal_engine.twin_key("Moai_Statue.zip") == "moai_statue"
+    assert proposal_engine.twin_key("  MOAI_STATUE.ZIP ") == "moai_statue"
+    assert proposal_engine.twin_key("Moai_Statue") == "moai_statue"
+    assert proposal_engine.twin_key("archive.zip.zip") == "archive.zip", "only one suffix is removed"
+
+
+def test_common_entry_root_is_the_one_top_level_directory() -> None:
+    paths = [f"{CLOCKWORK_ROOT}/Clockwork_Part{index:02d}.stl" for index in range(3)]
+
+    root = proposal_engine.common_entry_root(paths)
+
+    assert root == CLOCKWORK_ROOT
+
+
+def test_common_entry_root_carries_the_first_seen_casing() -> None:
+    assert proposal_engine.common_entry_root(["17_ClockworkMonster/a.stl", "17_clockworkmonster/b.stl"]) == (
+        "17_ClockworkMonster"
+    )
+
+
+def test_common_entry_root_of_mixed_roots_is_none() -> None:
+    assert proposal_engine.common_entry_root(["17_Thing/a.stl", "Other Thing/b.stl"]) is None
+
+
+def test_common_entry_root_of_a_top_level_file_is_none() -> None:
+    assert proposal_engine.common_entry_root(["17_Thing/a.stl", "README.txt"]) is None
+
+
+def test_common_entry_root_of_no_entries_is_none() -> None:
+    assert proposal_engine.common_entry_root([]) is None
+
+
+def test_common_entry_root_ignores_the_macosx_artifact() -> None:
+    paths = [
+        "__MACOSX/17_Thing/._a.stl",
+        "__MACOSX/17_Thing/._preview.jpg",
+        "17_Thing/a.stl",
+        "17_Thing/preview.jpg",
+    ]
+
+    assert proposal_engine.common_entry_root(paths) == "17_Thing"
+
+
+def test_common_entry_root_of_only_macosx_entries_is_none() -> None:
+    assert proposal_engine.common_entry_root(["__MACOSX/17_Thing/._a.stl"]) is None
+
+
+# Moved to test_file_utils.py with is_generic_container_root (Mf-1agz).
+
+
+def test_archive_payload_contained_accepts_an_identity_payload() -> None:
+    """A flat archive written over the same paths needs no strip at all."""
+    archive = [("part.stl", 40), ("preview.jpg", 20)]
+
+    assert contained(archive, [("part.stl", 40), ("preview.jpg", 20)]), "identity: the paths already agree"
+
+
+def test_archive_payload_contained_strips_one_wrapper() -> None:
+    """The archive's own entries name the wrapper; one strip makes them agree."""
+    assert contained([("SnVB623/part.stl", 40)], [("part.stl", 40)]), "one common entry root is stripped"
+
+
+def test_archive_payload_contained_strips_a_generic_wrapper_on_the_stem_route() -> None:
+    """``is_generic_container_root`` is the entry-root route's rule, not this one.
+
+    The name only says nothing about WHICH bundle an archive holds, and it is
+    consulted where a root is used to NAME a directory. Here nobody names a
+    directory with it - the folder is the stem twin already - so ``files/`` is
+    just a wrapper like any other and is stripped once.
+    """
+    assert contained([("files/part.stl", 40)], [("part.stl", 40)]), (
+        "a generic root is refused where it names a directory, not where it is stripped"
+    )
+
+
+def test_archive_payload_contained_is_containment_not_equality() -> None:
+    """A lived-in directory legitimately holds more than the archive shipped."""
+    archive = [("SnVB623/part.stl", 40)]
+    folder = [("part.stl", 40), ("spare.stl", 41), ("render.png", 20)]
+
+    assert contained(archive, folder), "one extra file on disk does not unpair a verified archive"
+
+
+def test_archive_payload_contained_refuses_two_strips() -> None:
+    """The wrapper decision is made once; a wrapper's wrapper is not stripped."""
+    archive = [("outer/files/part.stl", 40)]
+
+    assert contained(archive, [("part.stl", 40)]) is False, "two strips would pair a nested thing with anything"
+    assert contained(archive, [("files/part.stl", 40)]), "exactly one strip is the rule"
+
+
+def test_archive_payload_contained_refuses_a_size_mismatch() -> None:
+    """Declared size is header data; a lie in it makes the pairing wrong, so refuse."""
+    assert contained([("SnVB623/part.stl", 40)], [("part.stl", 41)]) is False
+
+
+def test_archive_payload_contained_refuses_a_name_mismatch() -> None:
+    assert contained([("SnVB623/part.stl", 40)], [("other.stl", 40)]) is False
+
+
+def test_archive_payload_contained_ignores_macosx_cruft() -> None:
+    """AppleDouble entries are not payload, and cruft alone has verified nothing."""
+    assert contained([("__MACOSX/._part.stl", 5), ("part.stl", 40)], [("part.stl", 40)]), (
+        "the cruft is dropped before the comparison"
+    )
+    assert contained([("__MACOSX/._part.stl", 5)], [("part.stl", 40)]) is False
+
+
+def test_archive_payload_contained_without_one_common_root_refuses() -> None:
+    """No single wrapper, and no identity, means there is no strip to make."""
+    assert contained([("A/part.stl", 40), ("B/other.stl", 41)], [("part.stl", 40)]) is False, (
+        "two wrappers: there is no single entry root"
+    )
+    assert contained([("part.stl", 40), ("A/other.stl", 41)], [("part.stl", 40)]) is False, (
+        "a top-level file beside a wrapped one is no single root either"
+    )
+
+
+def test_archive_payload_contained_with_an_entry_root_is_the_strict_strip() -> None:
+    """The named root is stripped without any identity shortcut."""
+    assert contained([("SnVB623/part.stl", 40)], [("part.stl", 40)], entry_root="SnVB623"), (
+        "every entry sits under the named root"
+    )
+    assert contained(
+        [("SnVB623/part.stl", 40), ("Other/x.stl", 1)], [("part.stl", 40)], entry_root="SnVB623"
+    ) is False, "an entry outside the root is not this archive's payload"
+    assert contained([("part.stl", 40)], [("part.stl", 40)], entry_root="SnVB623") is False, (
+        "no identity shortcut on the entry-root route: a flat archive must not widen Mf-6b82"
+    )
 
 
 def test_validate_returns_rows_and_prints_nothing(labelled_root: Path, capsys: pytest.CaptureFixture[str]) -> None:

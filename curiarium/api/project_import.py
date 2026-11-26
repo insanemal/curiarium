@@ -33,9 +33,9 @@ from zipfile import BadZipFile
 
 from fastapi import HTTPException
 
-import bundle_detect
 import bundle_service
 import entry_policy
+import library_scan
 import project_service
 import seams
 import zip_service
@@ -182,7 +182,7 @@ def _marker_groups(entries: Sequence[str], failed: Sequence[str]) -> List[dict]:
         if group is None:
             continue
         counts = per_group.setdefault(group, {"model_count": 0, "attached": 0})
-        if PurePath(entry).suffix.lower() not in bundle_detect.MODEL_SUFFIXES:
+        if PurePath(entry).suffix.lower() not in library_scan.MODEL_SUFFIXES:
             continue
         counts["model_count"] += 1
         if entry not in refused:

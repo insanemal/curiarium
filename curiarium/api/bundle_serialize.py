@@ -163,9 +163,9 @@ def serialise_report(root, *, limit=None, command=None, database_path=None) -> d
     ``db.DB_URL`` would otherwise record a path that is deleted when the tool
     exits; the caller passes the real source instead.
     """
-    import bundle_detect
     import bundle_service
     import db
+    import proposal_engine
 
     root = Path(root)
     previous = bundle_service.STORAGE
@@ -237,10 +237,15 @@ def serialise_report(root, *, limit=None, command=None, database_path=None) -> d
         "build_sha": build["build_sha"],
         "build_dirty": build["build_dirty"],
         "command": list(command) if command else ["bundle_serialize.serialise_report"],
+        # The rule set the WHOLE report was decided against (Mf-1agz): the engine
+        # owns the tables now, because the engine is what ranks. An artifact taken
+        # before this change carries a different version and is therefore
+        # explicitly NOT comparable to one taken after it - which is the point of
+        # stamping at all.
         "rule_set": {
-            "version": bundle_detect.RULE_SET_VERSION,
+            "version": proposal_engine.RULE_SET_VERSION,
             "stamp": report["rule_set"]["stamp"],
-            "tables": bundle_detect.rule_set_tables(),
+            "tables": proposal_engine.rule_set_tables(),
         },
         "library": {
             "storage_root": str(root),

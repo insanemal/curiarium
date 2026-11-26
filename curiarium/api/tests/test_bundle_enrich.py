@@ -13,7 +13,7 @@ The heuristics pinned here:
 * a `by-nc-sa/3.0` deed URL is never re-versioned to the table's 4.0, because
   that would invent a legal claim the vendor never made;
 * `Product.brand.name` is not a creator and `<meta author>` is never read;
-* the licence display comes from `bundle_detect._LICENCE_TABLE` while the URL
+* the licence display comes from the engine's `LICENCE_TABLE` while the URL
   stays the page's own string, and an unknown deed echoes verbatim;
 * a page never overwrites a human value, and the licence/licence_url pair is
   taken together or not at all;

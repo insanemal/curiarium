@@ -83,14 +83,16 @@ export type BundleEnrichment = {
  *  drift into a request the server would reject. */
 export const ENRICH_MAX_KEYS = 25;
 
-/** One of the folder shapes a row could be imported as, with the rule that
- *  matched it and the counts and groups THAT shape would produce. The server
- *  serves them strongest-first, with `manual` (import everything in the folder)
- *  last, so the first entry is its recommendation and the pane offers the rest
- *  as an override. */
+/** One of the folder shapes a row could be imported as, with the engine's rule
+ *  token for it and the counts and groups THAT shape would produce. The server
+ *  serves the proposal engine's ranking, recommended first, so the first entry
+ *  IS the recommendation and the pane offers the rest as an override. */
 export type BundleMatch = {
   shape: string;
+  /** The proposal engine's token for this reading, ALWAYS `engine:<shape>` - the
+   *  same token the create marker records, so one spelling owns the rule. */
   rule: string;
+  /** The engine's confidence band for this reading (`high | medium | low`). */
   confidence: string;
   model_count: number;
   image_count: number;
@@ -98,14 +100,15 @@ export type BundleMatch = {
   other_count: number;
   groups?: BundleGroup[];
   note?: string | null;
-  /** Can the server enact this reading TODAY? `creatable: false` marks a shape
-   *  the detector offers but cannot create from yet (the proposal engine's
-   *  dissenting cardinality readings, which need arranging first), and such a
-   *  match always carries a `note` saying why. ABSENT means enactable: a
-   *  payload from before this field existed is one the server could always act
-   *  on, so the reader must treat it as `true` rather than refuse every old
-   *  report. The create endpoint answers `needs-arrange` for a false shape and
-   *  writes nothing, which is why a client must never send one. */
+  /** The ENGINE's verdict on this reading: can the server enact it TODAY?
+   *  `creatable: false` marks an honest reading it cannot create from yet (a
+   *  directory's `split-*` / `add-to-project`, which need arranging first, or an
+   *  archive's `archive-leave`, which has nothing to import), and such a match
+   *  always carries a `note` saying why. ABSENT means enactable: a payload from
+   *  before this field existed is one the server could always act on, so the
+   *  reader must treat it as `true` rather than refuse every old report. The
+   *  create endpoint answers `needs-arrange` for a false shape and writes
+   *  nothing, which is why a client must never send one. */
   creatable?: boolean;
 };
 
@@ -119,6 +122,12 @@ export type BundleDetectItem = {
   licence: string | null;
   licence_url: string | null;
   source_url: string | null;
+  /** The engine's recommendation for this row, mirrored from `matches[0]`:
+   *  `detector` is `matches[0].rule` (always `engine:<shape>`), `confidence` is
+   *  the engine's band and `metadata_shape` is `matches[0].shape`. They keep
+   *  their wire names, and a payload served before the engine wrote these fields
+   *  still carries the older detector vocabulary - which is why the client keeps
+   *  labels for those shapes too. */
   detector: string;
   confidence: string;
   metadata_shape: string;
@@ -179,7 +188,15 @@ export type BundleDetectItem = {
 };
 
 export type BundleDetectCounts = {
+  /** The rows this report HAS. It keeps its old meaning: the count is the rows
+   *  the walk offered, not the number the `limit` let onto the wire. */
   total: number;
+  /** How many rows this report has (= `total`) and how many of them the server's
+   *  `limit` kept back. Required on purpose: the server always emits both now
+   *  (defaulted to 0 in the schema), so the truncated notice can say what the
+   *  operator is and is not looking at instead of guessing. */
+  offered: number;
+  withheld: number;
   high: number;
   /** Optional: a payload from before the medium confidence simply omits it, so readers use `?? 0`. */
   medium?: number;

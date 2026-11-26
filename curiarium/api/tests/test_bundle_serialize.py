@@ -29,10 +29,10 @@ from typing import Dict, Mapping
 
 import pytest
 
-import bundle_detect
 import bundle_serialize
 import bundle_service
 import main
+import proposal_engine
 import routers
 from db import engine
 from migrations import run_migrations
@@ -46,6 +46,7 @@ DRAGON = "import/5390184_DRAGON"
 PILE = "import/pile"
 TRIO = "import/Trio"
 DUPLICATE_SUPPRESSED = "import/dupes/B.zip"
+COLLECTION = "import/Collection"
 
 
 def write_file(path: Path, payload: bytes = b"x") -> None:
@@ -127,6 +128,14 @@ def storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     write_zip(duel / "A.zip", {"d.stl": b"solid d\n", "e.png": b"png e", "f.txt": b"notes f\n"})
     write_file(duel / "B.zip", (duel / "A.zip").read_bytes())
 
+    # Three products in one folder (Mf-1agz): each child ships its own README, so
+    # the engine reads this as a split and the alternative is one project.
+    collection = area / "Collection"
+    for name in ("Widget One", "Widget Two", "Widget Three"):
+        write_text(collection / name / "README.md", f"# {name}\n")
+        for index in range(2):
+            write_file(collection / name / f"part{index}.stl", b"solid\n")
+
     # A plain archive row, a pile, and two directories with nothing to offer.
     # Deliberately different bytes from the dupes pair: same bytes would make it a
     # duplicate and the corpus would lose its only plain archive row.
@@ -151,19 +160,19 @@ def jsonable(artifact: dict) -> dict:
     return {key: value for key, value in artifact.items() if key != "taken_at"}
 
 
-def fresh_decision(root: Path, candidate: bundle_service.BundleCandidate) -> bundle_detect.Detection:
-    """The pure decision for one candidate, asked again from the snapshot."""
-    if candidate.manual:
-        # A manual row is a SCOPE rather than a rule: `detect_bundle` refuses the
-        # listing, and the row exists because the operator may still import it.
-        return bundle_detect.Detection(facts=bundle_detect.manual_facts(candidate.snapshot), refusal=None)
-    if candidate.title_name:
-        return bundle_detect.title_name_decision(candidate.snapshot)
-    if candidate.pair_only or candidate.archive_owned:
-        return bundle_detect.archive_owned_decision(candidate.snapshot)
+def fresh_decision(root: Path, candidate: bundle_service.BundleCandidate):
+    """The engine's own ranking for one candidate, asked again from its facts.
+
+    The row's ``matches`` must BE this list: one measurement, one ranking, and the
+    report is not allowed a second opinion (Mf-1agz).
+    """
     if candidate.is_archive:
-        return bundle_service._detect_archive_decision(root / candidate.snapshot.rel_dir, candidate.snapshot)
-    return bundle_service._detect_folder_decision(root, candidate.snapshot)
+        options, _reasons = proposal_engine.propose_archive(candidate.facts)
+        return options
+    options, _reasons, _repo = proposal_engine.propose(
+        candidate.facts, frozenset(), git_timeout=bundle_service.GIT_PROBE_TIMEOUT
+    )
+    return options
 
 
 def rows_by_path(artifact: dict) -> Dict[str, dict]:
@@ -198,7 +207,7 @@ def test_the_artifact_is_deterministic_and_a_superset_of_the_baseline_schema(sto
         for key in bundle_serialize.BASELINE_ROW_KEYS:
             assert key in row, f"row {row['rel_path']} lost the baseline key {key}"
         assert row["rule_set"] == first["rule_set"]["stamp"]
-        assert row["rule_set"] == bundle_detect.RULE_SET_STAMP
+        assert row["rule_set"] == proposal_engine.RULE_SET_STAMP
     assert [row["rel_path"] for row in rows] == sorted(row["rel_path"] for row in rows)
     assert [item["rel_path"] for item in first["refused"]] == sorted(
         item["rel_path"] for item in first["refused"]
@@ -230,7 +239,11 @@ def test_every_archive_is_either_offered_or_refused_with_a_rule(storage: Path) -
 
     assert offered & refused_archives == set(), "an archive cannot be both offered and refused"
     assert offered | refused_archives == every_zip, sorted(every_zip - (offered | refused_archives))
-    assert len(offered) == 2, sorted(offered)  # the surviving duplicate and the plain archive
+    # Five archive rows: the four the archive engine reads as "one project from
+    # this archive" plus the surviving copy of the duplicate pair. An archive is
+    # only refused when the engine reads nothing to unpack inside it, or when the
+    # scan itself refuses it (member, twin, duplicate, unreadable).
+    assert len(offered) == 5, sorted(offered)
 
     for path, item in refused.items():
         assert item["rule"] in bundle_service.REFUSAL_RULES, (path, item["rule"])
@@ -240,15 +253,12 @@ def test_every_archive_is_either_offered_or_refused_with_a_rule(storage: Path) -
         "import/Clockwork/inner.zip": bundle_service.REFUSAL_NESTED_MEMBER,
         DUPLICATE_SUPPRESSED: bundle_service.REFUSAL_DUPLICATE,
         "import/broken.zip": bundle_service.REFUSAL_UNREADABLE_ARCHIVE,
-        "import/model-only.zip": bundle_detect.REFUSAL_R3_TRIO_NO_IMAGE,
-        "import/readme.zip": bundle_detect.REFUSAL_R1_NO_MARKERS,
-        "import/All Pokemon.zip": bundle_detect.REFUSAL_R3_NO_OWN_DEPTH_MODEL,
     }
     for path, rule in expected.items():
         assert refused[path]["rule"] == rule, (path, refused[path]["rule"])
 
 
-def test_a_rule_change_diff_names_every_changed_added_and_removed_row(
+def test_a_rule_change_diff_names_every_changed_row(
     storage: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A coverage test over one corpus: the diff names every row the rules moved.
@@ -256,14 +266,19 @@ def test_a_rule_change_diff_names_every_changed_added_and_removed_row(
     This is the acceptance criterion of the ticket, and the mutation is the ticket
     itself - change the rules and the tool has to say which rows moved, rather than
     leaving an operator to compare two counts from memory.
+
+    The rule table is the ENGINE's now (Mf-1agz), and it is read at call time, so
+    patching `PRODUCT_DOC` to match nothing is a real rule change: a child folder
+    that ships a README no longer claims to be a product, so `import/Collection`
+    stops being a split and becomes one project. Rows are neither added nor
+    removed by that edit, which is what makes the row-for-row answer the thing
+    being asserted.
     """
     before = bundle_serialize.serialise_report(storage)
+    assert rows_by_path(before)[COLLECTION]["shape"] == "split-top-folders"
 
     with monkeypatch.context() as patched:
-        patched.setattr(bundle_detect, "TITLE_NAME_BUNDLES_ENABLED", False)
-        patched.setattr(bundle_detect, "_THINGIVERSE_ID_IN_NAME", re.compile(r"^(\d{9,})_"))
-        patched.setattr(bundle_detect, "DETECTOR_GENERIC", "generic-bundle-v2")
-        patched.setattr(bundle_detect, "R3_MODEL_DIRS", frozenset({"files", "stl"}))
+        patched.setattr(proposal_engine, "PRODUCT_DOC", re.compile(r"(?!)"))
         after = bundle_serialize.serialise_report(storage)
 
     old_rows = rows_by_path(before)
@@ -274,21 +289,11 @@ def test_a_rule_change_diff_names_every_changed_added_and_removed_row(
     detector_changed = [path for path in common if old_rows[path]["detector"] != new_rows[path]["detector"]]
     confidence_changed = [path for path in common if old_rows[path]["confidence"] != new_rows[path]["confidence"]]
 
-    # Manual rows changed this coverage test's premise: a directory the rules
-    # refuse is now OFFERED as a manual scope, so widening R3 does not ADD
-    # import/pile - it moves that same row's detector from `manual` to
-    # `generic-bundle`. The row-for-row answer is asserted below instead.
-    assert not added, f"a manual row means widening a rule moves a row, never creates one: {added}"
-    # Same premise for removals: disabling R5 leaves `01_Fates End - Wizard
-    # Tower` refused, so it is still offered as the manual scope - its detector
-    # moves title-name -> manual rather than the row disappearing.
-    assert not removed, f"a refused directory is still a manual row: {removed}"
-    assert detector_changed, "the corpus no longer exercises a detector change (DETECTOR_GENERIC was renamed)"
-    assert confidence_changed, (
-        "the corpus no longer exercises a confidence change (the 5390184_DRAGON row should fall medium -> low)"
-    )
-    assert PILE in detector_changed, "widened R3_MODEL_DIRS should move import/pile off the manual scope"
-    assert FATES_END in detector_changed, "disabling R5 should move the Fates End row onto the manual scope"
+    assert not added, f"a rule that reads documents can never ADD a row: {added}"
+    assert not removed, f"a rule that reads documents can never REMOVE a row: {removed}"
+    assert detector_changed == [COLLECTION], detector_changed
+    assert new_rows[COLLECTION]["shape"] == "one-project"
+    assert confidence_changed, "the collection's band moves with its reading"
 
     diff = bundle_serialize.diff_artifacts(before, after)
 
@@ -298,13 +303,6 @@ def test_a_rule_change_diff_names_every_changed_added_and_removed_row(
     assert diff["removed"] == removed
     assert [item["rel_path"] for item in diff["detector_changed"]] == detector_changed
     assert [item["rel_path"] for item in diff["confidence_changed"]] == confidence_changed
-
-    dragon = next(item for item in diff["confidence_changed"] if item["rel_path"] == DRAGON)
-    assert (dragon["old"], dragon["new"]) == ("medium", "low")
-    assert DRAGON in detector_changed
-    # A refused directory is still a manual row, so disabling R5 MOVES the Fates
-    # End row's detector rather than removing it (see the note above).
-    assert FATES_END not in removed
 
     text = bundle_serialize.format_diff(diff)
     assert "comparable: NO" in text
@@ -482,20 +480,19 @@ def test_refusals_are_additive_and_do_not_change_the_offered_rows(storage: Path)
 
     rows = {row["rel_path"]: row for row in report["bundles"]}
     for candidate in scan.candidates:
-        decision = fresh_decision(storage, candidate)
-        assert decision.facts is not None, candidate.key
-        assert rows[candidate.key]["detector"] == decision.facts.detector
-        assert rows[candidate.key]["confidence"] == decision.facts.confidence
+        options = fresh_decision(storage, candidate)
+        # The report's whole offer IS the engine's, in the engine's order, and the
+        # row's own fields are `matches[0]` - the invariant Mf-1agz exists for.
+        assert [match["shape"] for match in rows[candidate.key]["matches"]] == [
+            option.shape for option in options
+        ], candidate.key
+        assert rows[candidate.key]["detector"] == rows[candidate.key]["matches"][0]["rule"]
+        assert rows[candidate.key]["confidence"] == options[0].confidence
 
     assert report["refused"], "the corpus must have refused paths"
-    # A MANUAL row is deliberately both a row and a ledger entry: the rule that
-    # refused the path is the row's `note` (Mf-z643). Every other row stays
-    # disjoint from the ledger, which is the property this test is about.
-    manual = {row["rel_path"] for row in report["bundles"] if row["detector"] == "manual"}
+    # No row is also a ledger entry any more: every refused path is a path the walk
+    # did not offer (the manual scope that used to be both is gone, Mf-1agz).
     for item in report["refused"]:
-        if item["rel_path"] in manual:
-            assert rows[item["rel_path"]]["matches"][0]["rule"] == item["rule"]
-            continue
         assert item["rel_path"] not in offered, item
     assert scan.refusals, "the scan itself must carry the ledger"
     assert {item.rel_path for item in scan.refusals} == {item["rel_path"] for item in report["refused"]}
@@ -654,7 +651,7 @@ def test_a_report_still_measures_when_there_is_no_repository(
         assert item["rule"] in bundle_service.REFUSAL_RULES, item
     assert artifact["offered_keys"] == [row["rel_path"] for row in artifact["rows"]]
     assert artifact["counts"]["total"] == len(artifact["rows"])
-    assert artifact["rule_set"]["stamp"] == bundle_detect.RULE_SET_STAMP
+    assert artifact["rule_set"]["stamp"] == proposal_engine.RULE_SET_STAMP
     for row in artifact["rows"]:
         for key in copy.BASELINE_ROW_KEYS:
             assert key in row, f"row {row['rel_path']} lost the baseline key {key}"

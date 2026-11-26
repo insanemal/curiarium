@@ -193,7 +193,17 @@ const RESOLVED_QUEUE: Record<Role, ReviewQueueKey> = {
 const EMPTY_REPORT: BundleReport = {
   root: "",
   truncated: false,
-  counts: { total: 0, high: 0, low: 0, ready: 0, blocked: 0, dismissed: 0, already_created: 0 },
+  counts: {
+    total: 0,
+    offered: 0,
+    withheld: 0,
+    high: 0,
+    low: 0,
+    ready: 0,
+    blocked: 0,
+    dismissed: 0,
+    already_created: 0,
+  },
   bundles: [],
   stale_dismissals: [],
 };

@@ -20,14 +20,19 @@ audited by `curiarium/api/tests/test_proposal_engine.py` rather than trusted.
 Read-only in the strongest sense: no rename, no link, no unlink, no mkdir, no
 write-file. It opens directories for reading, files to parse a README/vendor
 document, and archives read-only to compare a payload. The one thing that can run
-a subprocess is `propose()`, which asks git about a checkout via `git_state` - and
-a GET handler must never do that, so the call is behind `probe_git=False`
-(Mf-yitm). A proposal moves nothing either way.
+a subprocess is `propose()`, which asks git about a checkout via `git_state`. Since
+Mf-1agz the report ENABLES that probe with a bounded `git_timeout` (5.0 s in the
+report), which deliberately reverses Mf-yitm's `probe_git=False` default for a GET:
+the owner-approved label corpus is 7/7 with probing and 6/7 without, and the
+measured cost over the 175-row live population is +0.507 s. The bound is what keeps
+one hung checkout from costing a request `GIT_TIMEOUT_SECONDS`. A proposal moves
+nothing either way.
 
 Nothing here prints. `validate()` returns plain data and the CLI shim renders it,
 so the same scoring can be asserted in a test instead of scraped from stdout.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -103,7 +108,7 @@ VENDOR_ID = re.compile(r"(?:^|[\s_\-])(\d{5,})\b")
 # Precision, not recall: `VENDOR_ID` above matches 5+ digits because it asks the
 # recall question ("is this a whole product"), while `foreign` asks only the
 # precision question ("is this somebody else's thing"), so it keeps the 6-8 digit
-# window `bundle_detect.COMPOUND_FOREIGN_ID` used. Ported by value.
+# window the deleted detector's `COMPOUND_FOREIGN_ID` used. Ported by value.
 COMPOUND_FOREIGN_ID = re.compile(r"(?:^|[-_ ])\d{6,8}(?:$|[-_ ])")
 
 
@@ -173,7 +178,7 @@ MACOSX_ROOT = "__macosx"
 
 # --- metadata vocabulary --------------------------------------------------
 #
-# The licence table is ported from `bundle_detect._LICENCE_TABLE` by VALUE. A
+# The licence table is ported by VALUE from the detector this engine replaced. A
 # known token maps to (display, URL); an unknown token keeps its own text and
 # gets NO URL. A guessed licence link is a legal statement this engine is not
 # entitled to make.
@@ -210,7 +215,7 @@ BOILERPLATE_TITLES = {
     "attribution card", "microsoft word", "document1", "pdf",
 }
 
-# The Thingiverse marker grammar, ported from `bundle_detect`: one scan for the
+# The Thingiverse marker grammar, ported from the detector this engine replaced: one scan for the
 # creator and the licence token it writes. Each half is independent, so a README
 # that mentions a licence but not the uploader must not invent an author.
 README_MARKERS = re.compile(
@@ -1295,8 +1300,9 @@ def is_macosx_artifact(rel_path: str) -> bool:
 def twin_key(name: str) -> str:
     """The identity a folder and a `.zip` share: casefolded, one `.zip` off.
 
-    Ported from `bundle_detect.twin_key` so the pairing stem has one definition
-    here too.
+    THE one definition (Mf-1agz): the archive pairing in `bundle_service` and the
+    twin verification below both read it, so a folder and its zip cannot be keyed
+    two ways.
     """
     key = (name or "").strip().casefold()
     if key.endswith(".zip"):
@@ -1309,7 +1315,10 @@ def common_entry_root(rel_paths: Iterable[str]) -> Optional[str]:
 
     AppleDouble cruft is ignored, entries are compared casefolded, and a loose entry
     at the top level (or two different first segments) means there is no single
-    wrapper. Ported from `bundle_detect.common_entry_root` by rule.
+    wrapper.
+
+    THE one definition (Mf-1agz): the archive pairing in `bundle_service` reads it
+    rather than keeping a second copy free to drift.
     """
     root: Optional[str] = None
     for rel_path in rel_paths:
@@ -1325,36 +1334,75 @@ def common_entry_root(rel_paths: Iterable[str]) -> Optional[str]:
     return root
 
 
-def _payload_contained(payload: Iterable[Tuple[str, int]],
-                       folder: Iterable[Tuple[str, int]]) -> bool:
-    """Whether this archive's payload is contained in this folder listing.
+def archive_payload_contained(archive_entries: Iterable[Tuple[str, int]],
+                              folder_entries: Iterable[Tuple[str, int]],
+                              entry_root: Optional[str] = None) -> bool:
+    """Whether this archive's payload is contained in this directory's listing.
+
+    THE one containment predicate, asked by both archive/directory pairing routes
+    (the stem route and the named-entry-root route), so they cannot disagree about
+    what an archive's payload is or about when it fits a folder. It judges two
+    listings and a string; it never touches disk.
 
     Containment, not equality: a lived-in directory legitimately holds more than
-    the archive that shipped it. The path is casefolded and the size compared, with
-    ONE `common_entry_root` strip; two strips are refused on purpose. Declared size
-    is an archive HEADER field, so this decides pairing and is never an integrity
-    claim. The single containment predicate behind twin verification.
+    the archive that shipped it. Declared size is an archive HEADER field, so this
+    decides pairing and is never an integrity claim. The skip is
+    `is_macosx_artifact`, so an archive of cruft alone has verified nothing and is
+    refused.
+
+    ``entry_root`` given is the strict strip-and-compare: every payload entry's
+    first segment must casefold-equal the root and the remainder plus its declared
+    size must sit in the folder. An entry outside the root is ``False``, and there
+    is deliberately no identity shortcut on this route - trying one would silently
+    widen the rule that produced the root.
+
+    ``entry_root is None`` is the stem route, where nobody named the wrapper: the
+    wrapper decision is made ONCE for the whole archive, never per entry and never
+    twice - identity first, else a single `common_entry_root` strip. Two strips are
+    refused on purpose, because that would pair a wrapper's wrapper with anything
+    nested one level deeper.
     """
     entries = [
-        (str(path), int(size)) for path, size in payload
+        (str(path), int(size)) for path, size in archive_entries
         if not is_macosx_artifact(str(path))
     ]
     if not entries:
         return False
-    keys = {(path.casefold(), size) for path, size in entries}
-    if keys <= folder:
+    folder = {(str(path).casefold(), int(size)) for path, size in folder_entries}
+    if entry_root is not None:
+        stripped = _payload_without_root(entries, entry_root)
+        return stripped is not None and stripped <= folder
+    if {(path.casefold(), size) for path, size in entries} <= folder:
         return True
     root = common_entry_root([path for path, _size in entries])
     if root is None:
         return False
-    wanted = root.casefold()
+    stripped = _payload_without_root(entries, root)
+    return stripped is not None and stripped <= folder
+
+
+def _payload_without_root(payload: Iterable[Tuple[str, int]],
+                          entry_root: str) -> Optional[set]:
+    """Every payload entry with ``entry_root``'s first segment split off, casefolded.
+
+    ``None`` as soon as one entry sits outside the root. The first segment is split
+    off rather than sliced by the length of a casefolded prefix: casefolding may
+    change a string's length, and a slice would then cut the tail in the wrong place.
+    """
+    wanted = (entry_root or "").casefold()
     stripped = set()
-    for path, size in entries:
+    for path, size in payload:
         head, separator, rest = path.partition("/")
         if not separator or head.casefold() != wanted:
-            return False
+            return None
         stripped.add((rest.casefold(), size))
-    return stripped <= folder
+    return stripped
+
+
+def _payload_contained(payload: Iterable[Tuple[str, int]],
+                       folder: Iterable[Tuple[str, int]]) -> bool:
+    """`archive_payload_contained` on the stem route: the twin's own call."""
+    return archive_payload_contained(payload, folder)
 
 
 def _folder_listing(directory: str, max_entries: int) -> Tuple[set, int, bool]:
@@ -1534,12 +1582,17 @@ def parse_document_kind(facts: Facts) -> Optional[str]:
 
 
 def propose(facts: Facts, project_keys: Sequence[str], *,
-            probe_git: bool = True) -> Tuple[List[Option], List[str], Optional[dict]]:
+            probe_git: bool = True,
+            git_timeout: Optional[float] = None) -> Tuple[List[Option], List[str], Optional[dict]]:
     """Every interpretation the facts support, ranked; plus the reasons.
 
-    `probe_git=False` skips `git_state` entirely and reports no repo. That switch is
-    for the API: `git_state` shells out to git, and a GET handler may never run a
-    subprocess. The CLI, which is the operator's own tight loop, keeps the default.
+    `probe_git=False` skips `git_state` entirely and reports no repo; the default is
+    the CLI's own tight loop, where a checkout is worth asking about. `git_timeout`
+    bounds that probe (Mf-1agz): `git_state` gives its whole four-command budget
+    this many seconds, so the report - which reads inside a GET and probes git
+    because the label corpus is 7/7 with probing and 6/7 without - pays at most
+    that much for one hung checkout instead of `GIT_TIMEOUT_SECONDS`. `None` keeps
+    `git_state`'s own default, so every CLI caller is unchanged.
     """
     reasons: List[str] = []
     options: List[Option] = []
@@ -1566,7 +1619,7 @@ def propose(facts: Facts, project_keys: Sequence[str], *,
     ]
     doc = parse_document_kind(facts)
 
-    repo = git_state(facts.path) if probe_git else None
+    repo = git_state(facts.path, timeout=git_timeout) if probe_git else None
     if repo is not None:
         tracked_models = sum(
             1 for rel in repo["tracked"] if os.path.splitext(rel)[1].lower() in MODEL_EXTS
@@ -2230,6 +2283,116 @@ def plan_digest(key: str, shape: str, moves, creates) -> str:
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+
+# --- the rule set a report is stamped against ------------------------------
+#
+# Mf-1agz: ONE engine ranks, and every report row carries the stamp of the tables
+# that decided it, so two reports are comparable by construction or explicitly not.
+# `rule_set_tables` captures every row-deciding constant BY VALUE - sets become
+# sorted lists, a regex becomes `{pattern, flags}`, a mapping is sorted - so the
+# digest is a function of the tables and not of process memory, dict insertion
+# order or set iteration order. A table edit therefore moves the stamp, which
+# `tests/test_proposal_engine.py` pins.
+
+# The revision of this rule set. It moves when a rule CHANGES MEANING and the
+# tables alone cannot say so; a table edit needs no bump because the stamp already
+# moves.
+RULE_SET_VERSION = "2"
+
+
+def _regex_table(pattern) -> dict:
+    """One compiled regex as the canonical ``{pattern, flags}`` table entry."""
+    return {"pattern": pattern.pattern, "flags": pattern.flags}
+
+
+def rule_set_tables() -> dict:
+    """Every constant a row-deciding path consults, captured BY VALUE.
+
+    Read from the module at call time, so editing a table changes the stamp that a
+    test pins - a table edit cannot go unnoticed.
+
+    Deliberately EXCLUDED, because they bound WORK rather than decide a row: the
+    walk caps (``TWIN_MAX_ENTRIES``, ``PROVENANCE_MAX``) and the report's own entry
+    budget in ``bundle_service``. Including them would make a cosmetic bound edit
+    look like a classification change, which is the noise this stamp exists to
+    remove. The document caps ARE included: a smaller ``DOCS_MAX_PER_FOLDER`` or
+    ``PDF_MAX_BYTES`` changes which facts get read, and so the counts a row states.
+    """
+    return {
+        # The shapes a row can be recommended as, and the two that are enactable.
+        "ONE_PROJECT_SHAPES": list(ONE_PROJECT_SHAPES),
+        "SPLIT_SHAPES": list(SPLIT_SHAPES),
+        "PACKAGING_TAIL": _regex_table(PACKAGING_TAIL),
+        # What counts as what.
+        "MODEL_EXTS": sorted(MODEL_EXTS),
+        "IMAGE_EXTS": sorted(IMAGE_EXTS),
+        "PREVIEW_EXTS": sorted(PREVIEW_EXTS),
+        "DOC_EXTS": sorted(DOC_EXTS),
+        "ARCHIVE_EXTS": sorted(ARCHIVE_EXTS),
+        "META_EXTS": sorted(META_EXTS),
+        "JUNK_NAMES": sorted(JUNK_NAMES),
+        "APP_OWNED": sorted(APP_OWNED),
+        # The naming and grouping vocabulary the score and the groups read.
+        "PART_NAME": _regex_table(PART_NAME),
+        "PRODUCT_DOC": _regex_table(PRODUCT_DOC),
+        "VENDOR_ID": _regex_table(VENDOR_ID),
+        "COMPOUND_FOREIGN_ID": _regex_table(COMPOUND_FOREIGN_ID),
+        "SITE_CODE": _regex_table(SITE_CODE),
+        "KEEP_TOKENS": sorted(KEEP_TOKENS),
+        "MACOSX_ROOT": MACOSX_ROOT,
+        # The group/hierarchy bounds a rendered fact depends on.
+        "GROUPS_MAX_DEPTH": GROUPS_MAX_DEPTH,
+        "GROUPS_MAX_CHILDREN": GROUPS_MAX_CHILDREN,
+        # The document reads a fact sheet depends on.
+        "TEXT_MAX_BYTES": TEXT_MAX_BYTES,
+        "PDF_MAX_BYTES": PDF_MAX_BYTES,
+        "PDF_MAX_PAGES": PDF_MAX_PAGES,
+        "DOC_CHAR_CAP": DOC_CHAR_CAP,
+        "DOCS_MAX_PER_FOLDER": DOCS_MAX_PER_FOLDER,
+        "PDF_DOCUMENTS_ENABLED": PDF_DOCUMENTS_ENABLED,
+        # The git probe that adds the `git-project` reading.
+        "GIT_MAX_TRACKED": GIT_MAX_TRACKED,
+        "GIT_MAX_UNTRACKED": GIT_MAX_UNTRACKED,
+        "GIT_TIMEOUT_SECONDS": GIT_TIMEOUT_SECONDS,
+        # Provenance and licences.
+        "LICENCE_TABLE": {key: list(value) for key, value in sorted(LICENCE_TABLE.items())},
+        "_CC_URL_TOKENS": {key: value for key, value in sorted(_CC_URL_TOKENS.items())},
+        "_CREATIVE_COMMONS": _CREATIVE_COMMONS,
+        "BOILERPLATE_TITLES": sorted(BOILERPLATE_TITLES),
+        "README_MARKERS": _regex_table(README_MARKERS),
+        "LICENSE_LINE": _regex_table(LICENSE_LINE),
+        "_ATTRIBUTION_FIRST_LINE": _regex_table(_ATTRIBUTION_FIRST_LINE),
+        "_LICENSED_UNDER_LINE": _regex_table(_LICENSED_UNDER_LINE),
+        "_SUMMARY_LINE": _regex_table(_SUMMARY_LINE),
+        "_SENTENCE_BOUNDARY": _regex_table(_SENTENCE_BOUNDARY),
+        "_TRAILING_JUNK": _TRAILING_JUNK,
+        "_TOKEN_SEPARATORS": _regex_table(_TOKEN_SEPARATORS),
+        "PROVIDER_HOSTS": {key: sorted(value) for key, value in sorted(PROVIDER_HOSTS.items())},
+        "PROVIDER_MODEL_ID": {key: _regex_table(value) for key, value in sorted(PROVIDER_MODEL_ID.items())},
+        "_NON_MODEL_PATH": _regex_table(_NON_MODEL_PATH),
+        "_BARE_MODEL_PATHS": sorted(_BARE_MODEL_PATHS),
+        "_URL_RE": _regex_table(_URL_RE),
+    }
+
+
+def rule_set_stamp() -> str:
+    """The sha256 stamp of the rule tables as they are NOW, not as they were imported.
+
+    Read at call time on purpose: a test can change one table and re-derive the
+    stamp, which is how the pin below is proven to cover the tables it claims.
+    """
+    canonical = json.dumps(rule_set_tables(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# The stamp of the tables as this process imported them: what every report row
+# records, so two reports are comparable by construction or explicitly not.
+RULE_SET_STAMP = rule_set_stamp()
+
+
+def rule_set() -> dict:
+    """The rule set a report is taken against: its version and its stamp."""
+    return {"version": RULE_SET_VERSION, "stamp": rule_set_stamp()}
 
 
 # --- archives -------------------------------------------------------------

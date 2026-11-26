@@ -15,9 +15,12 @@ README. That is why it is safe to point at a live CephFS mount.
     python3 curiarium/scripts/propose_import.py --only Vault --only import/Stagetop
     python3 curiarium/scripts/propose_import.py --json > /tmp/proposals.json
 
-Nothing here is wired into the app yet, and nothing here should be: the shapes it
-proposes are a hypothesis to be measured, and the arranging half (rename, move,
-hard-link) is a separate, approval-gated step that does not exist yet.
+Since Mf-1agz the app does NOT keep a second opinion: `GET /bundles/detect` asks
+this same engine about every row and serves its ranking as `matches`, so what this
+harness prints is what the operator is offered (the report bounds the git probe at
+5 s per row; the CLI uses the engine's own default). The arranging half (rename,
+move, hard-link) is still a separate, approval-gated step, and what it enacts is
+`proposal_engine.arrange_moves`.
 
 WHAT THIS FILE IS, since Mf-yitm: measurements and interpretations live in
 `curiarium/api/proposal_engine.py`, an app-free module (no FastAPI, no database),

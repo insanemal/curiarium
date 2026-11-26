@@ -1,179 +1,122 @@
 """Turn what is on disk into a dry-run bundle report, then into projects.
 
-This is the only layer that touches both bytes and rows. `bundle_detect` decides
-what a listing means; this module enumerates the storage tree, resolves each
-candidate against the database, serves the report, and - only when a human
-confirms - creates one project per bundle.
+This is the only layer that touches both bytes and rows. `proposal_engine` decides
+what a listing means - it measures a folder and ranks the readings its facts
+support - and this module enumerates the storage tree, asks the engine about each
+folder, resolves each row against the database, serves the report, and - only when
+a human confirms - creates one project per bundle. There is no second opinion
+anywhere in this file: no rule of its own, no legacy reading, no dissent list.
+
+**ONE engine ranks (Mf-1agz).** The row-population rule, in the engine's own
+vocabulary, is stated once at ``_build_candidates``: walk top-down; a `leave` or
+`archive-only` reading descends and offers no row; a claiming reading
+(``one-project``/``git-project``/``add-to-project``) is a row and descent stops; a
+split reading is a row and descent stops, because the split's children ARE the
+split. The app's ``import/`` area is transparent - it is the drop zone the import
+doors write into, so a row for it would offer the whole inbox and hide the
+products inside it. A ``.zip`` is a row of its own through
+``proposal_engine.measure_archive``/``propose_archive``, unless it is a duplicate,
+a member of an offered folder, or one of those folders' provenance.
 
 **The report is recomputed from disk on every read.** There is no cache, no
 stored candidate table and no migration: a directory added by ``rsync``, a folder
 renamed by hand or a zip dropped next to its twin changes the very next
 ``GET``/``build_report`` response. That is the whole reason detection can be
-trusted on a box someone else administers.
+trusted on a box someone else administers. The walk costs more than it used to -
+one engine measurement per row, and a bounded git probe inside the GET (below) -
+and the measured wall clock over the live 175-row tree is recorded in
+``.plans/measurements/Mf-1agz-after-summary.md``.
+
+**Git probing, bounded (Mf-1agz).** The report asks git about a checkout
+(``GIT_PROBE_TIMEOUT`` = 5 s per row) because the owner-approved label corpus is
+7/7 with probing and 6/7 without - ``import/endorphin`` is only read correctly as
+a checkout - and 173 of the 175 rows pay one ``os.path.exists`` for the answer.
+This reverses Mf-yitm's ``probe_git=False`` default for the API on the record
+(ADR 0010, Decision 18 amendment); the bound is what keeps a hung checkout from
+costing a GET the engine's own 120 s budget.
 
 **The folder is the truth; a twin zip is provenance only.** When a directory and
 a ``<name>.zip`` sit side by side, the directory is the bundle and the archive
-attaches no files. What the report then says in ``twin_verified`` depends on who
-paired them. For a directory some rule detects on its own, it is the names-only
-comparison - the casefolded *basenames* inside the zip against the casefolded
-basenames of the folder's recursive entries, never a checksum - because the
-operator paired them and a mismatch is information for the operator (``False``),
-not an assertion to raise. For a directory the pairing itself promoted, it is a
-re-verified containment: the same containment check that had to pass for the
-archive to pair at all, re-run against the bytes on disk now.
+attaches no files. ``twin_verified`` says what the pairing evidence is: for a stem
+twin it is the names-only comparison (the operator paired them, so a mismatch is
+information rather than an assertion), and for an entry-root pairing it is a
+re-verified containment - a ``False`` there means the bytes changed since the
+scan. The one containment predicate for both routes is
+``proposal_engine.archive_payload_contained``.
 
 **A nested archive is a member, never a candidate.** A ``.zip`` strictly below a
-detected bundle's directory belongs to that bundle: it is counted as an archive
-and nothing else, so it never becomes a second row, never pairs a sibling
-directory through its entry root, and never supplies a model, image or text that
-would make the enclosing directory a bundle. Its central directory may still be
+row belongs to that row (``file_utils.is_bundle_member``): it never becomes a
+second row, never pairs a sibling directory, and never supplies a model that would
+make the enclosing folder something else. Its central directory may still be
 listed to decide pairing and its bytes hashed for duplicate identity, but nothing
 inside it is read as evidence and nothing is ever extracted.
-``bundle_detect.is_bundle_member`` is the one predicate for that membership; the
-container strip still runs first, so a LOW folder that holds only a zip-only bundle is a
-container rather than a bundle and that zip is not "nested" at all. The member
-filter runs after the strip on purpose - see the note at the strip.
-
-**Renamed extractions pair on the archive's entry root.** A vendor rename breaks
-the stem rule: ``import/17_ClockworkMonster/`` beside ``17_Fates End -
-ClockworkMonster Tower.zip`` shares nothing but an ordinal prefix. So a second
-pass reads the archives the stem rule left behind, computes each one's common
-entry root (``bundle_detect.common_entry_root``) and pairs it with a *sibling*
-directory of that name - same parent only, so a root naming an ancestor or a
-directory elsewhere never pairs - unless the root is a generic container name
-(``files``/``images``/``models``/``stl``), which would pair half a real library
-to the wrong thing. ``entry_root_verified`` then requires containment of
-(casefolded bundle-relative path, declared size) against the directory's
-post-claim listing. Containment, not equality: a lived-in directory holds more
-than its archive. Declared size is an archive header field, so this is pairing
-evidence, never an integrity claim. On either path ``twin_verified`` is a
-re-verified containment for a directory the pairing promoted - it is not "always
-true": a ``False`` means the bytes changed since the scan. For a directory a rule
-detects on its own, the stem path's ``twin_verified`` stays an operator remark.
-The archive attaches nothing on either path.
 
 **Duplicate archives are one bundle.** Identity for an archive is its content
 hash (sha256 over the file, read in bounded chunks). Two archives with the same
-hash are one bundle: the copy is suppressed from both archive passes - it never
-becomes a second row and can never pair a second directory - and reported in
+hash are one bundle: the copy is suppressed from the archive pass and reported in
 ``duplicates`` with its ``reclaimable_bytes`` and a copyable tab-separated
-``duplicates_text``. Hashing is size-first: only archives sharing a size with
-another archive are opened, so a uniquely-sized archive is never read, and the
-worst case (every archive the same size) reads each exactly once. The report
-never deletes, renames or moves anything: it only renders text.
+``duplicates_text``. Hashing is size-first, so a uniquely-sized archive is never
+opened. The report never deletes, renames or moves anything: it only renders text.
 
-A duplicate that is a *member* of a live bundle is never on the deletable side:
-it is removed from the group, and a group left with fewer than two non-member
-paths disappears. An outside copy whose only twin is a member is therefore either
-still offered as its own archive bundle (when it was the group's keep) or was
-already suppressed (when it was not); the report never invites deleting part of a
-live bundle.
-
-**A verified pairing makes an offered-nowhere directory a low bundle.** The
-Clockwork shape - models and images and no text - is not an R3 bundle, so a rule
-that only read the listing would render nothing for it. When a pairing has proved
-that an archive beside a directory owns that directory, the archive supplies what
-the listing cannot: its identity. The directory is therefore offered as a real
-``generic-bundle`` / ``low`` candidate keyed at the DIRECTORY, with that archive
-reported as its ``archive`` and no file attached from it - the archive is
-provenance, the low confidence says the shape was inferred. It is then creatable
-exactly like any other low candidate: a resolved ``Folder`` and registered model
-assets, nothing about the detector. The pairing arrives one of two ways: by the
-archive's entry root, or by a stem twin whose directory no rule offers on its own
-and whose payload was verified by containment. Images and text inside the
-directory are neither required nor disqualifying; own-depth/cardinality
-(``bundle_detect._own_depth_model_count``) is the only shape guard left, and it
-is load-bearing - it is what keeps a pile from being promoted on an ancestor's
-or a child's models.
-
-Be honest about the bounds. **Without a pairing the shape is silent**: model
-files and a render are too weak on their own, so nothing is offered and nothing
-can be created - unless the folder's NAME reads like a title, which is R5's
-separate signal and not a loosening of this shape rule (ADR 0010 Decision 21).
-**The pairing never overrides the container rule**: a directory
-that holds bundles keeps the blocked ``archive_only`` row and creates nothing, so
-a pile of models with one zip somewhere inside it is still a pile. **A promotion
-is refused entirely - no row at all - when the directory's subtree holds a
-candidate a stronger rule produced** (``medium`` or ``high``), because then the
-directory is a container the operator made by hand and the child is the real
-bundle (ADR 0010 Decision 18, ``Mf-v3i3``). **A pairing
-names the directory itself and never a descendant**, so it can never qualify one.
-**A stem twin of a directory some rule already offers keeps the names-only
-answer** (the archive is that directory's provenance, never a pairing), and **a
-stem twin whose directory no rule offers and whose payload fails containment is
-consumed** rather than retried under the weaker entry-root name. A refused pair
-still gets a row rather than silence, which is why it keeps the archive-only
-EXPLANATION; whether it is also creatable is a database answer, and Mf-quv4 moved
-it onto the same disk predicate every other row is judged by (ADR 0010 Decision 7).
 **A row on the report is not the same thing as a row in the queue**: the web list
 hides anything carrying ``existing_project_id`` behind its "show created" toggle
-(``ui/review/bundleRows.ts`` ``matchesVisibility``), and a refused row now reports
-the assets its key holds, so the assets leg can find a project for it and hide it
-that way - measured, ``import/Pile`` gained ``existing_project_match: assets``
-while staying ``blocked``/``archive_only``, and the report's ``already_created``
-count moved 3 -> 4 over the Mf-quv4 corpus.
+(``ui/review/bundleRows.ts`` ``matchesVisibility``).
 
-A zip with no extracted twin is still read, through
-``zip_service.read_zip_text_entry`` (bounded, never extracted), so the report can
-show its provenance; it is always ``blocked``/``archive_only``, because creation
-happens from registered assets. The extraction/registration door for an archive
-already in the library is ``POST /import/archive`` (Mf-1zmd): it extracts the zip
-in place into the twin directory this detector already pairs, and the next scan
-registers it, so no detector change is involved.
+A ``.zip`` row is always ``blocked``/``archive_only``, because creation happens
+from registered assets and its door is extraction. That string is not a verdict -
+it is the NAME of the only door, and the client keys the Extract action off it
+(``extractPathFor``); whether that door is actionable comes from the engine, in
+``matches[0].creatable``. The extraction/registration door is
+``POST /import/archive`` (Mf-1zmd): it extracts the zip in place, the next scan
+registers it, and the folder it produced becomes a row of its own.
 
 **Why ``_folder_index`` keys on ``Folder.storage_path``.** A bundle is only
 creatable when its directory is a *registered* directory, meaning a ``Folder``
 row whose ``storage_path`` is that relative path. The rows migrated from the
 flattened v3 schema carry ``storage_path IS NULL`` (Mf-um7x), so they can never
 match - that single fact *is* the legacy refusal. It keys on the row, never on
-which detector fired: heal the folder row (a rescan gives it its real path) and
-the same bundle becomes creatable with no code change, while an R2 bundle that
-still has only a flattened row stays visible as ``high`` confidence and
-``blocked``.
+which shape was recommended: heal the folder row (a rescan gives it its real path)
+and the same bundle becomes creatable with no code change.
 
 **The two commit windows, and why a re-run is safe.** One created bundle commits
 twice: the project row *with* its ``_bundle`` marker *and* every member row, in one
-transaction through ``project_create_service.create_project_from_members`` (which
-calls ``project_service.create_project_with_members``), then the audit row
-(``audit.record``). It used to be three windows - project, then members through
-``project_service.add_assets`` in a second session - and that gap is what could
-leave a project with a marker and no members; an unknown asset id now refuses the
-whole request before the insert rather than failing per id after it. The audit row
-is its own window by design (an effect's audit row must be durable even when the
-business write is not). It cannot duplicate a project: every create pass first asks
+transaction through ``project_create_service.create_project_from_members``, then
+the audit row (``audit.record``). The audit row is its own window by design. It
+cannot duplicate a project: every create pass first asks
 ``project_create_service.find_existing_project`` - the marker key, then the twin
-archive, then
-the source URL, then
-an exact casefolded name, then asset containment over the models a create would
-attach - and a hit is ``skipped`` with the existing project id and the project
-is never touched. A human edit is therefore never overwritten by
-a re-run, and the report says ``already_created`` before anyone presses create.
+archive, then the source URL, then an exact casefolded name, then asset
+containment over the models a create would attach - and a hit is ``skipped`` with
+the existing project id and the project is never touched. A human edit is
+therefore never overwritten by a re-run, and the report says ``already_created``
+before anyone presses create.
 
-**A bundle's project holds every registered file its snapshot names.** Detection
-is one deepest-first pass, so a child bundle is claimed before its parent is
-considered: the parent never inherits the child's files, and a directory that
-holds nothing but child bundles is not a bundle at all. A created project
-therefore holds every registered asset its own snapshot names - models, images,
-text documents, unknowns and nested archives alike - and never a nested bundle's
-files under the same recursive prefix. What each of those files IS in the project
-(``model`` / ``image`` / ``text`` / ``other`` / ``archive``) is the detector's own
-``bundle_detect.classify_entry`` answer, decided once in ``_members_of``, so the
-project and the row it was created from can never disagree about a file.
+**A bundle's project holds every registered file its own row names.** A created
+project holds every registered asset under its key that the row owns - models,
+images, text documents, unknowns and nested archives alike. What each of those
+files IS in the project (``model`` / ``image`` / ``text`` / ``other`` /
+``archive``) is ``library_scan.classify_entry``'s answer, decided once in
+``_members_of``, so the project and the row it was created from can never disagree
+about a file. The create-time belt refuses a row whose registered subtree holds
+more than the row owns (an existing project's files, or files that appeared since
+the scan) unless the engine read it with documentary evidence - HIGH is exempt
+exactly as it always was (ADR 0010 Decision 15/18).
 
-**Bounds.** The walk is capped at ``MAX_SCAN_ENTRIES`` (``truncated`` says it
-stopped early) and a document read is capped at
-``bundle_detect.BUNDLE_DOC_MAX_BYTES``. ``limit`` bounds the *report*: the counts
-still describe everything that was found, and ``truncated`` is true when rows
-were withheld. Detection itself writes nothing - no row, no file, no folder
-healing - so the report is safe on a read route.
+**Bounds.** The walk is capped at ``MAX_SCAN_ENTRIES`` and so is each row's
+measurement (``truncated`` says a bound stopped it). ``limit`` bounds the
+*report*: ``counts.total``/``counts.offered`` still describe everything that was
+found and ``counts.withheld`` says how many rows the wire did not carry, because a
+bounded report that said only ``truncated: true`` made the operator guess whether
+the row they wanted was one of the ones dropped (Vault was exactly that row).
+Every read writes nothing - no row, no file, no folder healing - so the report is
+safe on a read route.
 
 **Every absence is named (Mf-9ygi).** A scan also returns the ledger of what it
 refused: one ``BundleRefusal`` per path the walk saw and did not offer, carrying
-the rule that refused it (``REFUSAL_RULES``). The ledger is derived AFTER the
-candidate set is final and is never an input to it, so reporting a refusal can
-never change which rows are offered. This is the part the 114 -> 112
-investigation lacked: 46 archives were invisible and the report said nothing at
-all about them.
+the rule that refused it (``REFUSAL_RULES``: the engine's own ``leave`` /
+``archive-only`` words and the scan's own reasons). The ledger is derived AFTER
+the row set is final and is never an input to it, so reporting a refusal can never
+change which rows are offered. This is the part the 114 -> 112 investigation
+lacked: 46 archives were invisible and the report said nothing at all about them.
 """
 
 import hashlib
@@ -190,10 +133,10 @@ from sqlmodel import Session, select
 
 import asset_urls
 import audit
-import bundle_detect
 import bundle_drift
 import bundle_enrich
 import db
+import file_utils
 import library_scan
 import project_create_service
 import project_service
@@ -206,11 +149,31 @@ from models import Asset, Folder, Project
 # The storage root bundle keys are resolved against. A module global so tests can
 # point it at a temp tree exactly like ``library_scan.STORAGE``.
 STORAGE = db.STORAGE
+# The app's import drop zone, at the storage root. Transparent to the row walk: it
+# is where the import doors land a download, so a row for it would offer the whole
+# inbox as one project and stop the walk before the products inside it. No row,
+# no absorption - and its CHILDREN are read exactly like any other folder.
+IMPORT_AREA = "import"
+TRANSPARENT_DIRS = frozenset({IMPORT_AREA})
+# The engine readings that offer NO row and let the walk descend: there is nothing
+# to import in this folder itself, so the answer may be one of its children.
+DESCEND_SHAPES = frozenset({"leave", "archive-only"})
+# The shapes a create can enact, split by row kind. A directory row is creatable
+# exactly when the engine reads it as one project (`one-project`/`git-project`); a
+# `.zip` row exactly when the archive engine reads it as something to unpack. A
+# split, an `add-to-project` or an `archive-leave` is an honest offer the create
+# path refuses with `needs-arrange` (or, for the zip, the Extract door).
+DIRECTORY_CREATABLE_SHAPES = frozenset(proposal_engine.ONE_PROJECT_SHAPES)
+ARCHIVE_CREATABLE_SHAPES = frozenset({"archive-project", "archive-split"})
+# The bound the report gives `git_state` per row (Mf-1agz). The report probes git
+# because the label corpus is 7/7 with probing and 6/7 without; this is what keeps
+# one hung checkout from costing a GET the full `GIT_TIMEOUT_SECONDS`.
+GIT_PROBE_TIMEOUT = 5.0
+# The Thingiverse thing page an id in a name points at. One spelling, so a
+# derived URL and a page the app fetched can never name two different things.
+THINGIVERSE_THING_URL = "https://www.thingiverse.com/thing:{}"
 # A walk is bounded so a pathological tree cannot make a read request run forever.
 MAX_SCAN_ENTRIES = 200_000
-# The dissent pass gets the same allowance as the walk that feeds it, once per
-# pass, so its total cost is a second MAX_SCAN_ENTRIES and not one per row.
-MAX_DISSENT_ENTRIES = MAX_SCAN_ENTRIES
 # The report's own bound. ``build_report`` never truncates by accident: a caller
 # that needs every row (a create pass) asks for more than the walk can produce.
 DEFAULT_LIMIT = 200
@@ -268,13 +231,14 @@ CONTAINS_BUNDLES = "contains_bundles"
 # answer it labels.
 MATCH_MARKER = project_create_service.MATCH_MARKER
 
-# Why this service refused a path the walk saw. The detector owns the R1-R5
-# vocabulary (``bundle_detect.REFUSAL_RULES``); these are the refusals only the
-# scan can make, because only the scan sees the whole tree: a duplicate archive, a
-# hidden twin, an archive nobody could open, a folder that holds bundles, and a
-# file that belongs to a live bundle. A path that is not offered carries exactly
-# one of these or one detector reason - never silence, which is what made the
-# invisible archives of Mf-9ygi expensive to find.
+# Why this service refused a path the walk saw. Since Mf-1agz the engine owns the
+# decision, so its readings ARE the vocabulary - a directory the engine reads as
+# `leave` is named with that word - and the rest are the refusals only the scan can
+# make, because only the scan sees the whole tree: a duplicate archive, a hidden
+# twin, an archive nobody could open, a folder that holds rows, the app's own drop
+# zone, an unmeasured subtree, and a file that belongs to a live bundle. A path that
+# is not offered carries exactly one of these - never silence, which is what made
+# the invisible archives of Mf-9ygi expensive to find.
 REFUSAL_CONTAINER = "container-rule"
 REFUSAL_DUPLICATE = "duplicate"
 REFUSAL_NESTED_MEMBER = "nested-member"
@@ -282,10 +246,22 @@ REFUSAL_TWIN_CONSUMED = "twin-consumed"
 REFUSAL_TWIN_UNVERIFIED = "twin-unverified"
 REFUSAL_UNREADABLE_ARCHIVE = "unreadable-archive"
 REFUSAL_MEMBER_OF_BUNDLE = "member-of-bundle"
+# The engine's own no-row readings, used verbatim so the ledger and the ranking
+# speak one vocabulary: nothing to import here. `leave` is what a folder answers
+# when it holds neither models nor archives; `archive-only` is what it answers when
+# it holds archives and no models (its zips are their own rows); `archive-leave` is
+# the archive engine's word for a `.zip` with nothing unpackable inside it.
+REFUSAL_LEAVE = "leave"
+REFUSAL_ARCHIVE_ONLY = "archive-only"
+REFUSAL_ARCHIVE_LEAVE = "archive-leave"
+# The app's import drop zone: never a row, never absorbing.
+REFUSAL_IMPORT_AREA = "import-area"
+# A subtree the report's entry budget stopped before measuring. Offered nowhere,
+# because half a census cannot be ranked honestly.
+REFUSAL_TRUNCATED = "truncated"
 
-# Every reason a refusal row may carry: the detector's vocabulary plus this
-# service's, so a caller can validate a ledger without knowledge of either half.
-REFUSAL_RULES = bundle_detect.REFUSAL_RULES | frozenset(
+# Every reason a refusal row may carry.
+REFUSAL_RULES = frozenset(
     {
         REFUSAL_CONTAINER,
         REFUSAL_DUPLICATE,
@@ -294,64 +270,52 @@ REFUSAL_RULES = bundle_detect.REFUSAL_RULES | frozenset(
         REFUSAL_TWIN_UNVERIFIED,
         REFUSAL_UNREADABLE_ARCHIVE,
         REFUSAL_MEMBER_OF_BUNDLE,
+        REFUSAL_LEAVE,
+        REFUSAL_ARCHIVE_ONLY,
+        REFUSAL_ARCHIVE_LEAVE,
+        REFUSAL_IMPORT_AREA,
+        REFUSAL_TRUNCATED,
     }
 )
 
 
 @dataclass(frozen=True)
 class BundleCandidate:
-    """One directory or zip that looks like a bundle, before any database read.
+    """One row: a folder or a `.zip`, and the engine's own reading of it.
 
-    ``confidence`` is internal: it decides whether a candidate may claim a
-    subtree. It is never returned in a report row - the row carries the facts
-    from its own detect call. ``entry_root`` is the archive entry root that
-    paired this bundle's archive, ``None`` when the stem rule paired it.
-    ``pair_only`` means a paired directory the container rule refused at the walk:
-    it is shown, and - since Mf-quv4 - its status is decided by the same disk
-    predicate as every other row (a resolved ``Folder`` and the models ``claims``
-    leaves it), not by this flag. ``archive_owned`` means a verified pairing owns this
-    directory: the archive supplies its identity on the entry-root route or on the
-    stem route, and the low confidence says the shape was inferred, so it is
-    offered at LOW even when no rule offers the directory on its own and it is
-    creatable like any other LOW candidate. ``title_name`` means the row exists
-    only because the folder's NAME reads like a title, so its facts come from
-    ``bundle_detect.title_name_facts`` and its confidence is LOW. ``compound``
-    means the row exists only because the folder holds ONE product in several
-    model-bearing parts, so its facts come from
-    ``bundle_detect.compound_bundle_facts``, its confidence is LOW, and it
-    carries a group breakdown. ``manual`` means the row exists only because the
-    walk refused this directory and the operator is still allowed to import it:
-    its facts come from ``bundle_detect.manual_facts``, its confidence is LOW, its
-    ``manual_rule`` is the ledger word that refused it, and the row states a
-    SCOPE (everything under this path) rather than a claim about the directory.
+    Since Mf-1agz the ENGINE decides which paths are rows and what each row
+    recommends; this service only resolves a row against the database, renders it
+    and enacts the operator's choice. So a candidate carries the measurement and
+    the recommended option, and nothing else: no confidence of its own, no second
+    reading, no shape guess.
+
+    ``rel`` is the walk-relative path (what the scan keyed things by), while
+    ``facts.rel`` is storage-relative (what the engine compared `project_keys`
+    against). ``files`` is the row's OWN subtree listing at scan time -
+    bundle-relative ``(path, size)`` - captured by the walk that already had it, so
+    twin verification and the create's ownership question never re-read the disk.
+    ``archive_path``/``entry_root`` name the `.zip` that is this folder's
+    provenance, and which pairing route found it.
     """
 
     key: str
-    snapshot: bundle_detect.BundleSnapshot
-    archive_path: Optional[str]
+    rel: str
+    facts: object
+    options: Tuple[proposal_engine.Option, ...]
     is_archive: bool
-    confidence: str
+    files: Tuple[Tuple[str, int], ...] = ()
+    archive_path: Optional[str] = None
     entry_root: Optional[str] = None
-    pair_only: bool = False
-    archive_owned: bool = False
-    title_name: bool = False
-    compound: bool = False
-    manual: bool = False
-    manual_rule: Optional[str] = None
 
     @property
-    def offers_archive_only(self) -> bool:
-        """Whether this candidate's SHAPE is "an archive, or a directory paired with one".
+    def option(self) -> proposal_engine.Option:
+        """The recommendation: the engine's first option, never re-derived."""
+        return self.options[0]
 
-        Since Mf-quv4 this is a SHAPE predicate for the two detection uses only -
-        the archive-containment ``contained_keys`` list (a row of this shape is a
-        bundle another folder must not be allowed to swallow) and the twin-attachment
-        loop (a row of this shape reports the archive it was built with and takes no
-        twin). ``_report_row`` no longer reads it: ``blocked``/``archive_only`` is a
-        database answer now, decided by the disk predicate, and a candidate whose
-        shape is archive-only is not thereby uncreatable.
-        """
-        return self.is_archive or self.pair_only
+    @property
+    def creatable_shapes(self) -> FrozenSet[str]:
+        """The shapes a create can enact for a row of this kind."""
+        return ARCHIVE_CREATABLE_SHAPES if self.is_archive else DIRECTORY_CREATABLE_SHAPES
 
 
 @dataclass(frozen=True)
@@ -369,19 +333,19 @@ class BundleRefusal:
 
 @dataclass(frozen=True)
 class BundleScan:
-    """One walk of the storage tree: the candidates, the duplicates, the refusals."""
+    """One walk of the storage tree: the rows, the duplicates, the refusals."""
 
     candidates: List[BundleCandidate]
     truncated: bool
-    duplicates: Tuple[bundle_detect.DuplicateGroup, ...] = ()
-    # Every path the walk refused to offer, sorted and named by its rule. Derived
-    # from the candidate set, never an input to it: adding a refusal can never
-    # change which rows are offered.
+    duplicates: Tuple[library_scan.DuplicateGroup, ...] = ()
+    # Every path the walk saw and did not offer, sorted and named by its rule.
+    # Derived from the candidate set, never an input to it: adding a refusal can
+    # never change which rows are offered.
     refusals: Tuple[BundleRefusal, ...] = ()
-    # The candidates R7 absorbed, carried so the report can re-offer a group an
-    # operator excluded at confirmation. Never part of `candidates`, so the
-    # offered set and the refused ledger are unchanged by their presence here.
-    absorbed: Tuple[BundleCandidate, ...] = ()
+
+    @property
+    def by_key(self) -> Dict[str, BundleCandidate]:
+        return {candidate.key: candidate for candidate in self.candidates}
 
 
 def _entry_size(entry) -> int:
@@ -420,152 +384,16 @@ def _parent(rel_dir: str) -> str:
     return rel_dir.rsplit("/", 1)[0] if "/" in rel_dir else ""
 
 
-def _relates_to_any(rel_dir: str, taken: AbstractSet[str]) -> bool:
-    """Whether ``rel_dir`` is already spoken for by a row, or is a container.
-
-    Three legs, and each one is a distinct refusal: the key IS a row (it was
-    claimed by a rule, promoted by a pairing or recorded as pair-only); it sits
-    INSIDE a row, so a name-only guess must never re-offer a bundle's own
-    subtree as a second thing; or it HOLDS a row, which is the container rule -
-    a folder of bundles is a pile whatever its name says. ``taken`` includes
-    archive rows, so a folder holding a zip-only bundle is a container too.
-    """
-    prefix = rel_dir + "/"
-    return any(
-        key == rel_dir or key.startswith(prefix) or rel_dir.startswith(key + "/") for key in taken
-    )
-
-
-def _holds_stronger_candidate(rel_dir: str, candidates: Sequence[BundleCandidate]) -> bool:
-    """Whether a STRONGER rule already detected a bundle strictly below ``rel_dir``.
-
-    An ``archive_owned`` row is a LOW shape inference, and it must never swallow a
-    bundle a stronger rule produced (ADR 0010 Decision 18, owner decision
-    2026-11-04: "I will sometimes extract a file and copy the zip in" - such a
-    parent is a hand-made container and the child is the real bundle). The
-    discriminating question is "does the subtree hold a candidate a stronger rule
-    produced", never "does it hold a zip": a zip that is only a MEMBER of the
-    enclosing bundle is not a candidate at that strength, which is why the
-    Clockwork directory keeps its row (Decision 17). The LOW/MEDIUM boundary is
-    ``bundle_detect.STRONG_CONFIDENCES``, membership rather than a literal.
-    """
-    prefix = rel_dir + "/"
-    return any(
-        candidate.key.startswith(prefix) and candidate.confidence in bundle_detect.STRONG_CONFIDENCES
-        for candidate in candidates
-    )
-
-
-def _promotion_would_double_own(
-    rel_dir: str,
-    owned_below: Sequence[BundleCandidate],
-    work: Mapping[str, Sequence[bundle_detect.BundleEntry]],
-) -> bool:
-    """Whether a verified twin at ``rel_dir`` would create a disk a row already owns.
-
-    ``owned_below`` is every row already offered STRICTLY below ``rel_dir``. One disk
-    is never created twice, so the twin may take the directory only while those rows own
-    the whole payload: nothing offered below (the twin owns the disk alone), or every
-    row hanging under ONE child of it (a wrapper, whose child is a member rather than a
-    second product). Rows under two children are two products, and a row that leaves a
-    file of the directory's own beside it is a payload only partly claimed. Promoting
-    either would put other products' files under this row as well, so the twin refuses
-    and keeps its pair-only row - creatability and double ownership decide, never a
-    candidate's confidence.
-
-    ``work`` is asked only "empty?", never "what shape?" - the Mf-wd3v trap. It is the
-    post-claim view, so a non-empty one means the claim left files of the directory's
-    OWN standing beside the ones it took: the split payloads ``import/L`` and
-    ``import/Z`` are exactly that.
-    """
-    if not owned_below:
-        return False
-    if work.get(rel_dir):
-        return True
-    first_segments = {
-        candidate.key[len(rel_dir) + 1 :].split("/", 1)[0] for candidate in owned_below
-    }
-    return len(first_segments) != 1
-
-
 def _basename(rel_dir: str) -> str:
     return rel_dir.rsplit("/", 1)[-1]
-
-
-def _folder_snapshot(rel_dir: str, entries: Sequence[bundle_detect.BundleEntry]) -> bundle_detect.BundleSnapshot:
-    return bundle_detect.BundleSnapshot(bundle_name=_basename(rel_dir), rel_dir=rel_dir, entries=tuple(entries))
-
-
-def _read_bounded(path: Path, max_bytes: int) -> Optional[str]:
-    """Read at most ``max_bytes + 1`` bytes; over the cap the document is skipped."""
-    try:
-        with Path(path).open("rb") as handle:
-            payload = handle.read(max_bytes + 1)
-    except OSError:
-        return None
-    if len(payload) > max_bytes:
-        return None
-    return payload.decode("utf-8", errors="replace")
-
-
-def _read_docs(base: Path, candidates: Sequence[str]) -> Dict[str, str]:
-    docs: Dict[str, str] = {}
-    for candidate in candidates:
-        text = _read_bounded(base / candidate, bundle_detect.BUNDLE_DOC_MAX_BYTES)
-        if text is not None:
-            docs[candidate] = text
-    return docs
-
-
-def _detect_folder(root: Path, snapshot: bundle_detect.BundleSnapshot) -> Optional[bundle_detect.BundleFacts]:
-    return _detect_folder_decision(root, snapshot).facts
-
-
-def _detect_folder_decision(root: Path, snapshot: bundle_detect.BundleSnapshot) -> bundle_detect.Detection:
-    """The folder's decision, so a refusal can name its rule as well as a row its facts."""
-    docs = _read_docs(Path(root) / snapshot.rel_dir, bundle_detect.doc_entry_candidates(snapshot))
-    return bundle_detect.detect_bundle_decision(snapshot, docs)
-
-
-def _detect_archive(zip_path: Path, snapshot: bundle_detect.BundleSnapshot) -> Optional[bundle_detect.BundleFacts]:
-    """The archive's facts, shared with ``_candidate_facts`` when a row is rendered.
-
-    It delegates to ``_detect_archive_decision`` so the archive carrier's rule set
-    - R1/R2/R4/R3 and then R6 - is decided in exactly one place; a row rendered
-    here can never disagree with the candidate the walk offered.
-    """
-    return _detect_archive_decision(zip_path, snapshot).facts
-
-
-def _detect_archive_decision(zip_path: Path, snapshot: bundle_detect.BundleSnapshot) -> bundle_detect.Detection:
-    """The archive's decision: the bounded read, then the archive-carrier rules.
-
-    ``archive_bundle_decision`` is a wrapper around ``detect_bundle_decision``, so
-    R1/R2/R4/R3 keep their precedence and R6 is consulted only when all four
-    refused. A directory is never handed this function; R6 is archive-only.
-    """
-    docs: Dict[str, str] = {}
-    for candidate in bundle_detect.doc_entry_candidates(snapshot):
-        text = zip_service.read_zip_text_entry(zip_path, candidate, bundle_detect.BUNDLE_DOC_MAX_BYTES)
-        if text is not None:
-            docs[candidate] = text
-    return bundle_detect.archive_bundle_decision(snapshot, docs)
-
-
-def _refusal_of(detection: bundle_detect.Detection) -> str:
-    """The rule that refused this detection; a refused decision always names one."""
-    if detection.refusal is None:
-        raise RuntimeError("a refused detection must name its rule")
-    return detection.refusal
 
 
 def _refuse(ledger: Dict[str, str], rel_path: str, rule: str, *, override: bool = False) -> None:
     """Record why ``rel_path`` is not offered. The FIRST refusal wins by default.
 
-    First-wins is what makes the ledger stable: the folder pass sees a directory
+    First-wins is what makes the ledger stable: the row walk sees a directory
     before any later pass does, so its reason is the most specific one. A pass
-    that has strictly better information (a promotion refusing a pair it has
-    already examined) passes ``override=True``.
+    that has strictly better information passes ``override=True``.
     """
     if override:
         ledger[rel_path] = rule
@@ -573,23 +401,10 @@ def _refuse(ledger: Dict[str, str], rel_path: str, rule: str, *, override: bool 
         ledger.setdefault(rel_path, rule)
 
 
-def _zip_snapshot(zip_path: Path, rel_path: str) -> Optional[bundle_detect.BundleSnapshot]:
-    """The listing of one archive, or ``None`` when it is not readable at all."""
-    try:
-        entries = zip_service.list_zip_entries(zip_path)
-    except (BadZipFile, OSError):
-        return None
-    return bundle_detect.BundleSnapshot(
-        bundle_name=Path(rel_path).stem,
-        rel_dir=rel_path,
-        entries=tuple(bundle_detect.BundleEntry(rel_path=entry["path"], size=int(entry["size"])) for entry in entries),
-    )
-
-
-def _subtree(files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]) -> Dict[str, List[bundle_detect.BundleEntry]]:
+def _subtree(files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]) -> Dict[str, List[Tuple[str, int]]]:
     """Every entry below each directory, folded deepest-first: O(files), not O(dirs x files)."""
-    folded: Dict[str, List[bundle_detect.BundleEntry]] = {
-        rel_dir: [bundle_detect.BundleEntry(rel_path=name, size=size) for name, size in files]
+    folded: Dict[str, List[Tuple[str, int]]] = {
+        rel_dir: [(name, size) for name, size in files]
         for rel_dir, files in files_by_dir.items()
     }
     for rel_dir in sorted(folded, key=lambda item: (-_depth(item), item)):
@@ -598,29 +413,9 @@ def _subtree(files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]) -> Dict[str,
         parent = _parent(rel_dir)
         prefix = _basename(rel_dir)
         folded.setdefault(parent, []).extend(
-            bundle_detect.BundleEntry(rel_path=f"{prefix}/{entry.rel_path}", size=entry.size) for entry in folded[rel_dir]
+            (f"{prefix}/{name}", size) for name, size in folded[rel_dir]
         )
     return folded
-
-
-def _forget_claimed_subtree(work: Mapping[str, List[bundle_detect.BundleEntry]], claimed_dir: str) -> None:
-    """Drop a claimed bundle's files from every ancestor's view.
-
-    Deepest-first is what makes this sound: by the time a directory is claimed its
-    children have already been evaluated, so what is left in its list is what this
-    bundle owns. Only the claimed subtree is removed, never a whole intermediate
-    directory: claiming ``A/B/C`` strips ``C/...`` from ``A/B`` and only
-    ``B/C/...`` from ``A``, so ``A`` keeps ``A/B``'s own unclaimed files.
-    """
-    suffix = _basename(claimed_dir)
-    parent = _parent(claimed_dir)
-    while parent:
-        kept = work.get(parent)
-        if kept is not None:
-            prefix = suffix + "/"
-            work[parent] = [entry for entry in kept if not entry.rel_path.startswith(prefix)]
-        suffix = _basename(parent) + "/" + suffix
-        parent = _parent(parent)
 
 
 def _walk_tree(root: Path) -> Tuple[Dict[str, List[Tuple[str, int]]], Dict[str, set], bool]:
@@ -644,236 +439,148 @@ def _walk_tree(root: Path) -> Tuple[Dict[str, List[Tuple[str, int]]], Dict[str, 
     return files_by_dir, dirs_by_parent, truncated
 
 
-def _inside_repository_dump(key: str, repo_dumps: AbstractSet[str]) -> bool:
-    """Whether ``key`` IS a repository dump, or sits inside one.
+# --- the row walk (Mf-1agz) ------------------------------------------------
+#
+# ONE engine ranks, and this is the seam: the walk asks the engine about a folder
+# and acts on its answer. The rule, in the engine's own vocabulary:
+#
+#   * a `leave` reading (nothing to import here) descends: the answer may be one of
+#     the children. An `archive-only` reading - no models, but archives - descends
+#     for the same reason: the zips below it are their own rows.
+#   * a CLAIMING reading (`one-project`/`git-project`/`add-to-project`) is a row and
+#     descent STOPS: the folder is the product, and its children are parts of it.
+#   * a SPLIT reading (`split-top-folders`/`split-model-folders`) is a row and
+#     descent stops too: the split's children ARE the split, so a row per child
+#     would offer the same files twice.
+#   * the app's `import/` area is transparent: never a row, never absorbing.
+#   * a `.zip` is a row of its own through `measure_archive`/`propose_archive`,
+#     unless it is a duplicate, a member of an offered folder, or one of those
+#     folders' provenance (the twin).
+#
+# Measured over the live tree: 175 rows (154 one-project, 5 split, 16 zip). The
+# derivation, the row-level before/after and the 73 dropped members are recorded in
+# `.plans/measurements/Mf-1agz-after-summary.md`; `tests/test_bundle_report_engine.py`
+# keeps the invariant that the report's recommendation IS the engine's.
 
-    A payload directory inside a checkout is part of that checkout's own tree:
-    ``import/endorphin/STLs`` shares one family token over its three
-    ``stage-N`` directories and would otherwise be compounded, swallowing three
-    title-name rows of a checkout that holds five DIFFERENT products. Nothing
-    strictly below a marker-bearing root may be compounded. Walks the ancestors
-    with ``_parent``, so the cost is the key's own depth.
+
+def _row_rel(scope: str, rel_dir: str) -> str:
+    """The storage-relative spelling of a walk-relative row key."""
+    if not rel_dir:
+        return scope
+    return _qualify(scope, rel_dir)
+
+
+def _measure_row(root: Path, rel_dir: str, *, scope: str) -> proposal_engine.Facts:
+    """One folder, measured into the facts the row renders and ranks.
+
+    ``max_entries`` is the report's own walk bound: a row is rendered from a walk
+    inside a GET, so a pathological folder must not make one request unbounded. A
+    walk that hits the bound says so (``Facts.truncated``) and the row is refused
+    rather than offered on half a census.
     """
-    if key in repo_dumps:
-        return True
-    parent = _parent(key)
-    while parent:
-        if parent in repo_dumps:
-            return True
-        parent = _parent(parent)
-    return False
+    return proposal_engine.measure(
+        str(Path(root) / rel_dir), _row_rel(scope, rel_dir), max_entries=MAX_SCAN_ENTRIES
+    )
 
 
-def _compound_absorbs(absorbed: Sequence[BundleCandidate], snapshot: bundle_detect.BundleSnapshot) -> bool:
-    """Whether a compound row may absorb the rows below it.
-
-    A Leg A family - models only in subdirectories - generalises LOW guesses: the
-    ten Stagetop children and the eight Rocket variants are exactly the rows R7
-    exists to replace. It must never replace a STRONGER rule's verdict instead.
-    ``vendor/`` holding two Thingiverse exports that happen to share the word
-    "bundle" is a pile of two whole products rather than one product in two
-    parts, and the container rule already reads it that way; absorbing its rows
-    would rewrite two verdicts no rule disputed and lower a HIGH row to LOW.
-
-    A folder that holds models of its OWN is the other shape (Leg B,
-    ``import/xbox360_shell``): its 27 models are invisible today because the
-    parent is refused as a container, so absorbing the foreign HIGH row beside
-    them is owner decision 2 - "one row, with the foreign group flagged". The
-    group name and the ledger entry keep that evidence recoverable.
-
-    The question "does this folder hold its own models" is asked through
-    ``bundle_detect.root_model_count`` and not re-implemented here: the strict
-    depth-0 reading is the same one that separates R7's two legs, and a second
-    copy of it would be free to drift.
-    """
-    if not any(candidate.confidence in bundle_detect.STRONG_CONFIDENCES for candidate in absorbed):
-        return True
-    return bundle_detect.root_model_count(snapshot) >= 1
-
-
-def _compound_pass(
-    folded: Mapping[str, Sequence[bundle_detect.BundleEntry]],
-    files_by_dir: Mapping[str, Sequence[Tuple[str, int]]],
-    found: Sequence[BundleCandidate],
+def _directory_rows(
+    root: Path,
+    dirs_by_parent: Mapping[str, set],
+    folded: Mapping[str, Sequence[Tuple[str, int]]],
+    readings: Dict[str, str],
     refusals: Dict[str, str],
-) -> Tuple[List[BundleCandidate], List[BundleCandidate]]:
-    """R7: turn a folder holding ONE product in several parts into one row.
+    *,
+    scope: str,
+    project_keys: AbstractSet[str],
+) -> Tuple[List[BundleCandidate], bool]:
+    """Every directory ROW, top-down, and whether the entry bound stopped the walk.
 
-    **Why a post-pass and not a ``detect_bundle`` branch.** The folder walk is
-    deepest-first, so a branch inside the detector would hand ``Stagetop``'s row
-    to its first child and lose the row that child owns. Running at the end means
-    a compound row can only ever ABSORB rows that are already final, and it names
-    each of them in the ledger.
-
-    **Why ``folded`` and not ``work``.** ``work[rel_dir]`` has already had its
-    claimed children stripped by ``_forget_claimed_subtree``, so it reads 0
-    models for ``import/Stagetop``; ``folded`` is the unclaimed full-subtree
-    listing, which is exactly what the row's counts have to describe (``Stagetop``
-    reads 60, the Rocket 48, ``import/xbox360_shell`` 31 = 27 own + 4 foreign).
-
-    **The overlap guard.** A key that is already a row, or that sits strictly
-    inside one, is never compounded. R7 can therefore never lower, split or
-    rewrite the verdict for a directory any rule already offered - which is what
-    keeps ADR 0010 Decision 15's container rule intact for ``endorphin`` and every
-    other tree. A compound row is likewise never judged by
-    ``iter_bundle_candidates``' container strip at all: it is created after the
-    strip has run.
-
-    **Absorption is bounded by evidence.** A compound may only absorb rows no
-    stronger than what its own shape generalises: a Leg A family (models only in
-    subdirectories) replaces LOW guesses, while absorbing a STRONG row needs the
-    Leg B shape, where the folder's own models are the ones the container rule
-    made invisible. See ``_compound_absorbs`` for the measured pile that bound
-    exists for.
-
-    **The absorption is deliberately low-suppresses-high.**
-    ``import/xbox360_shell``'s foreign ``Wallmount ...`` row is HIGH and is
-    absorbed by a LOW compound row. That is owner decision 2 - "one row, with the
-    foreign group flagged": the group NAME is preserved in the row's breakdown,
-    the absorbed key is named ``member-of-bundle`` in the ledger, and detection is
-    recomputed from disk at create time, so C2 recovers the high evidence.
-
-    The cost is honest rather than optimistic. ``repo_dumps`` builds ONE snapshot
-    for EVERY folded directory on every scan, before the loop can skip anything,
-    so the pass pays that full-tree read whether or not
-    ``COMPOUND_BUNDLES_ENABLED`` is on - the switch lives inside the rule, by
-    design, because a caller must not have to know it. Inside the loop the shape
-    is O(dirs x subtree entries) at worst, like ``_relates_to_any``, and every
-    key that is already a row or sits inside one is skipped before its own
-    snapshot is built. Shallowest-first, so a parent claims before its child.
-
-    Returns ``(offered, absorbed)``: every row that survives the pass (the
-    compound rows included), and the child rows it absorbed, in the order they
-    were absorbed. The absorbed list is what lets a later reader re-offer a group
-    an operator excluded without re-deriving it from the ledger.
+    ``readings`` is the ledger half of the walk: the engine's word for every folder
+    it looked at and did not offer, so ``_reconcile_refusals`` can name each one
+    without measuring anything twice.
     """
-    offered = {candidate.key for candidate in found}
-    # A directory is a repository dump when its OWN immediate children carry a
-    # marker. A payload directory INSIDE a checkout is refused too - see
-    # `_inside_repository_dump` for the measured witness.
-    repo_dumps = {
-        key for key in folded if key and bundle_detect.has_repo_markers(_folder_snapshot(key, folded[key]))
-    }
-    archives = _zip_files(files_by_dir)
-    accepted: set = set()
-    compounds: List[BundleCandidate] = []
-    absorbed_rows: List[BundleCandidate] = []
-    for key in sorted(folded, key=lambda item: (_depth(item), item.casefold(), item)):
-        if not key or key in offered:
-            continue
-        if _strictly_inside_any(key, offered) or _strictly_inside_any(key, accepted):
-            continue
-        if not folded.get(key):
-            continue
-        if _inside_repository_dump(key, repo_dumps):
-            continue
-        # The UNCLAIMED full-subtree listing, never `work[key]`: see the docstring.
-        snapshot = _folder_snapshot(key, folded[key])
-        facts = bundle_detect.compound_bundle_facts(snapshot)
-        if facts is None:
-            continue
-        # A pair-only row is a blocked archive-only fact the operator can see on
-        # disk, so it is never absorbed - only real rows are.
-        absorbed = [
-            candidate
-            for candidate in found
-            if (candidate.key == key or candidate.key.startswith(key + "/")) and not candidate.pair_only
-        ]
-        if not _compound_absorbs(absorbed, snapshot):
-            continue
-        absorbed_keys = {candidate.key for candidate in absorbed}
-        for absorbed_key in absorbed_keys:
-            # These were rows, so they had no ledger entry of their own yet: the
-            # override is what puts one there.
-            _refuse(refusals, absorbed_key, REFUSAL_MEMBER_OF_BUNDLE, override=True)
-        found = [candidate for candidate in found if candidate.key not in absorbed_keys]
-        absorbed_rows.extend(absorbed)
-        for zip_rel in archives:
-            if not zip_rel.startswith(key + "/"):
+    rows: List[BundleCandidate] = []
+    truncated = False
+    stack: List[str] = [""]
+    while stack:
+        parent = stack.pop()
+        for name in sorted(dirs_by_parent.get(parent, ()), key=lambda item: (item.casefold(), item)):
+            rel_dir = f"{parent}/{name}" if parent else name
+            if rel_dir in TRANSPARENT_DIRS:
+                readings[rel_dir] = REFUSAL_IMPORT_AREA
+                stack.append(rel_dir)
                 continue
-            # An existing R3/R4/R5 reason is never rewritten. `scan_bundles`'
-            # reconciliation later relabels these archives `nested-member` because
-            # the compound key is a bundle directory - the correct Mf-74x5 answer
-            # for a zip inside a detected bundle - and it only ever edits the
-            # ledger, never the rows. This guard is outcome-dead: every zip below
-            # an accepted compound key is already in `nested`, and
-            # `_reconcile_refusals` assigns `nested-member` regardless of what is
-            # written here. It is kept as documentation of the intended ledger
-            # order, not as a protection - do not "harden" it later.
-            if refusals.get(zip_rel) is None or refusals.get(zip_rel) == REFUSAL_TWIN_CONSUMED:
-                _refuse(refusals, zip_rel, REFUSAL_MEMBER_OF_BUNDLE, override=True)
-        compounds.append(
-            BundleCandidate(
-                key=key,
-                snapshot=snapshot,
-                archive_path=None,
-                is_archive=False,
-                confidence=facts.confidence,
-                compound=True,
+            facts = _measure_row(root, rel_dir, scope=scope)
+            if facts.truncated:
+                # Half a census cannot be ranked honestly, and it must not be
+                # presented as a total: the report says it was truncated and this
+                # path is refused by name.
+                _refuse(refusals, rel_dir, REFUSAL_TRUNCATED)
+                readings[rel_dir] = REFUSAL_TRUNCATED
+                truncated = True
+                continue
+            options, _reasons, _repo = proposal_engine.propose(
+                facts, project_keys, git_timeout=GIT_PROBE_TIMEOUT
             )
-        )
-        accepted.add(key)
-    return list(found) + compounds, absorbed_rows
+            top = options[0] if options else None
+            readings[rel_dir] = top.shape if top is not None else REFUSAL_LEAVE
+            if top is None or top.shape in DESCEND_SHAPES:
+                stack.append(rel_dir)
+                continue
+            rows.append(
+                BundleCandidate(
+                    key=rel_dir,
+                    rel=rel_dir,
+                    facts=facts,
+                    options=tuple(options),
+                    is_archive=False,
+                    files=tuple(folded.get(rel_dir, ())),
+                )
+            )
+    return rows, truncated
 
 
-def _manual_pass(
-    folded: Mapping[str, Sequence[bundle_detect.BundleEntry]],
-    found: Sequence[BundleCandidate],
-    refusals: Mapping[str, str],
-    owned: AbstractSet[str],
-) -> List[BundleCandidate]:
-    """The refused directories, offered as a SCOPE: one row per MAXIMAL refusal.
+def _archive_row(
+    root: Path, rel_path: str, refusals: Dict[str, str], *, scope: str
+) -> Optional[BundleCandidate]:
+    """One `.zip` as its own row, through the archive engine.
 
-    Detection is no longer a gatekeeper, so a directory the rules declined is
-    still importable as "everything under this path". The row is deliberately
-    coarse: ONE manual row per maximal refused root, never one per descendant -
-    the parent already says the whole subtree is in scope, and a child row would
-    double-count the same files. Archives are never manual (only directories are
-    iterated), and a directory that HOLDS or SITS INSIDE a row is not a candidate
-    either: it is a container or a member, and the rules' answer for it stands.
-
-    Only a REFUSED root becomes manual - the ledger word that refused it is the
-    row's ``note`` - and a directory with every count at zero is not a row at all.
-    The emitted row is creatable precisely because the create gate no longer reads
-    ``status``: a manual row is ``blocked`` by database readiness exactly like any
-    other unresolved directory, and the operator's choice is what makes it a
-    project.
+    An unreadable archive is named, never an exception on a read route. A zip the
+    archive engine reads as `archive-leave` (nothing inside) is refused with that
+    word: there is no project to make from it.
     """
-    # `taken` includes the excluded project keys, so a directory that holds one
-    # is a container here too - the same answer `_relates_to_any` gives the walk.
-    taken = {candidate.key for candidate in found} | set(owned)
-    emitted: set = set()
-    manual: List[BundleCandidate] = []
-    for rel_dir in sorted(folded, key=lambda item: (_depth(item), item.casefold(), item)):
-        if not rel_dir:
-            continue
-        if _relates_to_any(rel_dir, taken):
-            continue
-        if _strictly_inside_any(rel_dir, emitted):
-            continue
-        rule = refusals.get(rel_dir)
-        if rule is None:
-            continue
-        if not folded.get(rel_dir):
-            continue
-        snapshot = _folder_snapshot(rel_dir, folded[rel_dir])
-        facts = bundle_detect.manual_facts(snapshot)
-        counts = facts.counts
-        if not any((counts.model, counts.image, counts.text, counts.other, counts.archive)):
-            continue
-        manual.append(
-            BundleCandidate(
-                key=rel_dir,
-                snapshot=snapshot,
-                archive_path=None,
-                is_archive=False,
-                confidence=facts.confidence,
-                manual=True,
-                manual_rule=rule,
-            )
-        )
-        emitted.add(rel_dir)
-    return manual
+    zip_path = Path(root) / rel_path
+    try:
+        zip_service.list_zip_entries(zip_path)
+    except (BadZipFile, OSError):
+        _refuse(refusals, rel_path, REFUSAL_UNREADABLE_ARCHIVE)
+        return None
+    facts = proposal_engine.measure_archive(str(zip_path), _row_rel(scope, rel_path))
+    options, _reasons = proposal_engine.propose_archive(facts)
+    top = options[0] if options else None
+    if top is None or top.shape not in ARCHIVE_CREATABLE_SHAPES:
+        _refuse(refusals, rel_path, REFUSAL_ARCHIVE_LEAVE)
+        return None
+    return BundleCandidate(
+        key=rel_path, rel=rel_path, facts=facts, options=tuple(options), is_archive=True
+    )
+
+
+def _attach_archive(
+    candidate: BundleCandidate, zip_rel: str, *, entry_root: Optional[str]
+) -> BundleCandidate:
+    """One row's provenance archive: the shortest name wins, deterministically.
+
+    A directory can pair with more than one archive (a stem twin and a renamed
+    extraction), and the row reports ONE. ``_paired_archive``'s ordering is the
+    authoritative path, so the choice never depends on readdir order.
+    """
+    pairs: List[Tuple[str, Optional[str]]] = []
+    if candidate.archive_path:
+        pairs.append((candidate.archive_path, candidate.entry_root))
+    pairs.append((zip_rel, entry_root))
+    archive_path, chosen_root = _paired_archive(pairs)
+    return replace(candidate, archive_path=archive_path, entry_root=chosen_root)
 
 
 def _build_candidates(
@@ -882,577 +589,119 @@ def _build_candidates(
     dirs_by_parent: Mapping[str, set],
     suppressed: AbstractSet[str],
     refusals: Dict[str, str],
+    readings: Dict[str, str],
     *,
-    excluded_keys: AbstractSet[str] = frozenset(),
-) -> Tuple[List[BundleCandidate], List[BundleCandidate]]:
-    """Every bundle under ``root`` from one walk's listings, as ``(offered, absorbed)``.
+    scope: str = "",
+    project_keys: AbstractSet[str] = frozenset(),
+) -> Tuple[List[BundleCandidate], bool]:
+    """Every ROW under ``root``, from the engine's own reading of each path.
 
-    ``suppressed`` holds the duplicate archives: a byte-identical copy is not a
-    bundle of its own, so both archive passes skip it and only the group's
-    authoritative path can be a row (or a pairing).
-
-    ``refusals`` is the ledger this function WRITES: every path it declines gets
-    a rule, so a caller can say why something is missing. It is never read back to
-    decide anything, so recording a refusal cannot change which rows are offered.
-
-    ``excluded_keys`` is the walk-relative set of project marker keys; the manual
-    pass reads it only as "a directory that holds one of these is a container".
-    The subtrees themselves are already gone - ``scan_bundles`` prunes before any
-    pass runs - so no other leg here needs to know about a project at all.
+    ``refusals`` and ``readings`` are the ledger this function WRITES: every path it
+    declines gets a rule, so a caller can say why something is missing. Neither is
+    ever read back to decide anything, so recording a refusal cannot change which
+    rows are offered. ``suppressed`` holds the duplicate archives: a byte-identical
+    copy is not a bundle of its own, so it is skipped here and reported once, in
+    ``duplicates``. ``project_keys`` are storage-relative marker keys, handed to the
+    engine so an `add-to-project` reading is possible at all.
     """
     folded = _subtree(files_by_dir)
-    found: List[BundleCandidate] = []
-    # The strict ancestors of every bundle already claimed. An INFERRED candidate
-    # in this set contains a bundle and is therefore a container, never a bundle -
-    # a guess must never swallow a subtree. The guard covers every inferred
-    # confidence, not just `low`: a medium guess (an id in a name) can swallow a
-    # subtree exactly as a low shape guess can. It is skipped *without* claiming,
-    # so its own files still bubble up to a legitimate ancestor.
-    claimed_ancestors: set = set()
-    # A mutable view of each directory's OWN entries. Claiming a bundle drops its
-    # whole branch from every ancestor, so a parent can only ever be a bundle in
-    # its own right: it never inherits a child's models, and a container
-    # directory that holds nothing but child bundles is not a bundle at all.
-    work: Dict[str, List[bundle_detect.BundleEntry]] = {
-        rel_dir: list(entries) for rel_dir, entries in folded.items() if rel_dir
-    }
-    for rel_dir in sorted(work, key=lambda item: (-_depth(item), item.casefold(), item)):
-        entries = work[rel_dir]
-        if not entries:
-            # Nothing left in this directory's own view, but the walk DID see files
-            # below it: they were all claimed by child bundles, so this directory
-            # holds bundles and is a container, never a bundle.
-            if folded.get(rel_dir):
-                _refuse(refusals, rel_dir, REFUSAL_CONTAINER)
-            continue
-        snapshot = _folder_snapshot(rel_dir, entries)
-        detection = _detect_folder_decision(root, snapshot)
-        facts = detection.facts
-        if facts is None:
-            _refuse(refusals, rel_dir, _refusal_of(detection))
-            continue
-        if facts.confidence in bundle_detect.INFERRED_CONFIDENCES and rel_dir in claimed_ancestors:
-            _refuse(refusals, rel_dir, REFUSAL_CONTAINER)
-            continue
-        found.append(
-            BundleCandidate(
-                key=rel_dir,
-                snapshot=snapshot,
-                archive_path=None,
-                is_archive=False,
-                confidence=facts.confidence,
-            )
-        )
-        _forget_claimed_subtree(work, rel_dir)
-        ancestor = _parent(rel_dir)
-        while ancestor:
-            claimed_ancestors.add(ancestor)
-            ancestor = _parent(ancestor)
-
-    # Pairing: the stem rule has first refusal, then the entry-root rule for the
-    # archives it left behind. Each pairing is `(zip_rel, Optional[entry_root])` - no
-    # entry root means the stem route paired it.
-    #
-    # A stem twin whose directory some rule already offers keeps the old answer
-    # byte-for-byte: the archive is that directory's provenance, never a pairing.
-    # A stem twin whose directory NO rule offers is verified by containment (the
-    # archive's own entries decide the wrapper) and joins the same map with no entry
-    # root. A stem twin that fails that verification is CONSUMED: it does not fall
-    # through to the entry-root pass, because the stem is the operator's own
-    # statement of which directory the archive is, and a failed check must never be
-    # retried under a weaker name.
-    #
-    # The entry-root pass then requires the archive's common entry root to name a
-    # sibling DIRECTORY (same parent only) and its entries to contain nothing the
-    # directory's post-claim listing does not hold. A duplicate archive is skipped:
-    # the content hash already says which of the pair is the original.
-    pairs: Dict[str, List[Tuple[str, Optional[str]]]] = {}
-    paired_zips: set = set()
-    detected = {candidate.key for candidate in found}
+    rows, truncated = _directory_rows(
+        root, dirs_by_parent, folded, readings, refusals,
+        scope=scope, project_keys=project_keys,
+    )
+    by_key: Dict[str, BundleCandidate] = {candidate.key: candidate for candidate in rows}
+    offered_dirs = frozenset(by_key)
+    archives: List[BundleCandidate] = []
     for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
         if rel_path in suppressed:
             _refuse(refusals, rel_path, REFUSAL_DUPLICATE)
             continue
+        if file_utils.is_bundle_member(rel_path, offered_dirs):
+            # A zip strictly below a row is a supporting file of that row: never a
+            # second row and never a pairing (the nested-member rule, Mf-74x5).
+            _refuse(refusals, rel_path, REFUSAL_NESTED_MEMBER)
+            continue
         twin = _twin_directory(rel_path, dirs_by_parent)
-        if twin is not None:
-            if twin in detected:
-                # The directory is offered on its own: the archive is its
-                # provenance, and a second row from the same bytes is a duplicate.
-                _refuse(refusals, rel_path, REFUSAL_TWIN_CONSUMED)
-                continue
-            # **Why ``folded`` and not ``work``.** ``work[twin]`` has already had its
-            # claimed children stripped by ``_forget_claimed_subtree``, so an extraction
-            # whose payload directory is itself a bundle reads as an EMPTY listing here
-            # - and an empty listing contains nothing, so the archive that IS its own
-            # twin is refused ``twin-unverified``. The pairing question is "does the
-            # archive's payload sit in this directory on disk", and the on-disk answer
-            # is the unclaimed full-subtree listing: ``folded`` (same trap, same file,
-            # see ``_compound_pass``). Containment still decides, still shared with the
-            # entry-root route via ``archive_payload_contained``, and the entry-root
-            # pass keeps ``work`` on purpose: that route must not disagree with the
-            # claim tree, this one only has to recognise its own payload.
-            if _stem_pair_verified(root / rel_path, folded.get(twin, ())):
-                pairs.setdefault(twin, []).append((rel_path, None))
-                paired_zips.add(rel_path)
-            else:
-                # Consumed: the stem is the operator's statement of which directory
-                # this archive is, and a failed check is never retried under a weaker
-                # name. The pairing that did not happen is named, not silent.
-                _refuse(refusals, rel_path, REFUSAL_TWIN_UNVERIFIED)
-            continue
-        paired = _entry_root_pair(root, rel_path, dirs_by_parent, work)
-        if paired is None:
-            # Silence here is deliberate: the zip-only pass below decides this
-            # archive, and two answers for one path would be a lie.
-            continue
-        folder, entry_root = paired
-        pairs.setdefault(folder, []).append((rel_path, entry_root))
-        paired_zips.add(rel_path)
-
-    # Zip-only candidates: an archive whose extracted twin is not beside it. A
-    # duplicate is skipped here too, so a copy never becomes a second bundle row.
-    for rel_path in sorted(_zip_files(files_by_dir), key=lambda item: (item.casefold(), item)):
-        if rel_path in suppressed:
-            # Already recorded as `duplicate` by the pairing pass.
-            continue
-        if rel_path in paired_zips:
-            # Provisional: the promotion loop below overrides this when it refuses
-            # the pairing, and the reconciliation drops it when the directory is
-            # offered. A pairing that does produce a row leaves the archive with no
-            # row of its own, which is exactly what `twin-consumed` says.
+        if twin is not None and twin in by_key:
+            # The directory is a row on its own: the archive is its provenance, and
+            # a second row from the same bytes would be a duplicate.
+            by_key[twin] = _attach_archive(by_key[twin], rel_path, entry_root=None)
             _refuse(refusals, rel_path, REFUSAL_TWIN_CONSUMED)
             continue
-        twin = _twin_directory(rel_path, dirs_by_parent)
-        if twin:
+        if twin is not None and not _stem_pair_verified(root / rel_path, folded.get(twin, ())):
+            # The stem is the operator's own statement of which directory this
+            # archive is, and a failed check is never retried under a weaker name.
             _refuse(refusals, rel_path, REFUSAL_TWIN_UNVERIFIED)
             continue
-        snapshot = _zip_snapshot(root / rel_path, rel_path)
-        if snapshot is None:
-            _refuse(refusals, rel_path, REFUSAL_UNREADABLE_ARCHIVE)
+        paired = _entry_root_pair(root, rel_path, dirs_by_parent, by_key)
+        if paired is not None:
+            folder, entry_root = paired
+            by_key[folder] = _attach_archive(by_key[folder], rel_path, entry_root=entry_root)
+            _refuse(refusals, rel_path, REFUSAL_TWIN_CONSUMED)
             continue
-        detection = _detect_archive_decision(root / rel_path, snapshot)
-        facts = detection.facts
-        if facts is None:
-            _refuse(refusals, rel_path, _refusal_of(detection))
-            continue
-        found.append(
-            BundleCandidate(
-                key=rel_path,
-                snapshot=snapshot,
-                archive_path=None,
-                is_archive=True,
-                confidence=facts.confidence,
-            )
-        )
-
-    # A directory a verified archive owns and no rule offers on its own - paired by
-    # its ENTRY ROOT or by its STEM. The archive supplies the identity, so this is a
-    # real LOW candidate keyed at the DIRECTORY. The container rule applies to a
-    # pairing exactly as it does to any other guess - a pairing that names a
-    # directory holding a CLAIMED bundle is a pile and proves nothing - and such a
-    # refused pairing keeps the blocked row instead, so the pair stays visible and
-    # creates nothing. A pairing refused because the subtree holds a STRONGER
-    # candidate is silent instead; see the guard in the loop.
-    #
-    # A pairing that names a directory INSIDE an already-claimed bundle never
-    # reaches a row of its own, and needs no extra refusal here: the archive it
-    # paired with sits inside that bundle too, so the member filter at the end
-    # prunes the pairing and the promoted candidate with it. A containing LOW
-    # guess is the mirror case and loses deliberately: promoting this directory
-    # puts its key in `contained_keys`, so the strip below drops the guess rather
-    # than the archived evidence.
-    pair_only_specs: Dict[str, Tuple[bundle_detect.BundleSnapshot, bundle_detect.BundleFacts]] = {}
-    # The rows each PROMOTED directory intends to take, keyed by the promoted key.
-    # Recorded here and applied after the nested-member prune - see the apply site.
-    promoted_dissolutions: Dict[str, List[str]] = {}
-    for folder in sorted(pairs, key=lambda item: (item.casefold(), item)):
-        pair_zips = [zip_rel for zip_rel, _entry_root in pairs[folder]]
-        if any(candidate.key == folder for candidate in found):
-            # The directory is offered on its own; the archive stays attached to it
-            # as provenance, and its `twin-consumed` reason is what the ledger says.
-            continue
-        # **Why ``folded`` and not ``work``.** ``work[folder]`` is the post-claim
-        # view, and a verified twin whose payload directory was claimed by the folder
-        # pass has had every one of its files stripped from it: the extraction
-        # ``import/01_Fates End - Wizard Tower`` holds nothing of its own because all
-        # twenty of its files sit in ``01_Wizard``, which the walk already offered.
-        # Reading `work` here therefore asks the shape question of an EMPTY listing,
-        # and every shape guard refuses - so a verified pair with real models behind
-        # it is refused ``twin-unverified``, the no-facts reason, which is a lie: the
-        # facts are on disk. The listing that describes what the directory HOLDS is
-        # the unclaimed subtree, exactly as in ``_compound_pass``.
-        #
-        # The fallback cannot turn an ancestor into a bundle. An emptied own view is
-        # only ever produced by ``_forget_claimed_subtree``, which runs together with
-        # the ``claimed_ancestors`` marking below, so a directory that reaches this
-        # line with nothing left in its own view is a claimed ancestor and answers as
-        # a pair-only container - it never joins ``found`` on its child's models. What
-        # the fallback changes is only WHICH reason it answers with: the honest
-        # container answer rather than "this archive verified nothing".
-        entries = work.get(folder) or folded.get(folder) or []
-        if not entries:
-            for zip_rel in pair_zips:
-                _refuse(refusals, zip_rel, REFUSAL_TWIN_UNVERIFIED, override=True)
-            continue
-        snapshot = _folder_snapshot(folder, entries)
-        detection = bundle_detect.archive_owned_decision(snapshot)
-        facts = detection.facts
-        if facts is None:
-            for zip_rel in pair_zips:
-                _refuse(refusals, zip_rel, _refusal_of(detection), override=True)
-            continue
-        # ONE DISK, ONE ROW (Mf-8acz). A verified twin is a row at its own key: the
-        # archive's own entry listing proved this directory is the wrapper, so no
-        # parent/child question is left to rank. The one question is OWNERSHIP - would
-        # this row create a disk a row already offered below it owns? - and it is asked
-        # of the rows, never of a candidate's confidence.
-        #
-        # * Nothing offered below: the twin owns the disk alone and is promoted. That is
-        #   an ordinary extraction, and it is also the vendor-extraction shape Mf-ny89
-        #   promoted by hand (``import/01_Fates End - Wizard Tower`` over
-        #   ``01_Wizard``), which this path must keep creatable.
-        # * Every row below hanging under ONE child of it: those rows are members, not
-        #   second products. The twin takes the disk and the apply site refuses them
-        #   ``member-of-bundle`` - one disk, one row.
-        # * Anything else - rows under two children, or a file of the directory's own
-        #   beside them: the pile, or a payload only partly claimed. The twin would
-        #   create other products' files a second time, so it is REFUSED and keeps the
-        #   pair-only row the operator can see and act on.
-        #
-        # An ARCHIVE row below is deliberately not counted: an archive inside a bundle
-        # is a member of whatever owns it, never a second owner (the nested-member pass
-        # and the apply site answer those; ``import/X``'s ``P.zip`` is the witness).
-        owned_below = [
-            candidate
-            for candidate in found
-            if candidate.key.startswith(folder + "/") and not candidate.is_archive
-        ]
-        if _promotion_would_double_own(folder, owned_below, work):
-            pair_only_specs[folder] = (snapshot, facts)
-            for zip_rel in pair_zips:
-                _refuse(refusals, zip_rel, REFUSAL_TWIN_CONSUMED, override=True)
-            continue
-        # The second refusal is Decision 18 (ADR 0010, owner decision 2026-11-04) and it
-        # is not this ticket's to change: a LOW shape inference must never swallow a
-        # bundle a stronger rule produced ("I will sometimes extract a file and copy the
-        # zip in"). A directory that already owns rows keeps its visible pair-only row;
-        # one that owns none is refused SILENTLY, because a pair-only key joins
-        # ``bundle_dirs`` and would make the strong child a member of it - the swallow
-        # again by a different route.
-        if _holds_stronger_candidate(folder, found):
-            if owned_below:
-                pair_only_specs[folder] = (snapshot, facts)
-            else:
-                for zip_rel in pair_zips:
-                    _refuse(refusals, zip_rel, REFUSAL_CONTAINER, override=True)
-            continue
-        promoted_dissolutions[folder] = [candidate.key for candidate in owned_below]
-        found.append(
-            BundleCandidate(
-                key=folder,
-                snapshot=snapshot,
-                archive_path=None,
-                is_archive=False,
-                confidence=facts.confidence,
-                archive_owned=True,
-            )
-        )
-        for zip_rel in pair_zips:
-            _refuse(refusals, zip_rel, REFUSAL_TWIN_CONSUMED, override=True)
-
-    # R5: a title-shaped folder of models is a LOW, name-derived bundle. This is
-    # a post-pass and NOT a `detect_bundle` branch, and the placement is
-    # load-bearing: the folder pass is deepest-first, so a rule inside it would
-    # claim `LittleTup`'s row for a child and lose `17_ClockworkMonster`'s
-    # promoted row (16 witnesses red, 12 service and 4 pure). It runs after the
-    # promotion so a verified archive keeps its stronger `archive_owned` row, and
-    # before the container strip so a title folder holding a bundle is refused by
-    # `_relates_to_any` rather than offered as a pile. Shallowest-first, so a
-    # title parent claims its title child instead of the other way round.
-    taken = {candidate.key for candidate in found}
-    taken.update(pair_only_specs)
-    for rel_dir in sorted(work, key=lambda item: (_depth(item), item.casefold(), item)):
-        if _relates_to_any(rel_dir, taken):
-            # Already a row, inside one, or holding one. The two legs are different
-            # answers: a member of a live bundle is a member, everything else here
-            # is a container.
-            member = any(rel_dir.startswith(key + "/") for key in taken)
-            _refuse(refusals, rel_dir, REFUSAL_MEMBER_OF_BUNDLE if member else REFUSAL_CONTAINER)
-            continue
-        entries = work[rel_dir]
-        if not entries:
-            continue
-        snapshot = _folder_snapshot(rel_dir, entries)
-        detection = bundle_detect.title_name_decision(snapshot)
-        facts = detection.facts
-        if facts is None:
-            # setdefault semantics on purpose: an earlier, more specific detector
-            # reason for this directory must survive this post-pass.
-            _refuse(refusals, rel_dir, _refusal_of(detection))
-            continue
-        found.append(
-            BundleCandidate(
-                key=rel_dir,
-                snapshot=snapshot,
-                archive_path=None,
-                is_archive=False,
-                confidence=facts.confidence,
-                title_name=True,
-            )
-        )
-        taken.add(rel_dir)
-
-    # An archive-only bundle is still a bundle: a low folder that strictly
-    # contains one is a container too, and the folder pass cannot see it because
-    # the archive is read after the directory walk. `contained_keys` is the keys of
-    # both kinds of archive-only row - an archive of its own, and a paired
-    # directory the container rule refuses - plus every directory a verified
-    # pairing promoted, because a promoted candidate is a bundle in its own right.
-    # A folder of INFERRED confidence that strictly contains any of them holds
-    # nothing but another thing's payload and is therefore a container, never a
-    # bundle. The guard covers every inferred confidence, not just `low`: a
-    # medium guess (an id in a name) containing a promoted or archive-only
-    # bundle is a pile exactly as a low one is.
-    #
-    # None of those rows is ever a *target* of the strip. A pair-only directory
-    # and a promoted one are verified evidence rather than a guess, and the
-    # archive's membership does not depend on the row, so dropping one would only
-    # hide the pair the operator can see on disk. The exemption swallows nothing:
-    # a guess that contains a promoted candidate is still dropped, which is the
-    # container rule applied to this pass. The promoted exemption is Decision 17's
-    # obligation: the Clockwork directory owns its nested zip, that zip is
-    # archive-only at this point, so without the exemption the directory would
-    # vanish and the zip would be the only row.
-    contained_keys = [candidate.key for candidate in found if candidate.offers_archive_only]
-    contained_keys.extend(pair_only_specs)
-    contained_keys.extend(candidate.key for candidate in found if candidate.archive_owned)
-    if contained_keys:
-        survived: List[BundleCandidate] = []
-        for candidate in found:
-            if (
-                not candidate.is_archive
-                and not candidate.pair_only
-                and not candidate.archive_owned
-                and candidate.confidence in bundle_detect.INFERRED_CONFIDENCES
-                and any(key.startswith(candidate.key + "/") for key in contained_keys)
-            ):
-                _refuse(refusals, candidate.key, REFUSAL_CONTAINER)
-                continue
-            survived.append(candidate)
-        found = survived
-
-    # A zip inside a detected bundle is a supporting file of that bundle, never a
-    # candidate and never a pairing (Mf-74x5). The bundle directories are the
-    # folder candidates that survived the strip plus the pair-only directories
-    # above; membership is strict, so a twin beside a directory is not a member.
-    bundle_dirs = {candidate.key for candidate in found if not candidate.is_archive}
-    bundle_dirs.update(pair_only_specs)
-    nested = _nested_archives(files_by_dir, bundle_dirs)
-    if nested:
-        for candidate in found:
-            if candidate.is_archive and candidate.key in nested:
-                _refuse(refusals, candidate.key, REFUSAL_NESTED_MEMBER)
-        found = [
-            candidate
-            for candidate in found
-            if not (candidate.is_archive and candidate.key in nested)
-        ]
-        pairs = {
-            folder: [pair for pair in folder_pairs if pair[0] not in nested]
-            for folder, folder_pairs in pairs.items()
-        }
-        pairs = {folder: folder_pairs for folder, folder_pairs in pairs.items() if folder_pairs}
-        pair_only_specs = {
-            folder: spec for folder, spec in pair_only_specs.items() if folder in pairs
-        }
-        # A promoted candidate whose pairing was just pruned is no longer
-        # archive-owned: a zip inside a bundle proved nothing about a sibling
-        # directory. The residual for THAT directory is silence - it is simply not
-        # offered - which is never a wrong project and never a delete invitation. The
-        # residual for its children is the opposite and deliberate: they keep the rows
-        # they had, because a promotion that never happened takes nothing (B-1 - the
-        # dissolution it recorded is committed at the apply site below, never here).
-        for candidate in found:
-            if candidate.archive_owned and candidate.key not in pairs:
-                _refuse(refusals, candidate.key, REFUSAL_MEMBER_OF_BUNDLE)
-        found = [
-            candidate
-            for candidate in found
-            if not (candidate.archive_owned and candidate.key not in pairs)
-        ]
-
-    # **B-1: the apply site for the promotions' deferred dissolutions.** A promoted
-    # directory takes the rows strictly below it, exactly as R7's compound absorption
-    # does - ``member-of-bundle``, written with the override, because each of those
-    # paths WAS an offered row until this commit said otherwise. It is committed here,
-    # at the one point where the row set is finally settled - after the nested-member
-    # prune, which is the pass that can veto a promotion this branch was built on (it
-    # empties `pairs[folder]`, and a promoted candidate that no longer has its pairing
-    # is dropped as no longer archive-owned, with silence as its residual).
-    #
-    # The invariant this enforces: **no ``member-of-bundle`` entry may name a row that
-    # does not exist.** Committed here - after the prune - that is structural, not
-    # lucky: a dissolution is written if and only if the promotion that justifies it
-    # survived to be a row. The eager branch-time dissolve was precisely what made the
-    # violation possible, and it was not rare - on the B-1 tree (`import/X.zip` the twin
-    # of `import/X`, `import/X/P.zip` the twin of `import/X/P`, the payload in
-    # `import/X/P/A`) the prune dropped the promoted `import/X/P` after its child
-    # `import/X/P/A` had already been dissolved out, so the child lost its row, the
-    # parent lost its row, NO ROW OWNED THE PAYLOAD, and the ledger wrote
-    # ``member-of-bundle`` for a path no row owns. Measured on that tree before the
-    # fix: one row (`import/X`, ``blocked``/``archive_only``, and ``assets_total`` 0
-    # AT THAT BUILD - an archive-only row skipped the asset lookup, which Mf-quv4
-    # removed) and no project obtainable from it. Re-measured after Mf-quv4 the same
-    # eager build leaves `import/X` answering ``ready`` with ``assets_total`` 7, and
-    # its create still answers ``failed``/``contains_bundles`` with no Project row:
-    # the create-time belt is what refuses it now, which is exactly why the report
-    # must not answer this question from a flag.
-    #
-    # `survivors` is read from `found` BEFORE any removal, so a promoted row sitting
-    # inside a surviving promoted parent still has its own children taken - they sit
-    # inside the surviving ancestor too, which is the correct answer and needs no
-    # fixpoint. A promoted directory that was itself dissolved never appears in
-    # `survivors`, so what it intended to take is simply never taken.
-    survivors = {candidate.key for candidate in found}
-    taken_keys = {
-        key
-        for folder, keys in promoted_dissolutions.items()
-        if folder in survivors
-        for key in keys
-    }
-    if taken_keys:
-        for key in sorted(taken_keys):
-            _refuse(refusals, key, REFUSAL_MEMBER_OF_BUNDLE, override=True)
-        found = [candidate for candidate in found if candidate.key not in taken_keys]
-
-    for folder in sorted(pair_only_specs, key=lambda item: (item.casefold(), item)):
-        snapshot, facts = pair_only_specs[folder]
-        archive_path, entry_root = _paired_archive(pairs[folder])
-        found.append(
-            BundleCandidate(
-                key=folder,
-                snapshot=snapshot,
-                archive_path=archive_path,
-                is_archive=False,
-                confidence=facts.confidence,
-                entry_root=entry_root,
-                pair_only=True,
-            )
-        )
-
-    # R7 runs last, and as a post-pass over the rows every other pass offered.
-    # Placed before the `with_twins` loop so the new row gets the same archive
-    # attachment and the same sort as every other row, and so every pass that
-    # decides every OTHER row is untouched.
-    found, absorbed = _compound_pass(folded, files_by_dir, found, refusals)
-
-    # The manual pass runs AFTER R7 so it can see every row that will exist: a
-    # refused directory that holds a compound row is a container, never a second
-    # scope over the same files. Its rows ride the `with_twins` loop below, so
-    # they sort and attach twins exactly like every other row.
-    found.extend(_manual_pass(folded, found, refusals, excluded_keys))
-
-    # A folder candidate's archive is provenance: reported, never a member. A row
-    # that is already archive-only is reported as it was built.
-    #
-    # The absorbed candidates ride through the SAME loop: a group re-offered at
-    # confirmation has to be byte-for-byte the row R7 dropped, archive included.
-    with_twins: List[BundleCandidate] = []
-    absorbed_with_twins: List[BundleCandidate] = []
-    for candidates, output in ((found, with_twins), (absorbed, absorbed_with_twins)):
-        for candidate in candidates:
-            if candidate.offers_archive_only:
-                output.append(candidate)
-                continue
-            stem = _twin_archive(candidate.key, files_by_dir)
-            archive, entry_root = stem, None
-            if candidate.archive_owned or stem is None:
-                paired = pairs.get(candidate.key)
-                if paired:
-                    archive, entry_root = _paired_archive(paired)
-            output.append(
-                BundleCandidate(
-                    key=candidate.key,
-                    snapshot=candidate.snapshot,
-                    archive_path=archive,
-                    is_archive=candidate.is_archive,
-                    confidence=candidate.confidence,
-                    entry_root=entry_root,
-                    pair_only=candidate.pair_only,
-                    archive_owned=candidate.archive_owned,
-                    title_name=candidate.title_name,
-                    compound=candidate.compound,
-                    manual=candidate.manual,
-                    manual_rule=candidate.manual_rule,
-                )
-            )
-    with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
-    absorbed_with_twins.sort(key=lambda candidate: (candidate.key.casefold(), candidate.key))
-    return with_twins, absorbed_with_twins
+        candidate = _archive_row(root, rel_path, refusals, scope=scope)
+        if candidate is not None:
+            archives.append(candidate)
+    return [by_key[candidate.key] for candidate in rows] + archives, truncated
 
 
-def scan_bundles(root: Path, *, excluded_keys: AbstractSet[str] = frozenset()) -> BundleScan:
-    """One walk of the storage tree: bundle candidates plus duplicate archives.
+def scan_bundles(
+    root: Path,
+    *,
+    excluded_keys: AbstractSet[str] = frozenset(),
+    project_keys: AbstractSet[str] = frozenset(),
+    scope: str = "",
+) -> BundleScan:
+    """One walk of the storage tree: the rows plus the duplicate archives.
 
-    Detection is one deepest-first pass. ``bundle_detect.detect_bundle`` applies R1 ->
-    R2 -> R4 -> R3 strongest-first within a single directory, so the only ordering that
-    pass needs is children before parents: a child bundle is claimed before its
-    parent is evaluated, and claiming it removes it from the parent's view. The
-    R5 name post-pass runs afterwards and shallowest-first, over keys no row
-    already owns, so it can only add a row and never reorder a claim. A directory can therefore only ever be a bundle in its own right - it
-    never inherits a child's models, and a directory that holds nothing but child
-    bundles is not a bundle at all. An INFERRED candidate - ``low``, or the
-    ``medium`` of an id in the name - whose key is a strict ancestor of an
-    already-claimed bundle is a *container* and is skipped without claiming, so
-    its own files still bubble up to a legitimate ancestor; a HIGH candidate is
-    exempt because its documents sit at depth 0 and it attaches only its own
-    models.
-
-    Byte-identical archives are one bundle, so the walk also groups duplicates by
-    content hash and suppresses every copy from both archive passes.
-
-    A ``.zip`` strictly below a detected bundle's directory is a *member* of that
-    bundle (``bundle_detect.is_bundle_member``): it is never a candidate and never
-    a pairing, and it is removed from every duplicate group before it is reported,
-    so the report never offers part of a live bundle for deletion.
+    The rows come from the engine's own top-down reading (``_build_candidates``), so
+    there is no second ranking here and no pass that could disagree with it.
 
     ``excluded_keys`` names the storage subtrees an existing project already owns,
     in walk-relative spelling. The walk is PRUNED of every such subtree before any
     pass runs, which is what makes "a path inside an existing project is not a
-    detection row" structural rather than a filter applied afterwards: no
-    candidate, no refusal and no duplicate inside a project key can ever be
-    produced. The project KEY ITSELF is never excluded - ``_strictly_inside_any``
-    is strict - so the row for the project's own directory survives and can still
-    report ``already_created``. The parameter is keyword-only and defaulted so the
-    nineteen positional call sites keep meaning exactly what they meant.
+    detection row" structural rather than a filter applied afterwards: no candidate,
+    no refusal and no duplicate inside a project key can ever be produced. The
+    project KEY ITSELF is never excluded - ``_strictly_inside_any`` is strict - so
+    the row for the project's own directory survives and can still report
+    ``already_created``.
+
+    ``project_keys`` are the same keys in STORAGE-relative spelling, handed to the
+    engine because that is the space ``Facts.rel`` lives in; an `add-to-project`
+    reading is impossible without them. ``scope`` is the storage-relative prefix
+    the walk root stands for, so a scoped report's rows answer the same keys a
+    whole-storage one would.
+
+    Byte-identical archives are one bundle, so the walk also groups duplicates by
+    content hash and suppresses every copy from the archive pass.
     """
     root = Path(root)
     files_by_dir, dirs_by_parent, truncated = _walk_tree(root)
     if excluded_keys:
         files_by_dir, dirs_by_parent = _without_owned_subtrees(files_by_dir, dirs_by_parent, excluded_keys)
     duplicates = duplicate_archives(root, files_by_dir)
-    suppressed = frozenset(bundle_detect.duplicate_archive_paths(duplicates))
+    suppressed = frozenset(library_scan.duplicate_archive_paths(duplicates))
     refusals: Dict[str, str] = {}
-    candidates, absorbed = _build_candidates(
-        root, files_by_dir, dirs_by_parent, suppressed, refusals, excluded_keys=excluded_keys
+    readings: Dict[str, str] = {}
+    candidates, engine_truncated = _build_candidates(
+        root, files_by_dir, dirs_by_parent, suppressed, refusals, readings,
+        scope=scope, project_keys=project_keys,
     )
-    # Only the offered rows name bundle directories: an absorbed key is already
-    # inside its compound key, so adding it would only restate the subtree.
     bundle_dirs = {candidate.key for candidate in candidates if not candidate.is_archive}
     nested = _nested_archives(files_by_dir, bundle_dirs)
     duplicates = _without_nested_members(duplicates, nested)
     return BundleScan(
         candidates=candidates,
-        truncated=truncated,
+        truncated=truncated or engine_truncated,
         duplicates=duplicates,
         refusals=_reconcile_refusals(
             refusals,
             candidates,
+            readings=readings,
             nested=nested,
             suppressed=suppressed,
             files_by_dir=files_by_dir,
         ),
-        absorbed=tuple(absorbed),
     )
 
 
@@ -1470,29 +719,37 @@ def _reconcile_refusals(
     refusals: Dict[str, str],
     candidates: Sequence[BundleCandidate],
     *,
+    readings: Mapping[str, str],
     nested: AbstractSet[str],
     suppressed: AbstractSet[str],
     files_by_dir: Mapping[str, Sequence[Tuple[str, int]]],
 ) -> Tuple[BundleRefusal, ...]:
-    """Turn the ledger written during the passes into one reason per refused path.
+    """One reason per path the walk saw, settled from the FINAL row set.
 
     The passes record reasons as they go, which means a keep can still look like a
-    refusal until the whole candidate set is known - an archive paired with a
-    directory that was then promoted is "consumed", not missing. This step reads
-    the FINAL candidate set and settles each entry, so the ledger never contradicts
-    the rows. It only ever edits the ledger: no candidate is added or dropped here.
-    The one deliberate exception is a MANUAL row: it is offered as a scope but the
-    rule that refused the path is its own `note`, so the ledger keeps naming it
-    with that same rule instead of popping it (Mf-z643).
+    refusal until the whole row set is known - an archive paired with a directory is
+    "consumed", not missing. This step reads the final set and settles each entry, so
+    the ledger never contradicts the rows. It only ever edits the ledger: no candidate
+    is added or dropped here.
+
+    Every directory the walk saw is named exactly once, in one of four ways: it is a
+    row (no entry), it sits INSIDE a row (``member-of-bundle``), it HOLDS a row
+    (``container-rule``), or it is a folder the engine read as `leave`/`archive-only`
+    (that word). The last arm is the one the engine's own vocabulary supplies, and
+    ``readings`` carries it so the walk never measures a folder twice.
     """
     offered_keys = {candidate.key for candidate in candidates}
     offered_dirs = {candidate.key for candidate in candidates if not candidate.is_archive}
-    # A manual row IS a refused path offered as a scope: the ledger keeps the rule
-    # that refused it, because that word is the row's own `note` (Mf-z643). Every
-    # OTHER row keeps the old contract - a path is either a row or a refusal.
-    manual_keys = {candidate.key for candidate in candidates if candidate.manual}
     attached = {candidate.archive_path for candidate in candidates if candidate.archive_path}
     all_zips = set(_zip_files(files_by_dir))
+    # Every strict ancestor of every row, computed once: "does this folder hold a
+    # row" is then a set membership rather than a prefix scan per directory.
+    ancestors: set = set()
+    for key in offered_keys:
+        parent = _parent(key)
+        while parent:
+            ancestors.add(parent)
+            parent = _parent(parent)
 
     for rel_path in all_zips:
         if rel_path in offered_keys:
@@ -1503,22 +760,21 @@ def _reconcile_refusals(
             refusals[rel_path] = REFUSAL_DUPLICATE
         elif rel_path in attached:
             refusals[rel_path] = REFUSAL_TWIN_CONSUMED
-        elif refusals.get(rel_path) == REFUSAL_TWIN_CONSUMED:
-            # A twin directory existed but no row was offered for it, so the archive
-            # was not consumed by anything: the pairing was refused.
-            refusals[rel_path] = REFUSAL_CONTAINER
 
-    for rel_path in list(refusals):
-        if rel_path in all_zips:
-            continue
-        if rel_path in manual_keys:
-            # The one exception, by design: a manual row carries its refusing rule
-            # as `note`, so the ledger must keep naming it with the same word.
+    for rel_path in sorted(files_by_dir, key=lambda item: (item.casefold(), item)):
+        if not rel_path or rel_path in all_zips:
             continue
         if rel_path in offered_keys:
-            refusals.pop(rel_path)
+            refusals.pop(rel_path, None)
         elif _strictly_inside_any(rel_path, offered_dirs):
             refusals[rel_path] = REFUSAL_MEMBER_OF_BUNDLE
+        elif rel_path in ancestors:
+            refusals[rel_path] = REFUSAL_CONTAINER
+        elif rel_path in readings:
+            refusals[rel_path] = readings[rel_path]
+        else:
+            # The walk never reached it: the entry bound or a vanished directory.
+            refusals.setdefault(rel_path, REFUSAL_TRUNCATED)
 
     return tuple(
         BundleRefusal(
@@ -1569,13 +825,13 @@ def _nested_archives(
     return {
         rel_path
         for rel_path in _zip_files(files_by_dir)
-        if bundle_detect.is_bundle_member(rel_path, bundle_dirs)
+        if file_utils.is_bundle_member(rel_path, bundle_dirs)
     }
 
 
 def duplicate_archives(
     root: Path, files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]
-) -> Tuple[bundle_detect.DuplicateGroup, ...]:
+) -> Tuple[library_scan.DuplicateGroup, ...]:
     """Byte-identical archives, grouped by sha256, hashing only shared-size entries.
 
     Size-first is the bound: a byte-identical copy is necessarily equal-size, so
@@ -1583,18 +839,18 @@ def duplicate_archives(
     where every archive is the same size - then each archive is read exactly once,
     never more. An unreadable archive contributes no identity and no group.
     """
-    identities: List[bundle_detect.ArchiveIdentity] = []
-    for size, paths in bundle_detect.equal_size_archive_groups(_zip_entries(files_by_dir)):
+    identities: List[library_scan.ArchiveIdentity] = []
+    for size, paths in library_scan.equal_size_archive_groups(_zip_entries(files_by_dir)):
         for rel_path in paths:
             digest = _content_digest(Path(root) / rel_path)
             if digest is not None:
-                identities.append(bundle_detect.ArchiveIdentity(rel_path=rel_path, size=size, digest=digest))
-    return bundle_detect.duplicate_groups(identities)
+                identities.append(library_scan.ArchiveIdentity(rel_path=rel_path, size=size, digest=digest))
+    return library_scan.duplicate_groups(identities)
 
 
 def _without_nested_members(
-    groups: Sequence[bundle_detect.DuplicateGroup], nested: AbstractSet[str]
-) -> Tuple[bundle_detect.DuplicateGroup, ...]:
+    groups: Sequence[library_scan.DuplicateGroup], nested: AbstractSet[str]
+) -> Tuple[library_scan.DuplicateGroup, ...]:
     """Drop bundle members from every duplicate group.
 
     A member of a live bundle is never offered for deletion, so it is removed
@@ -1607,31 +863,31 @@ def _without_nested_members(
     """
     if not nested:
         return tuple(groups)
-    kept: List[bundle_detect.DuplicateGroup] = []
+    kept: List[library_scan.DuplicateGroup] = []
     for group in groups:
         paths = tuple(path for path in group.paths if path not in nested)
         if len(paths) < 2:
             continue
-        kept.append(bundle_detect.DuplicateGroup(digest=group.digest, size=group.size, paths=paths))
+        kept.append(library_scan.DuplicateGroup(digest=group.digest, size=group.size, paths=paths))
     return tuple(kept)
 
 
 def _twin_directory(rel_path: str, dirs_by_parent: Mapping[str, set]) -> Optional[str]:
     parent = _parent(rel_path)
-    wanted = bundle_detect.twin_key(_basename(rel_path))
+    wanted = proposal_engine.twin_key(_basename(rel_path))
     for name in sorted(dirs_by_parent.get(parent, ())):
-        if bundle_detect.twin_key(name) == wanted:
+        if proposal_engine.twin_key(name) == wanted:
             return f"{parent}/{name}" if parent else name
     return None
 
 
 def _twin_archive(rel_dir: str, files_by_dir: Mapping[str, Sequence[Tuple[str, int]]]) -> Optional[str]:
     parent = _parent(rel_dir)
-    wanted = bundle_detect.twin_key(_basename(rel_dir))
+    wanted = proposal_engine.twin_key(_basename(rel_dir))
     for name, _size in sorted(files_by_dir.get(parent, ())):
         if _suffix(name) != ".zip":
             continue
-        if bundle_detect.twin_key(name) == wanted:
+        if proposal_engine.twin_key(name) == wanted:
             return f"{parent}/{name}" if parent else name
     return None
 
@@ -1640,25 +896,25 @@ def _entry_root_pair(
     root: Path,
     rel_path: str,
     dirs_by_parent: Mapping[str, set],
-    work: Mapping[str, Sequence[bundle_detect.BundleEntry]],
+    rows_by_key: Mapping[str, BundleCandidate],
 ) -> Optional[Tuple[str, str]]:
     """``(folder_rel, entry_root)`` for an archive that pairs by its entry root.
 
     Same-parent only: a root naming an ancestor or a directory elsewhere in the
     library is not evidence that the two sit together, and pairing across parents
     would attach one archive to a directory it was never extracted into. The
-    comparison set is ``work``'s post-claim listing, so pairing can never disagree
-    with the claim tree. A generic container root is refused outright (the name
-    says nothing about which thing the archive holds), and any read failure is
-    ``None`` - never an exception on a read route.
+    comparison set is the ROW's own subtree listing, so pairing can never disagree
+    with the row it is attaching to. A generic container root is refused outright
+    (the name says nothing about which thing the archive holds), and any read
+    failure is ``None`` - never an exception on a read route.
     """
     zip_path = Path(root) / rel_path
     try:
         entries = zip_service.list_zip_entries(zip_path)
     except (BadZipFile, OSError):
         return None
-    entry_root = bundle_detect.common_entry_root([str(entry["path"]) for entry in entries])
-    if entry_root is None or bundle_detect.is_generic_container_root(entry_root):
+    entry_root = proposal_engine.common_entry_root([str(entry["path"]) for entry in entries])
+    if entry_root is None or file_utils.is_generic_container_root(entry_root):
         return None
     parent = _parent(rel_path)
     wanted = entry_root.casefold()
@@ -1666,7 +922,10 @@ def _entry_root_pair(
         if name.casefold() != wanted:
             continue
         folder = f"{parent}/{name}" if parent else name
-        if entry_root_verified(zip_path, entry_root, work.get(folder, ())):
+        row = rows_by_key.get(folder)
+        if row is None:
+            continue
+        if entry_root_verified(zip_path, entry_root, row.files):
             return folder, entry_root
     return None
 
@@ -1787,7 +1046,7 @@ class ProjectMember:
     """One registered asset under a bundle key, and the role its entry earned."""
 
     asset: RegisteredAsset
-    # bundle_detect.classify_entry(...) -> model | image | text | other | archive
+    # library_scan.classify_entry(...) -> model | image | text | other | archive
     role: str
     # BUNDLE-relative: the asset's storage path minus ``key + "/"``.
     rel_path: str
@@ -1811,8 +1070,8 @@ def _members_of(key: str, assets: Sequence[RegisteredAsset]) -> MembersOf:
     text documents, unknowns and nested archives alike. There is no suffix table
     deciding who is a member, here or anywhere else in this library.
 
-    The ROLE of each member is decided once, by the detector's own classifier
-    (``bundle_detect.classify_entry``, over the BUNDLE-relative path and the declared
+    The ROLE of each member is decided once, by the scan's own classifier
+    (``library_scan.classify_entry``, over the BUNDLE-relative path and the declared
     size), which is the very call the report's own ``model_count``/``image_count``/
     ``text_count``/``other_count``/``archive_count`` are built from. So a project and
     the row it was created from can never disagree about what a file is.
@@ -1834,7 +1093,7 @@ def _members_of(key: str, assets: Sequence[RegisteredAsset]) -> MembersOf:
         entries.append(
             ProjectMember(
                 asset=asset,
-                role=bundle_detect.classify_entry(rel_path, asset.size),
+                role=library_scan.classify_entry(rel_path, asset.size),
                 rel_path=rel_path,
             )
         )
@@ -1842,8 +1101,8 @@ def _members_of(key: str, assets: Sequence[RegisteredAsset]) -> MembersOf:
 
 
 def _own_paths(key: str, candidate: BundleCandidate) -> set:
-    """The storage paths the candidate's own snapshot names, never a child's."""
-    return {f"{key}/{entry.rel_path}" for entry in candidate.snapshot.entries}
+    """The storage paths the row's own subtree listing names, never a child's."""
+    return {f"{key}/{rel_path}" for rel_path, _size in candidate.files}
 
 
 def _own_assets(
@@ -1887,7 +1146,7 @@ def _claimed_assets(
     return [asset for asset in assets if claims.get(asset.path, key) == key]
 
 
-def twin_verified(zip_path: Path, folder_entries: Sequence[bundle_detect.BundleEntry]) -> bool:
+def twin_verified(zip_path: Path, folder_files: Sequence[Tuple[str, int]]) -> bool:
     """Whether the archive's entry basenames match the folder's, casefolded.
 
     Names only: the archive attaches nothing, so this is a provenance remark, not
@@ -1899,59 +1158,51 @@ def twin_verified(zip_path: Path, folder_entries: Sequence[bundle_detect.BundleE
     except (BadZipFile, OSError):
         return False
     archive_names = sorted({PurePath(entry["path"]).name.casefold() for entry in entries})
-    folder_names = sorted({PurePath(entry.rel_path).name.casefold() for entry in folder_entries})
+    folder_names = sorted({PurePath(rel_path).name.casefold() for rel_path, _size in folder_files})
     return archive_names == folder_names
 
 
-def _stem_pair_verified(zip_path: Path, folder_entries: Sequence[bundle_detect.BundleEntry]) -> bool:
+def _stem_pair_verified(zip_path: Path, folder_files: Sequence[Tuple[str, int]]) -> bool:
     """Whether an archive verifies as the twin of the directory beside it.
 
-    This is the route for a stem twin whose directory no rule offers on its own:
-    the operator's names agree and the payload has to agree too, or the archive is
-    not that directory's provenance. The archive's own entries decide the wrapper -
-    identity first, else ONE ``common_entry_root`` strip, never per entry and never
-    two strips - through ``bundle_detect.archive_payload_contained``, the same
-    predicate the entry-root route uses. Declared size is header data, so this is
-    pairing evidence and never an integrity claim. Any read failure is ``False`` -
-    never an exception on a read route.
+    The operator's names agree, so they are not the evidence - the payload has to
+    agree too, or the archive is not that directory's provenance. The archive's own
+    entries decide the wrapper - identity first, else ONE ``common_entry_root``
+    strip, never per entry and never two strips - through the engine's ONE
+    containment predicate. Declared size is header data, so this is pairing
+    evidence and never an integrity claim. Any read failure is ``False``.
     """
     try:
         entries = zip_service.list_zip_entries(Path(zip_path))
     except (BadZipFile, OSError):
         return False
-    return bundle_detect.archive_payload_contained(
+    return proposal_engine.archive_payload_contained(
         ((str(entry["path"]), int(entry["size"])) for entry in entries),
-        folder_entries,
+        folder_files,
     )
 
 
 def entry_root_verified(
     zip_path: Path,
     entry_root: str,
-    folder_entries: Sequence[bundle_detect.BundleEntry],
+    folder_files: Sequence[Tuple[str, int]],
 ) -> bool:
     """Whether every entry of the archive sits inside ``entry_root`` and on disk.
 
     Strict strip-and-compare on this route: the root was named before the check, so
-    the caller already decided which wrapper to strip. Containment, not equality,
-    because a lived-in directory legitimately holds more than the archive that
-    shipped it. Declared size comes from the archive's header, so this is pairing
-    evidence and never an integrity claim: it decides which directory an archive
-    belongs to, and a lie in the header only makes a pairing wrong, never a bundle
-    corrupt. Any read failure is ``False`` - never an exception on a read route.
-
-    The ``__MACOSX`` skip, the first-segment split and the refusal of an archive of
-    cruft alone all live in ``bundle_detect.archive_payload_contained``, which both
-    pairing routes call, so the two routes cannot disagree about what an archive's
-    payload is.
+    the caller already decided which wrapper to strip. Containment, not equality
+    (a lived-in directory legitimately holds more than the archive that shipped
+    it), and declared size comes from the archive's header, so this decides which
+    directory an archive belongs to and is never an integrity claim. Any read
+    failure is ``False`` - never an exception on a read route.
     """
     try:
         entries = zip_service.list_zip_entries(Path(zip_path))
     except (BadZipFile, OSError):
         return False
-    return bundle_detect.archive_payload_contained(
+    return proposal_engine.archive_payload_contained(
         ((str(entry["path"]), int(entry["size"])) for entry in entries),
-        folder_entries,
+        folder_files,
         entry_root,
     )
 
@@ -1996,7 +1247,7 @@ def set_dismissals(keys: Sequence[str], dismissed: bool, ctx: audit.AuditContext
         settings_service.set_setting(settings_service.BUNDLE_DISMISSALS_KEY, json.dumps(current, sort_keys=True))
     for key in changed:
         audit.record(audit.Event(audit.BUNDLE_DISMISS, key, {"dismissed": dismissed}), ctx=ctx)
-    live = {candidate.key for candidate in iter_bundle_candidates(STORAGE)[0]}
+    live = {candidate.key for candidate in scan_bundles(STORAGE).candidates}
     stale = sorted((key for key in current if key not in live), key=lambda key: (key.casefold(), key))
     return {"dismissed": sorted(current), "stale_dismissals": stale}
 
@@ -2023,39 +1274,6 @@ def _set_enrichments(records: Mapping[str, dict]) -> None:
     the worst case here is one extra fetch, never a wrong row.
     """
     settings_service.set_setting(settings_service.BUNDLE_ENRICHMENTS_KEY, json.dumps(dict(records), sort_keys=True))
-
-
-def _compound_splits(session: Session) -> Dict[str, Tuple[str, ...]]:
-    """Which groups a created project's own marker records as excluded, by bundle key.
-
-    The marker is the ONLY justification this report accepts for re-offering a
-    path the walk named ``member-of-bundle``: it is the app's own statement that
-    an operator created this product WITHOUT that part, so the part is a product
-    of its own rather than a member. A pre-C2 marker has no ``groups`` at all and
-    therefore re-offers nothing - absence is the correct answer, because nothing
-    was ever excluded. Deleting the project deletes the marker, so the exclusion
-    goes with it and no stored setting can outlive the thing it described.
-
-    Separability is deliberately never derived from the refusals ledger:
-    ``_reconcile_refusals`` labels EVERY directory strictly inside an offered row
-    ``member-of-bundle``, so a ledger-derived answer would make every group
-    separable and ``not_separable_group`` dead code.
-    """
-    splits: Dict[str, Tuple[str, ...]] = {}
-    for project in session.exec(select(Project).order_by(Project.id)):
-        marker = project_service.bundle_marker_of(project.metadata_json)
-        key = marker.get("key")
-        groups = marker.get("groups")
-        if not isinstance(groups, list):
-            continue
-        excluded = tuple(
-            group["name"]
-            for group in groups
-            if isinstance(group, dict) and group.get("included") is False and isinstance(group.get("name"), str)
-        )
-        if isinstance(key, str) and excluded:
-            splits[key] = tuple(dict.fromkeys(splits.get(key, ()) + excluded))
-    return splits
 
 
 def _scope(path: str) -> str:
@@ -2125,7 +1343,7 @@ def known_project_keys(session: Session) -> FrozenSet[str]:
 
     ``project_service.bundle_marker_of`` is the ONE marker reader - never a second
     JSON parse here - so a bad metadata column means the same thing to the create
-    door, the compound belt and this guard. This is what makes "a path inside an
+    door, the create belt and this guard. This is what makes "a path inside an
     existing project is not a detection row" one predicate instead of a rule per
     pass: a key with no marker simply contributes nothing.
     """
@@ -2137,15 +1355,17 @@ def known_project_keys(session: Session) -> FrozenSet[str]:
     return frozenset(keys)
 
 
-def _excluded_keys(scope: str) -> FrozenSet[str]:
+def _excluded_keys(scope: str, *, known: Optional[AbstractSet[str]] = None) -> FrozenSet[str]:
     """The marker keys under ``scope``, expressed as WALK-relative subtrees.
 
     This is the ONE derivation both doors call - ``build_report`` for the report
     and ``create_bundles`` for the create - because a second derivation is exactly
     how a create answers ``unknown bundle`` for a row its own report offered.
+    ``known`` lets a caller that already read the marker keys pass them in, so a
+    report reads them once (``_marker_keys``) rather than twice.
     """
-    with Session(engine) as session:
-        known = known_project_keys(session)
+    if known is None:
+        known = _marker_keys()
     relative = (_unqualify(scope, key) for key in known)
     return frozenset(key for key in relative if key is not None)
 
@@ -2191,9 +1411,9 @@ def _without_owned_subtrees(
             continue
         if rel_dir in owned:
             kept_files[rel_dir] = [
-                (entry.rel_path, entry.size)
-                for entry in folded.get(rel_dir, ())
-                if _suffix(entry.rel_path) != ".zip"
+                (rel_path, size)
+                for rel_path, size in folded.get(rel_dir, ())
+                if _suffix(rel_path) != ".zip"
             ]
             continue
         kept_files[rel_dir] = list(files)
@@ -2207,170 +1427,25 @@ def _without_owned_subtrees(
     return kept_files, kept_parents
 
 
-def _candidate_facts(root: Path, candidate: BundleCandidate) -> Optional[bundle_detect.BundleFacts]:
-    if candidate.manual:
-        # A manual row is a SCOPE: its facts come from the whole subtree listing
-        # and never from a rule, so re-running detection here would answer None
-        # and drop the row the walk deliberately offered.
-        return bundle_detect.manual_facts(candidate.snapshot)
-    if candidate.compound:
-        # R7 is a post-pass: `_detect_folder` re-runs `detect_bundle`, which never
-        # knows the compound rule, so asking it here would answer None and drop the
-        # row. The facts are recomputed from the same snapshot the candidate was
-        # built from, so the row can never disagree with the candidate.
-        return bundle_detect.compound_bundle_facts(candidate.snapshot)
-    if candidate.title_name:
-        return bundle_detect.title_name_facts(candidate.snapshot)
-    if candidate.pair_only or candidate.archive_owned:
-        return bundle_detect.archive_owned_facts(candidate.snapshot)
-    if candidate.is_archive:
-        return _detect_archive(Path(root) / candidate.snapshot.rel_dir, candidate.snapshot)
-    return _detect_folder(Path(root), candidate.snapshot)
+def _wire_groups(groups: Sequence[Mapping]) -> List[dict]:
+    """One group list in the wire shape, from the engine's own groups.
 
-
-def _candidate_docs(root: Path, candidate: BundleCandidate) -> Dict[str, str]:
-    """The bounded documents a candidate carries, keyed bundle-relative.
-
-    The same two reads detection uses, so ``shape_matches`` can ask every rule of
-    one listing without opening a byte the scan would not have opened: a directory
-    through ``_read_docs``, an archive through the bounded zip-entry reader.
-    """
-    entries = bundle_detect.doc_entry_candidates(candidate.snapshot)
-    if candidate.is_archive:
-        archive = Path(root) / candidate.snapshot.rel_dir
-        docs: Dict[str, str] = {}
-        for name in entries:
-            text = zip_service.read_zip_text_entry(archive, name, bundle_detect.BUNDLE_DOC_MAX_BYTES)
-            if text is not None:
-                docs[name] = text
-        return docs
-    return _read_docs(Path(root) / candidate.snapshot.rel_dir, entries)
-
-
-def _wire_groups(
-    key: str, groups: Sequence[bundle_detect.BundleGroup], absorbed_keys: AbstractSet[str]
-) -> List[dict]:
-    """One group list in the wire shape, shared by the row and every match.
-
-    ``separable`` is compared in the walk's own relative key space because that is
-    the space the candidate and the absorbed set share.
+    The engine's groups are hierarchical (`children`), and the wire's
+    `BundleGroupOut` is the flat three-field shape the queue renders and the
+    create validates its exclusions against, so the TOP level is mapped
+    field-for-field and the hierarchy stays in the artifact. `separable` is the
+    engine's own answer - "could this group stand as its own project" - which is
+    exactly what an exclusion needs to be honest.
     """
     return [
         {
-            "name": group.name,
-            "model_count": group.model_count,
-            "foreign": group.foreign,
-            "separable": f"{key}/{group.name}" in absorbed_keys,
+            "name": group["name"],
+            "model_count": group["models"],
+            "foreign": bool(group["foreign"]),
+            "separable": bool(group["separable"]),
         }
         for group in groups
     ]
-
-
-class _DissentBudget:
-    """One entry allowance, shared by every row of one dissent pass.
-
-    The dissent is a SECOND walk of the same tree: the report's own walk is bounded
-    by ``MAX_SCAN_ENTRIES``, but ``proposal_engine.measure`` re-walks each row's
-    subtree with no cap of its own. Measured before this budget, on a 20-deep chain
-    with 50 models per level, the report's walk visits 1000 files while the dissent
-    pass revisits 10500 entries - 10.5x - and one 60k-file folder costs ``measure``
-    174 ms on its own. So the dissent spends from ONE allowance for the whole pass,
-    and the cost of ``GET /bundles/detect`` is bounded by ``MAX_DISSENT_ENTRIES``
-    rather than by how much disk the operator happens to have.
-    """
-
-    def __init__(self, entries: int) -> None:
-        self.remaining = entries
-
-    def spend(self, entries: int) -> None:
-        self.remaining -= entries
-
-
-def _engine_dissent(
-    root: Path,
-    candidate: BundleCandidate,
-    facts: bundle_detect.BundleFacts,
-    budget: _DissentBudget,
-) -> List[dict]:
-    """The engine's dissenting CARDINALITY readings, in the ``BundleMatchOut`` shape.
-
-    A match the server can serve but cannot enact yet: the engine reads the folder as
-    SEVERAL projects while the detector reads it as one, and that disagreement is
-    worth showing next to the detector's own offers. Every directory row is
-    consulted, a ``manual`` scope row included - a folder the detector refused is
-    exactly where "this is really N projects" matters most. Archive rows are skipped:
-    the engine walks a directory, and this question is scoped to those.
-
-    **The confidence band is the app's own reading of the engine's ranking.** The
-    engine has no confidence vocabulary: it ranks its options by score and stops.
-    This module calls an option ``high`` when it scores at or above the engine's top
-    option (the engine recommends this split and the app does not), ``medium`` when
-    it sits within ``CLOSE_CALL_POINTS`` of that top score, and ``low`` otherwise.
-
-    **Budgeted, because the walk itself is unbounded.** The pass spends from the one
-    ``_DissentBudget`` shared by every row: a row with no allowance left answers no
-    dissent at all - an honest silence, never half a census presented as a total, so
-    the report never grows a match it cannot justify. The row's walk gets the
-    remaining allowance as its ``max_entries``, and a census the walk had to truncate
-    cannot be scored honestly either, so a truncated one answers no dissent too.
-
-    ``probe_git=False`` is mandatory: this runs inside a GET handler and must never
-    run a git subprocess. A folder that disappeared mid-walk answers no dissent at
-    all - a report must not fail because a directory vanished underneath it.
-    """
-    if candidate.is_archive:
-        return []
-    if budget.remaining <= 0:
-        return []
-    try:
-        engine_facts = proposal_engine.measure(
-            str(Path(root) / candidate.snapshot.rel_dir),
-            candidate.key,
-            max_entries=budget.remaining,
-        )
-    except OSError:
-        return []
-    budget.spend(engine_facts.entries)
-    if engine_facts.truncated:
-        return []
-    options, _reasons, _repo = proposal_engine.propose(engine_facts, (), probe_git=False)
-    if not options:
-        return []
-    top_score = options[0].score
-    # A shape the row already recommends is not a dissent, whatever the engine calls it.
-    already_offered = {facts.metadata_shape, facts.detector}
-    dissent: List[dict] = []
-    for option in options:
-        if option.shape not in proposal_engine.SPLIT_SHAPES or option.shape in already_offered:
-            continue
-        if option.score >= top_score:
-            confidence = "high"
-        elif option.score >= top_score - CLOSE_CALL_POINTS:
-            confidence = "medium"
-        else:
-            confidence = "low"
-        dissent.append(
-            {
-                "shape": option.shape,
-                # Which table offered this reading, beside the detector names and
-                # ledger words every other match's rule is.
-                "rule": f"engine:{option.shape}",
-                "confidence": confidence,
-                # The engine's census, mapped onto the flattened fields.
-                "model_count": engine_facts.models,
-                "image_count": engine_facts.images,
-                "text_count": engine_facts.docs,
-                "other_count": engine_facts.others,
-                # The engine's split partitions the folder differently from R7's
-                # compound groups: there is no group breakdown to offer.
-                "groups": [],
-                # Every non-creatable match carries a note, and the note is the
-                # engine's own sentence about what the reading costs.
-                "note": f"needs arranging first: {option.consequence}",
-                "creatable": False,
-            }
-        )
-    return dissent
 
 
 def cover_for_registered(
@@ -2398,7 +1473,7 @@ def cover_for_registered(
     construction.
     """
     images = sorted(
-        (asset for asset in assets if _suffix(asset.path) in bundle_detect.IMAGE_SUFFIXES),
+        (asset for asset in assets if _suffix(asset.path) in library_scan.IMAGE_SUFFIXES),
         key=lambda asset: (-asset.size, asset.path),
     )
     if images:
@@ -2419,14 +1494,29 @@ def cover_for_registered(
     return _cover_none_fields(None, COVER_NONE)
 
 
-def _cover(assets: Sequence[RegisteredAsset], facts: bundle_detect.BundleFacts) -> dict:
-    """`cover_for_registered` with the walk's facts: the detection door's call.
+def _cover_entry(facts) -> Optional[str]:
+    """The engine's UNREGISTERED cover candidate: the largest image it found.
+
+    `Facts.cover` carries the reason beside the pick, and only the image reason is
+    a face the report can name without a registered asset: the `model-preview` leg
+    is `cover_for_registered`'s own, applied to the registered rows, and a
+    `.zip`'s facts carry no cover at all.
+    """
+    cover = getattr(facts, "cover", None) or {}
+    chosen = cover.get("chosen") or {}
+    if chosen.get("reason") == COVER_LARGEST_IMAGE:
+        return chosen.get("path")
+    return None
+
+
+def _cover(assets: Sequence[RegisteredAsset], facts) -> dict:
+    """`cover_for_registered` with the engine's facts: the report's one call.
 
     A one-line delegate on purpose. `_create_one` names the anti-fix it must not
     grow - "a second rule here would be free to disagree with the report's" - and
     the same reasoning binds this module to one implementation of the preference.
     """
-    return cover_for_registered(assets, facts.cover_entry)
+    return cover_for_registered(assets, _cover_entry(facts))
 
 
 def _cover_of(asset: RegisteredAsset, reason: str) -> dict:
@@ -2446,7 +1536,7 @@ def _cover_of(asset: RegisteredAsset, reason: str) -> dict:
 
 
 def _claim_owners(candidates: Sequence[BundleCandidate], *, scope: str) -> Dict[str, str]:
-    """``path`` -> the ONE offered key that owns that registered model path.
+    """``path`` -> the ONE row that owns that registered model path.
 
     One map for the whole report, built ONCE, so "does this row actually own this
     model?" is a dict lookup per row instead of a second opinion per row. It is the
@@ -2454,34 +1544,26 @@ def _claim_owners(candidates: Sequence[BundleCandidate], *, scope: str) -> Dict[
     PREFIXES a registered model used to claim it, which is how a container answered
     ``ready`` over models a deeper row exists to attach.
 
-    Three rules decide a winner, and each one kills a specific wrong answer:
+    Two rules decide a winner:
 
-    * Built from ``scan.candidates`` ONLY. An absorbed group re-offered as its own
-      row (``BundleScan.absorbed``) never writes anything, so it may not take a
-      path away from the row that does - that re-offer is served with ``claims``
-      set to ``None`` for exactly this reason.
-    * DEEPEST KEY FIRST, and the first writer wins. Two rows can name one path
-      (a parent's snapshot and a child's), and the deepest key is the row the
-      deepest-first walk claimed the path for, so it is the row the report credits.
-      The CREATE door reads this same map now (``_create_one`` through
-      ``_claimed_assets``), which is what ``Mf-yhjo`` closed: the report no longer
-      credits one row with a model while the create hands it to another. What this
-      map decides is which row owns a model, and so both which row the report says
-      is ``ready`` and which row ``find_existing_project``'s assets leg can call
-      already-created.
-    * Only ``bundle_detect.MODEL_SUFFIXES`` paths are claimable. That is not a
-      membership rule and never was: since Mf-7oow a create's member set is every
-      registered file under the key, so a project certainly holds previews,
-      documents and nested archives. Say what a claim is FOR: this map settles which
-      row's PARTS a path is. A preview is a product's face, not one of its parts, and
-      the MODEL answer ``_create_one`` reads off the member set as ``model_assets``
-      (one ``by_role`` call) is what ``attached``, the compound marker's per-group
-      counts and ``Dedupe.containment`` are asked with. Letting an image into the map
-      makes two rows contest a cover, which re-opens the ``Mf-quv4`` ownership bound
-      this bullet exists to keep. And this table is not what keeps a non-model with
-      its row - ``_claimed_assets``' ``claims.get(asset.path, key)`` default is: a
-      path the map is silent about stays with the row that named it instead of going
-      to nobody.
+    * Built from ``scan.candidates`` ONLY, deepest key first, first writer wins. A
+      parent's listing and a child's can only overlap where the parent holds the
+      child, and since Mf-1agz the row walk never descends into a row - so this is
+      a total, unambiguous answer rather than a race. Keeping the ordering is what
+      makes the map stable if a future rule ever does overlap.
+    * Only ``library_scan.MODEL_SUFFIXES`` paths are claimable. That is not a
+      membership rule and never was: a create's member set is every registered
+      file under the key, so a project certainly holds previews, documents and
+      nested archives. Say what a claim is FOR: this map settles which row's PARTS
+      a path is. A preview is a product's face, not one of its parts, and the MODEL
+      answer ``_create_one`` reads off the member set as ``model_assets`` (one
+      ``by_role`` call) is what ``attached``, the marker's per-group counts and
+      ``Dedupe.containment`` are asked with. Letting an image into the map makes two
+      rows contest a cover, which re-opens the ``Mf-quv4`` ownership bound this
+      bullet exists to keep. And this table is not what keeps a non-model with its
+      row - ``_claimed_assets``' ``claims.get(asset.path, key)`` default is: a path
+      the map is silent about stays with the row that named it instead of going to
+      nobody.
 
     ``is_archive`` rows are skipped: no registered file can live under a
     ``<x>.zip/`` prefix, so an archive row is never an owner - it is only ever
@@ -2496,27 +1578,9 @@ def _claim_owners(candidates: Sequence[BundleCandidate], *, scope: str) -> Dict[
     for candidate in ordered:
         key = _qualify(scope, candidate.key)
         for rel_path in _own_paths(key, candidate):
-            if _suffix(rel_path) in bundle_detect.MODEL_SUFFIXES:
+            if _suffix(rel_path) in library_scan.MODEL_SUFFIXES:
                 claims.setdefault(rel_path, key)
     return claims
-
-
-def _offered_dirs(candidates: Sequence[BundleCandidate], *, scope: str) -> AbstractSet[str]:
-    """Every non-archive candidate key, qualified: the container evidence.
-
-    "Holds a row" is the container half of the predicate, and it is asked of the
-    walk's own candidate set - not of the refusal ledger, which names paths that
-    were never rows and would refuse a parent for a directory nobody can create
-    from either. It is also not literally the row set: a candidate whose own detect
-    answers ``None`` is dropped by ``_report_row`` and would still count here. That
-    is the honest wording rather than a live difference - measured, no candidate in
-    the bundle suite is dropped that way, so the two sets are one set in practice.
-    Archives are excluded because a zip is a file: a directory that holds a zip
-    holds a member, not a bundle (the nested-member rule).
-    """
-    return frozenset(
-        _qualify(scope, candidate.key) for candidate in candidates if not candidate.is_archive
-    )
 
 
 def _cover_none_fields(rel_path: Optional[str], reason: str) -> dict:
@@ -2526,6 +1590,80 @@ def _cover_none_fields(rel_path: Optional[str], reason: str) -> dict:
     invariant is that the pair is set exactly when ``asset_id`` is.
     """
     return {"asset_id": None, "rel_path": rel_path, "reason": reason, "url": None, "thumb_url": None}
+
+
+def _metadata_value(metadata: Mapping, field: str) -> Optional[str]:
+    """One engine fact's value, or ``None`` when the engine had no evidence for it."""
+    entry = metadata.get(field) or {}
+    return entry.get("value")
+
+
+def _name_source_url(name: str) -> Optional[str]:
+    """The vendor URL a Thingiverse ID IN THE NAME states, or ``None``.
+
+    This is the one provenance inheritance Mf-1agz carries over from the old
+    detector's R4, and it is not a shape reading: an id-prefixed export
+    (``5390184_ARTICULATED_ice_dragon``) names its own thing page, the enrich door
+    is the only way to fill the rest of its metadata, and without this the door
+    answers "this bundle names no vendor id" for exactly the exports that do. It
+    states a URL and nothing else - never a creator, a licence or a title.
+    """
+    thing_id = library_scan.thingiverse_id_from_name(name)
+    if not thing_id:
+        return None
+    return THINGIVERSE_THING_URL.format(thing_id)
+
+
+def _row_facts(candidate: BundleCandidate) -> dict:
+    """The display fields a row renders, read off the engine's fact sheet.
+
+    A directory's facts are ``proposal_engine.Facts`` (metadata, provenance,
+    groups, twin, cover); a `.zip`'s are ``ArchiveFacts``, which measures the
+    archive's payload and nothing else - so an archive row's title is the product
+    name its filename carries and its other fields are honestly empty.
+    """
+    # `ArchiveFacts` carries no fact sheet, so its fields read as absent rather than
+    # needing a branch: the only difference the caller sees is the name the fallback
+    # uses (the zip's stem, not the directory's).
+    metadata = getattr(candidate.facts, "metadata", {}) or {}
+    name = Path(candidate.rel).stem if candidate.is_archive else _basename(candidate.rel)
+    title = _metadata_value(metadata, "title") or proposal_engine.product_title(
+        library_scan.display_name(name)
+    )
+    return {
+        "title": title,
+        "name_suggestion": title,
+        "creator": _metadata_value(metadata, "creator"),
+        "licence": _metadata_value(metadata, "licence"),
+        "licence_url": _metadata_value(metadata, "licence_url"),
+        "source_url": _metadata_value(metadata, "source_url") or _name_source_url(name),
+        "description": _metadata_value(metadata, "description"),
+    }
+
+
+def _match_row(option: proposal_engine.Option, candidate: BundleCandidate) -> dict:
+    """One engine option in the wire's ``BundleMatchOut`` shape.
+
+    The engine's own ranking, mapped field-for-field and in its order, so
+    ``matches[0]`` IS the recommendation the operator acts on. ``rule`` is the
+    ``engine:<shape>`` token the dissent shim already used, which is also the
+    create marker's ``rule`` - one token, one owner.
+    """
+    facts = candidate.facts
+    creatable = option.shape in candidate.creatable_shapes
+    return {
+        "shape": option.shape,
+        "rule": f"engine:{option.shape}",
+        "confidence": option.confidence,
+        "model_count": int(facts.models),
+        "image_count": int(facts.images),
+        "text_count": int(facts.docs),
+        "other_count": int(facts.others),
+        # An archive's facts carry no groups: its payload is one thing inside a zip.
+        "groups": [] if candidate.is_archive else _wire_groups(facts.groups),
+        "note": None if creatable else f"needs arranging first: {option.consequence}",
+        "creatable": creatable,
+    }
 
 
 def _report_row(
@@ -2539,112 +1677,41 @@ def _report_row(
     registered: Sequence[Tuple[str, str, int]],
     dismissals: Mapping[str, dict],
     enrichments: Mapping[str, dict],
-    absorbed_keys: AbstractSet[str],
     claims: Optional[Mapping[str, str]],
-    offered_dirs: AbstractSet[str],
-    dissent_budget: _DissentBudget,
-) -> Optional[dict]:
-    """One wire row for one candidate, or ``None`` when its own detect refuses it.
+) -> dict:
+    """One wire row for one candidate: the engine's answer, resolved against the DB.
 
     The row is clock-free: a cached page's facts fill an empty creator or licence
     whether or not the record is still fresh, because TTL gates only the enrich
-    action, never what the report shows. That is what keeps two reports of the
-    same disk identical from one minute to the next, and it means a record that
-    supplies nothing THIS row needed contributes no ``enrichment`` block at all.
-
-    The two drift keys are answered here from the report-wide indexes. Their
-    state is the wire's word for which of the three cases a marker-matched row
-    is, and the CLIENT owns the number's rendering - no notice at all for a
-    ``known`` zero, an en dash for ``unknown`` - because this server never formats
-    a number.
+    action, never what the report shows.
     """
-    facts = _candidate_facts(root, candidate)
-    if facts is None:
-        return None
+    facts = candidate.facts
+    display = _row_facts(candidate)
     key = _qualify(scope, candidate.key)
-    # The disk row is the truth and the page may only fill what it left blank, so
-    # the page can never overwrite a creator a human or the vendor already named.
-    cache_key = bundle_enrich.cache_key(facts.source_url)
+    cache_key = bundle_enrich.cache_key(display["source_url"])
     record = enrichments.get(cache_key) if cache_key is not None else None
-    values, fields = bundle_enrich.fills(facts.creator, facts.licence, facts.licence_url, record)
-    enrichment = bundle_enrich.provenance(record, fields) if fields else None
-    suggestion = (facts.title or "").strip() or "bundle"
-    # Every row asks the database, including the archive-only ones. What a row
-    # ANSWERS is not a reason to leave its own files uncounted and unclaimable:
-    # ``assets_total`` and the cover are read-out of the same key the operator can
-    # see on disk, and skipping the lookup made a refused row describe a directory
-    # it had never read (ADR 0010 Decision 7).
-    assets = registered_assets(session, key)
-    # Only the candidate's OWN entries decide status and cover: a registered
-    # asset below a nested child bundle belongs to that bundle, not to this one.
-    # The ONE ownership expression, shared with the create door (`_create_one`).
-    own_assets = _own_assets(assets, key=key, candidate=candidate)
-    # ONE owned set feeds both questions the row answers. `_claimed_assets` narrows
-    # by the report-wide one-owner map, so the row that says `ready` is the row that
-    # would attach these files and no other; `models` is that set read as the MODEL
-    # question. The two filters commute - `_own_assets` then the map, or the map then
-    # `_own_assets`, is one set either way - and `claims` indexes MODELS only, so a
-    # non-model keeps the row that named it (`claims.get(path, key)`, never
-    # `claims.get(path)`).
-    owned_assets = _claimed_assets(own_assets, key=key, claims=claims)
-    models = [asset for asset in owned_assets if _suffix(asset.path) in bundle_detect.MODEL_SUFFIXES]
-    # Deliberate reading of "every registered asset": containment is the MODEL
-    # question, and it stays the model question now that a project also holds the
-    # previews. A human's hand-made project over a bundle's files holds the models,
-    # so literal full-set containment over the images and the text too would report
-    # the owner's own project as NOT owning the bundle it was made from. This is the
-    # same set `_create_one` asks the dedupe with (`Dedupe.containment`), and
-    # `test_service_a_project_holding_the_models_owns_a_bundle_that_also_has_images`
-    # is the witness.
-    containment = [asset.id for asset in models]
-    # The container leg, read from the row OUTWARD: an INFERRED row that HOLDS one
-    # of the directories the report offers is a pile, not a bundle. Bounded to
-    # ``INFERRED_CONFIDENCES`` because that is the container rule this module has
-    # ALWAYS applied - ``_build_candidates`` refuses ``container-rule`` on
-    # ``facts.confidence in INFERRED_CONFIDENCES and rel_dir in claimed_ancestors``,
-    # and the archive-containment strip carries the same bound - so this is the
-    # published rule, not a new ranking. HIGH is exempt on purpose: a HIGH row's own
-    # documents sit at depth 0 and it attaches only its own models (ADR 0010
-    # Decision 15/18), so a HIGH parent over a HIGH child is two bundles. Measured:
-    # dropping the bound reds ``test_a_parent_attaches_only_its_own_models`` (that
-    # HIGH ``Parent Thing`` row goes ``blocked``, so its create answers
-    # ``created == 1`` where the witness pins ``2``) and
-    # ``test_a_bundle_attaches_only_its_own_files`` (the HIGH ``Unsorted`` parent
-    # loses the ``ready`` status its own loose model earned). ``claims is not None``
-    # keeps the leg off the inert re-offered rows: a group that owns nothing can
-    # never be the container that cancels somebody else either. And
-    # ``not candidate.compound`` keeps it off R7's rows, because the same Decision
-    # makes a compound row this rule's ONE bounded exception: a compound may hold a
-    # row it chose not to absorb (``_compound_pass`` never absorbs a pair-only row)
-    # and refusing it there would answer ``not_scanned`` - "no model file registered
-    # by a scan" - about a fully registered directory. Measured: deleting this clause
-    # alone is 0 red, because the suite builds no such compound; what makes it
-    # load-bearing is the pair - delete it AND let absorbed rows count as container
-    # evidence, and a compound self-cancels against its own re-offered group for 23
-    # red. ``test_an_excluded_group_row_and_its_compound_parent_are_mutually_inert``
-    # pins the whole five-mutation table, the three no-ops included.
-    #
-    # What the leg ACTUALLY refuses today is every row that carries a ``pair_only``
-    # answer: measured over the bundle suite it fires on nine keys (``import/Pile``,
-    # ``Q``, ``X``, ``Z``, ``D``, ``L``, ``M``, ``endorphin``, ``5390184_pile``) and
-    # all nine are pair-only. The other half of the bound is the walk's own
-    # guarantee, kept as the rule's shape rather than as live code: ``_relates_to_any``
-    # refuses a title candidate that HOLDS a row, and the folder pass refuses an
-    # inferred candidate in ``claimed_ancestors``, so neither can reach here.
-    parents = {key}
-    container = (
-        claims is not None
-        and candidate.confidence in bundle_detect.INFERRED_CONFIDENCES
-        and not candidate.compound
-        and any(_strictly_inside_any(other, parents) for other in offered_dirs)
+    values, fields = bundle_enrich.fills(
+        display["creator"], display["licence"], display["licence_url"], record
     )
-    if models and not candidate.is_archive and not container and key.casefold() in folders:
+    enrichment = bundle_enrich.provenance(record, fields) if fields else None
+    # Every row asks the database, including the archive-only ones: what a row
+    # ANSWERS is not a reason to leave its own files uncounted and unclaimable -
+    # ``assets_total`` and the cover are read out of the same key the operator can
+    # see on disk (ADR 0010 Decision 7).
+    assets = registered_assets(session, key)
+    # The ONE ownership expression, shared with the create door (``_create_one``):
+    # the row's own subtree listing, narrowed by the report-wide one-owner map.
+    own_assets = _own_assets(assets, key=key, candidate=candidate)
+    owned_assets = _claimed_assets(own_assets, key=key, claims=claims)
+    models = [asset for asset in owned_assets if _suffix(asset.path) in library_scan.MODEL_SUFFIXES]
+    containment = [asset.id for asset in models]
+    if models and not candidate.is_archive and key.casefold() in folders:
         status, blocked_reason = READY, None
-    elif candidate.is_archive or candidate.pair_only:
-        # BEFORE the folder leg, and the order is load-bearing: the web Extract door
-        # (``ui/review/bundleRows.ts`` ``extractPathFor``) opens only on
-        # ``blocked_reason === "archive_only"``, so a zip row that fell through to
-        # ``unresolved_directory`` would lose its only way into the library.
+    elif candidate.is_archive:
+        # The Extract door (``ui/review/bundleRows.ts`` ``extractPathFor``) opens only
+        # on ``blocked_reason === "archive_only"``, so a zip row keeps that value as
+        # the NAME of its one door. What the engine recommends decides whether that
+        # door is actionable, and that is ``matches[0].creatable`` - never this field.
         status, blocked_reason = BLOCKED, ARCHIVE_ONLY
     elif key.casefold() not in folders:
         status, blocked_reason = BLOCKED, UNRESOLVED_DIRECTORY
@@ -2654,55 +1721,22 @@ def _report_row(
     if candidate.archive_path:
         archive = {
             "rel_path": _qualify(scope, candidate.archive_path),
-            "twin_verified": _archive_twin_verified(root, candidate.archive_path, candidate),
+            "twin_verified": _archive_twin_verified(root, candidate),
         }
-    # The twin identity, for the door that creates from the ARCHIVE. A directory row
-    # that twins a `.zip` is the same product the Extract door would have made from
-    # that `.zip`, and the archive-extract marker records the archive it read - so
-    # asking with it is what makes the two doors see each other.
-    #
-    # Restricted to non-archive candidates, and that is the SECOND of two locks on
-    # losing a `.zip` row - the first is `archive_identity`'s `archive:` prefix, and
-    # the measurement credits the prefix, not this guard. Asked of a `.zip` candidate
-    # today this leg is inert anyway: an `is_archive` candidate carries no
-    # `archive_path` of its own, so there is nothing to ask with. It stays because
-    # "a `.zip` row is never asked with an archive identity" is the rule rather than a
-    # coincidence of the current candidate shape. What is genuinely load-bearing is
-    # that the marker's `key` is not a bare path: measured with the prefix dropped,
-    # the `.zip` row answers `existing_project_match == "marker"` and the report's
-    # `already_created` goes 0 -> 1 for it, and the web layer hides already_created
-    # rows behind "Show created" - which is the only place the Extract door that
-    # `.zip` row exists to offer is ever shown. Pinned by
-    # `test_the_zip_row_keeps_its_extract_door_after_its_archive_became_a_project`,
-    # whose mutation is that prefix.
-    twin = None if candidate.is_archive else _qualify(scope, candidate.archive_path or "")
+    twin = _qualify(scope, candidate.archive_path) if candidate.archive_path and not candidate.is_archive else None
     existing = project_create_service.find_existing_project(
         session,
         key=key,
         archive=twin,
-        source_url=facts.source_url,
-        name=suggestion,
+        source_url=display["source_url"],
+        name=display["name_suggestion"],
         assets=containment,
         asset_index=asset_index,
     )
-    # One row read, two derived fields: the id is the identity, the name is what
-    # a human can read. A blank/whitespace name is reported as None so the wire
-    # never implies a name it does not have.
     existing_project_id = existing.project.id if existing else None
     existing_project_name = existing.project.name if existing else None
     if existing_project_name is not None and not existing_project_name.strip():
         existing_project_name = None
-    # Drift is asked only of the app's OWN record: a marker is proof this project
-    # was made from this bundle, so its marker is the walk root to difference
-    # against. A project found by shared files (``assets``) or one a human typed
-    # in proves the files, not the intent, so it reports no question at all -
-    # never a zero. A stale walk root is ``unknown`` for the same reason an
-    # identity key is: the marker's creation-time ``rel_dir`` can outlive the
-    # folder, and a zero over a root nothing is registered under is a claim the
-    # state cannot support. Presence is asked of the report-wide ``registered``
-    # rows the report already holds, so the probe adds no statement; both indexes
-    # were built once for the whole report, so this row costs none; the count and
-    # the ids cannot disagree because the count IS the ids' length.
     drift_state = bundle_drift.DRIFT_NOT_APPLICABLE
     drift_count: Optional[int] = None
     if existing is not None and existing.match == MATCH_MARKER:
@@ -2719,99 +1753,35 @@ def _report_row(
                 is_member=lambda asset_id: owner in asset_index.get(asset_id, ()),
             )
             drift_count = len(asset_ids)
-    # The detector's offers first, exactly as ``shape_matches`` orders them and with
-    # every shape creatable: a rule-offered shape is what the create path enacts.
-    matches: List[dict] = [
-        {
-            "shape": match.shape,
-            "rule": match.rule,
-            "confidence": match.confidence,
-            "model_count": match.counts.model,
-            "image_count": match.counts.image,
-            "text_count": match.counts.text,
-            "other_count": match.counts.other,
-            "groups": _wire_groups(candidate.key, match.groups, absorbed_keys),
-            "note": match.note,
-            "creatable": True,
-        }
-        for match in bundle_detect.shape_matches(
-            candidate.snapshot,
-            _candidate_docs(root, candidate),
-            facts,
-            candidate.manual_rule,
-            paired=bool(candidate.archive_path),
-        )
-    ]
-    # Then the engine's dissenting readings, which are honest offers the create path
-    # cannot enact yet. Where they sit keeps both order invariants this list has
-    # always had: when the LAST match is the manual entry (and there is more than
-    # one), the dissent goes immediately BEFORE it, so ``matches[-1]`` stays the
-    # manual offer; otherwise - the manual-recommends-itself row, where ``matches[0]``
-    # must stay that manual entry - it is APPENDED. A row the engine offers no
-    # dissent on is byte-identical to before this ticket, which is the property the
-    # tests pin.
-    dissent = _engine_dissent(root, candidate, facts, dissent_budget)
-    if dissent:
-        if len(matches) > 1 and matches[-1]["shape"] == bundle_detect.SHAPE_MANUAL:
-            matches[-1:-1] = dissent
-        else:
-            matches.extend(dissent)
+    matches = [_match_row(row_option, candidate) for row_option in candidate.options]
     return {
         "key": key,
         "rel_path": key,
-        "title": facts.title,
-        "name_suggestion": suggestion,
+        "title": display["title"],
+        "name_suggestion": display["name_suggestion"],
         "creator": values["creator"],
         "licence": values["licence"],
         "licence_url": values["licence_url"],
         "enrichment": enrichment,
-        "source_url": facts.source_url,
-        "detector": facts.detector,
-        "confidence": facts.confidence,
-        "metadata_shape": facts.metadata_shape,
-        "description_excerpt": facts.description,
-        "model_count": facts.counts.model,
-        "image_count": facts.counts.image,
-        "text_count": facts.counts.text,
-        "other_count": facts.counts.other,
-        # The `archive` role's count from this row's own facts - the nested zips the
-        # detector counted. Declared on `BundleDetectItemOut`, or the response model
-        # drops it silently; deliberately NOT on `BundleMatchOut` (see the comment
-        # there), so the report artifact's before/after pair stays comparable.
-        "archive_count": facts.counts.archive,
-        # R7's breakdown: one entry per model-bearing group, so a row that covers
-        # 60 parts in two editions says so instead of showing an anonymous total.
-        # Empty for every row that is not compound. Rendered by the SAME helper the
-        # `matches` list uses, so a match's groups can never disagree with the
-        # row's own.
-        "groups": _wire_groups(candidate.key, facts.groups, absorbed_keys),
-        # Every shape this listing satisfies, FIRST the one this row recommends -
-        # `matches[0]` equals the row's own detector/confidence/metadata_shape by
-        # construction, so a client can offer the alternatives without a second
-        # round trip and without ranking them itself. The manual entry is last:
-        # "everything under this path" is always on offer, whatever the rules said.
-        # Built into a local first because the engine's dissent is inserted into it.
+        "source_url": display["source_url"],
+        # The row's own recommendation, in lockstep with matches[0] by construction:
+        # `detector`/`confidence`/`metadata_shape` keep their wire names and now
+        # describe the ENGINE's option (Mf-1agz).
+        "detector": matches[0]["rule"],
+        "confidence": matches[0]["confidence"],
+        "metadata_shape": matches[0]["shape"],
+        "description_excerpt": display["description"],
+        # The counts come off `matches[0]` - the engine's own census - so the row
+        # and its recommendation cannot disagree about a single number either.
+        "model_count": matches[0]["model_count"],
+        "image_count": matches[0]["image_count"],
+        "text_count": matches[0]["text_count"],
+        "other_count": matches[0]["other_count"],
+        "archive_count": _archive_count(candidate),
+        "groups": matches[0]["groups"],
+        # The engine's whole offer, recommended first: a client can present the
+        # alternatives without a second round trip and without ranking them itself.
         "matches": matches,
-        # The row's cover and the create's cover are ONE expression: `_create_one`
-        # re-asks this same `_cover` over its own exclusion-filtered `owned_assets`
-        # instead of writing a second rule free to disagree. What IS true of every
-        # asset this returns an `asset_id` for: `cover_for_registered`' image leg is
-        # bounded to `IMAGE_SUFFIXES` and its model leg to `PREVIEW_SUFFIXES`, a subset
-        # of `MODEL_SUFFIXES`. So a cover is always a model or an image, and can never
-        # name a `.txt`, a `.stlbak` or a nested `.zip` - all of which a create now
-        # attaches (the member set is every registered file under the key, `_members_of`),
-        # which makes a cover a member of what it writes whenever no group is excluded.
-        # "Therefore a card cannot advertise a file the project it creates does not
-        # hold" holds only for a create that excludes NO group: this cover is chosen
-        # exclusion-blind over the whole owned set, so a create that excludes a group
-        # routinely leaves the row advertising a file its project will not hold - the
-        # exclusion re-ask in `_create_one` is what puts a member in its place, and
-        # `test_the_cover_never_picks_a_registered_image_under_an_excluded_group` is
-        # exactly that case (row cover `Inbox/foreign/cover.jpg`, project holds only
-        # `Inbox/part-0.stl`).
-        # Picking from `owned_assets` rather than `own_assets` is the one-owner
-        # narrowing: a model-preview the map gave to a deeper row cannot be this row's
-        # face.
         "cover": _cover(owned_assets, facts),
         "assets_total": len(assets),
         "status": status,
@@ -2820,32 +1790,49 @@ def _report_row(
         "existing_project_id": existing_project_id,
         "existing_project_name": existing_project_name,
         "existing_project_match": existing.match if existing else None,
-        # The state is the server's word for WHICH case this row is; the client
-        # formats any number (and renders an en dash for unknown) - the server
-        # never formats one. Declared on ``BundleDetectItemOut`` or the response
-        # model drops both keys silently.
         "bundle_drift_state": drift_state,
         "bundle_drift_count": drift_count,
         "dismissed": key in dismissals,
     }
 
 
-def _archive_twin_verified(root: Path, archive_path: str, candidate: BundleCandidate) -> bool:
+def _archive_count(candidate: BundleCandidate) -> int:
+    """How many archives this row holds, from its own measurement.
+
+    A directory's facts count them as `archives`; an archive's facts list the
+    INNER archives it chose not to open, which is the same question one level
+    down. An opaque inner archive still counts: it is payload.
+    """
+    if candidate.is_archive:
+        return len(candidate.facts.nested)
+    return int(candidate.facts.archives)
+
+
+def _archive_twin_verified(root: Path, candidate: BundleCandidate) -> bool:
     """``twin_verified`` for the archive this candidate attaches.
 
-    Which answer is honest depends on who paired the two. A directory the entry-root
-    route OR the stem route promoted, and a pair-only directory, was verified by
-    containment at scan time, so its archive is **re-verified at report time**: a
-    ``False`` there means the bytes on disk changed since the scan, never that the
-    pairing was never checked. A stem twin of a directory some rule offers keeps the
-    names-only answer, because there the operator paired them and a mismatch is
-    information for the operator rather than an assertion to raise.
+    Which answer is honest depends on who paired the two. The entry-root route had
+    to prove containment before it paired at all, so its archive is
+    **re-verified at report time**: a ``False`` there means the bytes on disk
+    changed since the scan, never that the pairing was never checked. The stem
+    route keeps the names-only answer: there the operator paired them, and a
+    mismatch is information for the operator rather than an assertion to raise.
     """
+    archive_path = candidate.archive_path or ""
     if candidate.entry_root:
-        return entry_root_verified(root / archive_path, candidate.entry_root, candidate.snapshot.entries)
-    if candidate.archive_owned or candidate.pair_only:
-        return _stem_pair_verified(root / archive_path, candidate.snapshot.entries)
-    return twin_verified(root / archive_path, candidate.snapshot.entries)
+        return entry_root_verified(root / archive_path, candidate.entry_root, candidate.files)
+    return twin_verified(root / archive_path, candidate.files)
+
+
+def _marker_keys() -> FrozenSet[str]:
+    """Every storage-relative bundle key a Project's marker names, one query.
+
+    The ONE read both report doors start from: ``_excluded_keys`` turns it into
+    walk-relative subtrees and the engine is handed it verbatim, so the two spaces
+    meet at exactly one place (``_qualify``) and neither is re-derived.
+    """
+    with Session(engine) as session:
+        return known_project_keys(session)
 
 
 def build_report(*, path: str = "", limit: int = DEFAULT_LIMIT, include_dismissed: bool = False) -> dict:
@@ -2867,8 +1854,15 @@ def build_report(*, path: str = "", limit: int = DEFAULT_LIMIT, include_dismisse
     root = STORAGE / scope if scope else STORAGE
     if not _is_inside_storage(root):
         raise HTTPException(status_code=400, detail="path must stay inside the storage root")
+    known = _marker_keys()
+    scan = scan_bundles(
+        root,
+        excluded_keys=_excluded_keys(scope, known=known),
+        project_keys=known,
+        scope=scope,
+    )
     return _report_from_scan(
-        scan_bundles(root, excluded_keys=_excluded_keys(scope)),
+        scan,
         root=root,
         scope=scope,
         limit=limit,
@@ -2894,42 +1888,29 @@ def _report_from_scan(
     The enrich map is read ONCE per report unless the caller already holds it: a
     read per row would be one Session and one query per bundle.
 
-    A group an operator excluded at confirmation comes back as its own row here.
-    The justification is the created project's own marker (``_compound_splits``),
-    never the ledger, and the row is a real ``_report_row`` result stamped with
-    the same rule set as every other row - a hand-built dict would answer a
-    different shape and detonate the counts pass. The set this can add is BOUNDED
-    by the markers in the database: one exclusion re-offers exactly the groups
-    that project recorded as excluded, so a storage tree with no created splits
-    re-offers nothing at all and the report is unchanged.
+    ``counts.offered`` is how many rows the report HAS and ``counts.withheld`` is
+    how many of them ``limit`` kept off the wire (Mf-1agz): a bounded report that
+    said only ``truncated: true`` made the operator guess whether the row they were
+    looking for was one of the ones dropped, and Vault was exactly that row.
     """
     dismissals = get_dismissals()
     if enrichments is None:
         enrichments = get_enrichments()
-    # One rule set for the whole report, so every row's stamp and the report's own
+    # ONE rule set for the whole report, so every row's stamp and the report's own
     # are the same value even if a table is edited mid-run.
-    rule_set = bundle_detect.rule_set()
+    rule_set = proposal_engine.rule_set()
     rows: List[dict] = []
-    # Walk-relative, exactly the space the candidates and the refusal paths live in.
-    absorbed_keys = {candidate.key for candidate in scan.absorbed}
-    absorbed_by_key = {candidate.key: candidate for candidate in scan.absorbed}
-    reoffered: List[str] = []
     with Session(engine) as session:
         folders = _folder_index(session)
-        # One query for ALL candidates: containment is a dict lookup per row.
+        # One query for ALL rows: containment is a dict lookup per row.
         asset_index = project_create_service.project_assets_index(session)
         # One registered set for the whole report too: drift is a string prefix
-        # and a dict lookup per row, never a per-candidate read.
+        # and a dict lookup per row, never a per-row read.
         registered = registered_index(session)
-        splits = _compound_splits(session)
-        # Two report-wide maps, built once from the walk's OWN candidate set, so
-        # every row answers ownership and containment against one settled answer
-        # rather than re-deriving it from its own prefix (see ``_claim_owners``).
+        # ONE ownership map, built once from the walk's own row set, so every row
+        # answers ownership against one settled answer rather than re-deriving it
+        # from its own prefix (see ``_claim_owners``).
         claims = _claim_owners(scan.candidates, scope=scope)
-        offered_dirs = _offered_dirs(scan.candidates, scope=scope)
-        # ONE allowance for every row of this report's dissent pass (see
-        # ``_DissentBudget``): a per-row budget would be no bound at all.
-        budget = _DissentBudget(MAX_DISSENT_ENTRIES)
         for candidate in scan.candidates:
             row = _report_row(
                 session,
@@ -2941,79 +1922,32 @@ def _report_from_scan(
                 registered=registered,
                 dismissals=dismissals,
                 enrichments=enrichments,
-                absorbed_keys=absorbed_keys,
                 claims=claims,
-                offered_dirs=offered_dirs,
-                dissent_budget=budget,
             )
-            if row is not None:
-                row["rule_set"] = rule_set["stamp"]
-                rows.append(row)
-        # The excluded groups, re-offered as rows of their own. An absorbed group
-        # had a row only BECAUSE it was absorbed, so re-offering it is what keeps
-        # the parts the operator excluded out of the vanish case. `_qualify` is
-        # used for the MARKER match only: the marker stores root-relative keys,
-        # while `absorbed_by_key` is keyed by the unqualified walk-relative key.
-        for candidate in scan.candidates:
-            for name in splits.get(_qualify(scope, candidate.key), ()):
-                relative = f"{candidate.key}/{name}"
-                absorbed = absorbed_by_key.get(relative)
-                if absorbed is None:
-                    continue
-                row = _report_row(
-                    session,
-                    root=root,
-                    scope=scope,
-                    candidate=absorbed,
-                    folders=folders,
-                    asset_index=asset_index,
-                    registered=registered,
-                    dismissals=dismissals,
-                    enrichments=enrichments,
-                    absorbed_keys=absorbed_keys,
-                    # INERT, deliberately. A re-offered group is a report courtesy
-                    # for a create the operator already made: it is not part of the
-                    # walk's candidate set, so it may neither take a model away from
-                    # the compound row that does write (``claims=None``) nor count as
-                    # a container against it (``offered_dirs`` empty) - a compound
-                    # that contained its own re-offered group would cancel itself.
-                    # Both legs off is also what keeps these rows byte-for-byte the
-                    # status HEAD gave them: no claim filter, no container leg.
-                    claims=None,
-                    offered_dirs=frozenset(),
-                    dissent_budget=budget,
-                )
-                if row is None:
-                    continue
-                row["rule_set"] = rule_set["stamp"]
-                rows.append(row)
-                reoffered.append(relative)
+            row["rule_set"] = rule_set["stamp"]
+            rows.append(row)
 
-    # Re-offered rows are appended after the candidates; this sort is what keeps
-    # the physical order independent of that.
     rows.sort(key=lambda row: (row["key"].casefold(), row["key"]))
     visible = rows if include_dismissed else [row for row in rows if not row["dismissed"]]
+    bound = max(0, int(limit))
     counts = {
         "total": len(visible),
-        "high": sum(1 for row in visible if row["confidence"] == bundle_detect.CONFIDENCE_HIGH),
-        "medium": sum(1 for row in visible if row["confidence"] == bundle_detect.CONFIDENCE_MEDIUM),
-        "low": sum(1 for row in visible if row["confidence"] == bundle_detect.CONFIDENCE_LOW),
+        "high": sum(1 for row in visible if row["confidence"] == "high"),
+        "medium": sum(1 for row in visible if row["confidence"] == "medium"),
+        "low": sum(1 for row in visible if row["confidence"] == "low"),
         "ready": sum(1 for row in visible if row["status"] == READY),
         "blocked": sum(1 for row in visible if row["status"] == BLOCKED),
         "dismissed": sum(1 for row in rows if row["dismissed"]),
         "already_created": sum(1 for row in visible if row["existing_project_id"]),
+        # What the wire actually carried, and what the bound kept back. `total`
+        # keeps its old meaning (the rows this report has); these two say what the
+        # client is and is not looking at.
+        "offered": len(visible),
+        "withheld": max(0, len(visible) - bound),
     }
-    bound = max(0, int(limit))
-    live_keys = {_qualify(scope, candidate.key) for candidate in scan.candidates} | {
-        _qualify(scope, key) for key in reoffered
-    }
-    # The re-offer is a REPORT-level act: the ledger still says these paths were
-    # absorbed by R7, and only the row list contradicts it. Comparing the raw
-    # walk-relative `refusal.rel_path` against the walk-relative re-offered keys
-    # is what keeps the two spaces from drifting under a scope.
-    reoffered_relative = set(reoffered)
+    live_keys = {_qualify(scope, candidate.key) for candidate in scan.candidates}
     scoped_duplicates = tuple(
-        bundle_detect.DuplicateGroup(
+        library_scan.DuplicateGroup(
             digest=group.digest,
             size=group.size,
             paths=tuple(_qualify(scope, path) for path in group.paths),
@@ -3035,7 +1969,7 @@ def _report_from_scan(
             for group in scoped_duplicates
         ],
         "duplicates_total_bytes": sum(group.reclaimable_bytes for group in scoped_duplicates),
-        "duplicates_text": bundle_detect.duplicate_report_text(scoped_duplicates),
+        "duplicates_text": library_scan.duplicate_report_text(scoped_duplicates),
         "stale_dismissals": sorted(
             (key for key in dismissals if key not in live_keys), key=lambda key: (key.casefold(), key)
         ),
@@ -3044,7 +1978,6 @@ def _report_from_scan(
             (
                 {"rel_path": _qualify(scope, refusal.rel_path), "rule": refusal.rule, "kind": refusal.kind}
                 for refusal in scan.refusals
-                if refusal.rel_path not in reoffered_relative
             ),
             key=lambda item: item["rel_path"],
         ),
@@ -3055,13 +1988,14 @@ def _report_from_scan(
 class BundleCreateItem:
     """One confirmed bundle: which one, what to call it, and whether to enrich it.
 
-    ``exclude_groups`` names the compound row's groups the operator says are NOT
-    part of this product. Each must be a foreign group the walk absorbed as a row
-    of its own: ``_exclusion_prefixes`` states why a group outside that set is
-    refused, and it is the ticket's "when excluded it must remain a bundle row of
-    its own rather than vanishing". ``shape`` names one of the row's ``matches``
-    shapes; ``None`` means the row's recommended shape, exactly as before this
-    field existed. An unoffered shape answers ``failed``/``unknown shape``.
+    ``exclude_groups`` names the engine's groups the operator says are NOT part of
+    this product. Each must be one of the chosen match's own groups, marked
+    ``foreign`` (somebody else's thing) and ``separable`` (it could stand as a
+    project of its own), and ``_exclusion_prefixes`` states why a group outside
+    that set is refused: its parts would otherwise land in no project and in no
+    row. ``shape`` names one of the row's ``matches`` shapes; ``None`` means the
+    row's recommended shape. An unoffered shape answers ``failed``/``unknown
+    shape``.
     """
 
     key: str
@@ -3176,30 +2110,18 @@ def _create_one(
     key = (item.key or "").strip()
     if row is None or candidate is None:
         return _result(key, CREATE_FAILED, reason="unknown bundle")
-    # THE DEAD END DIES. ``blocked`` still means database readiness (Mf-um7x) and
-    # the Extract door still keys on ``archive_only`` - but a shape or scan
-    # mismatch is no longer a refusal. A row the rules declined is offered as the
-    # manual SCOPE and the operator's choice is what creates it; the create-time
-    # belt (``contains_bundles``), the exclusion validation and the primitive's
-    # empty-member refusal are what answer from here on.
+    # ``blocked`` still means database readiness (Mf-um7x) and the Extract door
+    # still keys on ``archive_only`` - but a shape or scan mismatch is not a
+    # refusal. A `.zip` row is blocked/archive_only because its only door is
+    # Extract: the create was never going to make a project from an archive.
     if row["blocked_reason"] == ARCHIVE_ONLY:
         return _result(key, CREATE_BLOCKED, reason=row["blocked_reason"] or ARCHIVE_ONLY)
     # The create follows the operator's chosen shape, not the row's recommendation:
-    # every create carries the shape it was made from, so a manual row and a
-    # compound row are distinguishable by their markers. A hand-built row may carry
-    # no `matches` and no `metadata_shape` at all; then its detector names the shape
-    # and its own `groups` is the only source of truth.
-    recommended_shape = row.get("metadata_shape")
-    if not recommended_shape:
-        # A hand-built row (tests, and any caller that never read the report) has no
-        # `metadata_shape`; the candidate's own kind is then the only signal, and a
-        # plain row falls back to its detector name.
-        if candidate.compound:
-            recommended_shape = bundle_detect.SHAPE_COMPOUND
-        elif candidate.manual:
-            recommended_shape = bundle_detect.SHAPE_MANUAL
-        else:
-            recommended_shape = row["detector"]
+    # every create carries the shape it was made from, so a split row arranged into
+    # one project and a plain one-project row are distinguishable by their markers.
+    # A hand-built row may carry no `metadata_shape` and no `matches` at all; then
+    # its detector word is the only signal.
+    recommended_shape = row.get("metadata_shape") or row["detector"]
     matches = row.get("matches") or []
     offered = [match["shape"] for match in matches] or [recommended_shape]
     chosen = item.shape or recommended_shape
@@ -3217,12 +2139,12 @@ def _create_one(
     if match.get("creatable") is False:
         return _result(key, CREATE_FAILED, reason=NEEDS_ARRANGE)
     # Validation runs before anything that touches the session, and before
-    # `find_existing_project` on purpose: an already-created compound row whose
-    # group list moved answers a validation reason, never `already_created`.
-    # The chosen match's groups are the ONE source for exclusion validation and
-    # for the compound marker, so a create can never validate against groups the
-    # chosen shape does not have. For the recommended compound row this is
-    # byte-identical to the row's own `groups`.
+    # `find_existing_project` on purpose: an already-created row whose group list
+    # moved answers a validation reason, never `already_created`. The chosen
+    # match's groups are the ONE source for exclusion validation and for the
+    # marker, so a create can never validate against groups the chosen shape does
+    # not have. For the recommended shape this is byte-identical to the row's own
+    # `groups`.
     groups = match.get("groups") or []
     prefixes, refusal = _exclusion_prefixes(key, groups, item.exclude_groups)
     if refusal is not None:
@@ -3235,8 +2157,8 @@ def _create_one(
         "detector": row["detector"],
         "confidence": row["confidence"],
         # Every create records the shape it was made from and the rule that offered
-        # that shape. `detector`/`confidence` stay byte-identical to the row; a
-        # manual create says ``shape=manual`` and its rule is the ledger word.
+        # that shape. `detector`/`confidence` stay byte-identical to the row, and the
+        # rule is the ``engine:<shape>`` token - one owner, one spelling.
         "shape": chosen,
         "rule": match.get("rule") or row["detector"],
         "rel_dir": row["rel_path"],
@@ -3265,7 +2187,7 @@ def _create_one(
         owned_assets = _claimed_assets(included_assets, key=key, claims=claims)
         # THE MEMBER SET, decided once: every registered asset this row owns (the
         # excluded groups already filtered out above) is a member, and its ROLE comes
-        # from the detector's own classifier inside `_members_of`. There is no suffix
+        # from the scan's own classifier inside `_members_of`. There is no suffix
         # table anywhere in this path and no `kinds=` hand-down any more - the attach
         # question ("who is in the project") and the role question ("what IS that
         # file") are one expression, so a project and the row it came from cannot
@@ -3280,7 +2202,7 @@ def _create_one(
         # `Dedupe.containment` on the create call. It is a VIEW of the member set, never
         # a second membership test - the roles came from `classify_entry` once, in
         # `_members_of`, and this body holds no `classify_entry` call at all.
-        model_assets = [entry.asset.id for entry in member_set.by_role(bundle_detect.MODEL)]
+        model_assets = [entry.asset.id for entry in member_set.by_role(library_scan.MODEL)]
         attached = set(model_assets)
         # Bucket the attach set by group once, so `attached` below is a lookup
         # rather than a prefix scan repeated for every group.
@@ -3299,20 +2221,16 @@ def _create_one(
             # project. `owned_assets` is the own-and-claimed set minus every excluded
             # group's prefix, so an excluded group's image can still never win the
             # face - it was filtered out two lines above, not here.
-            cover_facts = _candidate_facts(STORAGE, candidate)
-            if cover_facts is not None:
-                # A facts-level cover under an excluded prefix names the very
-                # thing the operator said is not part of this product, so it is
-                # dropped rather than allowed to win the unregistered-image leg.
-                # `cover_entry` is BUNDLE-relative while a prefix is
-                # storage-relative, so the key is prepended before comparing -
-                # without that the two spaces never intersect and the leg wins.
-                if cover_facts.cover_entry and f"{key}/{cover_facts.cover_entry}".startswith(prefixes):
-                    cover_facts = replace(cover_facts, cover_entry=None)
-                cover = _cover(owned_assets, cover_facts)
-            else:
-                # No facts means no cover can be proven outside the exclusion.
-                cover = _cover_none_fields(None, COVER_NONE)
+            # A facts-level cover under an excluded prefix names the very thing
+            # the operator said is not part of this product, so it is dropped
+            # rather than allowed to win the unregistered-image leg. The engine's
+            # cover entry is BUNDLE-relative while a prefix is storage-relative,
+            # so the key is prepended before comparing - without that the two
+            # spaces never intersect and the leg wins.
+            entry = _cover_entry(candidate.facts)
+            if entry and f"{key}/{entry}".startswith(prefixes):
+                entry = None
+            cover = cover_for_registered(owned_assets, entry)
         # `_cover`'s legs do not share a key space: the registered legs name a
         # storage-relative asset path, the unregistered leg a bundle-relative
         # entry. Settle one storage-relative path here so the marker never
@@ -3320,38 +2238,29 @@ def _create_one(
         cover_rel_path = cover["rel_path"]
         if cover_rel_path and not cover_rel_path.startswith(key_prefix):
             cover_rel_path = f"{key_prefix}{cover_rel_path}"
-        # THE BELT IS UNTOUCHED, and neither `assets` nor `own_assets` is filtered
-        # by the exclusion. The create-time belt is the same rule the report
-        # applies: every inferred confidence, not just `low`, is refused when its
-        # assets include another bundle's, and the difference it looks for is
-        # another bundle's assets. Filtering either list would make
-        # `len(assets) > len(own_assets)` true for EVERY excluded create, so every
-        # exclusion would answer `failed`/`contains_bundles`; and exempting the
-        # compound row from the belt is the named anti-fix. The belt stays live on
-        # a `low` compound row, and the refusal comes before the project row, so
-        # it can never leave a half-created project.
+        # Neither `assets` nor `own_assets` is filtered by the exclusion: the belt
+        # asks whether the row's registered subtree holds MORE than the row owns,
+        # and filtering either list would make that true for every excluded create
+        # - so every exclusion would answer `failed`/`contains_bundles`.
         #
-        # What moved is WHERE it is answered: the reason is settled here and handed
-        # to the primitive, which asks it AFTER the dedupe and BEFORE the write. A
-        # row that both already exists and would be refused therefore still
-        # answers `already_created` - the operator has the project, and that is the
-        # more useful sentence than the one about a create that never happens.
+        # What moved is WHERE the answer is given: the reason is settled here and
+        # handed to the primitive, which asks it AFTER the dedupe and BEFORE the
+        # write. A row that both already exists and would be refused therefore
+        # still answers `already_created` - the operator has the project, and that
+        # is the more useful sentence than one about a create that never happens.
         belt = (
             CONTAINS_BUNDLES
-            if row["confidence"] in bundle_detect.INFERRED_CONFIDENCES
-            and len(assets) > len(own_assets)
+            if row["confidence"] != "high" and len(assets) > len(own_assets)
             else None
         )
-        # The compound marker runs when the CHOSEN shape is compound, not when the
-        # candidate is: the operator's choice decides what the project records.
-        # The groups come from the chosen match (the one source of truth), while
-        # `attached` still comes from `models_by_group` - the files this create
-        # actually attaches. A manual create carries NO `groups` and NO `cover`
-        # block: manual is a SCOPE, not a compound. Members are NOT decided by the
-        # shape - `owned_assets`/`members`/`model_assets`/`cover`/`belt` read the
-        # same expressions as before, because a manual create changes the SCOPE of
-        # one project over the whole subtree, never which kinds a project holds.
-        if chosen == bundle_detect.SHAPE_COMPOUND:
+        # The group marker runs when the CHOSEN match HAS groups, not on a shape
+        # name: the operator's choice decides what the project records, and the
+        # groups come from that match (the one source of truth) while `attached`
+        # still comes from `models_by_group` - the files this create actually
+        # attaches. Members are never decided by the shape:
+        # `owned_assets`/`members`/`model_assets`/`cover`/`belt` read the same
+        # expressions whatever the choice is.
+        if groups:
             # The guard uses the walk's own verdict, not the row's: in-process both
             # come from ONE `scan`, so they cannot disagree.
             # `model_count` is what the SCAN registers, and `attached` is how many
@@ -3360,7 +2269,7 @@ def _create_one(
             # `._*` AppleDouble sidecar names no model and the two numbers agree on
             # a whole group; they differ only by an EXCLUSION, which `attached`
             # carries alone. That agreement is a property of the two doors asking
-            # the same hidden-name rule: the storage scan and the detector both run
+            # the same hidden-name rule: the storage scan and the engine both run
             # with hidden names skipped (the default). Opening the MOUNT door with
             # `IMPORT_MOUNT_INCLUDE_HIDDEN=1` makes it register the sidecars the
             # detector still refuses, which separates the numbers again - named in
@@ -3500,25 +2409,18 @@ def create_bundles(items: Sequence[BundleCreateItem], ctx: audit.AuditContext) -
     same way ``build_report`` derives it - one derivation, so a create can never
     answer ``unknown bundle`` for a row its own report offered.
     """
-    scan = scan_bundles(STORAGE, excluded_keys=_excluded_keys(""))
+    known = _marker_keys()
+    scan = scan_bundles(STORAGE, excluded_keys=_excluded_keys("", known=known), project_keys=known)
     report = _report_from_scan(scan, root=STORAGE, scope="", limit=MAX_SCAN_ENTRIES, include_dismissed=True)
     rows = {row["key"]: row for row in report["bundles"]}
-    by_key = {candidate.key: candidate for candidate in scan.candidates}
-    # The candidate rides along so the create door can reach an absorbed group;
-    # the `in rows` filter keeps the candidate map honest to the same set the
-    # report offered. The actual refusal for an un-offered key happens at the row
-    # lookup at the top of `_create_one`, not here.
-    by_key.update({candidate.key: candidate for candidate in scan.absorbed if candidate.key in rows})
+    by_key = scan.by_key
     # One query for the whole create pass, so a create is never O(items) queries.
     with Session(engine) as session:
         asset_index = project_create_service.project_assets_index(session)
     # The same report-wide one-owner map the report rows were stamped with, built
     # from the SAME scan, so the create door and the report cannot disagree about
-    # which row owns a model. An absorbed group re-offered as its own row is served
-    # `claims=None` exactly as `_report_from_scan` serves it: it never writes
-    # anything, so it may neither take a path away nor have one taken from it.
+    # which row owns a model.
     claims = _claim_owners(scan.candidates, scope="")
-    absorbed_keys = {candidate.key for candidate in scan.absorbed}
     counters = {CREATE_CREATED: 0, CREATE_SKIPPED: 0, CREATE_BLOCKED: 0, CREATE_FAILED: 0}
     results: List[dict] = []
     for item in items:
@@ -3529,7 +2431,7 @@ def create_bundles(items: Sequence[BundleCreateItem], ctx: audit.AuditContext) -
             by_key.get(key),
             ctx,
             asset_index=asset_index,
-            claims=None if key in absorbed_keys else claims,
+            claims=claims,
         )
         counters[result["status"]] += 1
         results.append(result)
@@ -3627,7 +2529,13 @@ def enrich_bundles(keys: Sequence[str], *, cookie: Optional[str], refresh: bool,
         # The id comes from the resolver, the one definition ``cache_key`` is built
         # from, so the page fetched and the key written cannot name different
         # things. Both are None for the same URL, hence one refusal.
-        thing_id = bundle_detect.thingiverse_thing_id_from_url(row["source_url"] or "")
+        #
+        # Function-local like the fetch below, and for the same reason: the
+        # resolver is the module that can open a socket, so the report path must
+        # never reach it through this module's own scope (see the AST test).
+        from import_resolvers import thingiverse_thing_id_from_url
+
+        thing_id = thingiverse_thing_id_from_url(row["source_url"] or "")
         cache_key = bundle_enrich.cache_key(row["source_url"])
         if thing_id is None or cache_key is None:
             results.append(
@@ -3662,8 +2570,8 @@ def enrich_bundles(keys: Sequence[str], *, cookie: Optional[str], refresh: bool,
             )
             counters[bundle_enrich.STATUS_CACHED] += 1
             continue
-        # Function-local on purpose: the one name that can open a socket stays out
-        # of this module's scope so the report path cannot reach it (see the AST
+        # Function-local on purpose: the two names that can open a socket stay out
+        # of this module's scope so the report path cannot reach them (see the AST
         # test). Importing here costs a dict lookup and nothing else.
         from import_resolvers import fetch_thingiverse_thing_page, thingiverse_no_metadata_detail
 

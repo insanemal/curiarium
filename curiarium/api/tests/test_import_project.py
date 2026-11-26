@@ -1295,7 +1295,9 @@ def test_the_readers_still_read_the_new_marker(monkeypatch: pytest.MonkeyPatch, 
 
     assert project_service.bundle_marker_of(raw) == marker
     with Session(engine) as session:
-        assert bundle_service._compound_splits(session).get(marker["key"]) is None
+        # Since Mf-1agz there is no compound belt to reinterpret a marker: the
+        # report's rows come from the engine, and an identity key is not a
+        # directory key - which is the property this assertion keeps.
         assert (
             project_create_service.find_existing_project(
                 session, key="import/17_ClockworkMonster", source_url=None, name="", assets=()

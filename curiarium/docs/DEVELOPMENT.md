@@ -244,8 +244,20 @@ The engine's `MODEL_EXTS` is a DELIBERATE superset of the API's five-suffix tabl
 a proposal may name a payload no importer accepts, which is exactly what these
 proposals are for. So `check_model_table.py` must not be pointed at it - that
 script pins equality for the four copies that really must agree. The containment
-(`bundle_detect.MODEL_SUFFIXES <= proposal_engine.MODEL_EXTS`) lives in the test
+(`library_scan.MODEL_SUFFIXES <= proposal_engine.MODEL_EXTS`) lives in the test
 instead.
+
+Since `Mf-1agz` the engine is also the ONLY thing that ranks the review queue:
+`bundle_detect` is deleted, `bundle_service` asks `proposal_engine.propose()` about
+every row (folder or `.zip`) and serves its option list as `matches`, and the
+invariant is pinned by `curiarium/api/tests/test_bundle_report_engine.py` - for
+every synthetic row the report's recommendation must equal
+`propose(...)[0].shape`, with `engine:<shape>` as every match's rule. Two things
+about that seam are easy to break and are named here rather than found later: the
+report passes `git_timeout=5.0` (it DOES probe git - the label corpus needs it -
+but never unbounded), and it passes `project_keys` in STORAGE-relative spelling,
+because `Facts.rel` is storage-relative and an `add-to-project` reading is
+impossible without them.
 
 ## The arrange surface (approving a shape, and undoing it)
 

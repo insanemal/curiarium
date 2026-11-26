@@ -32,7 +32,8 @@ from html.parser import HTMLParser
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
-import bundle_detect
+import proposal_engine
+from import_resolvers import thingiverse_thing_id_from_url
 
 # The window a cached page is trusted for: re-opening the queue must not
 # re-fetch, but a vendor edit should eventually be seen.
@@ -107,14 +108,15 @@ class _JsonLdParser(HTMLParser):
 def cache_key(source_url: Optional[str]) -> Optional[str]:
     """``"thingiverse:<id>"`` when the URL names a Thingiverse thing, else ``None``.
 
-    The id is read by the shipped ``bundle_detect.thingiverse_thing_id_from_url``,
-    so the cache, the detection report and the import door cannot disagree about
-    what a URL means. A blank URL names nothing and gets no key.
+    The id is read by the shipped ``import_resolvers.thingiverse_thing_id_from_url``
+    (the one reader, Mf-1agz), so the cache, the detection report and the import
+    door cannot disagree about what a URL means. A blank URL names nothing and
+    gets no key.
     """
     cleaned = (source_url or "").strip()
     if not cleaned:
         return None
-    thing_id = bundle_detect.thingiverse_thing_id_from_url(cleaned)
+    thing_id = thingiverse_thing_id_from_url(cleaned)
     if not thing_id:
         return None
     return f"{CACHE_KEY_PREFIX}{thing_id}"
@@ -148,7 +150,7 @@ def licence_from_page(value: Optional[str]) -> Tuple[Optional[str], Optional[str
     """``(display, url)`` for a licence a page states, by its own spelling.
 
     A value that is not a URL is a vendor token (an API-style ``cc-nc-sa``), and
-    belongs to ``bundle_detect.licence_from_token``'s table unchanged. A URL is
+    belongs to the engine's ``licence_from_token`` table unchanged. A URL is
     read by DEED PATH: the display comes from that same table, while the URL is
     always the page's VERBATIM string. Never the table's own URL: the table
     hardcodes ``.../4.0/``, so a real ``by-nc-sa/3.0`` page would be silently
@@ -160,7 +162,7 @@ def licence_from_page(value: Optional[str]) -> Tuple[Optional[str], Optional[str
     if text is None:
         return None, None
     if not _is_url(text):
-        return bundle_detect.licence_from_token(text)
+        return proposal_engine.licence_from_token(text)
     segments = [segment for segment in urlparse(text).path.split("/") if segment]
     if len(segments) < 2:
         return text, text
@@ -259,7 +261,7 @@ def provenance(record: Mapping, fields: Sequence[str]) -> dict:
 
 def _licensed_deed(value: str, slug: str) -> Tuple[Optional[str], Optional[str]]:
     """The display from the shared table, the URL always the page's own string."""
-    display, table_url = bundle_detect.licence_from_token("cc_" + slug.replace("-", "_"))
+    display, table_url = proposal_engine.licence_from_token("cc_" + slug.replace("-", "_"))
     if table_url is None:
         return value, value
     return display, value

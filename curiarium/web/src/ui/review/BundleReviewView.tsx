@@ -1329,7 +1329,10 @@ export default function BundleReviewView({
     <>
       {report?.truncated && (
         <p className="review-notice">
-          The walk stopped at the report limit; some bundles may be missing.
+          {/* The report's own array, not the filtered view: the shortfall this
+              sentence names is the server's `limit`, and the filter chips are the
+              operator's choice, already said by the summary beside the list. */}
+          {`Showing ${rows.length} of ${report.counts.offered} \u2014 ${report.counts.withheld} bundles are not in this list.`}
         </p>
       )}
       {stale.length > 0 && (

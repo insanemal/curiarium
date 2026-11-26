@@ -491,6 +491,10 @@ function makeReport(
     truncated: false,
     counts: {
       total: bundles.length,
+      // The wire always carries the pair now: this fixture has every row on it,
+      // so nothing is withheld unless a test overrides the numbers.
+      offered: bundles.length,
+      withheld: 0,
       high: bundles.filter(row => row.confidence === "high").length,
       medium: bundles.filter(row => row.confidence === "medium").length,
       low: bundles.filter(row => row.confidence === "low").length,
@@ -877,12 +881,26 @@ describe("BundleReviewView states", () => {
     expect(rowKeys()).toEqual(["Moai", "Cable_clip"]);
   });
 
-  it("warns that a truncated walk may be missing bundles", () => {
-    renderView(makeState({ report: makeReport([moai], { truncated: true }) }));
+  it("says how many bundles the report bound left off the wire", () => {
+    const report = makeReport([moai, cableClip], { truncated: true });
+    // The report HAS five rows and the wire carried two of them: the notice says
+    // what the operator is looking at, not merely that something is missing.
+    report.counts.offered = 5;
+    report.counts.withheld = 3;
 
+    renderView(makeState({ report }));
+
+    expect(screen.getByText("Showing 2 of 5 \u2014 3 bundles are not in this list.")).toBeTruthy();
+    // The old guess at a fixed sentence is gone, not merely outnumbered.
     expect(
-      screen.getByText("The walk stopped at the report limit; some bundles may be missing."),
-    ).toBeTruthy();
+      screen.queryByText("The walk stopped at the report limit; some bundles may be missing."),
+    ).toBeNull();
+  });
+
+  it("says nothing about the bound when the report is not truncated", () => {
+    renderView(makeState({ report: makeReport([moai, cableClip]) }));
+
+    expect(screen.queryByText(/bundles are not in this list\./)).toBeNull();
   });
 
   it("counts stale dismissals in the singular and the plural", () => {
@@ -3250,8 +3268,14 @@ describe("BundleReviewView import-as chooser", () => {
 
     renderView(makeState({ report: makeReport([moaiZip]) }));
 
-    // The zip-only row keeps the refusal word and offers its own door instead.
-    expect(statusCell(moaiZip.key).textContent).toContain("Blocked - ");
+    // The zip-only row offers its own door instead of a create. This fixture's
+    // recommendation sets no `creatable: false`, so the words follow that door:
+    // the sentence says what the row is and the refusal word is not spoken beside
+    // a live Extract button.
+    expect(statusCell(moaiZip.key).textContent).toBe(
+      "zip only - extract the archive in place, then the scan registers it",
+    );
+    expect(statusCell(moaiZip.key).textContent).not.toContain("Blocked");
     expect(
       (within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement)
         .disabled,

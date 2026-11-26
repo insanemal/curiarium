@@ -45,7 +45,6 @@ import archive_project_service
 import asset_file_service
 import asset_service
 import audit
-import bundle_detect
 import bundle_service
 import db
 import file_utils
@@ -617,8 +616,9 @@ def test_no_bundle_rule_is_consulted_on_this_path(
     added by the next refactor:
 
     * the door's transitive import closure contains no bundle module at all -
-      and not `archive_service`, which would pull `bundle_detect` in through its
-      twin-pairing check;
+      and not `archive_service`, which would pull the scan in through its
+      twin-pairing check (Mf-1agz: `bundle_detect` is deleted, so the closure is now
+      checked against the engine's vocabulary instead);
     * every rule function that could answer "what is this folder" explodes if it
       is called, and the create still succeeds.
     """
@@ -628,26 +628,29 @@ def test_no_bundle_rule_is_consulted_on_this_path(
     extract(client, headers)
     scan()
 
-    forbidden = {"bundle_detect", "bundle_service", "bundle_drift", "archive_service"}
+    forbidden = {"bundle_service", "bundle_drift", "archive_service"}
     for module_name in sorted(reachable_modules("archive_project_service")):
         assert module_name not in forbidden, f"{module_name} is in the door's import closure"
 
     def explode(*_args, **_kwargs):
         raise AssertionError("a bundle rule was consulted on the extract-and-create path")
 
+    # The engine is what would answer "what is this folder" now, so the rules that
+    # could are made to explode: a proposal, a ranking, a pairing stem.
+    import proposal_engine
+
     for name in (
-        "archive_owned_decision",
-        "archive_owned_facts",
-        "common_entry_root",
-        "is_counted_model",
-        "is_bundle_member",
+        "propose",
+        "propose_archive",
+        "measure",
+        "measure_archive",
         "twin_key",
+        "common_entry_root",
+        "archive_payload_contained",
         "rule_set",
         "rule_set_tables",
-        "duplicate_groups",
-        "generic_doc_candidates",
     ):
-        monkeypatch.setattr(bundle_detect, name, explode)
+        monkeypatch.setattr(proposal_engine, name, explode)
     for name in ("scan_bundles", "iter_bundle_candidates", "create_bundles"):
         # `find_existing_project` used to be in this list, and used to belong in it:
         # it was a `bundle_service` function and the archive door had its own
@@ -1436,7 +1439,7 @@ def test_the_twin_name_matches_what_the_extract_door_actually_wrote(
 ) -> None:
     """`archive_project_service` recomputes the twin instead of importing it.
 
-    It has to: importing `archive_service` would put `bundle_detect` in this
+    It has to: importing `archive_service` would put the whole bundle scan in this
     door's closure. The price is a second naming rule, so the agreement with the
     door that wrote the bytes is pinned rather than assumed - the response's own
     `destination` is the authority here, not a name this test invented.

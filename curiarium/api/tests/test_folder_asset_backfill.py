@@ -515,12 +515,29 @@ def test_the_backfill_touches_no_file(isolated_storage: Path) -> None:
 def test_a_rescan_links_a_legacy_folder_and_its_bundle_becomes_creatable(
     isolated_storage: Path,
 ) -> None:
+    """A legacy folder row blocks its bundle; the next scan links it and it creates.
+
+    Mf-1agz moved the ROW: a row sits where the engine says the product is, so this
+    bundle reports at its own top folder rather than at a leaf three levels down.
+    The legacy shape is applied to THAT folder row - `storage_path` NULL, the
+    flattened v3 state - because that single fact is the whole legacy refusal:
+    `_folder_index` keys on a path, so a NULL row can never resolve, and a rescan
+    that heals it makes the same bundle creatable with no code change.
+    """
     storage = isolated_storage
-    bundle_relative = "Unsorted/coll/files/niche"
+    bundle_relative = "Legacy Bundle"
     moai_bundle(storage, bundle_relative)
     scan()
 
-    leaf_id = flatten_to_legacy(storage, bundle_relative, LEGACY_LABEL)
+    with Session(engine) as session:
+        folder = session.exec(
+            select(Folder).where(Folder.storage_path == bundle_relative)
+        ).one()
+        leaf_id = folder.id
+        folder.storage_path = None
+        folder.name = LEGACY_LABEL
+        session.add(folder)
+        session.commit()
 
     blocked = row_for(bundle_service.build_report(), bundle_relative)
     assert blocked["status"] == "blocked"

@@ -105,6 +105,8 @@ function makeReport(bundles: BundleDetectItem[] = [], truncated = false): Bundle
     truncated,
     counts: {
       total: bundles.length,
+      offered: bundles.length,
+      withheld: 0,
       high: 0,
       low: 0,
       ready: 0,

@@ -3250,10 +3250,29 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     anything further behind `low`), not invented here. Withholding the reading
     would hide the disagreement between the two rule sets, which is the reason for
     consulting it at all; enacting it needs an arrange step, which is `Mf-v9eg`
-    and does not exist yet. The call is `probe_git=False`: `propose()` shells out
+    and does not exist yet. The call was `probe_git=False`: `propose()` shells out
     to git for a checkout's tracked set, and a GET handler may never run a
     subprocess. A directory that vanished mid-walk answers no dissent, so a report
     never fails because the disk moved under it.
+
+    **Amended by `Mf-1agz`: the report DOES probe git, bounded, and this
+    deliberately reverses `Mf-yitm`'s `probe_git=False`.** The sentence above is
+    right about the hazard and wrong about the answer. Correctness decided it: the
+    owner-approved label corpus is **7/7 with probing and 6/7 without** -
+    `import/endorphin` is a git checkout carrying five products, its label is
+    "one", and only `git-project` satisfies it. The hazard is answered by BOUNDING
+    the call instead of forbidding it: `propose()` gained a `git_timeout` kwarg
+    threaded to `git_state()`, and the report passes `git_timeout=5.0`, so one
+    hung checkout costs that row at most five seconds, never
+    `GIT_TIMEOUT_SECONDS` (120). The measured cost over the live 175-row
+    population is **+0.51 s** (two runs: +0.510 s and +0.480 s): two rows have a
+    repo (`import/endorphin`, 66 tracked files; `import/RepRap-MultiFilament`, 150
+    tracked) and the other 173 pay one `os.path.exists`. Whole-report wall clock
+    over the live tree: **2.66 s with probing, 2.15 s without** (best of three,
+    warm cache, the same code that produced the after-artifact). The rule this ADR keeps is therefore
+    not "no subprocess on a GET" but **"no unbounded subprocess on a GET"**; the
+    CLI keeps the engine's default (`probe_git=True`, no bound of its own), so
+    both sites answer the same question and only the report's budget differs.
 
     **The create path refuses that shape before it writes anything.**
     `POST /bundles/create` with a `creatable: false` match returns `failed` with
@@ -3279,6 +3298,127 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
     engine's tables changed; if the script grew a second copy of the rules instead
     of importing the one module; or if the detector's own offered shapes stopped
     being creatable.
+
+34. **ONE engine ranks, and `bundle_detect` is deleted** (`Mf-1agz`). The report
+    served two rule sets: the detector's verdict as `matches[0]`, and the proposal
+    engine's answer as a "dissent" that was filtered to split readings
+    (`if option.shape not in SPLIT_SHAPES: continue`). Measured on the live tree
+    before this decision: **226 of 226 directory rows carried a recommendation the
+    engine disagreed with** - the engine's answer was discarded on every row, not
+    only where it dissented - and two folders the owner went looking for (`Vault`,
+    `import/Stagetop`) had no row at all. So the filter, the legacy ranking and the
+    module it lived in are gone. `proposal_engine` ranks EVERY row, folder and
+    `.zip` alike, and nothing else votes, dissents or falls back.
+
+    **The row-population rule, in the engine's own vocabulary.** `bundle_detect`'s
+    R1-R6 passes were not only a ranking; they were what decided which paths became
+    rows, so deleting them needs a rule, stated once here and once in
+    `bundle_service._build_candidates`. Walk top-down; a `leave` reading (or an
+    `archive-only` one) descends and offers no row; a CLAIMING top
+    (`one-project`/`git-project`/`add-to-project`) is a row and descent stops; a
+    SPLIT top (`split-top-folders`/`split-model-folders`) is a row and descent
+    stops, because the split's children ARE the split. The app's `import/` area is
+    transparent - never a row, never absorbing - because it is the drop zone the
+    import doors write into and a row for it would offer the whole inbox. A `.zip`
+    is a row of its own through `measure_archive`/`propose_archive`, unless it is a
+    duplicate, a member of an offered folder, or that folder's provenance (the one
+    containing predicate is `archive_payload_contained`).
+
+    **Measured, not asserted** (`.plans/measurements/Mf-1agz-after-summary.md`, and
+    the before/after artifacts beside it): **188 rows** - 154 `one-project`, 2
+    `git-project`, 3 `split-top-folders`, 29 `archive-project` - of which **169**
+    were rows before and **19** are new (`Vault`, `import/Stagetop`, `import/
+    endorphin`, `import/RepRap-MultiFilament`, `import/Fates End - DiceJails`,
+    `Unsorted`, and 13 archives the old detector refused with an R3 rule whose
+    payload the archive engine reads as one project). **73 rows are gone**: 72 are
+    strictly inside a row that now exists and are named `member-of-bundle` in the
+    ledger (63 of them `Vault`'s archive-wrapper children, which duplicated
+    `Vault`'s own payload), and **one is not** - `import/Final sliced prints`,
+    three `.gcode` files and no model or archive, which the old manual pass offered
+    as an importable scope and the engine reads as `leave`. That last one is a
+    deliberate loss, named rather than buried: print output is not a project.
+
+    **Four decisions this cutover had to make.**
+
+    * **Git probing is enabled in the report and the CLI, with no override at
+      either site** - see Decision 33's `Mf-1agz` amendment for the correctness
+      case (7/7 vs 6/7 labels), the measured +0.510 s, and the 5 s bound that
+      replaces `Mf-yitm`'s `probe_git=False` safety default.
+    * **`project_keys` are injected.** `Facts.rel` is STORAGE-relative
+      (`_qualify(scope, rel_dir)`) at the `measure()` call site and
+      `project_keys = known_project_keys(session)` - marker keys, already
+      storage-relative and already read once per report for `_excluded_keys`, so no
+      new query. `_folder_index`/`Folder.storage_path` and `_unqualify` are
+      untouched: the create door keeps its own space and the two meet only at
+      `_qualify`. Without the injection an `add-to-project` reading is impossible
+      and a scoped report's rows silently disagree with a whole-storage one.
+    * **`creatable` is the engine's verdict, and the arrange door enacts it.**
+      `creatable = shape in ONE_PROJECT_SHAPES` for a folder, so `split-*` and
+      `add-to-project` are `creatable: false` with
+      `note = "needs arranging first: <consequence>"`, enacted by the EXISTING
+      `GET/POST /bundles/arrange` (`ENGINE_SHAPES` already covers both sets). No
+      route was added, and `permissions.py`/`audit.py` are untouched.
+    * **`archive_only` survives as the NAME of the one door, never as a verdict.**
+      A `.zip` row still carries `blocked_reason: "archive_only"` because that
+      string is what `ui/review/bundleRows.ts`/`BundleReviewView.tsx` key the
+      Extract action off; a directory row is never `archive_only` again. What the
+      engine decides is whether that door is actionable: a zip whose recommendation
+      is `archive-project`/`archive-split` is `creatable: true` and its client
+      status line reads as extractable, and only `archive-leave` is
+      `creatable: false`. This is the reading of the ticket's "`archive_only`
+      survives only when the engine recommends archive/leave" that keeps a working
+      door: the string names the action, `creatable` carries the verdict.
+
+    **The wire keeps its names and one owner.** `matches` is
+    `[Option for Option in propose(...)]` mapped field-for-field, in the engine's
+    order; `rule = "engine:" + shape` (the token the dissent shim already emitted,
+    so `detector`, `matches[0].rule` and the create marker's `rule` are
+    byte-identical); `metadata_shape = matches[0].shape`; `confidence` is the
+    engine's own high/medium/low band; `groups` is the flat top level of the
+    engine's hierarchical groups (the wire's `BundleGroupOut` shape is unchanged,
+    and `separable` now carries the engine's "could stand as its own project").
+    No legacy `shape_matches` reading is appended, labelled, ordered or tested -
+    the invariant test (`tests/test_bundle_report_engine.py`) asserts the report's
+    recommendation IS `propose(...)[0].shape` for every synthetic row, and refuses
+    any match whose rule is not `engine:<shape>`.
+
+    **Truncation is visible.** `counts` gained `offered` (= the rows the report
+    has) and `withheld` (= how many `limit` kept back); `total` keeps its old
+    meaning. The client's fixed sentence became a number: "Showing N of M - K
+    bundles are not in this list." A bounded report that said only
+    `truncated: true` made the operator guess whether the row they wanted was one
+    of the ones dropped, and `Vault` was exactly that row.
+
+    **What was deleted, and what moved.** `curiarium/api/bundle_detect.py` (2038
+    lines) is gone: the verdicts, the R1-R6 pipeline, the snapshots/facts, the
+    document parsers, the compound and manual passes, `shape_matches`, the
+    confidence and detector vocabularies, and the rule-set stamp. Its pure helpers
+    moved with their tests - `MODEL_SUFFIXES`/`BUNDLE_TEXT_EXTS`/role tokens/
+    `classify_entry`/`is_counted_entry`/`is_counted_model`/`display_name`/
+    `thingiverse_id_from_name`/the duplicate-archive identity, ordering and
+    reporting (`ArchiveIdentity`, `DuplicateGroup`, `equal_size_archive_groups`,
+    `duplicate_groups`, `duplicate_archive_paths`, `duplicate_report_text`) to
+    `library_scan`; `is_bundle_member`/`is_macosx_artifact`/
+    `is_generic_container_root`/`GENERIC_CONTAINER_ROOTS` to `file_utils`. The
+    pairing stem and the wrapper/containment predicates collapse onto the engine's
+    own `twin_key`/`common_entry_root`/`archive_payload_contained`, which kills
+    stage A's by-value duplication. `bundle_service` lost `_engine_dissent`, its
+    budget, `_build_candidates` and its passes, the candidate facts/docs readers
+    and the decision wrappers, and `BundleCandidate` shrank to
+    `key`/`rel`/`facts`/`options`/`files`/`archive_path`/`entry_root`/`is_archive`.
+    The rule-set stamp moved to `proposal_engine` (version `2`), derived from the
+    engine's own tables, so an artifact taken before this change is explicitly NOT
+    comparable to one taken after it - which is the point of stamping at all.
+
+    **What would make this wrong.** If any legacy reading appeared in `matches`;
+    if a row's `detector`/`confidence`/`metadata_shape` stopped equalling
+    `matches[0]`; if `bundle_detect` came back as an import; if a folder row
+    carried `archive_only`, or a zip row's `creatable` stopped following the
+    archive engine's recommendation; if the report stopped passing
+    `project_keys`, or passed them walk-relative; if the report stopped honouring
+    `git_timeout=5.0`; if `counts.offered`/`withheld` stopped being emitted, or the
+    client went back to a count-free truncation sentence; or if a `.zip` row
+    stopped being its own row, in either direction.
 
 ## Consequences
 
@@ -4375,8 +4515,21 @@ This ADR is superseded if any of the following becomes true:
 - a `creatable: false` shape reaches `_create_one`, or a create of it writes a
   project, an asset or a `_bundle` marker instead of answering
   `failed`/`needs-arrange`;
-- the proposal engine is consulted on a GET with git probing on - a subprocess in
-  a GET handler - or `propose()` stops being skippable;
+- the report's recommendation stops being `propose(...)[0].shape` for any row, or
+  a `matches` entry appears whose rule is not `engine:<shape>` (Decision 34);
+- a legacy reading is appended to `matches`, labelled, ordered or tested again -
+  the hybrid this decision exists to prevent;
+- a folder row carries `archive_only`, a zip row's `creatable` stops following the
+  archive engine's recommendation, or the Extract door's `blocked_reason` is
+  renamed without moving `extractPathFor` with it;
+- the row walk gains a pass that offers a row the engine did not recommend, or a
+  `leave` reading starts producing one;
+- `counts.offered`/`counts.withheld` stop being emitted, or the client's
+  truncation notice goes back to a count-free sentence;
+- the proposal engine is consulted on a GET with git probing UNBOUNDED - i.e. the
+  report stops passing `git_timeout`, or `propose()` stops threading it to
+  `git_state()` - or `propose()` stops being skippable at all (Decision 33's
+  amendment: the report probes git behind a 5 s bound, which is `Mf-1agz`);
 - `RULE_SET_STAMP` is re-pinned because a proposal-engine table moved, or
   `check_model_table.py` starts comparing the engine's wider `MODEL_EXTS` as an
   equality;

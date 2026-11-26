@@ -68,7 +68,7 @@ def test_the_policy_docstring_names_every_door_it_governs() -> None:
 def test_the_junk_vocabulary_and_predicate_live_in_one_module() -> None:
     """Name matching only: a literal search would flag two deliberately narrow peers.
 
-    ``library_scan.IGNORED_FILENAMES`` and ``bundle_detect.is_macosx_artifact``
+    ``library_scan.IGNORED_FILENAMES`` and ``file_utils.is_macosx_artifact``
     both mention ``__MACOSX``/``.DS_Store``-shaped debris on purpose - the scan
     list is a filesystem-walk list of three names and the bundle detector asks
     the narrower "is this outside the payload root" question - so grepping for

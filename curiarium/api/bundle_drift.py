@@ -24,7 +24,7 @@ otherwise nothing at all: ``unknown`` is the honest answer, never ``0``.
 over every asset reads the support files a create never attaches (every
 ``cover.jpg`` and ``notes.txt``) as drift, so a fresh project would prompt
 immediately; the measured compound tree reads 26 naive against an honest 0. The
-predicate is ``bundle_detect.is_counted_model`` - the basename model rule the
+predicate is ``library_scan.is_counted_model`` - the basename model rule the
 scan itself registers by (Mf-94od) - and it is deliberately NOT described as
 "the set ``find_existing_project`` uses": that containment is the candidate's
 own ``_own_paths`` tested for a model SUFFIX, so the two diverge in both
@@ -73,7 +73,7 @@ from typing import Callable, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from sqlmodel import Session, func, select
 
-import bundle_detect
+import library_scan
 import project_service
 from models import Asset, Project, ProjectAsset
 
@@ -200,7 +200,7 @@ def drift_asset_ids(
     * the path is not under an excluded prefix (an empty tuple drops nothing:
       ``str.startswith(())`` is ``False``), and
     * the project does not already hold the asset, and
-    * ``bundle_detect.is_counted_model`` calls it a model the scan would
+    * ``library_scan.is_counted_model`` calls it a model the scan would
       register - the measured rule that keeps ``cover.jpg``/``notes.txt`` and
       AppleDouble ``._*.stl`` copies from ever reading as new parts.
 
@@ -220,7 +220,7 @@ def drift_asset_ids(
             continue
         if is_member is not None and is_member(asset_id):
             continue
-        if not bundle_detect.is_counted_model(storage_path, int(size or 0)):
+        if not library_scan.is_counted_model(storage_path, int(size or 0)):
             continue
         keep.append((storage_path, asset_id))
     return [asset_id for _, asset_id in sorted(keep)]

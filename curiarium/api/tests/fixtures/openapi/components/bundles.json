@@ -592,6 +592,11 @@
         "title": "Medium",
         "type": "integer"
       },
+      "offered": {
+        "default": 0,
+        "title": "Offered",
+        "type": "integer"
+      },
       "ready": {
         "default": 0,
         "title": "Ready",
@@ -600,6 +605,11 @@
       "total": {
         "default": 0,
         "title": "Total",
+        "type": "integer"
+      },
+      "withheld": {
+        "default": 0,
+        "title": "Withheld",
         "type": "integer"
       }
     },

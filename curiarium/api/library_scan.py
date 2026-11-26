@@ -99,20 +99,21 @@ storage root.
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path, PurePath
-from typing import Callable, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from sqlalchemy import or_, update
 from sqlmodel import Session, select
 
 import folder_paths
 from asset_service import ensure_model_thumbnail, folder_name_index, save_thumb
-from config import DEFAULT_MOUNT_IMPORT_EXTS
+from config import DEFAULT_MOUNT_IMPORT_EXTS, IMPORT_ALLOWED_EXTS
 from db import STORAGE, engine
 from file_utils import guess_mime_from_path
 from models import Asset, Folder
@@ -145,6 +146,200 @@ MAX_CONSECUTIVE_BATCH_FAILURES = 3
 # Failures are both logged and captured, and both are bounded by the same cap so
 # the two cannot disagree: `failed == len(errors) + errors_omitted`.
 MAX_REPORTED_FAILURES = 100
+
+
+# --- bundle-member vocabulary ---
+# The vocabulary for what a bundle is made of (Mf-1agz): the role tokens, the
+# suffix tables, the entry predicates and the pure name helpers. It lives in the
+# scan because the scan is one of the doors that asks it - a bundle member is a
+# file this module registers, a model is a model by the suffix table the import
+# door accepts - and because `bundle_detect` imports every name below and
+# re-exports it, so neither module keeps a second copy of a shared rule.
+
+# The model extensions the import door accepts, minus the archive: a `.zip` is a
+# container, never a bundle member. This is NOT `file_utils.MODEL_SUFFIXES`, which
+# is the five mime-backed suffixes `is_model_path` answers with: the detect side
+# also carries .lbrn/.lbrn2 and omits .obj.
+MODEL_SUFFIXES = frozenset(IMPORT_ALLOWED_EXTS - {".zip"})
+# Prose that can carry provenance. Deliberately short: a `.pdf` is a document,
+# not a sibling README. This is the BUNDLE-MEMBER text set, narrower than any
+# document set on purpose: every extension here is one a vendor ships beside a
+# model.
+BUNDLE_TEXT_EXTS = frozenset({".txt", ".md", ".pdf", ".html", ".htm", ".rtf"})
+# The role an entry plays inside a bundle.
+MODEL, IMAGE, TEXT, ARCHIVE, OTHER = "model", "image", "text", "archive", "other"
+
+
+@dataclass(frozen=True)
+class ArchiveIdentity:
+    """One archive's path, byte size and content digest."""
+
+    rel_path: str
+    size: int
+    digest: str
+
+
+@dataclass(frozen=True)
+class DuplicateGroup:
+    """Byte-identical archives: one bundle, the rest reclaimable bytes."""
+
+    digest: str
+    size: int
+    paths: Tuple[str, ...]  # authoritative (shortest name) first
+
+    @property
+    def reclaimable_bytes(self) -> int:
+        return self.size * (len(self.paths) - 1)
+
+
+def archive_order(rel_path: str) -> Tuple[int, str, str]:
+    """The order that puts the original before a browser's `` (1)`` duplicate.
+
+    A duplicate-download suffix only ever appends characters, so the shortest name
+    is the original file; ties fall back to casefolded then raw text.
+    """
+    return (len(rel_path), rel_path.casefold(), rel_path)
+
+
+def equal_size_archive_groups(archives: Iterable[Tuple[str, int]]) -> Tuple[Tuple[int, Tuple[str, ...]], ...]:
+    """Sizes shared by two or more archives - the only archives worth hashing.
+
+    Byte-identical archives are necessarily equal-size, so a size that occurs once
+    cannot be a duplicate and its bytes are never read. The cost is one hash per
+    archive in a shared-size group, never one per archive in the library.
+    """
+    by_size: Dict[int, List[str]] = {}
+    for rel_path, size in archives:
+        by_size.setdefault(size, []).append(rel_path)
+    return tuple(
+        (size, tuple(sorted(paths, key=archive_order)))
+        for size, paths in sorted(by_size.items())
+        if len(paths) > 1
+    )
+
+
+def duplicate_groups(archives: Iterable[ArchiveIdentity]) -> Tuple[DuplicateGroup, ...]:
+    """Byte-identical archives grouped once; a lone digest produces no group."""
+    by_identity: Dict[Tuple[str, int], List[str]] = {}
+    for archive in archives:
+        by_identity.setdefault((archive.digest, archive.size), []).append(archive.rel_path)
+    groups = [
+        DuplicateGroup(digest=digest, size=size, paths=tuple(sorted(paths, key=archive_order)))
+        for (digest, size), paths in by_identity.items()
+        if len(paths) > 1
+    ]
+    return tuple(sorted(groups, key=lambda group: archive_order(group.paths[0])))
+
+
+def duplicate_archive_paths(groups: Sequence[DuplicateGroup]) -> Tuple[str, ...]:
+    """Every archive a group reports as a copy: all but its authoritative path."""
+    return tuple(path for group in groups for path in group.paths[1:])
+
+
+def duplicate_report_text(groups: Sequence[DuplicateGroup]) -> str:
+    """The block an operator copies out: one tab-separated line per archive.
+
+    Header lines carry the digest and the group's reclaimable bytes; every archive
+    line carries its path and byte size, so the text is actionable with no app.
+    """
+    if not groups:
+        return ""
+    total = sum(group.reclaimable_bytes for group in groups)
+    lines = [f"# duplicate archives: {len(groups)} group(s), {total} bytes reclaimable"]
+    for group in groups:
+        lines.append(f"# sha256 {group.digest} size {group.size} reclaimable {group.reclaimable_bytes}")
+        lines.append(f"keep\t{group.size}\t{group.paths[0]}")
+        for path in group.paths[1:]:
+            lines.append(f"duplicate\t{group.size}\t{path}")
+    return "\n".join(lines)
+
+
+def _is_text(rel_path: str, size: int) -> bool:
+    return classify_entry(rel_path, size) == TEXT
+
+
+def classify_entry(rel_path: str, size: int) -> str:
+    """The role of one entry, decided by its extension and nothing else.
+
+    ``size`` is accepted for signature symmetry with the callers that already
+    hold it; it never changes the answer. The stem is never consulted: two files
+    sharing a stem are two files, and a role is a property of the path.
+    """
+    suffix = PurePath(rel_path).suffix.lower()
+    if suffix == ".zip":
+        return ARCHIVE
+    if suffix in MODEL_SUFFIXES:
+        return MODEL
+    if suffix in IMAGE_SUFFIXES:
+        return IMAGE
+    if suffix in BUNDLE_TEXT_EXTS:
+        return TEXT
+    return OTHER
+
+
+def is_counted_entry(rel_path: str) -> bool:
+    """Whether the library scan would REGISTER this entry at all.
+
+    The scan's rule is the basename predicate alone, asked here through the very
+    function ``_register_tree`` calls, so the two doors cannot drift apart
+    (Mf-94od). Deliberately NOT ``entry_policy.is_junk_entry`` and NOT
+    ``is_macosx_artifact``: the scan REGISTERS a non-dot file under a nested
+    ``__MACOSX/`` (measured: ``g/__MACOSX/g/plain.stl`` registers), and the junk
+    predicate would UNDER-count a part the project really holds. Classifying a
+    ``._a.stl`` sidecar through the junk vocabulary would also miss a plain
+    ``.hidden.stl``, which the junk predicate calls not junk at all.
+
+    It asks the scan's DEFAULT door - a hidden name is skipped. The mount door can
+    be opened with ``IMPORT_MOUNT_INCLUDE_HIDDEN=1``, and then the scan registers
+    names this predicate still refuses; that conditional is named in ADR 0010
+    Decision 25 rather than hidden here, because the detector never sees the
+    door's flag and a parameter nobody passes would read as support it does not
+    have.
+    """
+    return not is_skipped_name(PurePath(rel_path).name)
+
+
+def is_counted_model(rel_path: str, size: int) -> bool:
+    """A MODEL the scan would register: the model count, through both doors.
+
+    ``classify_entry`` stays SUFFIX-ONLY on purpose (Mf-tkdp's stem rule): a role
+    is a property of the path. This composite is what the counting sites ask, so
+    an AppleDouble ``._a.stl`` beside ``a.stl`` names no model.
+    """
+    return classify_entry(rel_path, size) == MODEL and is_counted_entry(rel_path)
+
+
+# Two private patterns the name helpers below read: the ordinal a site puts first
+# in a directory name, and the Thingiverse id in that same position.
+_LEADING_ORDINAL = re.compile(r"^\d+[_-]+")
+# A Thingiverse export roots its own entries at `NNNNNNN_Title`, so a directory
+# carrying that shape carries provenance. Four digits, because three-digit runs
+# are common in ordinary names; a mandatory `_`, because `2024-10-31_backup` is
+# a date and not an export; `^`-anchored, because `my_5390184_thing` is the
+# operator's own naming and predates the export.
+_THINGIVERSE_ID_IN_NAME = re.compile(r"^(\d{4,})_")
+
+
+def display_name(name: str) -> str:
+    """A human name from a vendor directory name; never empty.
+
+    A leading ordinal (``2493386_``) is a site's id, not a name, so it is
+    dropped; underscores become spaces and whitespace is collapsed. Nothing else
+    is rewritten - ``-No_overhang`` keeps its dash, because a dash is content and
+    "Moai statue -No overhang" is a better title than a guessed rewrite.
+    """
+    raw = (name or "").strip()
+    stripped = _LEADING_ORDINAL.sub("", raw).replace("_", " ")
+    cleaned = " ".join(stripped.split())
+    if cleaned:
+        return cleaned
+    return " ".join(raw.replace("_", " ").split()) or "bundle"
+
+
+def thingiverse_id_from_name(name: str) -> Optional[str]:
+    """The Thingiverse id a vendor export puts first in its name, or ``None``."""
+    match = _THINGIVERSE_ID_IN_NAME.match(name)
+    return match.group(1) if match else None
 
 
 class ScanAlreadyRunning(RuntimeError):
