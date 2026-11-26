@@ -220,6 +220,10 @@ def main(argv: Sequence[str]) -> int:
                         help="relative (or absolute) folder; repeatable")
     parser.add_argument("--top", type=int, default=0, help="limit how many folders print")
     parser.add_argument("--json", action="store_true", help="machine-readable, for diffing")
+    parser.add_argument("--facts", metavar="KEY",
+                        help="dump every fact the engine measured for one path, as JSON")
+    parser.add_argument("--explain", metavar="KEY",
+                        help="print the facts, every option with its score, and the reasons")
     parser.add_argument(
         "--projects",
         help="JSON list of {key, project} - the operator's own labelled projects, used as "
@@ -264,6 +268,55 @@ def main(argv: Sequence[str]) -> int:
         report = proposal_engine.validate(args.root, labelled, project_keys, labels)
         sys.stdout.write(render_validation(report))
         return 0 if not report["disagree"] and not report["failures"] else 1
+
+    if args.facts or args.explain:
+        key = args.facts or args.explain
+        path = key if os.path.isabs(key) else os.path.join(args.root, key)
+        if not os.path.exists(path):
+            print(f"no such folder or archive: {key}", file=sys.stderr)
+            return 2
+        if os.path.isfile(path) and path.lower().endswith(".zip"):
+            afacts = proposal_engine.measure_archive(path, key)
+            options, reasons = proposal_engine.propose_archive(afacts)
+            facts_json = {
+                "kind": "archive", "rel": key, "entries": len(afacts.entries),
+                "counts": {"models": afacts.models, "images": afacts.images,
+                           "docs": afacts.docs, "others": afacts.others},
+                "common_root": afacts.common_root(), "nested": afacts.nested,
+            }
+        else:
+            facts = proposal_engine.measure(path, key)
+            options, reasons, _repo = proposal_engine.propose(facts, project_keys)
+            facts_json = {
+                "kind": "folder", "rel": key,
+                "counts": {"models": facts.models, "images": facts.images,
+                           "docs": facts.docs, "others": facts.others,
+                           "archives": facts.archives},
+                "model_dirs": len(facts.model_dirs), "depth": facts.depth,
+                "dominance": round(facts.dominance(), 3),
+                "top_children": facts.top_children_with_models(),
+                "twins": facts.twin_archives(),
+                "root_meta": facts.root_meta,
+                "children_with_product_document": facts.children_with_own_meta(),
+                # The engine will own these too (Mf-9h0v); print them when it does.
+                "metadata": getattr(facts, "metadata", None),
+                "groups": getattr(facts, "groups", None),
+                "cover": getattr(facts, "cover", None),
+            }
+        if args.facts:
+            print(json.dumps(facts_json, indent=1))
+            return 0
+        print(json.dumps(facts_json, indent=1))
+        print("options:")
+        for index, option in enumerate(options):
+            print(f"  [{option.score:>3}] {option.label}"
+                  f"  ({'recommended' if index == 0 else 'alternative'})")
+            print(f"        {option.detail}")
+            print(f"        -> {option.consequence}")
+        print("reasons:")
+        for reason in reasons:
+            print("  -", reason)
+        return 0
 
     if args.only:
         # A path that does not exist must fail loudly: silently measuring nothing
