@@ -41,12 +41,30 @@ vi.mock("../ModelViewer", () => ({
   generateModelSnapshot: vi.fn(),
 }));
 
+// The arrange door imports the domain module directly, so its calls are mocked
+// there rather than on the barrel. The original is spread back so the suite's
+// other bundle imports keep working.
+const arrangeApi = vi.hoisted(() => ({
+  getArrangePlan: vi.fn(),
+  arrangeBundles: vi.fn(),
+  undoArrange: vi.fn(),
+}));
+vi.mock("../../lib/api/bundles", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../lib/api/bundles")>()),
+  getArrangePlan: arrangeApi.getArrangePlan,
+  arrangeBundles: arrangeApi.arrangeBundles,
+  undoArrange: arrangeApi.undoArrange,
+}));
+
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
 import { createProjectFromExtract, type ArchiveProjectResult } from "../../lib/api/imports";
 import type { Project } from "../../lib/api/projects";
 import type { LibraryScanStatus } from "../../lib/api/settings";
 import {
   ENRICH_MAX_KEYS,
+  arrangeBundles,
+  getArrangePlan,
+  undoArrange,
   type BundleArrangeApplied,
   type BundleArrangePlan,
   type BundleArrangeUndo,
@@ -58,6 +76,7 @@ import {
   type BundleReport,
 } from "../../lib/api/bundles";
 import type { SettleOutcome } from "../../lib/scanSettle";
+import { UnauthorizedError } from "../../lib/api/http";
 import { getToasts, resetToasts } from "../../lib/toast";
 import Toaster from "../Toaster";
 import BundleReviewView from "./BundleReviewView";
@@ -72,12 +91,15 @@ import {
   isArchiveOnly,
   needsDecision,
 } from "./bundleRows";
-import type { BundleReviewState } from "./useBundleDetect";
+import type { BundleDetectState } from "./useBundleDetect";
 import type { LibraryScanState } from "./useLibraryScan";
 
 const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
 const extractArchiveMock = vi.mocked(extractArchive);
 const createProjectFromExtractMock = vi.mocked(createProjectFromExtract);
+const getArrangePlanMock = vi.mocked(getArrangePlan);
+const arrangeBundlesMock = vi.mocked(arrangeBundles);
+const undoArrangeMock = vi.mocked(undoArrange);
 
 const ARCHIVE_ENTRIES = [
   { path: "Moai.stl", size: 2048 },
@@ -609,7 +631,7 @@ function makeVerdict(overrides: Partial<ArchiveProjectResult> = {}): ArchiveProj
   };
 }
 
-function makeState(overrides: Partial<BundleReviewState> = {}): BundleReviewState {
+function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectState {
   return {
     report: makeReport([moai, cableClip, legacyVase, moaiZip]),
     loading: false,
@@ -628,12 +650,6 @@ function makeState(overrides: Partial<BundleReviewState> = {}): BundleReviewStat
     dismiss: vi.fn(async () => {}),
     enrich: vi.fn(async () => {}),
     notice: null,
-    // The arrange doors answer `null` - "nothing answered" - because the error
-    // line is the hook's to write. A fixture that wants a plan, or a verdict,
-    // passes its own spy; `null` proves the pane invents no verdict of its own.
-    arrangePlan: vi.fn(async (): Promise<BundleArrangePlan | null> => null),
-    arrange: vi.fn(async (): Promise<BundleArrangeApplied | null> => null),
-    undoArrange: vi.fn(async (): Promise<BundleArrangeUndo | null> => null),
     afterExtract: vi.fn(async (): Promise<SettleOutcome> => "settled"),
     waitAfterExtract: vi.fn(async (): Promise<SettleOutcome> => "settled"),
     ...overrides,
@@ -641,9 +657,9 @@ function makeState(overrides: Partial<BundleReviewState> = {}): BundleReviewStat
 }
 
 function renderView(
-  state: BundleReviewState,
+  state: BundleDetectState,
   canContribute = true,
-  options: { canScan?: boolean; onScan?: () => void } = {},
+  options: { canScan?: boolean; onScan?: () => void; onUnauthorized?: () => void } = {},
 ): RenderResult {
   return render(
     <BundleReviewView
@@ -652,6 +668,7 @@ function renderView(
       scan={makeScanState()}
       canScan={options.canScan ?? false}
       onScan={options.onScan ?? vi.fn()}
+      onUnauthorized={options.onUnauthorized}
     />,
   );
 }
@@ -753,7 +770,7 @@ function installArchiveListings(): void {
 }
 
 /** Both reveal toggles need live setters, exactly as the hook supplies them. */
-function VisibilityHarness({ initial }: { initial: BundleReviewState }) {
+function VisibilityHarness({ initial }: { initial: BundleDetectState }) {
   const [showDismissed, setShowDismissed] = React.useState(initial.showDismissed);
   const [showCreated, setShowCreated] = React.useState(initial.showCreated);
   return (
@@ -1040,7 +1057,7 @@ describe("BundleReviewView empty states", () => {
 
   type Case = {
     name: string;
-    state: BundleReviewState;
+    state: BundleDetectState;
     copy: string;
     /** The reveal toggles on screen: the way out, and nothing else. */
     toggles: string[];
@@ -4175,10 +4192,10 @@ describe("BundleReviewView project list hand-off", () => {
   /** Mount the view with the two hand-off props, and hand back the state the
    *  doors actually hold - the spies have to be the ones the view calls. */
   function handoff(
-    overrides: Partial<BundleReviewState> = {},
+    overrides: Partial<BundleDetectState> = {},
     props: { onProjectsChanged?: () => void; onProjectImported?: (id: string) => void } = {},
     report?: BundleReport,
-  ): BundleReviewState {
+  ): BundleDetectState {
     const state = makeState(report ? { report, ...overrides } : overrides);
     render(
       <BundleReviewView
@@ -4885,8 +4902,8 @@ function makeArrangePlan(overrides: Partial<BundleArrangePlan> = {}): BundleArra
     shape: "split-top-folders",
     plan_id: "plan-1",
     moves: [
-      { from: "Container/Alpha", to: "Alpha", kind: "dir" },
-      { from: "Container/Beta", to: "Beta", kind: "dir" },
+      { from: "Container/Alpha", to: "Alpha", kind: "dir", action: "hoist" },
+      { from: "Container/Beta", to: "Beta", kind: "dir", action: "hoist" },
     ],
     text: ['move "Container/Alpha" -> "Alpha"', 'move "Container/Beta" -> "Beta"'],
     creates: [{ path: "Alpha", exists: false }],
@@ -4950,24 +4967,40 @@ function undoButton(): HTMLButtonElement {
 }
 
 describe("the arrange door", () => {
+  it("forwards a 401 from the arrange door to the shell's sign-out", async () => {
+    // Catches a view that mounts the door without the shell's sign-out: the 401
+    // would die inside the panel and leave the operator on an expired session,
+    // while every other door on this screen signs them out.
+    const onUnauthorized = vi.fn();
+    getArrangePlanMock.mockRejectedValue(new UnauthorizedError());
+    renderView(makeState({ report: makeReport([arrangingRow]) }), true, { onUnauthorized });
+
+    fireEvent.click(previewButton());
+
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1));
+    expect(within(detail()).queryByRole("alert")).toBeNull();
+  });
+
   it("previews the moves for a shape the server cannot enact yet", async () => {
     // Catches a pane that asks for a plan on mount, or one that renders none of
-    // what came back: the click is the only trigger, and the server's own text and
-    // folder list are what the operator decides on.
-    const arrangePlan = vi.fn(async () => makeArrangePlan());
-    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan });
-    renderView(state);
+    // what came back: the click is the only trigger, and the wire's move array
+    // (not the engine's prose) is what the operator decides on.
+    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
+    renderView(makeState({ report: makeReport([arrangingRow]) }));
 
     // Nothing is asked for before the click: a preview is a disk walk.
-    expect(state.arrangePlan).not.toHaveBeenCalled();
+    expect(getArrangePlanMock).not.toHaveBeenCalled();
     fireEvent.click(previewButton());
 
     await waitFor(() => expect(planPanel()).toBeTruthy());
-    expect(state.arrangePlan).toHaveBeenCalledWith("Container", "split-top-folders");
+    expect(getArrangePlanMock).toHaveBeenCalledWith("Container", "split-top-folders");
 
     const panel = planPanel();
-    expect(within(panel).getByText('move "Container/Alpha" -> "Alpha"')).toBeTruthy();
-    expect(within(panel).getByText('move "Container/Beta" -> "Beta"')).toBeTruthy();
+    // One list item per WIRE move, each naming its action.
+    const moves = Array.from(panel.querySelectorAll<HTMLElement>("[data-arrange-move]"));
+    expect(moves.map(node => node.getAttribute("data-arrange-action"))).toEqual(["hoist", "hoist"]);
+    expect(within(moves[0]).getByText('move "Container/Alpha" -> "Alpha"')).toBeTruthy();
+    expect(within(moves[1]).getByText('move "Container/Beta" -> "Beta"')).toBeTruthy();
     expect(within(panel).getByText("Creates these folders")).toBeTruthy();
     expect(
       Array.from(panel.querySelectorAll("[data-arrange-create]")).map(node => node.textContent),
@@ -4984,10 +5017,9 @@ describe("the arrange door", () => {
     // `split-top-folders` plus `manual`. Choosing that reading must keep it
     // selected (or the door never opens), then Preview and Apply must carry the
     // chosen shape and the served `plan_id` to the server.
-    const arrangePlan = vi.fn(async () => makeArrangePlan({ key: "Multi" }));
-    const arrange = vi.fn(async () => makeArrangeApplied({ key: "Multi" }));
-    const state = makeState({ report: makeReport([splitTopFolders]), arrangePlan, arrange });
-    renderView(state);
+    getArrangePlanMock.mockResolvedValue(makeArrangePlan({ key: "Multi" }));
+    arrangeBundlesMock.mockResolvedValue(makeArrangeApplied({ key: "Multi" }));
+    renderView(makeState({ report: makeReport([splitTopFolders]) }));
 
     const importAs = within(detail()).getByRole("radiogroup", { name: "Import as" });
     fireEvent.click(
@@ -4999,11 +5031,15 @@ describe("the arrange door", () => {
 
     fireEvent.click(previewButton());
     await waitFor(() => expect(planPanel()).toBeTruthy());
-    expect(state.arrangePlan).toHaveBeenCalledWith("Multi", "split-top-folders");
+    expect(getArrangePlanMock).toHaveBeenCalledWith("Multi", "split-top-folders");
 
     fireEvent.click(applyButton());
     await waitFor(() => expect(undoButton()).toBeTruthy());
-    expect(state.arrange).toHaveBeenCalledWith("Multi", "split-top-folders", "plan-1");
+    expect(arrangeBundlesMock).toHaveBeenCalledWith({
+      key: "Multi",
+      shape: "split-top-folders",
+      planId: "plan-1",
+    });
   });
 
   it("refuses to offer Apply while the server holds an objection", async () => {
@@ -5014,13 +5050,12 @@ describe("the arrange door", () => {
       reason: "destination_exists",
       detail: "destination exists: Alpha",
     };
-    const arrangePlan = vi.fn(async () =>
+    getArrangePlanMock.mockResolvedValue(
       makeArrangePlan({
         refusals: [{ ...refusal, detail: "cross-device move refused: 2 of 2 moves" }, refusal],
       }),
     );
-    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan });
-    renderView(state);
+    renderView(makeState({ report: makeReport([arrangingRow]) }));
 
     fireEvent.click(previewButton());
     await waitFor(() => expect(planPanel()).toBeTruthy());
@@ -5033,24 +5068,27 @@ describe("the arrange door", () => {
       "cross-device move refused: 2 of 2 moves",
       "destination exists: Alpha",
     ]);
-    expect(refusals[0].className).toBe("review-detail-reason");
+    expect(refusals[0].className).toContain("review-detail-reason");
   });
 
   it("applies the previewed plan, names the moves that landed and offers the undo", async () => {
     // Catches an Apply that sends the row key instead of the served `plan_id`, and
     // one that leaves the consumed preview on screen: the plan names a tree that
     // has just moved.
-    const arrangePlan = vi.fn(async () => makeArrangePlan());
-    const arrange = vi.fn(async () => makeArrangeApplied());
-    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan, arrange });
-    renderView(state);
+    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
+    arrangeBundlesMock.mockResolvedValue(makeArrangeApplied());
+    renderView(makeState({ report: makeReport([arrangingRow]) }));
 
     fireEvent.click(previewButton());
     await waitFor(() => expect(planPanel()).toBeTruthy());
     fireEvent.click(applyButton());
 
     await waitFor(() => expect(undoButton()).toBeTruthy());
-    expect(state.arrange).toHaveBeenCalledWith("Container", "split-top-folders", "plan-1");
+    expect(arrangeBundlesMock).toHaveBeenCalledWith({
+      key: "Container",
+      shape: "split-top-folders",
+      planId: "plan-1",
+    });
     expect(detail().querySelector("[data-arrange-applied]")?.textContent).toBe("Arranged: 2 moves");
     expect(detail().querySelector("[data-arrange-plan]")).toBeNull();
   });
@@ -5058,16 +5096,10 @@ describe("the arrange door", () => {
   it("undoes that arrangement by the id the server issued", async () => {
     // Catches an undo driven by the row key or the plan id: the ledger is found by
     // `arrange_id`, and a second arrange has its own.
-    const arrangePlan = vi.fn(async () => makeArrangePlan());
-    const arrange = vi.fn(async () => makeArrangeApplied({ arrange_id: "arrange-9" }));
-    const undoArrange = vi.fn(async () => makeArrangeUndone({ arrange_id: "arrange-9" }));
-    const state = makeState({
-      report: makeReport([arrangingRow]),
-      arrangePlan,
-      arrange,
-      undoArrange,
-    });
-    renderView(state);
+    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
+    arrangeBundlesMock.mockResolvedValue(makeArrangeApplied({ arrange_id: "arrange-9" }));
+    undoArrangeMock.mockResolvedValue(makeArrangeUndone({ arrange_id: "arrange-9" }));
+    renderView(makeState({ report: makeReport([arrangingRow]) }));
 
     fireEvent.click(previewButton());
     await waitFor(() => expect(planPanel()).toBeTruthy());
@@ -5076,12 +5108,10 @@ describe("the arrange door", () => {
 
     fireEvent.click(undoButton());
 
-    await waitFor(() => expect(state.undoArrange).toHaveBeenCalledWith("arrange-9"));
+    await waitFor(() => expect(undoArrangeMock).toHaveBeenCalledWith("arrange-9"));
     // The count is gone with the moves, and so is the undo control: there is
     // nothing left of this arrange to fold back a second time.
-    await waitFor(() =>
-      expect(detail().querySelector("[data-arrange-applied]")).toBeNull(),
-    );
+    await waitFor(() => expect(detail().querySelector("[data-arrange-applied]")).toBeNull());
     expect(within(detail()).queryByRole("button", { name: "Undo this arrange" })).toBeNull();
   });
 
@@ -5089,12 +5119,11 @@ describe("the arrange door", () => {
     // Catches a silent pass: a directory this write made that the library walk
     // cannot see, and an asset row whose path names no file, are the two things an
     // operator must be told about by name.
-    const arrangePlan = vi.fn(async () => makeArrangePlan());
-    const arrange = vi.fn(async () =>
+    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
+    arrangeBundlesMock.mockResolvedValue(
       makeArrangeApplied({ unseeable: ["Ghost"], stale: ["Container/gone.stl"] }),
     );
-    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan, arrange });
-    renderView(state);
+    renderView(makeState({ report: makeReport([arrangingRow]) }));
 
     fireEvent.click(previewButton());
     await waitFor(() => expect(planPanel()).toBeTruthy());
@@ -5107,7 +5136,7 @@ describe("the arrange door", () => {
     expect(stale?.textContent).toContain("Container/gone.stl");
     // They live beside the reason style, not in a live region that would
     // re-announce the queue on every ArrowDown.
-    expect(unseeable?.className).toBe("review-detail-reason");
+    expect(unseeable?.className).toContain("review-detail-reason");
     expect(unseeable?.getAttribute("role")).toBeNull();
   });
 
@@ -5119,17 +5148,15 @@ describe("the arrange door", () => {
     expect(detail().querySelector("[data-arrange-preview]")).toBeNull();
   });
 
-  it("offers a viewer none of these controls", () => {
+  it("offers a viewer none of these controls, and asks for no plan", () => {
     // Catches an arrange door left outside the `canContribute` gate: a READ-only
     // role would be invited to start a disk walk and then to write.
-    const arrangePlan = vi.fn(async () => makeArrangePlan());
-    const state = makeState({ report: makeReport([arrangingRow]), arrangePlan });
-    renderView(state, false);
+    renderView(makeState({ report: makeReport([arrangingRow]) }), false);
 
     expect(within(detail()).queryByRole("button", { name: "Preview the moves" })).toBeNull();
     expect(within(detail()).queryByRole("button", { name: "Apply this arrangement" })).toBeNull();
     expect(within(detail()).queryByRole("button", { name: "Undo this arrange" })).toBeNull();
     expect(detail().querySelector("[data-arrange-plan]")).toBeNull();
-    expect(state.arrangePlan).not.toHaveBeenCalled();
+    expect(getArrangePlanMock).not.toHaveBeenCalled();
   });
 });

@@ -4,16 +4,10 @@ import React from "react";
 // mock the barrel as a fixed object, so a new named import from it would break
 // those mocks. `App.tsx` documents the same constraint for `../lib/api/auth`.
 import {
-  arrangeBundles,
   createBundles,
   enrichBundles,
-  getArrangePlan,
   getBundleReport,
   setBundleDismissed,
-  undoArrange as undoArrangeRequest,
-  type BundleArrangeApplied,
-  type BundleArrangePlan,
-  type BundleArrangeUndo,
   type BundleCreateItem,
   type BundleCreateResponse,
   type BundleEnrichItemResult,
@@ -62,28 +56,6 @@ export type BundleDetectState = {
    *  times. */
   waitAfterExtract: (results: ArchiveExtractResult[]) => Promise<SettleOutcome>;
 };
-
-/** The arrange doors: the preview, the apply and the undo.
- *
- *  They live on the queue's state for the same reason every other write does -
- *  the view never fetches, so the three calls need a home here. They are
- *  declared BESIDE `BundleDetectState` rather than inside it so a fixture that
- *  only reads a report (the badge's own suite) keeps compiling without them;
- *  `useBundleDetect` returns this intersection, and the review view asks for it.
- *
- *  Only `arrange` and `undoArrange` refetch: the preview is a READ that writes
- *  nothing, and the report a refetch would bring is the one already on screen.
- *  Each call answers the server's verdict, or null when nothing answered - the
- *  error line already speaks the failure, exactly as `create` does. */
-export type BundleArrangeActions = {
-  arrangePlan: (key: string, shape: string) => Promise<BundleArrangePlan | null>;
-  arrange: (key: string, shape: string, planId: string) => Promise<BundleArrangeApplied | null>;
-  undoArrange: (arrangeId: string) => Promise<BundleArrangeUndo | null>;
-};
-
-/** The queue's state as the review view consumes it: the detection report and
- *  every door that writes on it. */
-export type BundleReviewState = BundleDetectState & BundleArrangeActions;
 
 /** What an enrichment response means to the operator.
  *
@@ -178,7 +150,7 @@ function savedThingiverseCookie(): string | undefined {
  * the whole library once at the end, so it takes the wait alone: N of
  * `afterExtract` would be N whole-library walks for a single click.
  */
-export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleReviewState {
+export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleDetectState {
   const [report, setReport] = React.useState<BundleReport | null>(null);
   const [fetching, setFetching] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
@@ -338,88 +310,6 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleRevie
     [enabled, onUnauthorized, refresh],
   );
 
-  // Modelled on `create`, not on `mutate`: the response IS the answer - the
-  // moves, the refusals and the plan id the apply has to echo - and `mutate`
-  // discards it. A preview writes nothing, so it refetches nothing either: the
-  // report it would fetch is the one already on screen.
-  const arrangePlan = React.useCallback(
-    async (key: string, shape: string) => {
-      if (!enabled) return null;
-      setBusy(true);
-      setNotice(null);
-      try {
-        const plan = await getArrangePlan(key, shape);
-        setError(null);
-        return plan;
-      } catch (err) {
-        if (err instanceof UnauthorizedError) onUnauthorized?.();
-        setError(
-          err instanceof Error && err.message
-            ? err.message
-            : "Failed to preview the arrangement.",
-        );
-        return null;
-      } finally {
-        setBusy(false);
-      }
-    },
-    [enabled, onUnauthorized],
-  );
-
-  // The apply is a write, so it keeps `create`'s whole order: `busy`, the notice
-  // reset (an arrangement is a new decision, so the last enrichment's sentence
-  // no longer describes what the operator just did), `error` cleared only after
-  // the request answered, the refetch inside the try, `busy` released in
-  // `finally`. The response is returned because the pane must name the moves
-  // that landed, offer the undo by id, and say what the server could not see.
-  const arrange = React.useCallback(
-    async (key: string, shape: string, planId: string) => {
-      if (!enabled) return null;
-      setBusy(true);
-      setNotice(null);
-      try {
-        const applied = await arrangeBundles({ key, shape, planId });
-        setError(null);
-        await refresh();
-        return applied;
-      } catch (err) {
-        if (err instanceof UnauthorizedError) onUnauthorized?.();
-        setError(
-          err instanceof Error && err.message ? err.message : "Failed to arrange the bundle.",
-        );
-        return null;
-      } finally {
-        setBusy(false);
-      }
-    },
-    [enabled, onUnauthorized, refresh],
-  );
-
-  // The undo is the same write shape, and it returns too: `project_removed` and
-  // the second self-report are the only record of what the fold-back left.
-  const undoArrange = React.useCallback(
-    async (arrangeId: string) => {
-      if (!enabled) return null;
-      setBusy(true);
-      setNotice(null);
-      try {
-        const undone = await undoArrangeRequest(arrangeId);
-        setError(null);
-        await refresh();
-        return undone;
-      } catch (err) {
-        if (err instanceof UnauthorizedError) onUnauthorized?.();
-        setError(
-          err instanceof Error && err.message ? err.message : "Failed to undo the arrangement.",
-        );
-        return null;
-      } finally {
-        setBusy(false);
-      }
-    },
-    [enabled, onUnauthorized, refresh],
-  );
-
   // The settle alone. See the hook's doc comment: this is the one waiter, and
   // `afterExtract` below is it plus a refetch.
   const waitAfterExtract = React.useCallback(
@@ -463,9 +353,6 @@ export function useBundleDetect({ enabled, onUnauthorized }: Props): BundleRevie
     dismiss,
     enrich,
     notice,
-    arrangePlan,
-    arrange,
-    undoArrange,
     afterExtract,
     waitAfterExtract,
   };

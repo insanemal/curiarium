@@ -392,6 +392,8 @@ def _fresh_apply(item: ArrangeItem, preview: Mapping, ctx: audit.AuditContext) -
     row = _report_rows(root).get(item.key)
     if row is None:
         raise HTTPException(status_code=409, detail=f"unknown bundle: {item.key}")
+    # The ledger is not the wire: a plan's `action` (why the move exists) is a label
+    # for the preview, so each move is narrowed here to the three fields undo replays.
     moves = [{"from": move["from"], "to": move["to"], "kind": move["kind"]} for move in preview["moves"]]
     creates = [entry["path"] for entry in preview["creates"]]
     snapshot = _snapshot(moves, creates)

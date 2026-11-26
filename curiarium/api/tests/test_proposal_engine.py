@@ -483,12 +483,12 @@ def test_arrange_moves_hoists_each_model_bearing_child_out_of_a_container(tmp_pa
     container = build_container(tmp_path)
     facts = proposal_engine.measure(str(container), "import/Drop")
     assert proposal_engine.arrange_moves(facts, "split-top-folders") == [
-        {"from": "import/Drop/Product B", "to": "import/Product B", "kind": "dir"},
-        {"from": "import/Drop/Product A", "to": "import/Product A", "kind": "dir"},
+        {"from": "import/Drop/Product B", "to": "import/Product B", "kind": "dir", "action": "hoist"},
+        {"from": "import/Drop/Product A", "to": "import/Product A", "kind": "dir", "action": "hoist"},
     ], "a loose root model is not a folder to hoist: (root files) must never be a move"
     assert proposal_engine.arrange_moves(facts, "split-model-folders") == [
-        {"from": "import/Drop/Product A", "to": "import/Product A", "kind": "dir"},
-        {"from": "import/Drop/Product B", "to": "import/Product B", "kind": "dir"},
+        {"from": "import/Drop/Product A", "to": "import/Product A", "kind": "dir", "action": "hoist"},
+        {"from": "import/Drop/Product B", "to": "import/Product B", "kind": "dir", "action": "hoist"},
     ]
 
 
@@ -507,14 +507,30 @@ def test_arrange_moves_keeps_the_folder_for_a_project_shape(tmp_path: Path) -> N
 def test_arrange_moves_files_the_wrapper_archive_under_source(tmp_path: Path) -> None:
     """Case (b): the candidate is the wrapper, so its content rises into the product.
 
+    The two actions here are the discriminating pair for the token mapping: the
+    children land in a DIFFERENT, newly named product folder, so they are `move`,
+    while the zip is filed as `file-archive`. Mutation: give the children `hoist`
+    (the candidate's own name does not survive, so nothing is hoisted) or the zip
+    `move` and the UI labels the operation wrongly.
+
     Mutation: name `_source/` after the wrapper (`Vault Archive_18.11.2026/_source/`)
     and the extracted twin and its own zip disagree about which folder is the product.
     """
     wrapper = build_own_wrapper(tmp_path)
     facts = proposal_engine.measure(str(wrapper), VAULT_WRAPPER)
     assert proposal_engine.arrange_moves(facts, "one-project") == [
-        {"from": f"{VAULT_WRAPPER}/Rhino models", "to": "Vault/Rhino models", "kind": "dir"},
-        {"from": VAULT_ZIP, "to": f"Vault/_source/{VAULT_ZIP}", "kind": "file"},
+        {
+            "from": f"{VAULT_WRAPPER}/Rhino models",
+            "to": "Vault/Rhino models",
+            "kind": "dir",
+            "action": "move",
+        },
+        {
+            "from": VAULT_ZIP,
+            "to": f"Vault/_source/{VAULT_ZIP}",
+            "kind": "file",
+            "action": "file-archive",
+        },
     ]
 
 
@@ -537,7 +553,8 @@ def test_arrange_moves_supplies_the_series_title_and_keeps_the_number(tmp_path: 
         "from": "import/17_ClockworkMonster",
         "to": "import/17_Fates End - ClockworkMonster",
         "kind": "dir",
-    }]
+        "action": "rename",
+    }], "the series move is the only rename: any other token here mislabels it"
     for move in moves:
         assert re.match(r"^\d{2,}_", os.path.basename(move["to"])), (
             f"{move['to']!r} strips the series number: 17_ is an index, not clutter"
@@ -568,6 +585,9 @@ def test_every_move_is_storage_relative(tmp_path: Path) -> None:
         for move in proposal_engine.arrange_moves(facts, shape):
             seen += 1
             assert move["kind"] in ("dir", "file")
+            assert move["action"] in ("hoist", "move", "file-archive", "rename"), (
+                f"{move['action']!r} is not an arrange action token"
+            )
             for path in (move["from"], move["to"]):
                 assert path and not os.path.isabs(path) and not path.startswith("/"), (
                     f"{path!r} is absolute: a move record is storage-relative"
@@ -646,6 +666,8 @@ def test_plan_digest_is_the_same_plan_twice_and_changes_with_any_move() -> None:
 
     Mutation: hash a timestamp, the dict's repr or only the key, and `stale_plan`
     either refuses an unchanged disk or accepts a plan whose moves were rewritten.
+    Mutation: fold `action` into the hash and adding a label to a move invalidates
+    every plan already on screen.
     """
     moves = [{"from": "import/Drop/Product A", "to": "import/Product A", "kind": "dir"}]
     creates = [{"path": "import/Product A", "exists": True}]
@@ -653,6 +675,9 @@ def test_plan_digest_is_the_same_plan_twice_and_changes_with_any_move() -> None:
     assert first == proposal_engine.plan_digest(
         "import/Drop", "split-top-folders", list(moves), list(creates)
     ), "the same plan must hash the same on the second call"
+    assert first == proposal_engine.plan_digest(
+        "import/Drop", "split-top-folders", [{**moves[0], "action": "hoist"}], creates
+    ), "`action` says why the move exists; the digest hashes what it does, so it is ignored"
     assert re.fullmatch(r"[0-9a-f]{64}", first), f"a sha256 hex digest, got {first!r}"
     changed = [
         proposal_engine.plan_digest("import/Drop", "one-project", moves, creates),

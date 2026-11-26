@@ -87,8 +87,11 @@ survive beside it - which makes an interrupted apply a project with a replayable
 record rather than a project with nothing behind it. And a `creatable: false`
 match is now ACTIONABLE: `GET /bundles/arrange` serves the moves the create door
 cannot enact, so the row a create refuses with `needs-arrange` is a row the
-operator can still approve, preview and undo. The detection decision below is
-unchanged - the arrange reads the row, it never rewrites what a rule offered).
+operator can still approve, preview and undo. Each move the preview returns carries
+`kind` (what the path is on disk) and `action` (`hoist` | `move` | `file-archive` |
+`rename`, why the move exists), and a retired container is not a move so it has no
+token. The detection decision below is unchanged - the arrange reads the row, it
+never rewrites what a rule offered).
 
 ## Context
 

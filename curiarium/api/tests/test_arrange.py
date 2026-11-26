@@ -421,15 +421,21 @@ def test_a_wrapper_child_is_dropped_and_its_zip_filed_under_source(
 
     assert plan["refusals"] == []
     assert plan["report"]["creatable"] is False, "the row recommends root-docs, not one-project"
-    assert [(move["from"], move["to"], move["kind"]) for move in plan["moves"]] == [
-        ("Vault/Vault Archive_18.11.2026/Instructions Manual.pdf", "Vault/Instructions Manual.pdf", "file"),
-        ("Vault/Vault Archive_18.11.2026/parts", "Vault/parts", "dir"),
+    assert [(move["from"], move["to"], move["kind"], move["action"]) for move in plan["moves"]] == [
+        (
+            "Vault/Vault Archive_18.11.2026/Instructions Manual.pdf",
+            "Vault/Instructions Manual.pdf",
+            "file",
+            "hoist",
+        ),
+        ("Vault/Vault Archive_18.11.2026/parts", "Vault/parts", "dir", "hoist"),
         (
             "Vault/Vault Archive_18.11.2026/Vault Archive_18.11.2026.zip",
             "Vault/_source/Vault Archive_18.11.2026.zip",
             "file",
+            "file-archive",
         ),
-    ]
+    ], "the wrapper's children hoist into the candidate; the zip is filed as provenance"
     assert plan["creates"] == [{"path": "Vault", "exists": True}, {"path": "Vault/_source", "exists": False}]
     assert the_only(plan["text"], "move ") == 3
 
@@ -572,6 +578,9 @@ def test_a_split_hoists_every_product_and_retires_the_container(
         "import/Dragon Figurine",
         "import/Robot Figurine",
     ]
+    assert [move["action"] for move in plan["moves"]] == ["hoist", "hoist", "hoist"], (
+        "a split hoists each product out of the retired container"
+    )
 
     response = apply_plan(client, admin, plan)
 
@@ -657,7 +666,7 @@ def test_the_series_rename_keeps_the_number_and_the_rows_follow(
     plan = preview(client, admin, SERIES_KEY, "one-project")
 
     assert plan["refusals"] == []
-    assert plan["moves"] == [{"from": SERIES_KEY, "to": SERIES_TARGET, "kind": "dir"}]
+    assert plan["moves"] == [{"from": SERIES_KEY, "to": SERIES_TARGET, "kind": "dir", "action": "rename"}]
     assert plan["moves"][0]["to"].split("/")[-1].startswith("17_"), "the moves never strip the series number"
     assert any('rename to "17_Fates End - ClockworkMonster"' in line for line in plan["text"])
 
@@ -761,7 +770,7 @@ def test_a_hidden_destination_is_a_400(
         proposal_engine,
         "arrange_moves",
         lambda facts, chosen: (
-            [{"from": SERIES_KEY, "to": ".hidden/ClockworkMonster", "kind": "dir"}]
+            [{"from": SERIES_KEY, "to": ".hidden/ClockworkMonster", "kind": "dir", "action": "rename"}]
             if facts.rel == SERIES_KEY
             else real(facts, chosen)
         ),
@@ -788,7 +797,14 @@ def test_a_destination_outside_the_storage_root_is_a_400(
         proposal_engine,
         "arrange_moves",
         lambda facts, chosen: (
-            [{"from": SERIES_KEY, "to": "import/../../outside/ClockworkMonster", "kind": "dir"}]
+            [
+                {
+                    "from": SERIES_KEY,
+                    "to": "import/../../outside/ClockworkMonster",
+                    "kind": "dir",
+                    "action": "rename",
+                }
+            ]
             if facts.rel == SERIES_KEY
             else real(facts, chosen)
         ),
@@ -815,7 +831,7 @@ def test_a_missing_source_is_refused(
         proposal_engine,
         "arrange_moves",
         lambda facts, chosen: (
-            [{"from": f"{SERIES_KEY}/ghost", "to": "import/ghost", "kind": "dir"}]
+            [{"from": f"{SERIES_KEY}/ghost", "to": "import/ghost", "kind": "dir", "action": "move"}]
             if facts.rel == SERIES_KEY
             else real(facts, chosen)
         ),
@@ -952,12 +968,14 @@ def test_the_wire_says_from_and_the_openapi_renders_from(
     )
     assert response.status_code == 200, response.text
     move = response.json()["moves"][0]
-    assert set(move) == {"from", "to", "kind"}
+    assert set(move) == {"from", "to", "kind", "action"}
+    assert move["action"] == "rename", "a series rename is the only token this plan can carry"
     assert "from_" not in move
 
     schema = client.get("/openapi.json").json()
     properties = schema["components"]["schemas"]["BundleArrangeMoveOut"]["properties"]
     assert "from" in properties and "from_" not in properties
+    assert "action" in properties
 
 
 def test_a_viewer_reads_the_preview_and_an_editor_may_apply(

@@ -2101,10 +2101,22 @@ def _entry_names(path: str) -> List[str]:
     return sorted([entry.name for entry in files] + dirs, key=str.casefold)
 
 
-def _move(facts: Facts, source: str, target: str) -> dict:
-    """One move record, with `kind` read off the disk the way the source is."""
+def _move(facts: Facts, source: str, target: str, action: str) -> dict:
+    """One move record: two fields, two questions.
+
+    `kind` (`dir` | `file`) is what the path IS on disk and what the mover must do;
+    it is read here, from the source. `action` says WHY the move exists and is
+    supplied by the call site: `hoist` | `move` | `file-archive` | `rename`.
+    `retire-container` is deliberately NOT a token: a retired container is a
+    property of the emptied container, not of any move record.
+    """
     local = os.path.join(facts.path, os.path.relpath(source or ".", facts.rel or "."))
-    return {"from": source, "to": target, "kind": "dir" if os.path.isdir(local) else "file"}
+    return {
+        "from": source,
+        "to": target,
+        "kind": "dir" if os.path.isdir(local) else "file",
+        "action": action,
+    }
 
 
 def _identity_free(moves: List[dict]) -> List[dict]:
@@ -2123,14 +2135,17 @@ def _own_wrapper_moves(facts: Facts, archive: str) -> List[dict]:
     parent = os.path.dirname(base)
     product_base = _rel_join(parent, wrapper_title(facts.name))
     sources = [
-        (_rel_join(base, name), _rel_join(product_base, name))
+        (_rel_join(base, name), _rel_join(product_base, name), "move")
         for name in _entry_names(facts.path) if name != archive
     ]
+    # The children rise into a DIFFERENT, newly named product folder: a move, not a
+    # hoist (the candidate's name does not survive). The zip is filed as provenance.
     sources.append(
-        (_rel_join(parent, archive), _rel_join(product_base, "_source", archive))
+        (_rel_join(parent, archive), _rel_join(product_base, "_source", archive), "file-archive")
     )
-    moves = [_move(facts, source, target) for source, target in sources]
-    return _identity_free(moves)
+    return _identity_free([
+        _move(facts, source, target, action) for source, target, action in sources
+    ])
 
 
 def _wrapper_child_moves(facts: Facts, wrapper: str, archives: List[str]) -> List[dict]:
@@ -2143,8 +2158,10 @@ def _wrapper_child_moves(facts: Facts, wrapper: str, archives: List[str]) -> Lis
     base = facts.rel
     inner = _child_twin(facts, wrapper)
     inner_archive = os.path.basename(inner) if inner else None
+    # The wrapper's children rise one level into the candidate, which keeps its name:
+    # a hoist. Every archive filed under `_source/` is provenance being filed.
     sources = [
-        (_rel_join(base, wrapper, name), _rel_join(base, name))
+        (_rel_join(base, wrapper, name), _rel_join(base, name), "hoist")
         for name in _entry_names(os.path.join(facts.path, wrapper))
         if name != inner_archive
     ]
@@ -2155,8 +2172,10 @@ def _wrapper_child_moves(facts: Facts, wrapper: str, archives: List[str]) -> Lis
             _rel_join(base, wrapper, archive) if archive == inner_archive
             else _rel_join(base, archive)
         )
-        sources.append((source, _rel_join(base, "_source", archive)))
-    return [_move(facts, source, target) for source, target in sources]
+        sources.append((source, _rel_join(base, "_source", archive), "file-archive"))
+    return [
+        _move(facts, source, target, action) for source, target, action in sources
+    ]
 
 
 def arrange_moves(facts: Facts, chosen: str) -> List[dict]:
@@ -2180,7 +2199,7 @@ def arrange_moves(facts: Facts, chosen: str) -> List[dict]:
             if child != "(root files)"
         ]
         return _identity_free([
-            _move(facts, _rel_join(base, child), _rel_join(parent, child))
+            _move(facts, _rel_join(base, child), _rel_join(parent, child), "hoist")
             for child in children
         ])
 
@@ -2190,7 +2209,7 @@ def arrange_moves(facts: Facts, chosen: str) -> List[dict]:
             if folder != "." and folder.count(os.sep) + 1 == 1
         ]
         return _identity_free([
-            _move(facts, _rel_join(base, folder), _rel_join(parent, folder))
+            _move(facts, _rel_join(base, folder), _rel_join(parent, folder), "hoist")
             for folder in sorted(shallow, key=str.casefold)
         ])
 
@@ -2213,10 +2232,10 @@ def arrange_moves(facts: Facts, chosen: str) -> List[dict]:
     # children and `base` keeps its name until this move.
     title = series_title(facts)
     if title is not None and title != name:
-        return [_move(facts, base, _rel_join(parent, title))]
+        return [_move(facts, base, _rel_join(parent, title), "rename")]
 
     if folder_title(name) != name:
-        return [_move(facts, base, _rel_join(parent, folder_title(name)))]
+        return [_move(facts, base, _rel_join(parent, folder_title(name)), "rename")]
 
     return []
 
@@ -2267,7 +2286,8 @@ def plan_digest(key: str, shape: str, moves, creates) -> str:
 
     Canonical JSON (sorted keys, no whitespace) over the key, the shape, the moves as
     `[from, to, kind]` triples and the creates, so a stale plan is refused by identity
-    rather than by re-reading the disk and hoping.
+    rather than by re-reading the disk and hoping. The digest deliberately excludes
+    `action`: it is a label for the move, not part of its effect.
     """
     import hashlib
     import json

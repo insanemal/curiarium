@@ -767,6 +767,25 @@ export function arrangeMoveLine(move: BundleArrangeMove): string {
   return `move "${move.from}" -> "${move.to}"`;
 }
 
+/** The word for WHY a move exists. The four tokens this client knows each get
+ *  their own reading; any other token (a newer server's) is shown verbatim,
+ *  because the client invents no word for a token it does not know - and never
+ *  a dash, which would make a real move read as an absent one. */
+export function arrangeActionLabel(action: string): string {
+  switch (action) {
+    case "hoist":
+      return "hoist";
+    case "move":
+      return "move";
+    case "file-archive":
+      return "file archive";
+    case "rename":
+      return "rename";
+    default:
+      return action;
+  }
+}
+
 /** The server's operator sentence for one refusal, VERBATIM - including any
  *  count in it, which is the server's own measurement of the tree it walked.
  *  The client decided no refusal, so it writes no words for one: a sentence

@@ -14,6 +14,47 @@ export const DRIFT_NOT_APPLICABLE = "not_applicable";
 
 export const ADD_DRIFT_PARTS_LABEL = "Add them";
 
+/** The bundle key and shape an arrange on this project may be measured against. */
+export type ProjectArrangeOffer = { bundleKey: string; shape: string };
+
+/**
+ * The bundle key + shape an arrange on this project may be measured against, or
+ * null.
+ *
+ * Mirrors `api/bundle_drift.walk_root`: `rel_dir` first (both doors record it,
+ * and a zip-project may set it while its `key` is an identity), then the
+ * detection door's `key`. A ZIP-import marker's key is an IDENTITY
+ * (`zip-project:<url>`), not a path `GET /bundles/arrange` could walk, so
+ * without a `rel_dir` it answers `unknown bundle` - and offering the door for it
+ * would invite a request the server can only refuse.
+ *
+ * A marker with no non-empty string `shape` offers nothing: the shape chooses
+ * which moves the plan would make, so there is no plan to ask for.
+ */
+export function projectArrangeOffer(marker: unknown): ProjectArrangeOffer | null {
+  if (typeof marker !== "object" || marker === null) return null;
+  const record = marker as Record<string, unknown>;
+  const shape = record.shape;
+  if (typeof shape !== "string" || shape.length === 0) return null;
+  const relDir = record.rel_dir;
+  if (typeof relDir === "string" && relDir.length > 0) {
+    return { bundleKey: relDir, shape };
+  }
+  const key = record.key;
+  if (typeof key === "string" && key.length > 0 && !key.startsWith("zip-project:")) {
+    return { bundleKey: key, shape };
+  }
+  return null;
+}
+
+/** Whether the drift notice wants the arrange door at all: only a `known` count
+ *  above zero names parts to move, and that is the notice's own condition. An
+ *  absent count (`null`) is not a zero - it says the server has not measured -
+ *  so it offers no door rather than guessing one. */
+export function driftWantsArrange(state: string, count: number | null): boolean {
+  return state === DRIFT_KNOWN && typeof count === "number" && count > 0;
+}
+
 const DRIFT_TAIL = "parts in this folder are not in the project";
 
 /**

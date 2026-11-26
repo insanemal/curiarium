@@ -65,9 +65,12 @@ import {
   DRIFT_NOT_APPLICABLE,
   DRIFT_UNKNOWN,
   driftNoticeLine,
+  driftWantsArrange,
+  projectArrangeOffer,
 } from "./projectBundleDrift";
 import { useFileGrants, useLiveFileGrants } from "../lib/useFileGrants";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
+import ArrangePlanPanel from "./review/ArrangePlanPanel";
 import AssetGrid from "./asset-grid/AssetGrid";
 import LicenceChip from "./LicenceChip";
 import AttachFilesControl from "./project-attach/AttachFilesControl";
@@ -343,6 +346,10 @@ export default function ProjectLanding({
   }, [project.id, bundleMarker, assetsVersion]);
 
   const driftLine = driftNoticeLine(drift.state, drift.count);
+  // The bundle key + shape a plan on this project would be measured against.
+  // Derived once, from the marker itself: the arrange door is offered only when
+  // there is a path and a shape to ask the server about.
+  const projectOffer = projectArrangeOffer(project.metadata_json?._bundle);
 
   // The one action on the notice, through the membership path that already
   // exists: nothing is attached without the click, and there is no new write
@@ -932,6 +939,19 @@ export default function ProjectLanding({
               >
                 {ADD_DRIFT_PARTS_LABEL}
               </button>
+            )}
+            {/* The arrange door: a grown folder can also be rearranged into the
+                shape it was created as, so the same door the review queue uses
+                is mounted here - no route, no new state, and no request until
+                the operator asks for a preview. */}
+            {canContribute && driftWantsArrange(drift.state, drift.count) && projectOffer !== null && (
+              <ArrangePlanPanel
+                bundleKey={projectOffer.bundleKey}
+                shape={projectOffer.shape}
+                canContribute={canContribute}
+                onChanged={onAssetsChanged}
+                onUnauthorized={onUnauthorized}
+              />
             )}
           </div>
         )}

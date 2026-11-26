@@ -369,6 +369,9 @@ class BundleArrangeMoveOut(BaseModel):
   to: str
   # file | dir - read off the disk when the plan was measured.
   kind: str
+  # hoist | move | file-archive | rename - why the move exists. `retire-container`
+  # is a container-level property, never a move's.
+  action: str
 
 
 class BundleArrangeCreateOut(BaseModel):

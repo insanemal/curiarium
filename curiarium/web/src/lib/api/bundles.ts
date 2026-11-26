@@ -316,11 +316,16 @@ export type BundleEnrichResponse = {
 
 /** One file or directory the plan would move. Both paths are relative to the
  *  storage root (never absolute, never candidate-relative), and `kind` is
- *  `file` or `dir` - the mover needs to know which one it is looking at. */
+ *  `file` or `dir` - the mover needs to know which one it is looking at.
+ *
+ *  `action` is WHY the move exists (`hoist | move | file-archive | rename`),
+ *  while `kind` is what the path IS on disk. `retire-container` is not a token
+ *  here because a retired container is not a move. */
 export type BundleArrangeMove = {
   from: string;
   to: string;
   kind: string;
+  action: string;
 };
 
 /** One destination directory the plan's moves imply, plus the server's own

@@ -29,6 +29,7 @@ import {
   activeShape,
   archiveExtractTitle,
   archiveLine,
+  arrangeActionLabel,
   arrangeAppliesNothing,
   arrangeMoveCount,
   arrangeMoveCountLabel,
@@ -2643,8 +2644,8 @@ describe("arranging", () => {
       shape: "split-top-folders",
       plan_id: "plan-1",
       moves: [
-        { from: "Moai statue/a.stl", to: "Moai statue/Fates End/a.stl", kind: "file" },
-        { from: "Moai statue/b.stl", to: "Moai statue/Fates End/b.stl", kind: "file" },
+        { from: "Moai statue/a.stl", to: "Moai statue/Fates End/a.stl", kind: "file", action: "move" },
+        { from: "Moai statue/b.stl", to: "Moai statue/Fates End/b.stl", kind: "file", action: "move" },
       ],
       text: ['move "Moai statue/a.stl" -> "Moai statue/Fates End/a.stl"'],
       creates: [{ path: "Moai statue/Fates End", exists: false }],
@@ -2662,8 +2663,21 @@ describe("arranging", () => {
         from: "Moai statue/a.stl",
         to: "Moai statue/Fates End/a.stl",
         kind: "file",
+        action: "move",
       }),
     ).toBe('move "Moai statue/a.stl" -> "Moai statue/Fates End/a.stl"');
+  });
+
+  it("reads each known action token as its own word, and an unknown one verbatim", () => {
+    // Catches a formatter that invents words for tokens it does not know, or
+    // renders one as a dash: a newer server's token is still a real move, and a
+    // dash would make it read as an absent one. The four known tokens are the
+    // only ones the client may translate.
+    expect(arrangeActionLabel("hoist")).toBe("hoist");
+    expect(arrangeActionLabel("move")).toBe("move");
+    expect(arrangeActionLabel("file-archive")).toBe("file archive");
+    expect(arrangeActionLabel("rename")).toBe("rename");
+    expect(arrangeActionLabel("retire-containerish")).toBe("retire-containerish");
   });
 
   it("renders a refusal as the server's own detail, verbatim", () => {

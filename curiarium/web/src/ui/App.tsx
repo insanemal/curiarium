@@ -915,6 +915,7 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                         onScan={scanFromShell}
                         onProjectsChanged={handleAssetsChanged}
                         onProjectImported={handleProjectImported}
+                        onUnauthorized={handleUnauthorized}
                       />
                     )}
                     {resolvedQueue === "imports" && (

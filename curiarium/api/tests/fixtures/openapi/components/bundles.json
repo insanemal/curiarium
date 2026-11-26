@@ -119,6 +119,10 @@
   "BundleArrangeMoveOut": {
     "description": "One move an arrangement would make, its two ends storage-root-relative.\n\n``from`` is a Python keyword, so the field is ``from_`` with an alias. The alias\nis what the wire says and what the OpenAPI schema renders; a bare ``from_``\nleaking onto the wire is the bug this pair exists to not have.",
     "properties": {
+      "action": {
+        "title": "Action",
+        "type": "string"
+      },
       "from": {
         "title": "From",
         "type": "string"
@@ -135,7 +139,8 @@
     "required": [
       "from",
       "to",
-      "kind"
+      "kind",
+      "action"
     ],
     "title": "BundleArrangeMoveOut",
     "type": "object"

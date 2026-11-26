@@ -267,7 +267,7 @@ disk match a shape the operator chose. Three routes, classified in
 
 | Route | Level | What it does |
 | --- | --- | --- |
-| `GET /bundles/arrange?key=&shape=` | READ | re-walks the folder, asks `proposal_engine` for the move list that shape implies, and returns the moves, the directories they need, the prose rendered from them, the row's own `creatable` verdict and every refusal it found. A dry run: it writes nothing |
+| `GET /bundles/arrange?key=&shape=` | READ | re-walks the folder, asks `proposal_engine` for the move list that shape implies, and returns the moves, the directories they need, the prose rendered from them, the row's own `creatable` verdict and every refusal it found. Each move is `{from, to, kind, action}`: `kind` is `file`/`dir` (what the path is on disk), `action` is one of `hoist`/`move`/`file-archive`/`rename` (why the move exists). A dry run: it writes nothing |
 | `POST /bundles/arrange` | WRITE | applies one previewed plan, echoing its `plan_id` back so a tree that changed since the preview is a 409 rather than an approval of something never shown |
 | `POST /bundles/arrange/{arrange_id}/undo` | WRITE | folds the landed moves back through the same mover and restores the rows from the ledger |
 
