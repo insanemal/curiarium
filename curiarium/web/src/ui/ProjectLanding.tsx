@@ -98,6 +98,13 @@ type Props = {
    * gallery, tag chips and Add-files exclusions read them) and the counts.
    */
   onAssetsChanged: () => void;
+  /**
+   * App's `handleFoldersChanged`. A server-side arrange creates Folder rows and
+   * rewrites `storage_path`, so the sidebar tree and the members/counts change
+   * in one event. Optional because a host that does not own the tree (a test
+   * harness, or a future embed) simply has nothing to bump.
+   */
+  onFoldersChanged?: () => void;
   onUnauthorized?: () => void;
   slicerSettings?: SlicerSettings;
   engravingSettings?: EngravingSettings;
@@ -251,6 +258,7 @@ export default function ProjectLanding({
   onProjectUpdated,
   onProjectDeleted,
   onAssetsChanged,
+  onFoldersChanged,
   onUnauthorized,
   slicerSettings,
   engravingSettings,
@@ -268,6 +276,15 @@ export default function ProjectLanding({
     },
     [onUnauthorized],
   );
+
+  // The arrange door's ONE completion signal: server-side arrange creates Folder
+  // rows and rewrites `storage_path`, so the tree AND the members/counts change
+  // in one event and must bump in one commit. The member grid below keeps
+  // `onProjectsChanged={onAssetsChanged}`: membership is an asset-only change.
+  const handleArranged = useCallback(() => {
+    onAssetsChanged();
+    onFoldersChanged?.();
+  }, [onAssetsChanged, onFoldersChanged]);
 
   // --- Attaching the user's own files -------------------------------------
 
@@ -960,7 +977,7 @@ export default function ProjectLanding({
                   bundleKey={projectOffer.bundleKey}
                   shape={projectOffer.shape}
                   canContribute={canContribute}
-                  onChanged={onAssetsChanged}
+                  onChanged={handleArranged}
                   onUnauthorized={onUnauthorized}
                 />
               )}

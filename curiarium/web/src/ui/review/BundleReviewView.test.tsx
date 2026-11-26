@@ -685,7 +685,13 @@ function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectStat
 function renderView(
   state: BundleDetectState,
   canContribute = true,
-  options: { canScan?: boolean; onScan?: () => void; onUnauthorized?: () => void } = {},
+  options: {
+    canScan?: boolean;
+    onScan?: () => void;
+    onUnauthorized?: () => void;
+    onProjectsChanged?: () => void;
+    onFoldersChanged?: () => void;
+  } = {},
 ): RenderResult {
   return render(
     <BundleReviewView
@@ -694,6 +700,8 @@ function renderView(
       scan={makeScanState()}
       canScan={options.canScan ?? false}
       onScan={options.onScan ?? vi.fn()}
+      onProjectsChanged={options.onProjectsChanged}
+      onFoldersChanged={options.onFoldersChanged}
       onUnauthorized={options.onUnauthorized}
     />,
   );
@@ -5212,6 +5220,29 @@ describe("the arrange door", () => {
     });
     expect(detail().querySelector("[data-arrange-applied]")?.textContent).toBe("Arranged: 2 moves");
     expect(detail().querySelector("[data-arrange-plan]")).toBeNull();
+  });
+
+  it("bumps the project list and the folder tree exactly once when an arrange is applied", async () => {
+    // The arrange door is the single completion signal for its own event: the
+    // server creates folders and rewrites `storage_path` in that one write, and
+    // no scan can complete for it (arrange refuses while a scan holds the slot
+    // and never starts one). A second bump would make these counts two.
+    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
+    arrangeBundlesMock.mockResolvedValue(makeArrangeApplied());
+    const onProjectsChanged = vi.fn();
+    const onFoldersChanged = vi.fn();
+    renderView(makeState({ report: makeReport([arrangingRow]) }), true, {
+      onProjectsChanged,
+      onFoldersChanged,
+    });
+
+    fireEvent.click(previewButton());
+    await waitFor(() => expect(planPanel()).toBeTruthy());
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(undoButton()).toBeTruthy());
+
+    expect(onProjectsChanged).toHaveBeenCalledTimes(1);
+    expect(onFoldersChanged).toHaveBeenCalledTimes(1);
   });
 
   it("undoes that arrangement by the id the server issued", async () => {

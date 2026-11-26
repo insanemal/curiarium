@@ -6,13 +6,14 @@ import React from "react";
 // precedent.
 import { UnauthorizedError } from "../../lib/api/http";
 import { getLibraryScanStatus, startLibraryScan, type LibraryScanStatus } from "../../lib/api/settings";
-import type { MissingScanOutcome } from "../asset-grid/assetGridMeta";
+import { RESCAN_TIMEOUT_MS, type MissingScanOutcome } from "../asset-grid/assetGridMeta";
 
 type Props = {
   /**
    * The missing queue is open, OR the shell has already armed a scan from a
-   * surface outside the queue (the library header / a detection row). Nothing is
-   * fetched on app load and nothing polls while idle.
+   * surface outside the queue (the library header, the queue's own panel or
+   * empty state through `scanFromShell`, a detection row). Nothing is fetched
+   * on app load and nothing polls while idle.
    */
   enabled: boolean;
   onUnauthorized?: () => void;
@@ -69,11 +70,37 @@ export function scanOutcome(scan: LibraryScanStatus | null): MissingScanOutcome 
  * never fetched an initial status, so the missing-flag set was `unknown` until
  * somebody pressed Rescan.
  *
+ * The armed flag is now set by the missing queue's panel and empty-state action
+ * too, through App's `scanFromShell`, not only by the library header. That is
+ * what keeps the poll alive when the operator leaves for the library while the
+ * scan walks: a rescan started from the queue used to stop being observed the
+ * moment the queue unmounted, and the tree stayed stale after it finished
+ * (owner, 2026-11-25).
+ *
  * Named consequence: the shell's arm flag is sticky, so once a scan has been
- * started from a surface outside the queue the hook stays enabled and a later
+ * started from any of those surfaces the hook stays enabled and a later
  * re-entry into the missing queue does not re-read the status. It keeps the
  * session's last known status, which is fresher-or-equal anyway. Before that
  * first shell use, the queue's re-entry re-read is unchanged.
+ *
+ * The off-view poll is bounded on the STALL, not on the duration: a healthy scan
+ * is followed for as long as it walks (a 15-minute rsync of a big storage folder
+ * must keep its finish signal, and the loop still ends on `!scan.running`), while
+ * a status read that has stopped succeeding stops the loop after
+ * `RESCAN_TIMEOUT_MS`. The arbitration is that an advisory read failure while
+ * off-view must be bounded - no unbounded background poll against a dead API -
+ * without capping a scan that is simply slow.
+ *
+ * Accepted boundary: a RELOAD mid-scan still shows a stale tree on purpose.
+ * Nothing reads the status on app load - that is the hook's whole point - so a
+ * reload cannot know a scan was walking, and `seeded` re-baselines on the first
+ * read afterwards. Do not paper over it with a load-time status read.
+ *
+ * The announcement itself is gated, not unconditional: `registered > 0` can
+ * suppress a healing-only run, because the scan's asset-evidence backfill can
+ * relink a migrated folder's `storage_path` with nothing registered. Names are
+ * unaffected, so the visible tree is right - and nobody may "fix" this with an
+ * unconditional announce, which would only re-announce noise.
  *
  * A scan the per-card Re-scan starts is invisible to this hook, so the grid
  * reports its statuses through `adopt`: the panel and the outcome follow that
@@ -101,12 +128,17 @@ export function useLibraryScan({
   // kept across activations so a finished scan announces exactly once.
   const seeded = React.useRef(false);
   const announced = React.useRef<number | null>(null);
+  // When the last status read SUCCEEDED, so an advisory-failure loop against a
+  // dead API cannot outlive `RESCAN_TIMEOUT_MS` while the operator is on another
+  // view. A failure and a 401 leave it alone: the bound is on the stall.
+  const lastReadAt = React.useRef<number | null>(null);
 
   const readStatus = React.useCallback(async () => {
     try {
       const next = await getLibraryScanStatus();
       setScan(next);
       setLoaded(true);
+      lastReadAt.current = Date.now();
     } catch (err) {
       if (err instanceof UnauthorizedError) {
         // A revoked session is not an advisory failure: stop and let the shell
@@ -139,6 +171,13 @@ export function useLibraryScan({
 
   React.useEffect(() => {
     if (!enabled || adopted.current || !scan?.running) return;
+    // The bound is on the STALL, not on the scan's duration: while reads keep
+    // succeeding the loop follows the scan for as long as it walks, and it ends
+    // on `!scan.running` anyway. Only a status read that has stopped succeeding
+    // stops the loop - the advisory read must not poll a dead API for a whole
+    // session while the operator is on another view.
+    const last = lastReadAt.current;
+    if (last != null && Date.now() - last > RESCAN_TIMEOUT_MS) return;
     // Re-arms on every successful read because `scan` gets a new identity, and
     // on `pollTick` when a failed read changed nothing.
     const timer = window.setTimeout(() => void readStatus(), POLL_MS);
@@ -149,6 +188,8 @@ export function useLibraryScan({
   // scan can also finish between polls, so `finished_at` is the signal, not
   // `running`.
   const finishedAt = loaded && scan && !scan.running ? scan.finished_at : null;
+  const registeredCount = scan?.registered ?? 0;
+  const flaggedMissingCount = scan?.missing ?? 0;
   React.useEffect(() => {
     if (!loaded) return;
     if (!seeded.current) {
@@ -159,10 +200,26 @@ export function useLibraryScan({
       return;
     }
     if (finishedAt == null || announced.current === finishedAt) return;
+    // Advance the baseline BEFORE any callback: a run that announces neither
+    // signal below must still never announce itself on a later re-read.
     announced.current = finishedAt;
-    onFoldersChanged?.();
-    onAssetsChanged?.();
-  }, [loaded, finishedAt, onFoldersChanged, onAssetsChanged]);
+    // The gate, spelled out. The server creates a folder row only for a
+    // directory that had a file to register, so `registered > 0` is its own
+    // evidence that the tree may have changed; a healing-only run registers
+    // nothing and leaves names untouched, so it must not refresh the tree. The
+    // asset signal also fires for a run that only newly flagged vanished files
+    // (`missing > 0`) - swallowing that would leave the grid stale. Both zero
+    // is a run with nothing to announce at all.
+    if (registeredCount > 0) onFoldersChanged?.();
+    if (registeredCount > 0 || flaggedMissingCount > 0) onAssetsChanged?.();
+  }, [
+    loaded,
+    finishedAt,
+    registeredCount,
+    flaggedMissingCount,
+    onFoldersChanged,
+    onAssetsChanged,
+  ]);
 
   const run = React.useCallback(async () => {
     setBusy(true);

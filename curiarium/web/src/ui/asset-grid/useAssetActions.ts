@@ -76,6 +76,13 @@ type AssetActionsOptions = {
    */
   onAssetsFiled?: () => void;
   /**
+   * Fires once, after a per-card Re-scan settled and refreshed the grid: a
+   * finished scan creates folders, so the tree App owns is stale until it bumps
+   * `foldersVersion`. The card path announces nothing through the queue's
+   * `useLibraryScan`, so this is its only tree signal.
+   */
+  onFoldersChanged?: () => void;
+  /**
    * Fires for each status this per-card Re-scan reads. The scan it starts is
    * invisible to the queue's `useLibraryScan`, so without this the queue header
    * and empty state keep describing the previous scan.
@@ -139,6 +146,7 @@ export function useAssetActions({
   onAddToProject,
   onAssetsFiled,
   onScanStatus,
+  onFoldersChanged,
 }: AssetActionsOptions): AssetActionsApi {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
@@ -395,6 +403,10 @@ export function useAssetActions({
         status = await readStatus();
       }
       await refresh();
+      // The scan is settled, and a finished scan creates folders from the
+      // directory tree: without this the sidebar tree stays stale after a
+      // per-card Re-scan (found in live testing, 2026-11-25).
+      onFoldersChanged?.();
       // A scan changes the flagged set, so App's counts (sidebar badge, queue
       // header) must refetch: without this the row leaves the list while the
       // badge keeps the old number.

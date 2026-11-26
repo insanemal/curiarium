@@ -20,6 +20,15 @@ type Props = {
   assetsVersion: number;
   onRefresh: () => void;
   onAssetsFiled: () => void;
+  /**
+   * App's `scanFromShell`: the shell's sticky arm plus its one `run`. Both doors
+   * in the queue (the panel and the empty state) hand this down, so the poll
+   * stays alive after the operator leaves for the library.
+   */
+  onScan: () => void;
+  /** App's `handleFoldersChanged`: a card's settled Re-scan creates folders, so
+   *  the sidebar tree must refetch. */
+  onFoldersChanged: () => void;
   onUnauthorized?: () => void;
   slicerSettings?: SlicerSettings;
   engravingSettings?: EngravingSettings;
@@ -57,6 +66,11 @@ const SCAN_LABELS: Record<MissingScanOutcome, string> = {
  * reports the statuses it polls back through `state.adopt`, so the header and
  * the empty state follow the scan that produced the rows rather than the last
  * scan this hook read itself.
+ *
+ * The queue no longer starts a scan itself: both of its doors (the panel and
+ * the empty-state action) hand the shell's `scanFromShell`, so the shell's
+ * sticky arm is set before `run()` and the poll keeps running after the operator
+ * leaves Review for the library.
  */
 export default function MissingFilesReviewView({
   state,
@@ -67,6 +81,8 @@ export default function MissingFilesReviewView({
   assetsVersion,
   onRefresh,
   onAssetsFiled,
+  onScan,
+  onFoldersChanged,
   onUnauthorized,
   slicerSettings,
   engravingSettings,
@@ -85,7 +101,7 @@ export default function MissingFilesReviewView({
       lastRefreshedLabel={SCAN_LABELS[missingScan]}
       onRefresh={onRefresh}
     >
-      <LibraryScanPanel state={state} canWrite={canWrite} />
+      <LibraryScanPanel state={state} canWrite={canWrite} onScan={onScan} />
       <AssetGrid
         missingOnly
         missingScan={missingScan}
@@ -98,11 +114,12 @@ export default function MissingFilesReviewView({
               state={state}
               canWrite={canWrite}
               surface="empty"
-              onScan={() => void state.run()}
+              onScan={onScan}
             />
           ) : undefined
         }
         onAssetsFiled={onAssetsFiled}
+        onFoldersChanged={onFoldersChanged}
         onScanStatus={state.adopt}
         onUnauthorized={onUnauthorized}
         slicerSettings={slicerSettings}

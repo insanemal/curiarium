@@ -10,6 +10,12 @@ type Props = {
    * a viewer, so moving the surface broadens no write permission.
    */
   canWrite: boolean;
+  /**
+   * Starts the SHELL's scan (App's `scanFromShell`: arm, then run), not this
+   * mount's own copy: the shell owns the one poller, so the finish is observed
+   * from any view - including after the operator leaves the queue.
+   */
+  onScan: () => void;
 };
 
 /**
@@ -18,9 +24,13 @@ type Props = {
  * can refresh the flag set the queue lists. The action row itself is shared with
  * the header, the empty state and a detection row, so the wording lives in
  * `ScanStorageAction`.
+ *
+ * The panel starts the SHELL's scan rather than the hook's own `run`, so a
+ * finish is observed from any view: the sticky arm keeps the shell's poll alive
+ * while the operator is on the library.
  */
-export default function LibraryScanPanel({ state, canWrite }: Props) {
-  const { scan, run } = state;
+export default function LibraryScanPanel({ state, canWrite, onScan }: Props) {
+  const { scan } = state;
 
   return (
     <div className="rounded-lg border border-panel bg-panel-soft p-4 flex flex-col gap-3" data-library-scan>
@@ -32,7 +42,7 @@ export default function LibraryScanPanel({ state, canWrite }: Props) {
           Files that have disappeared are counted and flagged in the grid, but never removed from the library.
         </p>
       </div>
-      <ScanStorageAction state={state} canWrite={canWrite} surface="panel" onScan={() => void run()} />
+      <ScanStorageAction state={state} canWrite={canWrite} surface="panel" onScan={onScan} />
       {scan && <LibraryScanFailures failed={scan.failed} errors={scan.errors} />}
     </div>
   );

@@ -29,6 +29,7 @@ type LandingProps = {
   onProjectUpdated: (project: Project) => void;
   onProjectDeleted: (id: string) => void;
   onAssetsChanged: () => void;
+  onFoldersChanged: () => void;
   onUnauthorized?: () => void;
   scrollElementRef?: RefObject<HTMLElement | null>;
 };
@@ -110,6 +111,7 @@ function viewProps(overrides: Partial<Props> = {}): Props {
     onProjectUpdated: vi.fn(),
     onProjectDeleted: vi.fn(),
     onAssetsChanged: vi.fn(),
+    onFoldersChanged: vi.fn(),
     assetsVersion: 0,
     theme: "dark",
     scrollElementRef: createRef<HTMLElement>(),
@@ -289,6 +291,7 @@ describe("ProjectView", () => {
     const onProjectUpdated = vi.fn();
     const onProjectDeleted = vi.fn();
     const onAssetsChanged = vi.fn();
+    const onFoldersChanged = vi.fn();
     const onUnauthorized = vi.fn();
     render(
       <ProjectView
@@ -297,6 +300,7 @@ describe("ProjectView", () => {
           onProjectUpdated,
           onProjectDeleted,
           onAssetsChanged,
+          onFoldersChanged,
           onUnauthorized,
         })}
       />,
@@ -314,6 +318,9 @@ describe("ProjectView", () => {
 
     landing.onAssetsChanged();
     expect(onAssetsChanged).toHaveBeenCalledTimes(1);
+
+    // The arrange door's folder bump is forwarded as the same callback identity.
+    expect(landing.onFoldersChanged).toBe(onFoldersChanged);
 
     expect(landing.onUnauthorized).toBe(onUnauthorized);
   });

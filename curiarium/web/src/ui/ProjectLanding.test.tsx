@@ -86,7 +86,7 @@ import {
 } from "../lib/api";
 import { saveResponseToDisk } from "../lib/download";
 import { getProjectBundleDrift, type ProjectBundleDrift } from "../lib/api/projects";
-import { getArrangePlan, type BundleArrangePlan } from "../lib/api/bundles";
+import { getArrangePlan, type BundleArrangeApplied, type BundleArrangePlan } from "../lib/api/bundles";
 import { getToasts, resetToasts } from "../lib/toast";
 
 const addProjectAssetsMock = vi.mocked(addProjectAssets);
@@ -183,6 +183,7 @@ function landingProps(overrides: Partial<Props> = {}): Props {
     onProjectUpdated: vi.fn(),
     onProjectDeleted: vi.fn(),
     onAssetsChanged: vi.fn(),
+    onFoldersChanged: vi.fn(),
     theme: "dark",
     ...overrides,
   };
@@ -1158,6 +1159,7 @@ function DriftHarness({
       onProjectUpdated={vi.fn()}
       onProjectDeleted={vi.fn()}
       onAssetsChanged={() => setVersion(current => current + 1)}
+      onFoldersChanged={() => {}}
       theme="dark"
     />
   );
@@ -1181,6 +1183,21 @@ const ARRANGE_PLAN: BundleArrangePlan = {
   creates: [{ path: "Hydra/A", exists: false }],
   refusals: [],
   report: { creatable: false, blocked_reason: "needs_arrange" },
+};
+
+/** The verdict of applying that plan, shaped the way `POST /bundles/arrange`
+ *  answers. */
+const ARRANGE_APPLIED: BundleArrangeApplied = {
+  key: "Hydra",
+  shape: "split-top-folders",
+  plan_id: "plan-1",
+  arrange_id: "arrange-7",
+  project_id: "p1",
+  applied: true,
+  moves: 1,
+  already_applied: false,
+  unseeable: [],
+  stale: [],
 };
 
 describe("ProjectLanding bundle drift", () => {
@@ -1430,5 +1447,36 @@ describe("ProjectLanding arrange door", () => {
     expect(await screen.findByText("2 parts in this folder are not in the project")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Preview the moves" })).toBeNull();
     expect(getArrangePlanMock).not.toHaveBeenCalled();
+  });
+
+  it("bumps the members and the folder tree exactly once when an arrange is applied", async () => {
+    // A server-side arrange creates Folder rows and rewrites `storage_path`, so
+    // the tree AND the members/counts change in one event and must bump in one
+    // commit - and once each: a second bump would make these counts two.
+    getProjectBundleDriftMock.mockResolvedValue({
+      state: "known",
+      count: 2,
+      asset_ids: ["a", "b"],
+    });
+    getArrangePlanMock.mockResolvedValue(ARRANGE_PLAN);
+    arrangeApi.arrangeBundles.mockResolvedValue(ARRANGE_APPLIED);
+    const onAssetsChanged = vi.fn();
+    const onFoldersChanged = vi.fn();
+    renderLanding({
+      project: makeProject({
+        metadata_json: { _bundle: { key: "Hydra", shape: "split-top-folders" } },
+      }),
+      onAssetsChanged,
+      onFoldersChanged,
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Preview the moves" }));
+    await waitFor(() =>
+      expect(getArrangePlanMock).toHaveBeenCalledWith("Hydra", "split-top-folders"),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Apply this arrangement" }));
+
+    await waitFor(() => expect(onFoldersChanged).toHaveBeenCalledTimes(1));
+    expect(onAssetsChanged).toHaveBeenCalledTimes(1);
   });
 });

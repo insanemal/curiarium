@@ -259,6 +259,10 @@ type Props = {
    *  queue adds no mechanism of its own.
    */
   onProjectsChanged?: () => void;
+  /** App's `handleFoldersChanged`. An arrange or a guided import creates folder
+   *  rows and rewrites `storage_path`, so the sidebar tree must reload with the
+   *  project list in the same commit. */
+  onFoldersChanged?: () => void;
   /** Land on the one project this click created.
    *
    *  Offered only when one click made exactly one project; the bump above is what
@@ -440,6 +444,7 @@ export default function BundleReviewView({
   canScan,
   onScan,
   onProjectsChanged,
+  onFoldersChanged,
   onProjectImported,
   onUnauthorized,
   theme = "light",
@@ -453,7 +458,21 @@ export default function BundleReviewView({
     setShowDismissed,
     showCreated,
     setShowCreated,
+    refresh,
   } = state;
+
+  // The arrange door and the guided panel have ONE completion signal, this
+  // handler, and it bumps both versions in one commit. Arrange refuses while a
+  // scan holds the slot and never starts a scan itself, so no scan completion
+  // can fire for the same event. That is also why the guided panel no longer
+  // bumps the project list itself: with both, one landing-with-no-project would
+  // bump it twice in the same event.
+  const handleArranged = React.useCallback((): void => {
+    void refresh();
+    onProjectsChanged?.();
+    onFoldersChanged?.();
+  }, [refresh, onProjectsChanged, onFoldersChanged]);
+
   const [filter, setFilter] = React.useState<BundleFilter>("all");
   const [selectedKeys, setSelectedKeys] = React.useState<string[]>([]);
   const [names, setNames] = React.useState<Record<string, string>>({});
@@ -1900,7 +1919,7 @@ export default function BundleReviewView({
                           bundleKey={activeRow.key}
                           shape={activeShapeName}
                           canContribute={canContribute}
-                          onChanged={() => void state.refresh()}
+                          onChanged={handleArranged}
                           onUnauthorized={onUnauthorized}
                         />
                       )}
@@ -1929,9 +1948,8 @@ export default function BundleReviewView({
                         initialName={typedName(names, activeRow)}
                         onLanded={projectId => {
                           if (projectId) onProjectImported?.(projectId);
-                          else onProjectsChanged?.();
                         }}
-                        onChanged={() => void state.refresh()}
+                        onChanged={handleArranged}
                         onUnauthorized={onUnauthorized}
                       />
                     )}

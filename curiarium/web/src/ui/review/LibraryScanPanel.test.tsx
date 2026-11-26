@@ -34,8 +34,12 @@ function makeState(overrides: Partial<LibraryScanState> = {}): LibraryScanState 
   };
 }
 
-function renderPanel(state: LibraryScanState = makeState(), canWrite = true) {
-  return render(<LibraryScanPanel state={state} canWrite={canWrite} />);
+function renderPanel(
+  state: LibraryScanState = makeState(),
+  canWrite = true,
+  onScan: () => void = vi.fn(),
+) {
+  return render(<LibraryScanPanel state={state} canWrite={canWrite} onScan={onScan} />);
 }
 
 afterEach(() => {
@@ -70,13 +74,15 @@ describe("LibraryScanPanel", () => {
     expect(screen.queryByText(/Last scan:/)).toBeNull();
   });
 
-  it("runs the scan once on click", () => {
+  it("starts the shell's scan once on click, never the hook's own run", () => {
     const state = makeState();
-    renderPanel(state);
+    const onScan = vi.fn();
+    renderPanel(state, true, onScan);
 
     fireEvent.click(screen.getByRole("button", { name: "Rescan storage folder" }));
 
-    expect(state.run).toHaveBeenCalledTimes(1);
+    expect(onScan).toHaveBeenCalledTimes(1);
+    expect(state.run).not.toHaveBeenCalled();
   });
 
   it("shows the already-running message", () => {

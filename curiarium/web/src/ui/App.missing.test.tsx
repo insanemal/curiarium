@@ -112,12 +112,19 @@ vi.mock("../lib/settings", async importOriginal => {
   };
 });
 
-// The review entry point lives in the header, so each rail only has to mount the
-// pane the mode assertions look for. Every prop App passes is accepted and
-// ignored: nothing in this file asserts the rails' contents.
+// The review entry point lives in the header, so the rail only has to mount the
+// pane the mode assertions look for. The one exception is `foldersVersion`: it
+// is echoed as `data-folders-version` so a stale folder tree is observable
+// instead of invisible (Mf-9hhd).
 vi.mock("./Sidebar", async () => {
   const react = await import("react");
-  return { default: () => react.createElement("aside", { "aria-label": "Files" }) };
+  return {
+    default: (props: { foldersVersion?: number }) =>
+      react.createElement("aside", {
+        "aria-label": "Files",
+        "data-folders-version": String(props.foldersVersion ?? 0),
+      }),
+  };
 });
 
 vi.mock("./ProjectView", async () => {
@@ -534,13 +541,122 @@ describe("App missing queue coherence (Mf-1tx3)", () => {
     await waitFor(() => expect(getAssetCountsMock).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(pinnedCalls().length).toBe(pinnedBefore + 1));
     expect(lastPinnedParams()?.missing).toBe(true);
-    // Entry read plus the one poll the fake timers drove: the finished status
-    // is what fired the two change signals.
+    // Exactly two reads, on purpose: the panel's Rescan now goes through
+    // `scanFromShell` (arm, then run) - the arm changes nothing because the
+    // queue already had this hook enabled - so the reads are the entry read and
+    // the one poll the fake timers drove. The POST's own answer is not a read.
     expect(getQueueStatusMock).toHaveBeenCalledTimes(2);
 
     await settle(30);
     expect(getAssetCountsMock).toHaveBeenCalledTimes(2);
     expect(pinnedCalls().length).toBe(pinnedBefore + 1);
+  });
+
+  it("refreshes the folder tree when a scan started from the queue finishes while the operator is on the library view (Mf-9hhd)", async () => {
+    startQueueScanMock.mockResolvedValue(makeStatus({ running: true, finished_at: null }));
+    getQueueStatusMock
+      // Entry read: an EARLIER scan had already finished, so nothing polls yet.
+      .mockResolvedValueOnce(makeStatus({ finished_at: 100, missing: 1 }))
+      // The poll after Rescan: the NEW scan finished and registered 3 files, so
+      // it created folders as well as assets.
+      .mockResolvedValue(makeStatus({ finished_at: 200, registered: 3, missing: 1 }));
+
+    await renderApp();
+    await openQueue();
+    await queueReady();
+    await waitFor(() => expect(badgeText()).toBe("1"));
+
+    // The rail stand-in echoes the folder-tree version App passes it, so a
+    // stale tree is observable. The pre-scan "0" also proves the harness reads
+    // the live prop rather than a constant.
+    const sidebar = () => document.querySelector('aside[aria-label="Files"]') as HTMLElement;
+    expect(sidebar()).toBeTruthy();
+    expect(sidebar().getAttribute("data-folders-version")).toBe("0");
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // The queue's own panel surface: it hands App's `scanFromShell`, which
+      // arms the shell's sticky poll flag BEFORE `run()`, so the poll outlives
+      // the queue. (Before the fix it called `state.run()` directly and the tree
+      // stayed stale - what this test reproduced as `expected '0' to be '1'`.)
+      fireEvent.click(screen.getByRole("button", { name: "Rescan storage folder" }));
+      await flush();
+      expect(startQueueScanMock).toHaveBeenCalledTimes(1);
+
+      // Leave the review destination for the library view while the scan walks.
+      fireEvent.click(screen.getByRole("button", { name: "Back to files" }));
+      await flush();
+      expect(screen.queryByRole("heading", { name: "Missing files" })).toBeNull();
+
+      // One poll interval passes with the queue closed. `enabled` is the only
+      // thing that keeps that timer alive.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+      await flush();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The discriminator: the tree may not stay stale. "1" is also an
+    // exactly-once claim - a double announcement would make it "2".
+    expect(sidebar().getAttribute("data-folders-version")).toBe("1");
+
+    // Status reads: the queue's entry read plus the one poll that observed the
+    // finish, taken while the operator was already back on the library view.
+    const readsAfterFinish = getQueueStatusMock.mock.calls.length;
+    expect(readsAfterFinish).toBe(2);
+
+    // Both change signals bump in ONE commit, so the counts are refetched once
+    // after the app-load read rather than once per signal.
+    expect(getAssetCountsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the folder tree exactly once when a per-card Re-scan settles (Mf-9hhd)", async () => {
+    // The card's Re-scan starts and polls its own scan pair through the barrel;
+    // the queue's `useLibraryScan` never sees it and so announces nothing. The
+    // tree bump has to ride the card path's own settle, and only once.
+    getQueueStatusMock.mockResolvedValue(makeStatus({ finished_at: 100, failed: 0, missing: 1 }));
+    listAssetsMock.mockImplementation(async params => ({
+      items: params?.missing === true ? [missingAsset] : [],
+      hasMore: false,
+    }));
+    getAssetCountsMock.mockResolvedValue({ total: 9, unfiled: 0, missing: 1 });
+    startCardScanMock.mockResolvedValue(makeStatus({ running: true, finished_at: null }));
+    getCardScanStatusMock.mockResolvedValue(makeStatus({ finished_at: 200, missing: 1 }));
+
+    await renderApp();
+    await openQueue();
+    await queueReady();
+    await waitFor(() => expect(badgeText()).toBe("1"));
+
+    const sidebar = () => document.querySelector('aside[aria-label="Files"]') as HTMLElement;
+    expect(sidebar()).toBeTruthy();
+    expect(sidebar().getAttribute("data-folders-version")).toBe("0");
+
+    const card = await findCard(missingAsset.id);
+    fireEvent.click(within(openCardMenu(card)).getByRole("menuitem", { name: "Re-scan" }));
+
+    // The settle refetches the grid and bumps the tree in the same turn. "1" is
+    // an exactly-once claim: a second bump would make it "2".
+    await waitFor(() => expect(sidebar().getAttribute("data-folders-version")).toBe("1"));
+
+    // Nothing keeps bumping it afterwards: the card's poll loop is finished.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+      await flush();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+      await flush();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sidebar().getAttribute("data-folders-version")).toBe("1");
   });
 
   it("drops the badge and the header by one after a Forget", async () => {

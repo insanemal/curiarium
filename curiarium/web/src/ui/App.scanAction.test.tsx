@@ -103,9 +103,17 @@ vi.mock("../lib/settings", async importOriginal => {
   };
 });
 
+// The rail stand-in echoes `foldersVersion` as `data-folders-version`, so a
+// stale folder tree after a finished scan is observable (Mf-9hhd).
 vi.mock("./Sidebar", async () => {
   const react = await import("react");
-  return { default: () => react.createElement("aside", { "aria-label": "Files" }) };
+  return {
+    default: (props: { foldersVersion?: number }) =>
+      react.createElement("aside", {
+        "aria-label": "Files",
+        "data-folders-version": String(props.foldersVersion ?? 0),
+      }),
+  };
 });
 
 vi.mock("./ProjectView", async () => {
@@ -279,6 +287,98 @@ describe("App storage scan from the cold library header (Mf-7mio)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("refreshes the folder tree and the grid once when a header-started scan finishes (Mf-9hhd)", async () => {
+    startScanMock.mockResolvedValue(makeStatus({ running: true, finished_at: null }));
+    getScanStatusMock
+      // Entry read: the scan the header started is still walking.
+      .mockResolvedValueOnce(makeStatus({ running: true, finished_at: null }))
+      // The poll after POLL_MS: it finished and registered 3 files, so it
+      // created folders as well as assets.
+      .mockResolvedValue(makeStatus({ finished_at: 200, registered: 3, missing: 1 }));
+
+    await renderApp();
+    await settle(30);
+
+    const sidebar = () => document.querySelector('aside[aria-label="Files"]') as HTMLElement;
+    expect(sidebar()).toBeTruthy();
+    expect(sidebar().getAttribute("data-folders-version")).toBe("0");
+
+    const listAssetsBefore = listAssetsMock.mock.calls.length;
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const headerAction = screen.getByRole("button", { name: "Rescan storage folder" });
+      // The library header, not the queue's panel: this path arms `scanArmed`
+      // BEFORE `run()`, which is why the poll loop is alive without the queue.
+      expect(headerAction.closest('[data-scan-surface="header"]')).toBeTruthy();
+      fireEvent.click(headerAction);
+      await flush();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+      await flush();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The control for the queue-path reproduction below: this half PASSED
+    // BEFORE any Mf-9hhd fix, because `scanFromShell` arms `scanArmed` before
+    // `run()` so the finish is observed from anywhere. "1" is also an
+    // exactly-once claim: a second announcement would make it "2".
+    expect(sidebar().getAttribute("data-folders-version")).toBe("1");
+
+    // The asset side of the same commit: the grid refetches in place on
+    // `assetsVersion`, one extra listing and not two.
+    expect(listAssetsMock.mock.calls.length).toBe(listAssetsBefore + 1);
+    // Both change signals landed in one commit, so the counts are read once
+    // after the app-load read.
+    await waitFor(() => expect(getAssetCountsMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps polling after the operator leaves the library mid-scan (Mf-9hhd)", async () => {
+    // The header arms `scanArmed` before `run()`, so the poll outlives the
+    // library view - which is exactly what a queue-initiated rescan used to
+    // miss: it stopped being observed the moment its own view unmounted.
+    startScanMock.mockResolvedValue(makeStatus({ running: true, finished_at: null }));
+    getScanStatusMock
+      // Entry read: the scan the header started is still walking.
+      .mockResolvedValueOnce(makeStatus({ running: true, finished_at: null }))
+      // The poll after POLL_MS: it finished and registered 3 files.
+      .mockResolvedValue(makeStatus({ finished_at: 200, registered: 3, missing: 1 }));
+
+    await renderApp();
+    await settle(30);
+
+    const sidebar = () => document.querySelector('aside[aria-label="Files"]') as HTMLElement;
+    expect(sidebar()).toBeTruthy();
+    expect(sidebar().getAttribute("data-folders-version")).toBe("0");
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Rescan storage folder" }));
+      await flush();
+      expect(startScanMock).toHaveBeenCalledTimes(1);
+
+      // Navigate to Review while the scan is still walking: the library - and
+      // with it the header control that started the scan - leaves the screen.
+      fireEvent.click(screen.getByRole("button", { name: "Review" }));
+      await flush();
+      expect(screen.queryByRole("button", { name: "Rescan storage folder" })).toBeNull();
+
+      // The one poll interval happens off the library.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+      await flush();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The tree still bumps, once: the poll was alive without the library view.
+    expect(sidebar().getAttribute("data-folders-version")).toBe("1");
   });
 
   it("gives a viewer no header action but still reads the status on queue entry", async () => {

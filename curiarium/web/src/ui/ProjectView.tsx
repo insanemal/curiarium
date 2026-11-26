@@ -40,6 +40,9 @@ type Props = {
   onProjectUpdated: (project: Project) => void;
   onProjectDeleted: (id: string) => void;
   onAssetsChanged: () => void;
+  /** App's `handleFoldersChanged`, forwarded to the landing's arrange door.
+   *  Optional because a host with no sidebar tree has nothing to bump. */
+  onFoldersChanged?: () => void;
   assetsVersion: number;
   onUnauthorized?: () => void;
   slicerSettings?: SlicerSettings;
@@ -144,6 +147,7 @@ export default function ProjectView({
   onProjectUpdated,
   onProjectDeleted,
   onAssetsChanged,
+  onFoldersChanged,
   assetsVersion,
   onUnauthorized,
   slicerSettings,
@@ -336,6 +340,7 @@ export default function ProjectView({
           onProjectUpdated={onProjectUpdated}
           onProjectDeleted={handleDelete}
           onAssetsChanged={onAssetsChanged}
+          onFoldersChanged={onFoldersChanged}
           onUnauthorized={onUnauthorized}
           slicerSettings={slicerSettings}
           engravingSettings={engravingSettings}

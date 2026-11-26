@@ -57,6 +57,23 @@ vi.mock("../LightBurnPreview", () => ({
   default: () => null,
 }));
 
+// The real grid is WRAPPED, not replaced: every existing assertion keeps running
+// against the real component, and its props are recorded so the forwarding
+// contract (`onFoldersChanged`) stays testable here (Mf-9hhd).
+const gridState = vi.hoisted(() => ({ received: null as Record<string, unknown> | null }));
+
+vi.mock("../asset-grid/AssetGrid", async importOriginal => {
+  const actual = await importOriginal<typeof import("../asset-grid/AssetGrid")>();
+  const react = await import("react");
+  const Grid = actual.default;
+  return {
+    default: (props: Record<string, unknown>) => {
+      gridState.received = props;
+      return react.createElement(Grid, props as never);
+    },
+  };
+});
+
 import { listAssets, listCreators, listTags } from "../../lib/api";
 import type { LibraryScanStatus } from "../../lib/api/settings";
 import MissingFilesReviewView from "./MissingFilesReviewView";
@@ -107,6 +124,8 @@ function viewProps(overrides: Partial<ViewProps> = {}): ViewProps {
     assetsVersion: 0,
     onRefresh: vi.fn(),
     onAssetsFiled: vi.fn(),
+    onScan: vi.fn(),
+    onFoldersChanged: vi.fn(),
     onUnauthorized: vi.fn(),
     theme: "dark",
     ...overrides,
@@ -132,6 +151,7 @@ function emptyStateMarker(container: HTMLElement): string | null {
 }
 
 beforeEach(() => {
+  gridState.received = null;
   listAssetsMock.mockReset();
   listAssetsMock.mockResolvedValue({ items: [], hasMore: false });
   listTagsMock.mockReset();
@@ -194,6 +214,41 @@ describe("MissingFilesReviewView queue", () => {
     expect(
       await screen.findByText("Last scan: 3 new, 1 known, 0 missing, 0 failed"),
     ).toBeTruthy();
+  });
+});
+
+describe("MissingFilesReviewView scan ownership", () => {
+  it("hands the panel's Rescan to the shell's onScan", async () => {
+    const onScan = vi.fn();
+    renderView({ onScan });
+
+    const panel = document.querySelector<HTMLElement>("[data-library-scan]");
+    if (!panel) throw new Error("the scan panel is not rendered");
+    fireEvent.click(within(panel).getByRole("button", { name: "Rescan storage folder" }));
+
+    expect(onScan).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands the empty state's scan to the same onScan, never the hook's own run", async () => {
+    const state = makeState();
+    const onScan = vi.fn();
+    const { container } = renderView({ state, onScan });
+
+    await screen.findByText("Every file an asset points at is on disk.");
+    const empty = container.querySelector<HTMLElement>('[data-scan-surface="empty"]');
+    if (!empty) throw new Error("the empty-state scan action is not rendered");
+    fireEvent.click(within(empty).getByRole("button", { name: "Rescan storage folder" }));
+
+    expect(onScan).toHaveBeenCalledTimes(1);
+    expect(state.run).not.toHaveBeenCalled();
+  });
+
+  it("hands the grid the same onFoldersChanged", async () => {
+    const onFoldersChanged = vi.fn();
+    renderView({ onFoldersChanged });
+
+    await waitFor(() => expect(gridState.received).not.toBeNull());
+    expect(gridState.received?.onFoldersChanged).toBe(onFoldersChanged);
   });
 });
 

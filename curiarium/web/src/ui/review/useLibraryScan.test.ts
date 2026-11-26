@@ -27,6 +27,7 @@ vi.mock("../../lib/api/settings", () => ({
 
 import { UnauthorizedError } from "../../lib/api/http";
 import type { LibraryScanStatus } from "../../lib/api/settings";
+import { RESCAN_TIMEOUT_MS } from "../asset-grid/assetGridMeta";
 import { scanOutcome, useLibraryScan } from "./useLibraryScan";
 
 const FINISHED_AT = 1_700_000_010;
@@ -194,6 +195,57 @@ describe("useLibraryScan polling", () => {
     await tick();
     expect(getStatus.mock.calls.length).toBeGreaterThan(3);
   });
+
+  it("stops polling a running scan once the off-view deadline passes", async () => {
+    // The status read is advisory, so a dead API keeps answering neither a
+    // status nor an error the operator can see. The bound is on that STALL:
+    // nothing stamps `lastReadAt`, so once `RESCAN_TIMEOUT_MS` has passed since
+    // the last read that succeeded, the loop stops re-arming.
+    getStatus
+      .mockResolvedValueOnce(runningStatus())
+      .mockRejectedValue(new Error("network down"));
+
+    renderHook(() => useLibraryScan({ enabled: true }));
+    await settle();
+    expect(getStatus).toHaveBeenCalledTimes(1);
+
+    // One interval in, a poll fails and the chain re-arms on `pollTick`.
+    await tick();
+    expect(getStatus).toHaveBeenCalledTimes(2);
+
+    // One jump past the deadline: the last timer stamped inside it arms, the
+    // read after it does not, and the stall is over the bound from then on.
+    await tick(RESCAN_TIMEOUT_MS + 1_600);
+    const readsAtDeadline = getStatus.mock.calls.length;
+    expect(readsAtDeadline).toBeGreaterThan(2);
+
+    await tick(RESCAN_TIMEOUT_MS);
+    expect(getStatus).toHaveBeenCalledTimes(readsAtDeadline);
+  });
+
+  it("keeps following a scan that walks longer than the deadline", async () => {
+    // A 15-minute rsync of a big storage folder is a HEALTHY scan. The deadline
+    // bounds a dead API, not a slow scan, so every successful running read must
+    // keep the chain alive past `RESCAN_TIMEOUT_MS` - a duration cap would lose
+    // the finish signal and leave the tree stale after the scan ends, which is
+    // the bug this ticket fixes.
+    readReturns(runningStatus);
+
+    renderHook(() => useLibraryScan({ enabled: true }));
+    await settle();
+    expect(getStatus).toHaveBeenCalledTimes(1);
+
+    // Twelve minutes of walk time, advanced in one-minute steps: a healthy
+    // read must keep stamping the bound, so the loop follows the scan right
+    // across `RESCAN_TIMEOUT_MS` instead of capping its duration.
+    for (let minute = 0; minute < 12; minute += 1) await tick(60_000);
+    const reads = getStatus.mock.calls.length;
+    expect(reads).toBeGreaterThan(10);
+
+    // And it is still growing: the chain never stopped following the scan.
+    await tick();
+    expect(getStatus.mock.calls.length).toBeGreaterThan(reads);
+  });
 });
 
 describe("useLibraryScan announcements", () => {
@@ -214,6 +266,12 @@ describe("useLibraryScan announcements", () => {
     expect(onFoldersChanged).toHaveBeenCalledTimes(1);
     expect(onAssetsChanged).toHaveBeenCalledTimes(1);
 
+    // Five further intervals of the same finished status: an announced
+    // completion may never be announced again.
+    for (let interval = 0; interval < 5; interval += 1) await tick();
+    expect(onFoldersChanged).toHaveBeenCalledTimes(1);
+    expect(onAssetsChanged).toHaveBeenCalledTimes(1);
+
     // Refetching the SAME finished scan (a manual rescan reporting the same
     // `finished_at`) must not announce it a second time.
     await act(async () => {
@@ -223,6 +281,54 @@ describe("useLibraryScan announcements", () => {
 
     expect(onFoldersChanged).toHaveBeenCalledTimes(1);
     expect(onAssetsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces nothing when a finished scan registered and flagged nothing", async () => {
+    // A healing-only run: the asset-evidence backfill can relink a migrated
+    // folder's `storage_path` with nothing registered, and the tree's names are
+    // unaffected. Both zero is a run with nothing to tell either signal about.
+    getStatus.mockImplementationOnce(async () => runningStatus());
+    readReturns(() => makeStatus({ registered: 0, missing: 0 }));
+    const onAssetsChanged = vi.fn();
+    const onFoldersChanged = vi.fn();
+
+    const { rerender } = renderHook(
+      ({ enabled }) => useLibraryScan({ enabled, onAssetsChanged, onFoldersChanged }),
+      { initialProps: { enabled: true } },
+    );
+    await settle();
+
+    await tick();
+    expect(onFoldersChanged).not.toHaveBeenCalled();
+    expect(onAssetsChanged).not.toHaveBeenCalled();
+
+    // `announced` advanced even though no signal fired, so a later re-read of
+    // the same `finished_at` cannot announce it either.
+    rerender({ enabled: false });
+    await settle();
+    rerender({ enabled: true });
+    await settle();
+    await tick();
+
+    expect(getStatus).toHaveBeenCalledTimes(3);
+    expect(onFoldersChanged).not.toHaveBeenCalled();
+    expect(onAssetsChanged).not.toHaveBeenCalled();
+  });
+
+  it("signals only the assets for a run that newly flagged vanished files", async () => {
+    // A run with nothing registered still flags missing files: swallowing it
+    // would leave the grid showing rows the scan just marked.
+    getStatus.mockImplementationOnce(async () => runningStatus());
+    readReturns(() => makeStatus({ registered: 0, missing: 3 }));
+    const onAssetsChanged = vi.fn();
+    const onFoldersChanged = vi.fn();
+
+    renderHook(() => useLibraryScan({ enabled: true, onAssetsChanged, onFoldersChanged }));
+    await settle();
+    await tick();
+
+    expect(onAssetsChanged).toHaveBeenCalledTimes(1);
+    expect(onFoldersChanged).not.toHaveBeenCalled();
   });
 
   it("does not re-announce a scan that finished before the queue was opened", async () => {

@@ -90,6 +90,13 @@ type Props = {
    */
   onAssetsFiled?: () => void;
   /**
+   * Fires once a per-card Re-scan settles: a finished scan creates folder rows,
+   * so App's `foldersVersion` must bump or the sidebar tree stays stale. The
+   * card path starts its scan through the other pair and announces nothing
+   * through `useLibraryScan`, so this is its only tree signal.
+   */
+  onFoldersChanged?: () => void;
+  /**
    * Fires for each status the per-card Re-scan reads, so the missing queue's
    * panel and empty state describe the scan that produced its rows.
    */
@@ -127,6 +134,7 @@ export default function AssetGrid({
   onProjectCreated,
   onAssetsFiled,
   onScanStatus,
+  onFoldersChanged,
 }: Props) {
   const isProject = projectId != null;
   // Project membership is not asset ownership: removing a member drops a join
@@ -288,6 +296,7 @@ export default function AssetGrid({
     onAddToProject: openProjectPicker,
     onAssetsFiled,
     onScanStatus,
+    onFoldersChanged,
   });
 
   // Membership removal is NOT deletion: this path calls `removeProjectAssets`
