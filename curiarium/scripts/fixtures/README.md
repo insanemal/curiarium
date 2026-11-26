@@ -9,10 +9,15 @@ command below still runs through the script and still scores the same rules.
 Keys are **root-relative**, so the same file works against any library root:
 
 ```
-python3 curiarium/scripts/propose_import.py --root /mnt/ceph/3D_models \
+.venv/bin/python curiarium/scripts/propose_import.py --root /mnt/ceph/3D_models \
     --projects /tmp/project-keys.json \
     --labels curiarium/scripts/fixtures/proposal-labels.json --validate
 ```
+
+`--facts KEY` dumps the whole fact sheet (metadata, provenance, groups, twin,
+cover, documents) with every section marked `kind: fact` or `kind: suggestion`;
+`--explain KEY` adds every option's score and confidence. Both run under the repo
+virtualenv because the engine reads PDFs with `pypdf` (see below).
 
 `--projects` is a local export of the live project keys (one `{"key", "project"}`
 object per project, taken read-only from `Project.metadata_json -> _bundle.key`).
@@ -46,8 +51,8 @@ flattening rule cannot silently disappear.
 ## Running the harness
 
 The engine is app-free (no FastAPI, no database) but it is no longer stdlib-only:
-it uses a PDF library for document text and info. Run the harness with the repo's
-virtualenv, which installs `curiarium/api/requirements*.lock`:
+it uses `pypdf` for PDF text, document info and link annotations. Run the harness
+with the repo's virtualenv, which installs `curiarium/api/requirements*.lock`:
 
 ```
 .venv/bin/python curiarium/scripts/propose_import.py --only Vault

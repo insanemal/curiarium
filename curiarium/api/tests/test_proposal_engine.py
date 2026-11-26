@@ -10,9 +10,10 @@ silently:
 * two copies drift by WORDING, which nothing catches. So the first test pins the
   MODULE IDENTITY instead: copy the engine back into the script and this reds on
   identity, not on wording;
-* the engine is imported by the API process, so one `import fastapi` there would
-  make the offline tight loop (a bare host python against a live mount)
-  unimportable. The audit is mechanical, not a comment;
+* the engine is imported by the API process and run in a host tight loop, so one
+  `import fastapi` there would drag the session/HTTP world into a read-only walk
+  and make the loop unimportable outside the app. The audit is mechanical: no app
+  module, and `pypdf` is the one third-party import, deliberately allow-listed;
 * `MODEL_EXTS` is deliberately WIDER than the app's `MODEL_SUFFIXES` - a proposal
   may name a payload no importer accepts - so it is pinned as a containment, not
   as an equality: `check_model_table.py` pins equality for the four copies that
@@ -151,30 +152,23 @@ def test_the_shim_bootstraps_the_engine_only_through_sys_path() -> None:
         assert fragment in source, f"the sys.path bootstrap lost {fragment!r}"
 
 
-# --- the engine is stdlib-only and app-free -------------------------------
+# --- the engine is app-free, with one allow-listed third-party dep ---------
+
+# The ONE third-party package the engine may import, deliberately: `pypdf` is pure
+# Python (no system libraries, so the multi-arch image stays buildable on arm64).
+# A second dependency must be an explicit edit here, not an accident.
+ALLOWED_THIRD_PARTY = {"pypdf"}
 
 
-def test_the_engine_imports_nothing_but_the_stdlib() -> None:
-    """No app import may reach the engine: it is imported by a bare host python.
+def test_the_engine_imports_no_app_module() -> None:
+    """No app import may reach the engine, and `pypdf` is its only third-party one.
 
-    Mutation: `import fastapi` (or `db`, or `bundle_detect`) at the top of
-    `proposal_engine.py` makes the offline tight loop - the whole point of the tool -
-    fail to start on a machine that has no app dependencies installed, and the API
-    keeps working, so nothing else notices.
+    Mutation: `import fastapi` (or `db`, or `bundle_detect`) makes the engine drag
+    the session/HTTP world into a read-only walk and breaks the host tight loop;
+    a second third-party dependency slipped in silently would do the same on a
+    machine without it. Both are caught mechanically, at every import depth.
     """
     tree = ast.parse(ENGINE.read_text(encoding="utf-8"))
-    top_level = {
-        alias.name.split(".")[0]
-        for node in tree.body if isinstance(node, ast.Import)
-        for alias in node.names
-    } | {
-        (node.module or "").split(".")[0]
-        for node in tree.body if isinstance(node, ast.ImportFrom)
-    }
-    assert top_level == {"os", "re", "typing"}, (
-        f"the engine's top-level imports are {sorted(top_level)}: stdlib-only was pinned to "
-        f"os, re and typing, and subprocess/zipfile/io belong inside the one function using them"
-    )
     every = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -183,12 +177,25 @@ def test_the_engine_imports_nothing_but_the_stdlib() -> None:
             if node.level:
                 raise AssertionError("the engine must not import relatively: it has no package")
             every.add((node.module or "").split(".")[0])
-    assert every <= set(sys.stdlib_module_names), (
-        f"the engine imports non-stdlib modules {sorted(every - set(sys.stdlib_module_names))}"
-    )
+    top_level = {
+        alias.name.split(".")[0]
+        for node in tree.body if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        (node.module or "").split(".")[0]
+        for node in tree.body if isinstance(node, ast.ImportFrom)
+    }
     assert every & set(APP_MODULES) == set(), (
         f"the engine imports app modules {sorted(every & set(APP_MODULES))}: they drag the "
         f"session and HTTP world into a read-only walk and break the host tight loop"
+    )
+    assert top_level & set(APP_MODULES) == set(), (
+        f"the engine imports app modules at module level {sorted(top_level & set(APP_MODULES))}"
+    )
+    third_party = every - set(sys.stdlib_module_names)
+    assert third_party <= ALLOWED_THIRD_PARTY, (
+        f"the engine imports non-stdlib modules {sorted(third_party)}; the allow-list is "
+        f"{sorted(ALLOWED_THIRD_PARTY)}. Add one deliberately, do not slip it in"
     )
 
 

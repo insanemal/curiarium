@@ -21,12 +21,13 @@ hard-link) is a separate, approval-gated step that does not exist yet.
 
 WHAT THIS FILE IS, since Mf-yitm: measurements and interpretations live in
 `curiarium/api/proposal_engine.py`, an app-free module (no FastAPI, no database),
-so
-the API can call the same rules a route needs without a subprocess or a second
-copy. What is left here is argv, the sys.path bootstrap that lets a bare host
-python find that module, and the text rendering - which is why nothing below
-defines a rule, and why a `def propose` in this file would be a fork of the
-engine rather than a fix to it.
+so the API can call the same rules a route needs without a subprocess or a second
+copy. The engine is app-free, not stdlib-only: it uses `pypdf` for PDF text and
+document info, so run this harness under the repo virtualenv
+(`.venv/bin/python`, which installs `curiarium/api/requirements*.lock`). What is
+left here is argv, the sys.path bootstrap that lets that interpreter find the
+engine, and the rendering - which is why nothing below defines a rule, and why a
+`def propose` in this file would be a fork of the engine rather than a fix to it.
 """
 
 import argparse
@@ -55,7 +56,7 @@ def render_archive(rel: str, facts: proposal_engine.ArchiveFacts,
         out.append(f"  why       {reason}")
     out.append("  options   (ranked)")
     for option in options[:3]:
-        out.append(f"    {option.score:>3}  {option.label}")
+        out.append(f"    {option.score:>3}  {option.label}  [{option.confidence}]")
         out.append(f"         {option.detail}")
     out.append("  arrange   " + arrange[0])
     for extra in arrange[1:]:
@@ -122,14 +123,16 @@ def render(rel: str, options: List[proposal_engine.Option], reasons: List[str],
         out.append(f"  why       {reason}")
     out.append("  options   (ranked)")
     for option in options[:4]:
-        out.append(f"    {option.score:>3}  {option.label}")
+        out.append(f"    {option.score:>3}  {option.label}  [{option.confidence}]")
         out.append(f"         {option.detail}")
         if option is not options[0]:
             out.append(f"         -> {option.consequence}")
     if repo is not None:
         out.append(
-            f"  git       {repo['branch']} @ {(repo['head'].split() or ['?'])[0]} · "
+            f"  git       {(repo.get('branch') or ('detached at ' + (repo.get('sha') or '?')))} "
+            f"@ {(repo['head'].split() or ['?'])[0]} · "
             f"{len(repo['tracked'])} tracked · {len(repo['untracked'])} untracked"
+            + (" · truncated" if repo.get('truncated') else "")
         )
         for item in (peel or []):
             mark = "twin  " if item["twin"] else "      "
@@ -213,6 +216,69 @@ def render_validation(report: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def folder_facts_json(facts: proposal_engine.Facts) -> dict:
+    """The WHOLE fact sheet, with every section marked fact or suggestion.
+
+    Rendering only: the values are the engine's. `kind: fact` means a measured count,
+    structure or result; `kind: suggestion` means a value the operator may confirm,
+    and every such entry carries its own `where` and `confidence`.
+    """
+    return {
+        "kind": "folder",
+        "rel": facts.rel,
+        "counts": {
+            "kind": "fact", "models": facts.models, "images": facts.images,
+            "docs": facts.docs, "others": facts.others, "archives": facts.archives,
+            "bytes": facts.bytes,
+        },
+        "structure": {
+            "kind": "fact",
+            "model_dirs": len(facts.model_dirs),
+            "depth": facts.depth,
+            "dominance": round(facts.dominance(), 3),
+            "top_children": facts.top_children_with_models(),
+            "root_meta": facts.root_meta,
+            "children_with_product_document": facts.children_with_own_meta(),
+            "truncated": facts.truncated,
+        },
+        "groups": {"kind": "fact", "tree": facts.groups},
+        "twin": {"kind": "fact", **facts.twin, "archives": facts.twin_archives()},
+        "cover": {"kind": "fact", **facts.cover},
+        "documents": {"kind": "fact", "items": facts.documents},
+        "metadata": {"kind": "suggestion", "fields": facts.metadata},
+        "provenance": {
+            "kind": "suggestion",
+            "candidates": facts.provenance["candidates"],
+            "unresolved": facts.provenance["unresolved"],
+            "confidence": facts.provenance["confidence"],
+        },
+    }
+
+
+def archive_facts_json(facts: proposal_engine.ArchiveFacts, rel: str) -> dict:
+    """An archive's fact sheet: it has counts and a payload, not a metadata tree."""
+    return {
+        "kind": "archive",
+        "rel": rel,
+        "entries": {"kind": "fact", "count": len(facts.entries)},
+        "counts": {
+            "kind": "fact", "models": facts.models, "images": facts.images,
+            "docs": facts.docs, "others": facts.others,
+        },
+        "common_root": {"kind": "fact", "value": facts.common_root()},
+        "nested": {"kind": "fact", "items": facts.nested},
+        "groups": {"kind": "fact", "tree": []},
+        "twin": {"kind": "fact", "verified": False, "pairs": [], "unverified": []},
+        "cover": {"kind": "fact", "reason": "none", "chosen": None, "candidates": []},
+        "documents": {"kind": "fact", "items": []},
+        "metadata": {"kind": "suggestion", "fields": {}},
+        "provenance": {
+            "kind": "suggestion", "candidates": [], "unresolved": [],
+            "confidence": "suggested",
+        },
+    }
+
+
 def main(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--root", default=os.environ.get("CURIARIUM_STORAGE",
@@ -279,31 +345,11 @@ def main(argv: Sequence[str]) -> int:
         if os.path.isfile(path) and path.lower().endswith(".zip"):
             afacts = proposal_engine.measure_archive(path, key)
             options, reasons = proposal_engine.propose_archive(afacts)
-            facts_json = {
-                "kind": "archive", "rel": key, "entries": len(afacts.entries),
-                "counts": {"models": afacts.models, "images": afacts.images,
-                           "docs": afacts.docs, "others": afacts.others},
-                "common_root": afacts.common_root(), "nested": afacts.nested,
-            }
+            facts_json = archive_facts_json(afacts, key)
         else:
             facts = proposal_engine.measure(path, key)
             options, reasons, _repo = proposal_engine.propose(facts, project_keys)
-            facts_json = {
-                "kind": "folder", "rel": key,
-                "counts": {"models": facts.models, "images": facts.images,
-                           "docs": facts.docs, "others": facts.others,
-                           "archives": facts.archives},
-                "model_dirs": len(facts.model_dirs), "depth": facts.depth,
-                "dominance": round(facts.dominance(), 3),
-                "top_children": facts.top_children_with_models(),
-                "twins": facts.twin_archives(),
-                "root_meta": facts.root_meta,
-                "children_with_product_document": facts.children_with_own_meta(),
-                # The engine will own these too (Mf-9h0v); print them when it does.
-                "metadata": getattr(facts, "metadata", None),
-                "groups": getattr(facts, "groups", None),
-                "cover": getattr(facts, "cover", None),
-            }
+            facts_json = folder_facts_json(facts)
         if args.facts:
             print(json.dumps(facts_json, indent=1))
             return 0
@@ -311,7 +357,9 @@ def main(argv: Sequence[str]) -> int:
         print("options:")
         for index, option in enumerate(options):
             print(f"  [{option.score:>3}] {option.label}"
+                  f"  confidence={option.confidence}"
                   f"  ({'recommended' if index == 0 else 'alternative'})")
+            print(f"        shape: {option.shape}")
             print(f"        {option.detail}")
             print(f"        -> {option.consequence}")
         print("reasons:")

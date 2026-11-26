@@ -1,32 +1,39 @@
 #!/usr/bin/env python3
-"""Measure a folder and propose what it should become. Stdlib only, writes nothing.
+"""Measure a folder and propose what it should become. Writes nothing.
 
 The engine behind `curiarium/scripts/propose_import.py`, and the half of that tool
 the app is allowed to call. It walks a real storage tree and answers, per folder,
 which interpretations the facts support ("one project", "one project per part
 folder", "add these parts to an existing project"), each with the counts it would
 produce, the reasons it is or is not recommended, and the arrangement it would
-need.
+need. It also measures the FACTS a report renders: vendor metadata, provenance
+candidates, hierarchical groups, archive twin verification and cover candidates.
 
-STDLIB ONLY, and no app import of any kind: this module is imported by the API
-process (later passes wire it into a route) *and* run from a bare host python in
-an offline tight loop against a live CephFS mount. `fastapi` or `sqlalchemy` here
-would make the tight loop impossible to start, so the constraint is audited by
-`curiarium/api/tests/test_proposal_engine.py` rather than trusted.
+APP-FREE, not stdlib-only. The engine uses `pypdf` (pure Python, no system
+libraries) for PDF text and document info, so run it under the repo virtualenv
+(`.venv/bin/python`, which installs `curiarium/api/requirements*.lock`). What it
+must never do is import an app module - `fastapi`, `sqlalchemy`, a database or
+settings/router module - because that is what lets the API process import it AND
+a host run it in an offline tight loop against a live CephFS mount. The rule is
+audited by `curiarium/api/tests/test_proposal_engine.py` rather than trusted.
 
 Read-only in the strongest sense: no rename, no link, no unlink, no mkdir, no
-write-file. It opens directories for reading and files only to parse a README.
-The one thing that can run a subprocess is `propose()`, which asks git about a
-checkout via `git_state` - and a GET handler must never do that, so the call is
-behind `probe_git=False` (Mf-yitm). A proposal moves nothing either way.
+write-file. It opens directories for reading, files to parse a README/vendor
+document, and archives read-only to compare a payload. The one thing that can run
+a subprocess is `propose()`, which asks git about a checkout via `git_state` - and
+a GET handler must never do that, so the call is behind `probe_git=False`
+(Mf-yitm). A proposal moves nothing either way.
 
 Nothing here prints. `validate()` returns plain data and the CLI shim renders it,
 so the same scoring can be asserted in a test instead of scraped from stdout.
 """
 
+import json
 import os
 import re
-from typing import Dict, List, Optional, Sequence, Tuple
+import time
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 # --- the corpus vocabulary ------------------------------------------------
 # Model suffixes are generous on purpose: this tool is asked "what is this
@@ -50,6 +57,8 @@ MODEL_EXTS = {
     ".lbrn", ".lbrn2", ".ctb", ".pwmx", ".pwma", ".sl1", ".sl1s",
 }
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".svg"}
+# The model suffixes a browser can render as a preview when no image exists.
+PREVIEW_EXTS = {".stl", ".3mf", ".step", ".stp"}
 DOC_EXTS = {".pdf", ".txt", ".md", ".html", ".htm", ".rtf", ".doc", ".docx"}
 ARCHIVE_EXTS = {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"}
 
@@ -90,6 +99,13 @@ PRODUCT_DOC = re.compile(
 # a claim that the folder names somebody's product, not a part of one.
 VENDOR_ID = re.compile(r"(?:^|[\s_\-])(\d{5,})\b")
 
+# A vendor product id of 6-8 digits in a FOLDER name: somebody ELSE's product.
+# Precision, not recall: `VENDOR_ID` above matches 5+ digits because it asks the
+# recall question ("is this a whole product"), while `foreign` asks only the
+# precision question ("is this somebody else's thing"), so it keeps the 6-8 digit
+# window `bundle_detect.COMPOUND_FOREIGN_ID` used. Ported by value.
+COMPOUND_FOREIGN_ID = re.compile(r"(?:^|[-_ ])\d{6,8}(?:$|[-_ ])")
+
 
 # A trailing download-site code: `Vault_USSA123123123`, `thing_ABC123456`. Only when
 # the token is long and digit-heavy, so a real word ("_remix", "_v2") survives.
@@ -99,6 +115,161 @@ SITE_CODE = re.compile(r"[ _\-]([A-Za-z]{0,8}\s?\d{6,}|[A-Za-z0-9]{10,}\d)\s*$")
 # Short all-caps tokens that are part of a product name, not a site/series code.
 KEEP_TOKENS = {"LED", "USB", "PLA", "ABS", "PETG", "TPU", "ASA", "XL", "XXL", "XXXL",
                "LCD", "OLED", "CNC", "PWM", "RGB", "SLA", "FDM", "HDMI", "RJ45"}
+
+
+# --- bounded reading ------------------------------------------------------
+#
+# Every fact below is read by a GET-shaped caller, so every read has a ceiling.
+# The numbers are chosen from the live library, not from optimism:
+#
+# * `PDF_MAX_BYTES` is 64 MiB. The largest manual measured in `/mnt/ceph/3D_models`
+#   is `Vault/Vault Archive_18.11.2026/Instructions Manual_14.11.26.pdf` at
+#   16.87 MB / 67 pages; a 64 MiB cap covers it with 3.8x headroom without letting
+#   one hostile file pin a request.
+# * `PDF_MAX_PAGES` is 4 because every attribution card puts its title, creator,
+#   licence and links on page 1; stopping at 4 also bounds a 67-page manual.
+# * `TEXT_MAX_BYTES` is 64 KiB - a vendor README is prose, not a payload.
+# * `DOC_CHAR_CAP` bounds what one document contributes to a suggestion, so a
+#   pathological line cannot grow the fact sheet without bound.
+TEXT_MAX_BYTES = 64 * 1024
+PDF_MAX_BYTES = 64 * 1024 * 1024
+PDF_MAX_PAGES = 4
+DOC_CHAR_CAP = 20_000
+DOCS_MAX_PER_FOLDER = 32
+
+# The one switch the before/after measurement flips. Read ONLY by `_collect_facts`
+# (never by `_pdf_suggestions`), so both arms run the SAME code and the PDF gain is
+# one flip rather than two codebases. A disabled PDF is recorded
+# `skipped: "disabled"`, so the fact sheet never silently looks like it was absent.
+PDF_DOCUMENTS_ENABLED = True
+
+# Hierarchical groups are a report structure, not a full directory mirror. The
+# depth and fan-out caps keep a genuinely enormous tree finite; a node that hits
+# the child cap carries `truncated: True` so the report can say so rather than
+# silently look complete.
+GROUPS_MAX_DEPTH = 8
+GROUPS_MAX_CHILDREN = 64
+
+# Twin verification opens an archive read-only. A central directory is cheap,
+# but a crafted archive could still be enormous, so both the archive size and
+# the entry count are bounded and a bound that bites is reported, never ignored.
+TWIN_MAX_BYTES = 16 * 1024 * 1024 * 1024
+TWIN_MAX_ENTRIES = 50_000
+
+# A cover is a pick plus a short ranked shortlist. The report never needs every
+# image in a 794-model folder, only the best few and why they won.
+COVER_MAX_CANDIDATES = 12
+
+# Git output is bounded too: a checkout with a million tracked files must not
+# turn a proposal into a memory test, and the four commands share one budget.
+GIT_MAX_TRACKED = 5_000
+GIT_MAX_UNTRACKED = 500
+GIT_TIMEOUT_SECONDS = 120
+
+# One archive cruft root, shared by the payload reader and the root finder, so
+# the two can never disagree about what an archive's payload is.
+MACOSX_ROOT = "__macosx"
+
+
+# --- metadata vocabulary --------------------------------------------------
+#
+# The licence table is ported from `bundle_detect._LICENCE_TABLE` by VALUE. A
+# known token maps to (display, URL); an unknown token keeps its own text and
+# gets NO URL. A guessed licence link is a legal statement this engine is not
+# entitled to make.
+_CREATIVE_COMMONS = "https://creativecommons.org/licenses/"
+_CC0_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
+LICENCE_TABLE: Dict[str, Tuple[str, str]] = {
+    "cc_by": ("CC BY", f"{_CREATIVE_COMMONS}by/4.0/"),
+    "cc_by_sa": ("CC BY-SA", f"{_CREATIVE_COMMONS}by-sa/4.0/"),
+    "cc_by_nc": ("CC BY-NC", f"{_CREATIVE_COMMONS}by-nc/4.0/"),
+    "cc_nc": ("CC BY-NC", f"{_CREATIVE_COMMONS}by-nc/4.0/"),
+    "cc_by_nc_sa": ("CC BY-NC-SA", f"{_CREATIVE_COMMONS}by-nc-sa/4.0/"),
+    "cc_nc_sa": ("CC BY-NC-SA", f"{_CREATIVE_COMMONS}by-nc-sa/4.0/"),
+    "cc_by_nd": ("CC BY-ND", f"{_CREATIVE_COMMONS}by-nd/4.0/"),
+    "cc_by_nc_nd": ("CC BY-NC-ND", f"{_CREATIVE_COMMONS}by-nc-nd/4.0/"),
+    "cc_nc_nd": ("CC BY-NC-ND", f"{_CREATIVE_COMMONS}by-nc-nd/4.0/"),
+    "cc0": ("CC0", _CC0_URL),
+    "cc_zero": ("CC0", _CC0_URL),
+    "public_domain": ("CC0", _CC0_URL),
+}
+_TOKEN_SEPARATORS = re.compile(r"[\s\-]+")
+
+# A CC licence URL the document itself states also names the licence; this map
+# only translates a URL we already hold into the display the table would use.
+_CC_URL_TOKENS = {
+    "by": "cc_by", "by-sa": "cc_by_sa", "by-nc": "cc_by_nc",
+    "by-nc-sa": "cc_by_nc_sa", "by-nd": "cc_by_nd",
+    "by-nc-nd": "cc_by_nc_nd",
+}
+
+# Document-info values that are tool boilerplate, never a title. Refusing this
+# short list is what keeps `Printables PDF` from being offered as a product name.
+BOILERPLATE_TITLES = {
+    "", "untitled", "printables pdf", "attribution_cards", "attribution cards",
+    "attribution card", "microsoft word", "document1", "pdf",
+}
+
+# The Thingiverse marker grammar, ported from `bundle_detect`: one scan for the
+# creator and the licence token it writes. Each half is independent, so a README
+# that mentions a licence but not the uploader must not invent an author.
+README_MARKERS = re.compile(
+    r"created\s+by\s+thingiverse\s+user\s+(?P<creator>[^,\n]+)"
+    r"|licensed\s+under\s+(?P<licence>[^,\n;.]+)",
+    re.IGNORECASE,
+)
+# `<title> by <creator> on Thingiverse: <url>` - greedy title so the LAST ` by `
+# before the marker wins, and the url stops at whitespace.
+LICENSE_LINE = re.compile(
+    r"(?P<title>.+) by (?P<creator>.+?) on Thingiverse:\s*(?P<url>\S+)",
+    re.IGNORECASE,
+)
+_TRAILING_JUNK = ",;."
+_SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
+# The attribution-card shape the live library actually ships:
+#   <title> by <creator>
+#   ...
+#   Licensed under:
+#   <token>
+_ATTRIBUTION_FIRST_LINE = re.compile(r"^(?P<title>.+?)\s+by\s+(?P<creator>.+)$")
+_LICENSED_UNDER_LINE = re.compile(r"licensed\s+under\b", re.IGNORECASE)
+_SUMMARY_LINE = re.compile(r"^summary\s*:?\s*$", re.IGNORECASE)
+
+# Provider table. The engine owns its own copy because importing
+# `import_resolvers`/`url_utils` would drag fastapi's world in; a test pins the
+# two copies for the three providers `url_utils.source_key` understands.
+PROVIDER_HOSTS = {
+    "thingiverse": frozenset({"thingiverse.com", "www.thingiverse.com"}),
+    "printables": frozenset({"printables.com", "www.printables.com"}),
+    "myminifactory": frozenset({"myminifactory.com", "www.myminifactory.com"}),
+}
+PROVIDER_MODEL_ID = {
+    "thingiverse": re.compile(r"thing:(\d+)|/things/(\d+)", re.IGNORECASE),
+    "printables": re.compile(r"/model/(\d+)"),
+    "myminifactory": re.compile(r"/object/(\d+)"),
+    "makerworld": re.compile(r"/models/(\d+)"),
+}
+# A provider URL that is deliberately NOT a model: a creator profile, a social
+# card, a collection. The live Printables cards carry `/social/<id>/about` beside
+# the model link, and MyMiniFactory carries `/users/<name>`.
+_NON_MODEL_PATH = re.compile(
+    r"/(?:social|users?|collections?|about|search|tags?|gallery|profile|u)/"
+    r"|/@[^/]+",
+    re.IGNORECASE,
+)
+# A bare model path carrying only a query (`/model?categoryId=21`) is a listing,
+# not a truncated model page: reject it rather than call it unresolved.
+_BARE_MODEL_PATHS = frozenset({"/model", "/models", "/thing", "/things", "/object"})
+PROVENANCE_MAX = 32
+PROVENANCE_UNRESOLVED_MAX = 16
+PROVENANCE_ALSO_IN_MAX = 8
+# `https://…`, `www.…` and a bare provider host all occur in real cards; the
+# scheme-less `www.thingiverse.com/thing:2738211` is a measured witness.
+_URL_RE = re.compile(
+    r"(?:https?://|www\.)[^\s<>\"'\]\)\[\}\,]+(?:\.[^\s<>\"'\]\)\[\}\,]+)*"
+    r"|(?:thingiverse|printables|myminifactory|makerworld)\.com/[^\s<>\"'\]\)\[\}\,]+",
+    re.IGNORECASE,
+)
 
 
 def product_title(name: str) -> str:
@@ -126,41 +297,135 @@ def vendor_id(name: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def git_state(path: str) -> Optional[dict]:
+def _resolve_to_candidate(rel_path: str, candidate: str, toplevel: str) -> Optional[str]:
+    """One repo-root-relative path, rebased onto the candidate folder.
+
+    `ls-files` and `status` answer from the repository's top level, which is not
+    the candidate when the operator pointed at a subdirectory of a checkout. A
+    path that sits outside the candidate is not the candidate's content and is
+    dropped; without this a nested row reads another folder's files.
+    """
+    path = (rel_path or "").replace(os.sep, "/").lstrip("/")
+    if not path:
+        return None
+    if not toplevel:
+        return path
+    try:
+        prefix = os.path.relpath(candidate, toplevel).replace(os.sep, "/")
+    except (OSError, ValueError):
+        return path
+    if prefix in ("", "."):
+        return path
+    prefix = prefix.rstrip("/") + "/"
+    if path == prefix.rstrip("/"):
+        return None
+    if not path.startswith(prefix):
+        return None
+    return path[len(prefix):]
+
+
+def _porcelain_untracked(status: str) -> List[str]:
+    """The untracked names in `git status --porcelain -z` output, NUL-delimited.
+
+    `-z` is what makes a path with a space or a rename survive: the output is
+    never quoted and a rename contributes both its old and new name as separate
+    NUL records, so we can take the new one without a `->` parser.
+    """
+    out: List[str] = []
+    tokens = status.split("\0")
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if not token:
+            continue
+        status_code = token[:2]
+        name = token[3:] if len(token) > 3 else ""
+        if status_code[:1] in {"R", "C"}:
+            # A rename/copy is two records: `XY <new>` then `<old>`. Drop the old.
+            index += 1
+        if status_code == "??" and name:
+            out.append(name.rstrip("/"))
+    return out
+
+
+def git_state(
+    path: str, *, max_tracked: Optional[int] = None,
+    max_untracked: Optional[int] = None,
+    timeout: Optional[float] = None,
+) -> Optional[dict]:
     """The repo's own declaration of what belongs to it, read without writing.
 
     `--no-optional-locks` + GIT_OPTIONAL_LOCKS=0 keep `status` from refreshing the
     index, so asking this question never writes to the working tree. Returns None
     for a non-repo, or when git is absent: a missing tool must not fail a proposal.
+
+    `.git` may be a DIRECTORY (normal repo) or a FILE (linked worktree, submodule)
+    - `os.path.exists` covers both deliberately. A detached HEAD is reported as
+    `branch: None, detached: True` plus the short sha, never the literal string
+    `HEAD` as a branch. The four commands share one wall-clock budget and every
+    listing has a cap; a cap that bites sets `truncated: True`.
     """
+    budget = GIT_TIMEOUT_SECONDS if timeout is None else timeout
+    tracked_cap = GIT_MAX_TRACKED if max_tracked is None else max_tracked
+    untracked_cap = GIT_MAX_UNTRACKED if max_untracked is None else max_untracked
     if not os.path.exists(os.path.join(path, ".git")):
         return None
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    deadline = time.monotonic() + budget
+
     def run(*args: str) -> Optional[str]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
         try:
             import subprocess
             out = subprocess.run(
                 ["git", "--no-optional-locks", "-C", path, *args],
-                capture_output=True, text=True, timeout=120, env=env,
+                capture_output=True, text=True, timeout=remaining, env=env,
             )
         except (OSError, subprocess.SubprocessError):
             return None
         return out.stdout if out.returncode == 0 else None
+
     branch = (run("rev-parse", "--abbrev-ref", "HEAD") or "").strip()
     head = (run("log", "-1", "--format=%h %ci") or "").strip()
-    tracked = run("ls-files")
-    status = run("status", "--porcelain", "--untracked-files=normal")
-    if tracked is None or status is None:
+    toplevel = (run("rev-parse", "--show-toplevel") or "").strip()
+    tracked_raw = run("ls-files")
+    status = run("status", "--porcelain", "-z", "--untracked-files=normal")
+    if tracked_raw is None or status is None:
         return None
-    untracked = []
-    for line in status.splitlines():
-        if line.startswith("?? "):
-            name = line[3:].strip().strip('"')
-            untracked.append(name.rstrip("/"))
+    detached = branch in ("HEAD", "")
+    sha = head.split()[0] if head else ""
+    truncated = False
+    tracked: List[str] = []
+    for line in tracked_raw.splitlines():
+        if not line:
+            continue
+        resolved = _resolve_to_candidate(line, path, toplevel)
+        if resolved is None:
+            continue
+        if len(tracked) >= tracked_cap:
+            truncated = True
+            break
+        tracked.append(resolved)
+    untracked: List[str] = []
+    for name in _porcelain_untracked(status):
+        resolved = _resolve_to_candidate(name, path, toplevel)
+        if resolved is None:
+            continue
+        if len(untracked) >= untracked_cap:
+            truncated = True
+            break
+        untracked.append(resolved)
     return {
-        "branch": branch or "?",
+        "branch": None if detached else branch,
+        "detached": detached,
         "head": head,
-        "tracked": [line for line in tracked.splitlines() if line],
+        "sha": sha,
+        "toplevel": toplevel or None,
+        "truncated": truncated,
+        "tracked": tracked,
         "untracked": sorted(set(untracked), key=str.casefold),
     }
 
@@ -219,9 +484,32 @@ class Facts:
         self.model_dirs: Dict[str, int] = {}
         # relative dir -> metadata filenames found directly in it
         self.meta: Dict[str, List[str]] = {}
+        # relative dir -> filenames whose STEM claims a product (README/LICENSE/
+        # print-settings/info ...), including extension-less ones. Only the flag
+        # predicates read it, so a full file listing is never retained.
+        self.dir_product_docs: Dict[str, List[str]] = {}
         self.children: List[str] = []          # this folder's own subdirectory names
         self.child_models: Dict[str, int] = {}  # first path segment -> model count
         self.child_meta: Dict[str, List[str]] = {}  # first path segment -> meta files
+        # --- the fact sheet the report renders (Mf-9h0v) ------------------
+        # Every one of these is ADDITIVE: no fact below changes a score, a shape
+        # or an `arrange` line. They describe the same walk the ranking already
+        # measured, so a report can show provenance without a second walk.
+        # field -> {"value", "where", "confidence"}; an absent field is ABSENT,
+        # never a None-with-a-guess.
+        self.metadata: Dict[str, dict] = {}
+        self.provenance: dict = {
+            "candidates": [], "unresolved": [], "confidence": "suggested",
+        }
+        # Hierarchical list of directory nodes that hold models somewhere below.
+        self.groups: List[dict] = []
+        self.twin: dict = {"verified": False, "pairs": [], "unverified": []}
+        self.cover: dict = {"reason": "none", "chosen": None, "candidates": []}
+        # What was read and what was skipped, so a cap hit is visible.
+        self.documents: List[dict] = []
+        # Walk-local file records used to build `cover`; not part of the API.
+        self._images: List[Tuple[str, int]] = []
+        self._previews: List[Tuple[str, int]] = []
 
     # -- derived -----------------------------------------------------------
     @property
@@ -327,6 +615,7 @@ def measure(
         for entry in files:
             facts.bytes += entry.size
             ext = entry.ext
+            rel_file = entry.name if rel_dir == "." else f"{rel_dir}/{entry.name}"
             if ext in ARCHIVE_EXTS:
                 facts.archives += 1
             if ext in MODEL_EXTS:
@@ -334,8 +623,11 @@ def measure(
                 facts.model_dirs[rel_dir] = facts.model_dirs.get(rel_dir, 0) + 1
                 top = rel_dir.split(os.sep, 1)[0] if rel_dir != "." else "."
                 facts.child_models[top] = facts.child_models.get(top, 0) + 1
+                if ext in PREVIEW_EXTS:
+                    facts._previews.append((rel_file, entry.size))
             elif ext in IMAGE_EXTS:
                 facts.images += 1
+                facts._images.append((rel_file, entry.size))
             elif ext in DOC_EXTS:
                 facts.docs += 1
             else:
@@ -344,10 +636,852 @@ def measure(
                 facts.meta.setdefault(rel_dir, []).append(entry.name)
                 top = rel_dir.split(os.sep, 1)[0] if rel_dir != "." else "."
                 facts.child_meta.setdefault(top, []).append(entry.name)
+            stem = os.path.splitext(entry.name)[0]
+            if stem.casefold() in {"readme", "license", "licence"} or PRODUCT_DOC.search(stem):
+                facts.dir_product_docs.setdefault(rel_dir, []).append(entry.name)
         for name in dirs:
             stack.append((name if rel_dir == "." else os.path.join(rel_dir, name),
                           os.path.join(absolute, name)))
+    _collect_facts(facts)
     return facts
+
+
+# --- the fact sheet: metadata, provenance, groups, twin, cover -------------
+#
+# Everything below is ADDITIVE evidence for a report. Nothing here feeds a score,
+# a shape or a move: those are measured above and must stay byte-identical when a
+# fact is added (the Mf-9h0v invariant).
+
+_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def _trim(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = value.strip().strip(_TRAILING_JUNK).strip()
+    return cleaned or None
+
+
+def _trim_to_last_sentence(value: Optional[str]) -> Optional[str]:
+    """`value` from its last sentence boundary on; unchanged when there is none."""
+    if not value:
+        return value
+    return _SENTENCE_BOUNDARY.split(value)[-1].strip() or None
+
+
+def licence_from_token(token: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """`(display, url)` for a known licence token; `(token, None)` otherwise.
+
+    `token is None` stays `(None, None)`. An unknown token is echoed back
+    unmodified and gets no URL: this function never invents a licence link.
+    """
+    if not token:
+        return None, None
+    normalised = _TOKEN_SEPARATORS.sub("_", token.strip().lower()).strip("_")
+    known = LICENCE_TABLE.get(normalised)
+    if known is not None:
+        return known
+    return token, None
+
+
+def _licence_display_from_url(url: Optional[str]) -> Optional[str]:
+    """The display a CC URL the document itself states implies, or None."""
+    value = (url or "").strip()
+    match = re.search(r"/licenses/([a-z\-]+)/([0-9.]+)", value, re.IGNORECASE)
+    if match:
+        token = _CC_URL_TOKENS.get(match.group(1).lower())
+        if token:
+            return f"{LICENCE_TABLE[token][0]} {match.group(2)}"
+    if "publicdomain/zero" in value.lower():
+        return "CC0"
+    return None
+
+
+def _set_licence(meta: dict, display: Optional[str], url: Optional[str],
+                 where: str, confidence: str) -> None:
+    """Record a licence the DOCUMENT states, with its URL only when the table knows
+    one. A stronger suggestion replaces a weaker one; an equal one keeps the first."""
+    if not display:
+        return
+    existing = meta.get("licence")
+    if existing is not None and (
+        _CONFIDENCE_RANK[existing["confidence"]] >= _CONFIDENCE_RANK[confidence]
+    ):
+        return
+    meta["licence"] = {"value": display, "where": where, "confidence": confidence}
+    if url:
+        meta["licence_url"] = {"value": url, "where": where, "confidence": confidence}
+    else:
+        meta.pop("licence_url", None)
+
+
+def _offer_licence(meta: dict, token: Optional[str], where: str, confidence: str) -> None:
+    display, url = licence_from_token(token)
+    _set_licence(meta, display, url, where, confidence)
+
+
+def _offer(meta: dict, field: str, value: Optional[str], where: str,
+           confidence: str) -> None:
+    """One field suggestion. A stronger one wins; an equal one keeps the first."""
+    if value is None:
+        return
+    text = " ".join(str(value).split()).strip()
+    if not text:
+        return
+    if len(text) > DOC_CHAR_CAP:
+        text = text[:DOC_CHAR_CAP]
+    existing = meta.get(field)
+    if existing is not None and (
+        _CONFIDENCE_RANK[existing["confidence"]] >= _CONFIDENCE_RANK[confidence]
+    ):
+        return
+    meta[field] = {"value": text, "where": where, "confidence": confidence}
+
+
+def _provider_for_host(host: str) -> Optional[str]:
+    host = (host or "").lower()
+    for name, hosts in PROVIDER_HOSTS.items():
+        if host in hosts:
+            return name
+    # Exact/subdomain only: `evil-makerworld.com` is not MakerWorld.
+    if host == "makerworld.com" or host.endswith(".makerworld.com"):
+        return "makerworld"
+    return None
+
+
+def _classify_url(raw: Optional[str]) -> Tuple[Optional[str], Optional[dict]]:
+    """A provider URL as `("candidate", {...})`, `("unresolved", {...})` or None.
+
+    A provider host with a model id is a candidate. A provider host with the model
+    marker but no id is UNRESOLVED (a truncated extraction), never an invented id.
+    A creator/social/collection page is not a model URL at all and is dropped.
+    """
+    text = (raw or "").strip().strip("<>\"'")
+    text = text.rstrip(_TRAILING_JUNK).strip()
+    if not text:
+        return None, None
+    normalised = text if "://" in text else f"https://{text}"
+    try:
+        parsed = urlparse(normalised)
+    except ValueError:
+        return None, None
+    provider = _provider_for_host(parsed.hostname or "")
+    if provider is None:
+        return None, None
+    path = parsed.path or ""
+    if _NON_MODEL_PATH.search(path):
+        return None, None
+    if parsed.query and path.rstrip("/") in _BARE_MODEL_PATHS:
+        return None, None
+    match = PROVIDER_MODEL_ID[provider].search(path)
+    subject_id = None
+    if match:
+        subject_id = next((group for group in match.groups() if group), None)
+    if subject_id:
+        return "candidate", {
+            "url": normalised, "provider": provider, "subject_id": subject_id,
+        }
+    return "unresolved", {
+        "text": text, "provider": provider,
+        "reason": "provider URL without a model id (truncated?)",
+    }
+
+
+def _iter_urls(text: str) -> Iterable[str]:
+    seen = set()
+    for match in _URL_RE.finditer(text or ""):
+        url = match.group(0).rstrip(".,;:!?'\")]}")
+        if url and url not in seen:
+            seen.add(url)
+            yield url
+
+
+def _note_alternative(existing: dict, where: str, confidence: str) -> None:
+    """Record a second sighting of an already-known subject, bounded, without noise."""
+    item = {"where": where, "confidence": confidence}
+    if item == {"where": existing["where"], "confidence": existing["confidence"]}:
+        return
+    also = existing.setdefault("also_in", [])
+    if item in also or len(also) >= PROVENANCE_ALSO_IN_MAX:
+        return
+    also.append(item)
+
+
+def _offer_provenance(prov: dict, raw: Optional[str], where: str,
+                      confidence: str) -> None:
+    status, data = _classify_url(raw)
+    if status == "candidate":
+        for existing in prov["candidates"]:
+            if (existing["provider"], existing["subject_id"]) == (
+                data["provider"], data["subject_id"]
+            ):
+                # Keep the strongest sighting as the face of the candidate; ties
+                # keep the first. A medium text link must never suppress the
+                # model's own HIGH annotation from another document, so the
+                # weaker location moves to `also_in` and stays visible.
+                if _CONFIDENCE_RANK[confidence] > _CONFIDENCE_RANK[existing["confidence"]]:
+                    previous_where = existing["where"]
+                    previous_confidence = existing["confidence"]
+                    existing["url"] = data["url"]
+                    existing["where"] = where
+                    existing["confidence"] = confidence
+                    _note_alternative(existing, previous_where, previous_confidence)
+                else:
+                    _note_alternative(existing, where, confidence)
+                return
+        if len(prov["candidates"]) >= PROVENANCE_MAX:
+            return
+        prov["candidates"].append({
+            "url": data["url"], "provider": data["provider"],
+            "subject_id": data["subject_id"], "where": where,
+            "confidence": confidence,
+        })
+    elif status == "unresolved":
+        if any(item["text"] == data["text"] for item in prov["unresolved"]):
+            return
+        if len(prov["unresolved"]) >= PROVENANCE_UNRESOLVED_MAX:
+            return
+        prov["unresolved"].append({
+            "text": data["text"], "where": where, "reason": data["reason"],
+        })
+
+
+def _first_provider_url(text: str) -> Optional[str]:
+    for url in _iter_urls(text):
+        status, _data = _classify_url(url)
+        if status == "candidate":
+            return url
+    return None
+
+
+def _parse_vendor_text(text: str, where: str, meta: dict, prov: dict) -> None:
+    """The vendor markers a text document or a PDF page can state.
+
+    Strength is deliberate: the Thingiverse pair (`created by … user`, `licensed
+    under …`) and the `<title> by <creator> on Thingiverse: <url>` line are explicit
+    machine markers and HIGH; an attribution card's first line, a `Licensed under:`
+    next line and a Summary block are heuristics and MEDIUM. A licence is only ever
+    what the text says - never invented, and never given a URL the table cannot back.
+    """
+    body = (text or "")[:DOC_CHAR_CAP]
+    if not body:
+        return
+    for match in README_MARKERS.finditer(body):
+        if match.group("creator"):
+            _offer(meta, "creator", _trim(match.group("creator")), where, "high")
+        token = _trim(match.group("licence"))
+        if token and token.casefold() not in {"a", "an", "the", ":", "-"}:
+            _offer_licence(meta, token, where, "high")
+
+    license_line = LICENSE_LINE.search(body)
+    if license_line is not None:
+        title = _trim_to_last_sentence(_trim(license_line.group("title")))
+        creator = _trim(license_line.group("creator"))
+        url = license_line.group("url").rstrip(").,")
+        _offer(meta, "title", title, where, "high")
+        _offer(meta, "creator", creator, where, "high")
+        if url:
+            _offer(meta, "source_url", url, where, "high")
+            _offer_provenance(prov, url, where, "high")
+
+    lines = [line.strip() for line in body.splitlines()]
+    summary: List[str] = []
+    for index, line in enumerate(lines):
+        licensed = _LICENSED_UNDER_LINE.search(line)
+        if licensed is not None:
+            inline = line[licensed.end():].strip().lstrip(":").strip()
+            if inline and inline.casefold() not in {"a", "an", "the"}:
+                _offer_licence(meta, _trim(inline), where, "medium")
+            else:
+                for nxt in lines[index + 1:]:
+                    if nxt:
+                        _offer_licence(meta, _trim(nxt), where, "medium")
+                        break
+        if _SUMMARY_LINE.match(line) and not summary:
+            for nxt in lines[index + 1:]:
+                if not nxt:
+                    break
+                summary.append(nxt)
+
+    first = next((line for line in lines if line), "")
+    if license_line is None and first and " on Thingiverse:" not in first:
+        attribution = _ATTRIBUTION_FIRST_LINE.match(first)
+        if attribution:
+            _offer(meta, "title", _trim(attribution.group("title")), where, "medium")
+            _offer(meta, "creator", _trim(attribution.group("creator")), where, "medium")
+
+    if summary:
+        _offer(meta, "description", " ".join(summary), where, "medium")
+    elif "description" not in meta and "readme" in os.path.basename(where).casefold():
+        # Leading prose is a description only in a README. A `LICENSE.txt` whose
+        # first line is "This thing was created by …" is not a summary, and a
+        # licence token is not one either.
+        marker_at = len(body)
+        for marker in README_MARKERS.finditer(body):
+            marker_at = min(marker_at, marker.start())
+        leading = body[:marker_at].strip()
+        # An attribution card's first line is `<title> by <creator>`, not prose;
+        # treating it as a description would file the title as the summary.
+        if 3 <= len(leading) <= 400 and not _ATTRIBUTION_FIRST_LINE.match(leading):
+            _offer(meta, "description", leading, where, "medium")
+
+    for url in _iter_urls(body):
+        _offer_provenance(prov, url, where, "medium")
+    if "source_url" not in meta:
+        first_url = _first_provider_url(body)
+        if first_url:
+            _offer(meta, "source_url", first_url, where, "medium")
+
+
+def _json_suggestions(text: str, where: str, meta: dict, prov: dict) -> int:
+    """`info.json`: the one vendor document whose keys are machine markers (HIGH)."""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError) as error:
+        raise ValueError("not JSON") from error
+    if not isinstance(data, dict):
+        raise ValueError("JSON is not an object")
+
+    def pick(*keys: str) -> Optional[str]:
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
+    _offer(meta, "title", pick("title", "name"), where, "high")
+    _offer(meta, "creator", pick("creator", "author", "designer"), where, "high")
+    _offer_licence(meta, pick("license", "licence"), where, "high")
+    url = pick("url", "source_url", "thingiverse_url")
+    if url:
+        _offer(meta, "source_url", url, where, "high")
+        _offer_provenance(prov, url, where, "high")
+    _offer(meta, "description", pick("description"), where, "high")
+    return len(text)
+
+
+def _html_suggestions(text: str, where: str, meta: dict, prov: dict) -> int:
+    """A vendor `.html` card: og:title/author/licence-link are markers (HIGH)."""
+    body = (text or "")[:DOC_CHAR_CAP]
+    og_title = re.search(
+        r"<meta[^>]+property=[\"']og:title[\"'][^>]*content=[\"']([^\"']*)",
+        body, re.IGNORECASE,
+    ) or re.search(
+        r"<meta[^>]+content=[\"']([^\"']*)[\"'][^>]*property=[\"']og:title[\"']",
+        body, re.IGNORECASE,
+    )
+    if og_title:
+        _offer(meta, "title", og_title.group(1), where, "high")
+    document_title = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+    if document_title:
+        _offer(meta, "title", document_title.group(1), where, "medium")
+    author = re.search(
+        r"<meta[^>]+name=[\"']author[\"'][^>]*content=[\"']([^\"']*)",
+        body, re.IGNORECASE,
+    ) or re.search(
+        r"<meta[^>]+content=[\"']([^\"']*)[\"'][^>]*name=[\"']author[\"']",
+        body, re.IGNORECASE,
+    )
+    if author:
+        _offer(meta, "creator", author.group(1), where, "high")
+    licence_link = re.search(
+        r"<link[^>]+rel=[\"']license[\"'][^>]*href=[\"']([^\"']+)",
+        body, re.IGNORECASE,
+    ) or re.search(
+        r"<link[^>]+href=[\"']([^\"']+)[\"'][^>]*rel=[\"']license[\"']",
+        body, re.IGNORECASE,
+    )
+    if licence_link:
+        href = licence_link.group(1)
+        _set_licence(meta, _licence_display_from_url(href), href, where, "high")
+    # Markup is not prose: take the URLs, but never let a tag soup become a
+    # description the way `_parse_vendor_text`'s leading-prose rule would.
+    for url in _iter_urls(body):
+        _offer_provenance(prov, url, where, "medium")
+    if "source_url" not in meta:
+        first_url = _first_provider_url(body)
+        if first_url:
+            _offer(meta, "source_url", first_url, where, "medium")
+    return len(body)
+
+
+def _pdf_suggestions(path: str, rel: str, meta: dict, prov: dict) -> int:
+    """A PDF's document info, text and link annotations. Untrusted input, bounded.
+
+    `PDF_MAX_PAGES` is 4 because every attribution card keeps its facts on page 1;
+    a 67-page manual is still read only at its head. A parse failure is raised to
+    the caller, which records the document as `unreadable` - never a crash.
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(path)
+    chars = 0
+    info = getattr(reader, "metadata", None)
+    if info is not None:
+        title = getattr(info, "title", None)
+        author = getattr(info, "author", None)
+        if title and str(title).strip().casefold() not in BOILERPLATE_TITLES:
+            _offer(meta, "title", str(title), f"{rel} info", "low")
+        if author and str(author).strip():
+            _offer(meta, "creator", str(author), f"{rel} info", "high")
+    pages = list(reader.pages)[:PDF_MAX_PAGES]
+    for number, page in enumerate(pages, start=1):
+        where = f"{rel} p{number}"
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        if text:
+            chars += len(text)
+            _parse_vendor_text(text, where, meta, prov)
+        try:
+            annotations = page.get("/Annots")
+        except Exception:
+            annotations = None
+        for reference in annotations or []:
+            try:
+                obj = reference.get_object()
+                action = obj.get("/A")
+                uri = action.get("/URI") if action is not None else None
+            except Exception:
+                continue
+            if not uri:
+                continue
+            uri_text = str(uri)
+            where_annot = f"{rel} annotations p{number}"
+            _offer_provenance(prov, uri_text, where_annot, "high")
+            status, data = _classify_url(uri_text)
+            if status == "candidate":
+                # HIGH, and it may replace a text-derived medium: the annotation
+                # is the model's own link, the text is often a related-model link.
+                _offer(meta, "source_url", data["url"], where_annot, "high")
+    return chars
+
+
+def _document_kind(ext: str) -> Optional[str]:
+    if ext == ".pdf":
+        return "pdf"
+    if ext == ".json":
+        return "json"
+    if ext in {".html", ".htm"}:
+        return "html"
+    if ext in {".txt", ".md"}:
+        return "text"
+    return None
+
+
+def _read_text_suggestions(abs_path: str, rel: str, kind: str,
+                           meta: dict, prov: dict) -> int:
+    with open(abs_path, "r", encoding="utf-8", errors="replace") as handle:
+        text = handle.read(TEXT_MAX_BYTES)
+    text = text[:DOC_CHAR_CAP]
+    if kind == "json":
+        return _json_suggestions(text, rel, meta, prov)
+    if kind == "html":
+        return _html_suggestions(text, rel, meta, prov)
+    _parse_vendor_text(text, rel, meta, prov)
+    return len(text)
+
+
+def _collect_facts(facts: Facts) -> None:
+    """Read the folder's documents in a deterministic order and build every fact.
+
+    Reading order is `(depth, path casefolded)`: root documents first, then the
+    shallowest, so two runs over the same tree give one answer. A document over its
+    cap is recorded as skipped rather than dropped, and a parse failure is a
+    DOCUMENT (`skipped: "unreadable"`), never an exception out of `measure`.
+    """
+    candidates: List[Tuple[int, str, str]] = []
+    for rel_dir, names in facts.meta.items():
+        for name in names:
+            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
+            candidates.append((rel.count("/"), rel.casefold(), rel))
+    candidates.sort()
+    read_so_far = 0
+    for _depth, _folded, rel in candidates:
+        abs_path = os.path.join(facts.path, rel)
+        kind = _document_kind(os.path.splitext(rel)[1].lower())
+        if kind is None:
+            continue
+        try:
+            size = os.path.getsize(abs_path)
+        except OSError:
+            size = 0
+        record = {"path": rel, "kind": kind, "bytes": size,
+                  "read": False, "skipped": None, "chars": 0}
+        if kind == "pdf" and not PDF_DOCUMENTS_ENABLED:
+            record["skipped"] = "disabled"
+            facts.documents.append(record)
+            continue
+        limit = PDF_MAX_BYTES if kind == "pdf" else TEXT_MAX_BYTES
+        if size > limit:
+            record["skipped"] = "too-large"
+            facts.documents.append(record)
+            continue
+        if read_so_far >= DOCS_MAX_PER_FOLDER:
+            record["skipped"] = "cap"
+            facts.documents.append(record)
+            continue
+        read_so_far += 1
+        try:
+            if kind == "pdf":
+                chars = _pdf_suggestions(abs_path, rel, facts.metadata, facts.provenance)
+            else:
+                chars = _read_text_suggestions(
+                    abs_path, rel, kind, facts.metadata, facts.provenance
+                )
+        except Exception:
+            record["skipped"] = "unreadable"
+            facts.documents.append(record)
+            continue
+        record["read"] = True
+        record["chars"] = chars
+        facts.documents.append(record)
+
+    facts.groups = _build_groups(facts)
+    facts.twin = _build_twin(facts)
+    facts.cover = _build_cover(facts)
+
+
+def _owns_product_doc(facts: Facts, rel_dir: str) -> bool:
+    """Whether a directory's OWN root holds a product document.
+
+    The same predicate `children_with_own_meta` uses, applied at any depth: a JSON/
+    PDF/HTML document or a README/LICENCE/print-settings/info stem sitting DIRECTLY
+    in the directory. A document one level deeper is payload, not a claim.
+    """
+    for name in facts.meta.get(rel_dir, []):
+        stem, ext = os.path.splitext(name)
+        if ext.lower() in {".json", ".pdf", ".html", ".htm"} or PRODUCT_DOC.search(stem):
+            return True
+    # Extension-less vendor documents (`README`, `LICENSE`) never reach `meta`.
+    return bool(facts.dir_product_docs.get(rel_dir))
+
+
+def _owns_readme_stem(facts: Facts, rel_dir: str) -> bool:
+    for name in facts.dir_product_docs.get(rel_dir, []):
+        if os.path.splitext(name)[0].casefold() in {"readme", "license", "licence"}:
+            return True
+    return False
+
+
+def _build_groups(facts: Facts) -> List[dict]:
+    """The hierarchical groups a report renders: directories that hold models below.
+
+    `foreign` is the legacy R7 definition, preserved exactly: the name carries a
+    compound vendor id of 6-8 digits (`COMPOUND_FOREIGN_ID`), or the group's OWN
+    root (exactly one level down) holds a README/LICENSE/LICENCE stem.
+    `separable` is not "is a product" but "could stand as its own project": its
+    own root carries a product document (or its name carries a vendor id), and its
+    name does not read as a part.
+
+    The measured Vault tree (`/mnt/ceph/3D_models/Vault/
+    Vault Archive_18.11.2026/`) witnesses both flags:
+
+      Instructions Manual_14.11.26.pdf      <- at the wrapper's own root
+      01. DRAWERS/ -> 01. S Families/ -> {Facades, S3, S4, S5, S6, S7} -> parts
+                   -> 02. M Families/ ... 07. Universal/
+      02. SUSTAINERS/   03. MODIFICATIONS/
+
+    `Vault Archive_18.11.2026` IS `separable: true` because the manual sits at its
+    own root, so the wrapper could stand as its own project. `01. DRAWERS` and
+    `01. S Families` are NOT separable: their names read as parts (the ordinal
+    branch of `PART_NAME`) and neither owns a product document at its own root.
+    A document in a child documents the child, not the parent.
+    """
+    direct: Dict[str, int] = {
+        path: count for path, count in facts.model_dirs.items() if path != "."
+    }
+    if not direct:
+        return []
+    nodes = set()
+    for path in direct:
+        parts = path.split("/")
+        for index in range(1, len(parts) + 1):
+            nodes.add("/".join(parts[:index]))
+    children_of: Dict[str, List[str]] = {}
+    for path in nodes:
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        children_of.setdefault(parent, []).append(path)
+
+    def subtree_models(path: str) -> int:
+        return sum(
+            count for key, count in direct.items()
+            if key == path or key.startswith(path + "/")
+        )
+
+    def node(path: str, depth: int) -> dict:
+        name = path.rsplit("/", 1)[-1]
+        kids = sorted(
+            children_of.get(path, []),
+            key=lambda item: item.rsplit("/", 1)[-1].casefold(),
+        )
+        truncated = False
+        if len(kids) > GROUPS_MAX_CHILDREN:
+            kids = kids[:GROUPS_MAX_CHILDREN]
+            truncated = True
+        children: List[dict] = []
+        if depth < GROUPS_MAX_DEPTH:
+            children = [node(kid, depth + 1) for kid in kids]
+        elif kids:
+            # The depth cap bit: the node keeps its subtree count but not its
+            # children, and says so.
+            truncated = True
+        record = {
+            "name": name,
+            "path": path,
+            "models": subtree_models(path),
+            "foreign": bool(
+                COMPOUND_FOREIGN_ID.search(name)
+                or _owns_readme_stem(facts, path)
+            ),
+            "separable": _group_separable(facts, path, name),
+            "children": children,
+        }
+        if truncated:
+            record["truncated"] = True
+        return record
+
+    roots = sorted(
+        children_of.get("", []),
+        key=lambda item: item.rsplit("/", 1)[-1].casefold(),
+    )
+    return [node(root, 1) for root in roots]
+
+
+def _group_separable(facts: Facts, path: str, name: str) -> bool:
+    # A part-shaped name is never a project boundary, whatever document it holds:
+    # `01. DRAWERS` is a sub-assembly of the vault, not a product.
+    if PART_NAME.match(name):
+        return False
+    return bool(vendor_id(name)) or _owns_product_doc(facts, path)
+
+
+def _build_cover(facts: Facts) -> dict:
+    """The report's cover preference, from disk: largest image, then model preview.
+
+    Registered-ness is app state and stays out: this reports candidates and why,
+    and the app decides what it can serve. Ties break by path so the pick is a
+    function of the tree.
+    """
+    images = sorted(facts._images, key=lambda item: (-item[1], item[0].casefold()))
+    previews = sorted(facts._previews, key=lambda item: (-item[1], item[0].casefold()))
+    ranked = [
+        {"path": path, "bytes": size, "reason": "largest-image"}
+        for path, size in images
+    ] + [
+        {"path": path, "bytes": size, "reason": "model-preview"}
+        for path, size in previews
+    ]
+    if images:
+        reason = "largest-image"
+    elif previews:
+        reason = "model-preview"
+    else:
+        reason = "none"
+    return {
+        "reason": reason,
+        "chosen": ranked[0] if ranked else None,
+        "candidates": ranked[:COVER_MAX_CANDIDATES],
+    }
+
+
+def is_macosx_artifact(rel_path: str) -> bool:
+    """Whether this entry is AppleDouble cruft rather than the archive's payload."""
+    head = (rel_path or "").split("/", 1)[0]
+    return head.casefold() == MACOSX_ROOT
+
+
+def twin_key(name: str) -> str:
+    """The identity a folder and a `.zip` share: casefolded, one `.zip` off.
+
+    Ported from `bundle_detect.twin_key` so the pairing stem has one definition
+    here too.
+    """
+    key = (name or "").strip().casefold()
+    if key.endswith(".zip"):
+        key = key[: -len(".zip")]
+    return key
+
+
+def common_entry_root(rel_paths: Iterable[str]) -> Optional[str]:
+    """The one top-level directory every entry sits under, or None.
+
+    AppleDouble cruft is ignored, entries are compared casefolded, and a loose entry
+    at the top level (or two different first segments) means there is no single
+    wrapper. Ported from `bundle_detect.common_entry_root` by rule.
+    """
+    root: Optional[str] = None
+    for rel_path in rel_paths:
+        if is_macosx_artifact(rel_path):
+            continue
+        head, separator, _rest = (rel_path or "").partition("/")
+        if not separator:
+            return None
+        if root is None:
+            root = head
+        elif head.casefold() != root.casefold():
+            return None
+    return root
+
+
+def _payload_contained(payload: Iterable[Tuple[str, int]],
+                       folder: Iterable[Tuple[str, int]]) -> bool:
+    """Whether this archive's payload is contained in this folder listing.
+
+    Containment, not equality: a lived-in directory legitimately holds more than
+    the archive that shipped it. The path is casefolded and the size compared, with
+    ONE `common_entry_root` strip; two strips are refused on purpose. Declared size
+    is an archive HEADER field, so this decides pairing and is never an integrity
+    claim. The single containment predicate behind twin verification.
+    """
+    entries = [
+        (str(path), int(size)) for path, size in payload
+        if not is_macosx_artifact(str(path))
+    ]
+    if not entries:
+        return False
+    keys = {(path.casefold(), size) for path, size in entries}
+    if keys <= folder:
+        return True
+    root = common_entry_root([path for path, _size in entries])
+    if root is None:
+        return False
+    wanted = root.casefold()
+    stripped = set()
+    for path, size in entries:
+        head, separator, rest = path.partition("/")
+        if not separator or head.casefold() != wanted:
+            return False
+        stripped.add((rest.casefold(), size))
+    return stripped <= folder
+
+
+def _folder_listing(directory: str, max_entries: int) -> Tuple[set, int, bool]:
+    """A directory's files as `(casefolded rel, size)`, its model count, truncation."""
+    listing: set = set()
+    models = 0
+    truncated = False
+    stack: List[Tuple[str, str]] = [("", directory)]
+    while stack:
+        rel_dir, absolute = stack.pop()
+        files, dirs = read_dir(absolute)
+        for entry in files:
+            if len(listing) >= max_entries:
+                truncated = True
+                continue
+            rel = entry.name if not rel_dir else f"{rel_dir}/{entry.name}"
+            listing.add((rel.casefold(), entry.size))
+            if entry.ext in MODEL_EXTS:
+                models += 1
+        for name in dirs:
+            stack.append((name if not rel_dir else f"{rel_dir}/{name}",
+                          os.path.join(absolute, name)))
+    return listing, models, truncated
+
+
+def _zip_payload(path: str) -> Tuple[Optional[List[Tuple[str, int]]], Optional[str]]:
+    """An archive's read-only payload, or `(None, reason)` when it cannot be read."""
+    import zipfile
+    try:
+        if os.path.getsize(path) > TWIN_MAX_BYTES:
+            return None, f"archive larger than TWIN_MAX_BYTES ({TWIN_MAX_BYTES})"
+        with zipfile.ZipFile(path) as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+            if len(infos) > TWIN_MAX_ENTRIES:
+                return None, f"more than TWIN_MAX_ENTRIES ({TWIN_MAX_ENTRIES}) entries"
+            payload = []
+            for info in infos:
+                name = info.filename.replace("\\", "/").lstrip("/")
+                if not name or is_macosx_artifact(name):
+                    continue
+                payload.append((name, info.file_size))
+        return payload, None
+    except (OSError, Exception):
+        return None, "archive could not be read"
+
+
+def _verify_pair(archive_rel: str, folder_rel: str, archive_path: str,
+                 folder_path: str) -> Tuple[dict, Optional[dict]]:
+    """Compare one archive against one folder; return (pair, unverified-or-None)."""
+    payload, problem = _zip_payload(archive_path)
+    if payload is None:
+        pair = {
+            "archive": archive_rel, "folder": folder_rel,
+            "models_in_archive": 0, "models_in_folder": 0,
+            "confirmed": False, "reason": problem or "unreadable",
+        }
+        return pair, {"archive": archive_rel, "folder": folder_rel,
+                      "reason": problem or "unreadable"}
+    listing, folder_models, truncated = _folder_listing(folder_path, TWIN_MAX_ENTRIES)
+    archive_models = sum(1 for name, _size in payload if os.path.splitext(name)[1].lower() in MODEL_EXTS)
+    confirmed = _payload_contained(payload, listing)
+    if truncated:
+        return (
+            {"archive": archive_rel, "folder": folder_rel,
+             "models_in_archive": archive_models, "models_in_folder": folder_models,
+             "confirmed": False, "reason": "folder listing hit TWIN_MAX_ENTRIES"},
+            {"archive": archive_rel, "folder": folder_rel,
+             "reason": "folder listing hit TWIN_MAX_ENTRIES"},
+        )
+    reason = (
+        "payload is contained in the folder (casefolded path + declared size)"
+        if confirmed else
+        "payload differs from the folder listing"
+    )
+    pair = {
+        "archive": archive_rel, "folder": folder_rel,
+        "models_in_archive": archive_models, "models_in_folder": folder_models,
+        "confirmed": confirmed, "reason": reason,
+    }
+    unverified = None if confirmed else {
+        "archive": archive_rel, "folder": folder_rel, "reason": reason,
+    }
+    return pair, unverified
+
+
+def _build_twin(facts: Facts) -> dict:
+    """Archive/directory pairs the tree claims, verified by containment.
+
+    Two candidate layouts, one predicate: a root archive whose stem matches a child
+    directory (`Facts.twin_archives()`), and the case where the candidate IS the
+    wrapper whose zip sits one level up (`_own_wrapper_archive`). Verified by
+    opening the zip read-only and comparing its payload against the paired folder;
+    the declared sizes are archive header fields, so this decides pairing and is
+    never an integrity claim.
+    """
+    pairs: List[dict] = []
+    unverified: List[dict] = []
+    for archive in facts.twin_archives():
+        stem = twin_key(archive)
+        child = next(
+            (name for name in facts.children if twin_key(name) == stem), None
+        )
+        if child is None:
+            continue
+        pair, failed = _verify_pair(
+            archive, child,
+            os.path.join(facts.path, archive),
+            os.path.join(facts.path, child),
+        )
+        pairs.append(pair)
+        if failed is not None:
+            unverified.append(failed)
+    own = _own_wrapper_archive(facts)
+    if own is not None:
+        pair, failed = _verify_pair(
+            f"../{own}", ".",
+            os.path.join(os.path.dirname(facts.path), own),
+            facts.path,
+        )
+        pairs.append(pair)
+        if failed is not None:
+            unverified.append(failed)
+    return {
+        "verified": any(pair["confirmed"] for pair in pairs),
+        "pairs": pairs,
+        "unverified": unverified,
+    }
 
 
 # --- interpretations ------------------------------------------------------
@@ -357,12 +1491,17 @@ def measure(
 # ranked, with the reason each is or is not recommended.
 
 class Option:
-    def __init__(self, shape: str, label: str, detail: str, consequence: str, score: int):
+    def __init__(self, shape: str, label: str, detail: str, consequence: str,
+                 score: int, confidence: str = "low"):
         self.shape = shape
         self.label = label
         self.detail = detail
         self.consequence = consequence
         self.score = score
+        # `high`/`medium`/`low` from the evidence that supports this reading. In
+        # the guided flow medium and low only choose a DEFAULT; they never remove
+        # an option.
+        self.confidence = confidence
 
     def as_dict(self) -> dict:
         return {
@@ -371,6 +1510,7 @@ class Option:
             "detail": self.detail,
             "consequence": self.consequence,
             "score": self.score,
+            "confidence": self.confidence,
         }
 
 
@@ -431,19 +1571,28 @@ def propose(facts: Facts, project_keys: Sequence[str], *,
         tracked_models = sum(
             1 for rel in repo["tracked"] if os.path.splitext(rel)[1].lower() in MODEL_EXTS
         )
-        reasons.append(
-            f"git checkout on {repo['branch']} ({repo['head'].split()[0] if repo['head'] else '?'}): "
-            f"{len(repo['tracked'])} tracked files ({tracked_models} models) belong to this project, "
-            f"{len(repo['untracked'])} untracked entries are materials"
-        )
-        options.append(Option(
-            "git-project",
-            "one project (the repo's own content)",
-            f"{len(repo['tracked'])} tracked files, {tracked_models} of them models; "
-            f"{len(repo['untracked'])} untracked entries peel off",
-            "the working tree declares the boundary: no guessing about what is a part",
-            95,
-        ))
+        where = repo["branch"] or (f"detached at {repo.get('sha') or '?'}")
+        if tracked_models:
+            reasons.append(
+                f"git checkout on {where} ({repo['head'].split()[0] if repo['head'] else '?'}): "
+                f"{len(repo['tracked'])} tracked files ({tracked_models} models) belong to this project, "
+                f"{len(repo['untracked'])} untracked entries are materials"
+            )
+            options.append(Option(
+                "git-project",
+                "one project (the repo's own content)",
+                f"{len(repo['tracked'])} tracked files, {tracked_models} of them models; "
+                f"{len(repo['untracked'])} untracked entries peel off",
+                "the working tree declares the boundary: no guessing about what is a part",
+                95,
+            ))
+        else:
+            # A checkout with no model in its tracked set would tell the operator to
+            # import nothing. Record why it is not offered instead.
+            reasons.append(
+                f"git checkout on {where} tracked {len(repo['tracked'])} files but no model; "
+                f"git-project is not offered because there is nothing to import"
+            )
 
     inside = next((key for key in project_keys if facts.rel.startswith(key + "/")), None)
     if inside:
@@ -545,7 +1694,90 @@ def propose(facts: Facts, project_keys: Sequence[str], *,
                               "nothing to import", 70))
 
     options.sort(key=lambda o: (-o.score, o.shape))
+    _assign_confidence(options, facts)
     return options, reasons, repo
+
+
+def _documented_at_root(facts: Facts) -> bool:
+    """Whether a HIGH-confidence field comes from a document at the candidate's OWN root.
+
+    `where` is a rel path (plus an optional page suffix). A document one level down is
+    a CHILD's document: `OutOfMarbles`' three PDFs sit in its children and its own
+    root holds none, so they document the children, never the collection.
+    """
+    for field in ("title", "creator", "licence", "source_url"):
+        entry = facts.metadata.get(field)
+        if entry and entry.get("confidence") == "high":
+            where = entry.get("where") or ""
+            if "/" not in where:
+                return True
+    return False
+
+
+def _assign_confidence(options: List[Option], facts: Facts) -> None:
+    """Set each option's confidence from the evidence that supports THAT reading.
+
+    * `high` - documentary evidence backs it: a `high`-confidence title, creator,
+      licence or source_url whose `where` is a document at the candidate's OWN
+      root (no `/` in the path) - the folder itself is the documented product -
+      or git's own declaration of the boundary (and its operator-declared cousin,
+      an existing project key).
+    * `medium` - structural evidence with a named discriminator (twin archives,
+      dominance >= 0.75, depth >= 2, part-shaped names, a separable split) AND a
+      clear score margin over the runner-up (>= 15 points).
+    * `low` - the reading rests on score/name alone, or the top two options are
+      within 15 points.
+
+    A document in a CHILD documents the child, not the parent: `OutOfMarbles`'
+    three PDFs sit in its children and its own root holds none, so they do not
+    make `one-project` a documented reading of the collection.
+
+    INVARIANT: an alternative never outranks the recommendation. If its own
+    evidence would put it in a higher band, it is capped at the recommendation's
+    band - a more-certain alternative would mean the SCORE is wrong - so the
+    disagreement stays visible in the reasons rather than being dressed up as a
+    more certain pick than the one actually recommended.
+
+    Medium and low only guide a DEFAULT in the guided flow; they NEVER remove an
+    option. Every option stays on the list whatever its confidence.
+    """
+    if not options:
+        return
+    top = options[0].score
+    runner_up = options[1].score if len(options) > 1 else None
+    contested = runner_up is not None and (top - runner_up) < 15
+    documentary = _documented_at_root(facts)
+    structural = {
+        "one-project": bool(facts.twin["verified"] or facts.twin_archives())
+        or facts.depth >= 2
+        or facts.dominance() >= 0.75
+        or len(facts.part_like_children()) >= 2,
+        "split-top-folders": bool(facts.children_with_own_meta())
+        or bool(facts.children_with_vendor_id()),
+        "add-to-project": True,
+        "git-project": True,
+    }
+    for index, option in enumerate(options):
+        if option.shape in {"git-project", "add-to-project"}:
+            option.confidence = "high"
+        elif documentary and option.shape in ONE_PROJECT_SHAPES:
+            option.confidence = "high"
+        elif contested:
+            option.confidence = "low"
+        elif index == 0 and structural.get(option.shape, False):
+            option.confidence = "medium"
+        else:
+            option.confidence = "low"
+
+    # INVARIANT: an alternative never outranks the recommendation. If its own
+    # evidence would put it in a higher band, cap it at the recommendation's band:
+    # a more certain alternative would mean the SCORE is wrong, and the
+    # disagreement belongs in the reasons (where it is visible), not dressed up as
+    # a more certain pick than the one actually recommended.
+    top_band = _CONFIDENCE_RANK[options[0].confidence]
+    for option in options[1:]:
+        if _CONFIDENCE_RANK[option.confidence] > top_band:
+            option.confidence = options[0].confidence
 
 
 def peel_proposals(facts: Facts, repo: dict) -> List[dict]:
@@ -982,8 +2214,7 @@ def plan_digest(key: str, shape: str, moves, creates) -> str:
 
     Canonical JSON (sorted keys, no whitespace) over the key, the shape, the moves as
     `[from, to, kind]` triples and the creates, so a stale plan is refused by identity
-    rather than by re-reading the disk and hoping. `hashlib` and `json` are imported
-    here, not at the top: the engine's top-level imports are pinned to os/re/typing.
+    rather than by re-reading the disk and hoping.
     """
     import hashlib
     import json
