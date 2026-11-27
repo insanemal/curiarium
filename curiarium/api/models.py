@@ -195,3 +195,49 @@ class OidcIdentity(SQLModel, table=True):
   subject: str
   user_id: str = Field(foreign_key="users.id", index=True)
   created_at: str
+
+
+# operation, operation_step and operation_lock are created by migration 015;
+# these classes only describe them for typed queries and must never create the
+# tables themselves (nothing in this app calls create_all). `step_index` is not
+# called `index` because `index` is an SQLite keyword; `undo_state` defaults to
+# 'none' exactly as the DDL does.
+class Operation(SQLModel, table=True):
+  __tablename__ = "operation"
+  id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+  workflow: str
+  target: str
+  plan_json: str
+  plan_digest: str
+  idempotency_key: str
+  status: str
+  submitted_by: str
+  submitted_by_id: Optional[str] = None
+  request_id: str
+  created_at: str
+  started_at: Optional[str] = None
+  finished_at: Optional[str] = None
+  error: Optional[str] = None
+  undo_state: str = Field(default="none")
+  superseded_by: Optional[str] = None
+
+
+class OperationStep(SQLModel, table=True):
+  __tablename__ = "operation_step"
+  id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+  operation_id: str = Field(foreign_key="operation.id")
+  step_index: int
+  op: str
+  args_json: str = Field(default="{}")
+  status: str
+  result_json: Optional[str] = None
+  error: Optional[str] = None
+  started_at: Optional[str] = None
+  finished_at: Optional[str] = None
+
+
+class OperationLock(SQLModel, table=True):
+  __tablename__ = "operation_lock"
+  path: str = Field(primary_key=True)
+  operation_id: str = Field(foreign_key="operation.id")
+  created_at: str

@@ -50,6 +50,11 @@ ACTOR_DISABLED_ROLE = "auth-disabled"
 ACTOR_FIRST_RUN = "first-run-setup"
 ACTOR_FIRST_RUN_KIND = "first-run"
 ACTOR_FIRST_RUN_ROLE = "unauthenticated"
+# The operations runner's own thread (Mf-5t30). A row it writes has no request
+# and no principal, so the actor says plainly that a background thread wrote it.
+ACTOR_RUNNER_USERNAME = "operations-runner"
+ACTOR_RUNNER_ROLE = "system"
+ACTOR_RUNNER_KIND = "system"
 
 ASSET_CREATE = "asset.create"
 ASSET_DELETE = "asset.delete"
@@ -144,6 +149,18 @@ SETTINGS_MFA_REQUIRE_ADMIN_UPDATE = "settings.mfa_require_admin.update"
 # The first-run setup window (Mf-lyj2). One row for the administrator row it created
 # plus the break-glass sessions it killed; never a password or a hash.
 FIRST_RUN_SETUP = "first_run.setup"
+# Operations (Mf-5t30). `submit`, `cancel` and `undo` are route-carried and
+# FAIL-CLOSED: each is staged in the transaction of the mutation it describes, so
+# a failed audit write rolls the mutation back. `done` and `failed` are written
+# by the runner's own thread, which has no request transaction to join, so they
+# go through `record_system()` after the status commit with a `system` actor, and
+# a failure there is logged, never raised - the residual window is that a
+# committed terminal status may briefly have no matching audit row.
+OPERATION_SUBMIT = "operation.submit"
+OPERATION_CANCEL = "operation.cancel"
+OPERATION_UNDO = "operation.undo"
+OPERATION_DONE = "operation.done"
+OPERATION_FAILED = "operation.failed"
 
 ACTIONS: frozenset[str] = frozenset({
     ASSET_CREATE,
@@ -203,6 +220,11 @@ ACTIONS: frozenset[str] = frozenset({
     MFA_RECOVERY_CODES_REGENERATE,
     SETTINGS_MFA_REQUIRE_ADMIN_UPDATE,
     FIRST_RUN_SETUP,
+    OPERATION_SUBMIT,
+    OPERATION_CANCEL,
+    OPERATION_UNDO,
+    OPERATION_DONE,
+    OPERATION_FAILED,
 })
 
 
@@ -255,6 +277,31 @@ def context_for(request: Request, context: Optional[AuthContext]) -> AuditContex
     if context is None:
         return context_for_actor(request, Actor(ACTOR_DISABLED_USERNAME, ACTOR_DISABLED_ROLE, ACTOR_DISABLED_ROLE, None))
     return context_for_actor(request, Actor(context.username, context.role, context.kind, context.user_id))
+
+
+def runner_context() -> AuditContext:
+    """The context for a row written by the operations runner's own thread."""
+    return AuditContext(
+        actor=Actor(ACTOR_RUNNER_USERNAME, ACTOR_RUNNER_ROLE, ACTOR_RUNNER_KIND, None),
+        request_id="-",
+        method="RUNNER",
+        path="/operations",
+    )
+
+
+def record_system(action: str, target: str, detail: Optional[dict] = None) -> None:
+    """One ACTIONS-only row from a background thread: log a failure, never raise.
+
+    Unlike `record()`, this must not raise: the operation has already committed
+    its terminal status, and a raised exception here would be a lie about the
+    operation's outcome.
+    """
+    try:
+        with Session(engine) as session:
+            stage(session, runner_context(), Event(action, target, detail))
+            session.commit()
+    except Exception:
+        log.exception("Audit write failed for %s (target %s)", action, target)
 
 
 def _now() -> str:
@@ -461,6 +508,11 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     ("DELETE", "/mfa"): (MFA_DISABLE,),
     ("POST", "/mfa/recovery-codes"): (MFA_RECOVERY_CODES_REGENERATE,),
     ("POST", "/settings/mfa"): (SETTINGS_MFA_REQUIRE_ADMIN_UPDATE,),
+    # Operations (Mf-5t30): the three route-carried actions. The runner's own
+    # `operation.done`/`operation.failed` rows have no route and are ACTIONS-only.
+    ("POST", "/operations"): (OPERATION_SUBMIT,),
+    ("POST", "/operations/{operation_id}/cancel"): (OPERATION_CANCEL,),
+    ("POST", "/operations/{operation_id}/undo"): (OPERATION_UNDO,),
 }
 
 # Mutating routes that are deliberately NOT audited, each with the reason. The
@@ -481,6 +533,7 @@ EXEMPT_ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/logout"): "session-token bookkeeping",
     ("POST", "/download/zip"): "streams a temp zip; stores nothing",
     ("POST", "/file-grants"): "mints a short-lived read-only file grant; mutates nothing",
+    ("POST", "/operations/plan"): "computes and returns a plan; writes nothing",
 }
 
 

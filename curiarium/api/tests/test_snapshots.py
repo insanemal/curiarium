@@ -950,8 +950,13 @@ def test_audit_the_snapshot_actions_are_declared_and_carried_by_their_routes() -
     # 48 = 47 + 1. Mf-v9eg adds the arrange apply and undo pair and their two
     # routes, so 57 = 55 + 2 and 50 = 48 + 2, over the three routes the matrix
     # gained (106 = 103 + 3: the preview is the one that writes no row).
-    assert len(audit.ACTIONS) == 57
-    assert len(audit.ROUTE_ACTIONS) == 50
+    # Mf-5t30 adds the operations core: three route-carried actions (submit,
+    # cancel, undo) and their three routes, plus two ACTIONS-only rows the
+    # runner's own thread writes (done, failed), so 62 = 57 + 5 and 50 + 3 = 53
+    # over the six routes the matrix gained (112 = 106 + 6, and the plan route
+    # is exempt because it writes nothing).
+    assert len(audit.ACTIONS) == 62
+    assert len(audit.ROUTE_ACTIONS) == 53
     assert audit.assert_audit_coverage() == audit.ROUTE_ACTIONS
 
 
@@ -986,13 +991,13 @@ def test_audit_docs_describe_the_snapshot_actions() -> None:
     path = _repo_path("docs", "AUDIT.md")
 
     text = path.read_text(encoding="utf-8")
-    assert "exactly these 57 strings" in text
+    assert "exactly these 62 strings" in text
     for needle in ("snapshot.create", "snapshot.prune", "snapshot.delete", "snapshot.restore", "snapshot.schedule.skipped", "snapshot.schedule.failed"):
         assert needle in text
     # The prose is hard-wrapped, so the sentence is pinned with its whitespace
     # normalised: the words are byte-for-byte, the wrap points are not.
     assert (
-        "The matrix has 106 routes, 42 of them `GET`; the remaining 64 split into 50 audited keys and 14 exempt keys."
+        "The matrix has 112 routes, 44 of them `GET`; the remaining 68 split into 53 audited keys and 15 exempt keys."
         in " ".join(text.split())
     )
     assert "fail-loud" in text

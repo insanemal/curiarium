@@ -57,6 +57,7 @@ from routers import (
     imports,
     library,
     mfa,
+    operations,
     projects,
     settings,
     snapshots,
@@ -102,6 +103,9 @@ API_ROUTERS = (
     # bulk `POST /projects`, so the two routers sit together in the served order.
     bundles.router,
     trash.router,
+    # Last: an operation can touch the whole library, so it is served after
+    # everything it reads.
+    operations.router,
 )
 
 
@@ -140,6 +144,20 @@ async def lifespan(_app: FastAPI):
     # A row left `running` belongs to a previous process that died before it
     # could finish. This runs before the mount thread, so it cannot catch ours.
     import_runs.mark_interrupted()
+    # Operations (Mf-5t30): repair rows a previous process left `running`, then
+    # start the coordinator thread when the background runner is enabled. Both
+    # run after the two boot guards and `run_migrations`, so the operations
+    # tables exist and nothing here can precede them. The function-local import
+    # mirrors the `snapshot_schedule` idiom below.
+    import operations_runner
+
+    operations_runner.resume_on_startup()
+    operations_stop = None
+    if operations_runner.should_run():
+        operations_stop = threading.Event()
+        threading.Thread(
+            target=operations_runner.run_forever, args=(operations_stop,), daemon=True
+        ).start()
     # Runs before the server accepts connections, so a single-process deployment
     # cannot have an in-flight upload for the sweep to race.
     asset_service.sweep_staging_dir()
@@ -172,6 +190,8 @@ async def lifespan(_app: FastAPI):
     # The snapshot scheduler leaks its event, so its thread lives until process
     # exit; this one is held precisely so shutdown can stop it.
     session_prune_stop.set()
+    if operations_stop is not None:
+        operations_stop.set()
 
 
 app = FastAPI(title="Curiarium API", version=__version__, lifespan=lifespan)

@@ -66,7 +66,21 @@ import storage_capabilities
 from config import MOUNT_IMPORT_COPY, MOUNT_IMPORT_ENABLED
 from db import engine
 from migrations import run_migrations
-from models import AppConfig, Asset, AssetFile, Folder, ImportRun, MfaRecoveryCode, Project, ProjectAsset, User, UserSession
+from models import (
+    AppConfig,
+    Asset,
+    AssetFile,
+    Folder,
+    ImportRun,
+    MfaRecoveryCode,
+    Operation,
+    OperationLock,
+    OperationStep,
+    Project,
+    ProjectAsset,
+    User,
+    UserSession,
+)
 
 ADMIN_USERNAME = "root"
 ADMIN_PASSWORD = "root-password-1"
@@ -1196,6 +1210,93 @@ def call_mfa_policy(client: TestClient, headers: dict[str, str], ids: Ids, monke
     return client.post("/settings/mfa", json={"require_admin": False}, headers=headers)
 
 
+# The operations core (Mf-5t30). The sweeps ask one question - may this role reach
+# the route - so the specs below compute a plan against the SEEDED library (a real
+# directory key, derived from an asset the seed uploaded) instead of hand-writing
+# one, and the submit spec removes the row it queued afterwards: the database is
+# one file for the whole run, and a queued operation left behind would be executed
+# by the next lifespan that starts.
+OPERATION_UNKNOWN_ID = "00000000-0000-0000-0000-0000000000ff"
+
+
+def plan_target(client: TestClient, headers: dict[str, str]) -> str:
+    """A library-relative directory key the seeded library really holds."""
+    landing = client.get("/assets", headers=headers)
+    rows = landing.json() if landing.status_code == 200 else []
+    for asset in rows if isinstance(rows, list) else []:
+        path = asset.get("storage_path") or ""
+        if "/" in path:
+            return path.rpartition("/")[0]
+    # Empty on purpose for an anonymous or denied caller: the operations route
+    # then answers the 401/403 this sweep is asking about, and no plan is built.
+    return ""
+
+
+def operation_plan(client: TestClient, headers: dict[str, str]) -> Response:
+    return client.post(
+        "/operations/plan",
+        json={"workflow": "create-project", "target": plan_target(client, headers)},
+        headers=headers,
+    )
+
+
+def discard_operation(operation_id: str) -> None:
+    """Remove a swept operation and its steps, so no later lifespan can run it."""
+    with Session(engine) as session:
+        session.exec(delete(OperationStep).where(OperationStep.operation_id == operation_id))
+        session.exec(delete(OperationLock).where(OperationLock.operation_id == operation_id))
+        session.exec(delete(Operation).where(Operation.id == operation_id))
+        session.commit()
+
+
+def call_plan_operation(
+    client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch
+) -> Response:
+    return operation_plan(client, headers)
+
+
+def call_submit_operation(
+    client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch
+) -> Response:
+    plan = operation_plan(client, headers)
+    if plan.status_code != 200:
+        # A denied caller is refused the plan, which is the answer this spec's
+        # sweeps assert for the caller; there is no plan_id to name.
+        return plan
+    response = client.post(
+        "/operations",
+        json={"plan_id": plan.json()["plan_id"], "idempotency_key": uuid4().hex},
+        headers=headers,
+    )
+    if response.status_code == 202:
+        discard_operation(response.json()["id"])
+    return response
+
+
+def call_get_operation(
+    client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch
+) -> Response:
+    return client.get(f"/operations/{OPERATION_UNKNOWN_ID}", headers=headers)
+
+
+def call_list_operations(
+    client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch
+) -> Response:
+    return client.get("/operations", headers=headers)
+
+
+def call_cancel_operation(
+    client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch
+) -> Response:
+    return client.post(f"/operations/{OPERATION_UNKNOWN_ID}/cancel", headers=headers)
+
+
+def call_undo_operation(
+    client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch
+) -> Response:
+    return client.post(f"/operations/{OPERATION_UNKNOWN_ID}/undo", headers=headers)
+
+
 CALLS: dict[tuple[str, str], CallSpec] = {
     ("GET", "/health"): call_health,
     ("POST", "/login"): call_login,
@@ -1303,6 +1404,12 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("GET", "/bundles/arrange"): call_arrange_preview,
     ("POST", "/bundles/arrange"): call_arrange_apply,
     ("POST", "/bundles/arrange/{arrange_id}/undo"): call_arrange_undo,
+    ("POST", "/operations/plan"): call_plan_operation,
+    ("POST", "/operations"): call_submit_operation,
+    ("GET", "/operations"): call_list_operations,
+    ("GET", "/operations/{operation_id}"): call_get_operation,
+    ("POST", "/operations/{operation_id}/cancel"): call_cancel_operation,
+    ("POST", "/operations/{operation_id}/undo"): call_undo_operation,
 }
 
 # What a permitted caller must get back. The five `/import*` routes are absent on
@@ -1430,6 +1537,15 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("GET", "/bundles/arrange"): 200,
     ("POST", "/bundles/arrange"): 409,
     ("POST", "/bundles/arrange/{arrange_id}/undo"): 404,
+    # Mf-5t30: the plan is computed for the seeded library's own directory key and
+    # writes nothing; the submit queues it (202) and the three id-routes answer the
+    # honest 404 for an id no operation has.
+    ("POST", "/operations/plan"): 200,
+    ("POST", "/operations"): 202,
+    ("GET", "/operations"): 200,
+    ("GET", "/operations/{operation_id}"): 404,
+    ("POST", "/operations/{operation_id}/cancel"): 404,
+    ("POST", "/operations/{operation_id}/undo"): 404,
 }
 
 
@@ -1555,22 +1671,24 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 106 routes - 11 public / 38 read / 24 contribute / 15 write / 18 admin.
+    """The matrix is pinned at 112 routes - 11 public / 40 read / 27 contribute / 16 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
     only moves between levels would otherwise keep the total and slip past.
+    Mf-5t30 moved it 106 -> 112: two reads (the queue and one operation), three
+    contributes (plan, submit, cancel) and one write (undo).
     """
     counts = {
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 106, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 112, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 38,
-        permissions.CONTRIBUTE: 24,
-        permissions.WRITE: 15,
+        permissions.READ: 40,
+        permissions.CONTRIBUTE: 27,
+        permissions.WRITE: 16,
         permissions.ADMIN: 18,
     }, counts
 

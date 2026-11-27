@@ -32,6 +32,9 @@ unknown or blank ranks as `public`, i.e. it is denied even reads - fail closed.
 | Rename or reorder supporting files (display only)    |  yes  |  yes   |     yes     |   no   |
 | Create folders                                       |  yes  |  yes   |     yes     |   no   |
 | Create a project, edit its details, add/remove members |  yes  |  yes   |     yes     |   no   |
+| Read the operations queue                            |  yes  |  yes   |     yes     |  yes   |
+| Plan, submit and cancel operations                   |  yes  |  yes   |     yes     |   no   |
+| Undo a finished operation                            |  yes  |  yes   |     no      |   no   |
 | Rename an asset on disk                             |  yes  |  yes   |     no      |   no   |
 | Move an asset between folders                        |  yes  |  yes   |     no      |   no   |
 | Rename or move a folder (it carries its tags)        |  yes  |  yes   |     no      |   no   |
@@ -237,8 +240,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 106 routes: 11 public, 38 read,
-24 contribute, 15 write, 18 admin.
+Paths are FastAPI templates exactly as declared. 112 routes: 11 public, 40 read,
+27 contribute, 16 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -302,6 +305,8 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | GET    | `/bundles/arrange`                      | the arrangement preview for one key and one shape: the move list, the directories it would create, the prose rendered from that list and every refusal; a dry run read off the disk, so it writes nothing and the moves an approval approves are on the wire before the approval |
 | GET    | `/snapshots`                           | lists the snapshots this volume has; reads the provider view, creates nothing |
 | GET    | `/snapshots/{name}/browse`             | browses one snapshot read-only; creates nothing |
+| GET    | `/operations`                          | the queue, newest first, with each operation's steps, status and undo state; a viewer may read what is running |
+| GET    | `/operations/{operation_id}`           | one operation and its step ledger |
 
 ### contribute (contributor, editor or admin)
 
@@ -337,6 +342,9 @@ on.
 | POST   | `/bundles/create`                           | creates one project per confirmed bundle from that report; idempotent, and a blocked bundle creates nothing |
 | POST   | `/bundles/dismiss`                          | hides bundles from the report, or undoes a dismissal: one appconfig value, and it removes nothing from the library |
 | POST   | `/bundles/enrich`                           | asks the vendor page a bundle already names for its missing creator/licence, filling **only empty fields**: an outbound fetch, but the report itself never fetches and a page that states no licence leaves it null |
+| POST   | `/operations/plan`                          | computes a plan and writes nothing: the step list, the counts and every exclusion with its reason. The `plan_id` it returns is the only thing a submit may name |
+| POST   | `/operations`                               | queues a plan this server issued, under an idempotency key; writes a row and answers 202, the in-process runner does the work. The request body has no steps field, so a client cannot invent a step list, and the plan is recomputed at submit so a stale one is a 409 |
+| POST   | `/operations/{operation_id}/cancel`         | a queued operation stops now; a running one is asked to stop after the step it is in completes, and its remaining steps are skipped |
 
 ### write (editor or admin)
 
@@ -360,6 +368,7 @@ out of the library, renames a file the library owns, or rescans the volume.
 | POST   | `/snapshots/{name}/restore`                 | copies snapshot bytes into `recovered/`; never overwrites |
 | POST   | `/bundles/arrange`                          | applies one previewed arrangement: it moves bytes on the volume for a shape the operator approved, so it is the editor's move, not a contribute; what it renames are the same paths `/asset/{asset_id}/rename` and `/asset/{asset_id}/folder` touch, in bulk |
 | POST   | `/bundles/arrange/{arrange_id}/undo`        | folds that arrangement back through the same mover and restores the rows from its ledger; the reversal is the same power as the move, so it sits on the same line |
+| POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by deleting the project row it created and never the files, so it is the same power as `DELETE /project/{project_id}`. Refused with 409 once a later operation over the same paths has superseded it |
 
 ### admin (administrators only)
 
@@ -383,6 +392,39 @@ out of the library, renames a file the library owns, or rescans the volume.
 | POST   | `/snapshots/retention`         | mutates retention |
 | GET    | `/snapshots/schedule`          | the scheduler's status report: last attempt, count, retention echo, warnings; operates nothing |
 | DELETE | `/snapshots/{name}`            | deleting a snapshot decides what history survives |
+
+## Operations
+
+Everything under `/operations` is a persisted plan with a review, and the plan
+is the server's: `POST /operations/plan` computes it from the library as it is
+now, returns the step list, the counts and every exclusion with its reason, and
+issues the `plan_id`. A submit names that `plan_id` and an idempotency key and
+nothing else - the body has no steps field (`extra="forbid"`), so a client
+cannot invent a step list - and the plan is recomputed at submit, so a stale one
+is a 409 rather than a run nobody reviewed.
+
+A submit is idempotent: the same key with the same plan answers the same
+operation, and the same key with a different plan is a 409 naming both. The
+route writes one row and answers 202; the in-process runner does the work, not
+the request.
+
+An operation declares the library paths it touches, so operations over
+overlapping paths queue behind each other and operations over disjoint paths run
+in parallel. Cancel lands between steps: a queued operation is cancelled at
+once, while a running one finishes the step it is in, skips the rest, and
+reports `cancelling` until it does.
+
+Undo lasts only until a later operation changes the same paths: the later one
+marks the earlier `superseded` and names itself, and both the 409 reason and
+`superseded_by` on `GET /operations/{operation_id}` say which operation it was.
+A restart resumes an interrupted operation from the step ledger - the steps that
+finished are skipped, the step that never started runs - and a step caught
+mid-flight fails the operation instead of being silently re-run, because its
+side effects are unknown. Finished operations are pruned to the newest 200 plus
+everything from the last 30 days; the audit log is the permanent record.
+
+`create-project` is the only workflow so far, and nothing the UI does today
+changed: no client calls these routes yet.
 
 ## Destructive confirmations
 

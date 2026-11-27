@@ -386,6 +386,14 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("DELETE", "/sessions/{session_id}"): ADMIN,
     # Purging deleted data is irreversible, so it is not an editor action.
     ("POST", "/trash/purge"): ADMIN,
+    # operations: viewers read the queue; only contributor+ may plan, submit or
+    # cancel; undo is an editor's move because it deletes a project row.
+    ("GET", "/operations"): READ,
+    ("GET", "/operations/{operation_id}"): READ,
+    ("POST", "/operations/plan"): CONTRIBUTE,
+    ("POST", "/operations"): CONTRIBUTE,
+    ("POST", "/operations/{operation_id}/cancel"): CONTRIBUTE,
+    ("POST", "/operations/{operation_id}/undo"): WRITE,
 }
 
 

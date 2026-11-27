@@ -67,7 +67,7 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 57 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 62 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
@@ -129,6 +129,11 @@ could honestly reconstruct.
 | `mfa.disable` | `DELETE /mfa` | the real username | `{"recovery_codes_deleted"}` | fail-closed |
 | `mfa.recovery_codes.regenerate` | `POST /mfa/recovery-codes` | the real username | `{"count": 10}` | fail-closed |
 | `settings.mfa_require_admin.update` | `POST /settings/mfa` | `"mfa_require_admin"` | `{"from", "to"}` booleans | fail-closed |
+| `operation.submit` | `POST /operations` | the new operation id | `{"workflow", "target", "steps", "idempotency_key"}` | fail-closed: staged in the same transaction as the operation row, so a failed audit write leaves no operation |
+| `operation.cancel` | `POST /operations/{operation_id}/cancel` | operation id | `{"previous", "result"}` - `previous` is `queued` or `running` and `result` is `cancelled` or `cancelling` | fail-closed |
+| `operation.undo` | `POST /operations/{operation_id}/undo` | operation id | `{"project_id", "project_name"}`, the project row that was deleted | fail-closed: staged before the delete, so the two deleted tables, the `undo_state` flip and the row commit together, and the member files are never touched |
+| `operation.done` | no route: the runner's own thread | operation id | `{"workflow", "target", "steps"}` | fail-loud: the terminal status is already committed, so the row is written after it under the `operations-runner` system actor and a failure is logged, never raised |
+| `operation.failed` | no route: the runner's own thread | operation id | `{"error", "workflow", "target"}` - `error` names the step and the count of steps not started when a step was caught mid-flight | fail-loud, same residual window |
 
 One row per **verdict**, not per click: `archive.project.create` writes a row for
 each of the four statuses that door can answer - `created`, `already_created`,
@@ -260,8 +265,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 106 routes, 42
-of them `GET`; the remaining 64 split into 50 audited keys and 14 exempt keys.
+out of scope by construction: they change nothing. The matrix has 112 routes, 44
+of them `GET`; the remaining 68 split into 53 audited keys and 15 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without
@@ -286,15 +291,18 @@ Exempt routes and why:
 | `POST /logout` | session-token bookkeeping |
 | `POST /download/zip` | streams a temp zip; stores nothing |
 | `POST /file-grants` | mints a short-lived read-only file grant; mutates nothing |
+| `POST /operations/plan` | computes and returns a plan; writes nothing |
 
 The classes behind those rows: **derived artifacts** (a thumbnail is a cache;
 losing it costs a regeneration), **outbound fetch** (the two `/import` inspectors
 read a remote URL and write nothing), **metadata that is not rename or move** (tags
 are a label list, not identity or location), **session-token bookkeeping**
 (`/logout` revokes a token; the surface worth watching is the credential check on
-`POST /login`), and **credential minting** (`/file-grants` signs a 60-second
+`POST /login`), **credential minting** (`/file-grants` signs a 60-second
 read-only URL for one existing file; it writes no row, changes no row and grants
-nothing a viewer could not already read). Creating a folder or a project stays
+nothing a viewer could not already read) and **a dry run** (`POST
+/operations/plan` computes a plan and returns it; the submit that writes the
+operation row is `operation.submit`). Creating a folder or a project stays
 exempt for the original reason: the object that gets created can be destroyed
 later, and `folder.delete` or `project.delete` is what is recorded. **Creating an
 asset is not exempt any more (Mf-0u1y): it is its own audited class**, so the
@@ -538,7 +546,7 @@ and no SQL statement issued through this application can rewrite the log".
 ## Who is recorded
 
 `audit.context_for(request, context)` derives the actor from the request and
-never raises. Four modes:
+never raises. Five modes:
 
 | Mode | `actor` | `actor_user_id` | `actor_role` | `actor_kind` |
 |---|---|---|---|---|
@@ -546,11 +554,17 @@ never raises. Four modes:
 | break-glass env admin | the `AUTH_USERNAME` value | `NULL` | `admin` | `break-glass` |
 | first-run setup | `first-run-setup` (`audit.ACTOR_FIRST_RUN`) | `NULL` | `unauthenticated` | `first-run` |
 | authentication disabled | `local` (`audit.ACTOR_DISABLED_USERNAME`) | `NULL` | `auth-disabled` | `auth-disabled` |
+| the operations runner | `operations-runner` (`audit.ACTOR_RUNNER_USERNAME`) | `NULL` | `system` | `system` |
 
 The first-run row is the one that must not claim a user: nobody authenticated to
 create that account, so the actor is a sentinel and the chosen username is the
 `target` instead, which makes `GET /audit?target=<username>` find the row that
 created the account.
+
+The operations runner's `operation.done` and `operation.failed` rows carry the
+fixed `operations-runner` actor with kind and role `system`, because a background
+thread has no request and no principal: the row says plainly that the runner,
+not a person, wrote it.
 
 `actor` and `actor_role` are denormalised copies taken at write time, for the
 same reason `sessions.username` is: the row is a historical record and must still
@@ -612,7 +626,7 @@ administration).
 | Parameter | Type | Semantics |
 |---|---|---|
 | `actor` | string | exact match, case-insensitive (both sides lowered, value stripped) |
-| `action` | string | exact match, case-sensitive - one of the 57 names above |
+| `action` | string | exact match, case-sensitive - one of the 62 names above |
 | `target` | string | case-sensitive substring match; `%`, `_` and `\` are escaped, so it is a literal substring. An asset id also returns that asset's `asset.create` row, because creation's target is the new id |
 | `since` | string | `created_at >= value` |
 | `until` | string | `created_at <= value` |

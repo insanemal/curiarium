@@ -51,6 +51,7 @@ import library_scan
 import login_throttle as login_throttle_module
 import main
 import oidc
+import operations_runner
 import permissions
 import sessions
 import settings_service
@@ -67,6 +68,9 @@ from models import (
     Folder,
     MfaRecoveryCode,
     OidcIdentity,
+    Operation,
+    OperationLock,
+    OperationStep,
     Project,
     ProjectAsset,
     User,
@@ -869,6 +873,99 @@ def call_mfa_policy(client, headers, ids, monkeypatch) -> Response:
     return client.post("/settings/mfa", json={"require_admin": False}, headers=headers)
 
 
+# --- the operations core (Mf-5t30) -------------------------------------------
+# The three operations routes each need a REAL operation to act on: a submit has
+# to name a plan this server issued, a cancel needs a row to cancel and an undo
+# needs a FINISHED create. So the specs below plan against the seeded library's
+# own directory key, submit, and - for the undo - drive the in-process runner
+# once. The runner's own `operation.done` row is written with the `system` actor,
+# not this request's, so the sweep's "the admin did it" assertions still read the
+# one row this request caused.
+
+
+def plan_target(client: TestClient, headers: dict[str, str]) -> str:
+    landing = client.get("/assets", headers=headers)
+    rows = landing.json() if landing.status_code == 200 else []
+    for asset in rows if isinstance(rows, list) else []:
+        path = asset.get("storage_path") or ""
+        if "/" in path:
+            return path.rpartition("/")[0]
+    # Empty on purpose for an anonymous or denied caller: the operations route
+    # then answers the 401/403 this sweep is asking about, and no plan is built.
+    return ""
+
+
+def queue_operation(client: TestClient, headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> dict:
+    plan = client.post(
+        "/operations/plan",
+        json={"workflow": "create-project", "target": plan_target(client, headers)},
+        headers=headers,
+    )
+    assert plan.status_code == 200, plan.text
+    queued = client.post(
+        "/operations",
+        json={"plan_id": plan.json()["plan_id"], "idempotency_key": uuid4().hex},
+        headers=headers,
+    )
+    assert queued.status_code == 202, queued.text
+    return queued.json()
+
+
+def discard_operation(operation_id: str) -> None:
+    """Remove a swept operation, so a later spec's dispatch pass cannot meet it.
+
+    The database is one file for the whole run and `dispatch_once()` promotes
+    EVERY queued row, so a leftover over the same directory key would be claimed
+    first and the next spec's own operation would be left queued. The audit rows
+    this file asserts on are never deleted - the operation row is not the record
+    being tested.
+    """
+    with Session(engine) as session:
+        session.exec(delete(OperationStep).where(OperationStep.operation_id == operation_id))
+        session.exec(delete(OperationLock).where(OperationLock.operation_id == operation_id))
+        session.exec(delete(Operation).where(Operation.id == operation_id))
+        session.commit()
+
+
+def call_submit_operation(client, headers, ids, monkeypatch) -> Response:
+    plan = client.post(
+        "/operations/plan",
+        json={"workflow": "create-project", "target": plan_target(client, headers)},
+        headers=headers,
+    )
+    response = client.post(
+        "/operations",
+        json={"plan_id": plan.json()["plan_id"], "idempotency_key": uuid4().hex},
+        headers=headers,
+    )
+    if response.status_code == 202:
+        discard_operation(response.json()["id"])
+    return response
+
+
+def call_cancel_operation(client, headers, ids, monkeypatch) -> Response:
+    operation = queue_operation(client, headers, monkeypatch)
+    try:
+        return client.post(f"/operations/{operation['id']}/cancel", headers=headers)
+    finally:
+        discard_operation(operation["id"])
+
+
+def call_undo_operation(client, headers, ids, monkeypatch) -> Response:
+    operation = queue_operation(client, headers, monkeypatch)
+    try:
+        for _attempt in range(5):
+            operations_runner.dispatch_once()
+            operations_runner.wait_idle(timeout=20)
+            finished = client.get(f"/operations/{operation['id']}", headers=headers)
+            if finished.json()["status"] != "queued":
+                break
+        assert finished.json()["status"] == "done", finished.text
+        return client.post(f"/operations/{operation['id']}/undo", headers=headers)
+    finally:
+        discard_operation(operation["id"])
+
+
 CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/login"): call_login,
     ("POST", "/auth/first-run/setup"): call_first_run_setup,
@@ -920,6 +1017,9 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("DELETE", "/mfa"): call_mfa_disable,
     ("POST", "/mfa/recovery-codes"): call_mfa_recovery_codes,
     ("POST", "/settings/mfa"): call_mfa_policy,
+    ("POST", "/operations"): call_submit_operation,
+    ("POST", "/operations/{operation_id}/cancel"): call_cancel_operation,
+    ("POST", "/operations/{operation_id}/undo"): call_undo_operation,
 }
 
 

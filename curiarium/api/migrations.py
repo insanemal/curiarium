@@ -707,6 +707,98 @@ def _migration_014_asset_attribution(conn: Connection) -> None:
     _add_column(conn, "asset", "created_via", "VARCHAR")
 
 
+def _migration_015_operations_core(conn: Connection) -> None:
+    """The operations ledger: a durable intent, executed in-process (Mf-5t30).
+
+    This is the operations ledger. It is append-only in the narrow sense that no
+    column of an earlier migration changes: `operation`, `operation_step` and
+    `operation_lock` are new tables, and 015 adds no column to an existing one.
+
+    The database is the truth and the runner is in-process. An `operation` row
+    is the durable record of an intent - what workflow, over which target, with
+    which reviewed plan - and `audit_events` (migration 006) stays the permanent
+    record of what actually happened. A finished row is pruned
+    (`operations_service.prune`), so this table is a queue with a bounded tail,
+    not a second history; the audit log is where the history lives.
+
+    `operation_step.step_index` is deliberately not called `index`: `index` is an
+    SQLite keyword, and a quoted identifier in every query that reads a step is
+    a trap one omission away from a syntax error.
+
+    `operation_lock.path` is the PRIMARY KEY, which is what makes "one holder
+    per exact prefix" a database fact rather than a convention; two operations
+    over overlapping (not equal) prefixes are refused by the dispatcher, which
+    cannot be expressed as a single unique key.
+
+    Every object is `IF NOT EXISTS`, so re-applying 015 is harmless, like
+    004-014.
+    """
+    conn.exec_driver_sql(
+        """CREATE TABLE IF NOT EXISTS operation (
+            id VARCHAR NOT NULL PRIMARY KEY,
+            workflow VARCHAR NOT NULL,
+            target VARCHAR NOT NULL,
+            plan_json TEXT NOT NULL,
+            plan_digest VARCHAR NOT NULL,
+            idempotency_key VARCHAR NOT NULL,
+            status VARCHAR NOT NULL CHECK (status IN ('queued','running','cancelling','cancelled','done','failed')),
+            submitted_by VARCHAR NOT NULL,
+            submitted_by_id VARCHAR,
+            request_id VARCHAR NOT NULL,
+            created_at VARCHAR NOT NULL,
+            started_at VARCHAR,
+            finished_at VARCHAR,
+            error TEXT,
+            undo_state VARCHAR NOT NULL DEFAULT 'none' CHECK (undo_state IN ('none','available','undone','superseded')),
+            superseded_by VARCHAR
+        )"""
+    )
+    conn.exec_driver_sql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_idempotency_key_unique "
+        "ON operation(idempotency_key)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_operation_status_created_at "
+        "ON operation(status, created_at)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_operation_created_at "
+        "ON operation(created_at DESC)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_operation_target ON operation(target)"
+    )
+    conn.exec_driver_sql(
+        """CREATE TABLE IF NOT EXISTS operation_step (
+            id VARCHAR NOT NULL PRIMARY KEY,
+            operation_id VARCHAR NOT NULL REFERENCES operation(id),
+            step_index INTEGER NOT NULL,
+            op VARCHAR NOT NULL,
+            args_json TEXT NOT NULL DEFAULT '{}',
+            status VARCHAR NOT NULL CHECK (status IN ('pending','running','done','failed','skipped')),
+            result_json TEXT,
+            error TEXT,
+            started_at VARCHAR,
+            finished_at VARCHAR
+        )"""
+    )
+    conn.exec_driver_sql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_step_operation_index "
+        "ON operation_step(operation_id, step_index)"
+    )
+    conn.exec_driver_sql(
+        """CREATE TABLE IF NOT EXISTS operation_lock (
+            path VARCHAR NOT NULL PRIMARY KEY,
+            operation_id VARCHAR NOT NULL REFERENCES operation(id),
+            created_at VARCHAR NOT NULL
+        )"""
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_operation_lock_operation_id "
+        "ON operation_lock(operation_id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial_schema", _migration_001_initial_schema),
     Migration(2, "nested_folders_and_mount_sources", _migration_002_nested_folders_and_mount_sources),
@@ -722,6 +814,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(12, "mfa_totp", _migration_012_mfa_totp),
     Migration(13, "asset_thumb_version", _migration_013_asset_thumb_version),
     Migration(14, "asset_attribution", _migration_014_asset_attribution),
+    Migration(15, "operations_core", _migration_015_operations_core),
 )
 
 

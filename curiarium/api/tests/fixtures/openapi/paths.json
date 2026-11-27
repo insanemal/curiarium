@@ -3494,6 +3494,305 @@
       "summary": "Verify Mfa"
     }
   },
+  "/operations": {
+    "get": {
+      "description": "Newest-first page of the queue, optionally filtered by status.",
+      "operationId": "list_operations_route_operations_get",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "state",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          }
+        },
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "offset",
+          "required": false,
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/OperationOut"
+                },
+                "title": "Response List Operations Route Operations Get",
+                "type": "array"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "List Operations Route"
+    },
+    "post": {
+      "description": "Queue a plan this server issued; the runner executes it, not this route.",
+      "operationId": "submit_operation_operations_post",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/OperationSubmitRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "202": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Submit Operation"
+    }
+  },
+  "/operations/plan": {
+    "post": {
+      "description": "Compute a plan from the library now; writes nothing.",
+      "operationId": "plan_operation_operations_plan_post",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/OperationPlanRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationPlanOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Plan Operation"
+    }
+  },
+  "/operations/{operation_id}": {
+    "get": {
+      "operationId": "get_operation_route_operations__operation_id__get",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "operation_id",
+          "required": true,
+          "schema": {
+            "title": "Operation Id",
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Get Operation Route"
+    }
+  },
+  "/operations/{operation_id}/cancel": {
+    "post": {
+      "description": "Cancel a queued operation, or ask a running one to stop after its step.",
+      "operationId": "cancel_operation_operations__operation_id__cancel_post",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "operation_id",
+          "required": true,
+          "schema": {
+            "title": "Operation Id",
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Cancel Operation"
+    }
+  },
+  "/operations/{operation_id}/undo": {
+    "post": {
+      "description": "Undo a finished create; deletes the project row, never the files.",
+      "operationId": "undo_operation_operations__operation_id__undo_post",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "operation_id",
+          "required": true,
+          "schema": {
+            "title": "Operation Id",
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationUndoOut"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Undo Operation"
+    }
+  },
   "/project/{project_id}": {
     "delete": {
       "operationId": "delete_project_project__project_id__delete",

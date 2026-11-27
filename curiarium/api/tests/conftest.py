@@ -90,3 +90,13 @@ storage_root.mkdir(parents=True, exist_ok=True)
 # A run that created its own root owns it; do not leave it behind in /tmp.
 if owns_database:
     atexit.register(shutil.rmtree, run_root, ignore_errors=True)
+
+# The operations runner's dispatcher thread must never start inside the suite: a
+# background pass would execute whatever an earlier test left queued, against the
+# wrong storage root. A module constant, not an env var, so a developer's shell
+# cannot flip it and no new operator-tunable config key appears (see
+# tests/test_deploy_manifest_env.py). `dispatch_once()` stays callable so a test
+# drives execution explicitly.
+import operations_runner  # noqa: E402  (after the environment above)
+
+operations_runner.BACKGROUND_ENABLED = False

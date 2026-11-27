@@ -1,0 +1,485 @@
+{
+  "OperationCoverOut": {
+    "description": "The cover a create would pick, and why; `asset_id` is None for no cover.",
+    "properties": {
+      "asset_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Asset Id"
+      },
+      "reason": {
+        "title": "Reason",
+        "type": "string"
+      },
+      "rel_path": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Rel Path"
+      }
+    },
+    "required": [
+      "reason"
+    ],
+    "title": "OperationCoverOut",
+    "type": "object"
+  },
+  "OperationExcludedOut": {
+    "description": "One file or directory the plan leaves out, with a human reason.",
+    "properties": {
+      "path": {
+        "title": "Path",
+        "type": "string"
+      },
+      "reason": {
+        "title": "Reason",
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "reason"
+    ],
+    "title": "OperationExcludedOut",
+    "type": "object"
+  },
+  "OperationGroupOut": {
+    "description": "One first-level directory under the target, and what it holds.",
+    "properties": {
+      "members": {
+        "title": "Members",
+        "type": "integer"
+      },
+      "models": {
+        "title": "Models",
+        "type": "integer"
+      },
+      "name": {
+        "title": "Name",
+        "type": "string"
+      }
+    },
+    "required": [
+      "name",
+      "members",
+      "models"
+    ],
+    "title": "OperationGroupOut",
+    "type": "object"
+  },
+  "OperationOut": {
+    "description": "One operation and its steps, newest state as stored.",
+    "properties": {
+      "created_at": {
+        "title": "Created At",
+        "type": "string"
+      },
+      "error": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Error"
+      },
+      "finished_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Finished At"
+      },
+      "id": {
+        "title": "Id",
+        "type": "string"
+      },
+      "started_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Started At"
+      },
+      "status": {
+        "title": "Status",
+        "type": "string"
+      },
+      "steps": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/OperationStepOut"
+        },
+        "title": "Steps",
+        "type": "array"
+      },
+      "submitted_by": {
+        "title": "Submitted By",
+        "type": "string"
+      },
+      "superseded_by": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Superseded By"
+      },
+      "target": {
+        "title": "Target",
+        "type": "string"
+      },
+      "undo_state": {
+        "title": "Undo State",
+        "type": "string"
+      },
+      "workflow": {
+        "title": "Workflow",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "workflow",
+      "target",
+      "status",
+      "submitted_by",
+      "created_at",
+      "undo_state"
+    ],
+    "title": "OperationOut",
+    "type": "object"
+  },
+  "OperationPlanOut": {
+    "description": "A computed plan: the opaque id to submit, plus the steps and review.",
+    "properties": {
+      "plan_id": {
+        "title": "Plan Id",
+        "type": "string"
+      },
+      "review": {
+        "$ref": "#/components/schemas/OperationReviewOut"
+      },
+      "steps": {
+        "items": {
+          "$ref": "#/components/schemas/OperationPlanStepOut"
+        },
+        "title": "Steps",
+        "type": "array"
+      },
+      "target": {
+        "title": "Target",
+        "type": "string"
+      },
+      "workflow": {
+        "title": "Workflow",
+        "type": "string"
+      }
+    },
+    "required": [
+      "plan_id",
+      "workflow",
+      "target",
+      "steps",
+      "review"
+    ],
+    "title": "OperationPlanOut",
+    "type": "object"
+  },
+  "OperationPlanRequest": {
+    "additionalProperties": false,
+    "description": "What to do and where.\n\n`extra=\"forbid\"` is the proof a client cannot smuggle a step list in alongside\n`workflow` and `target`.",
+    "properties": {
+      "params": {
+        "additionalProperties": true,
+        "default": {},
+        "title": "Params",
+        "type": "object"
+      },
+      "target": {
+        "title": "Target",
+        "type": "string"
+      },
+      "workflow": {
+        "title": "Workflow",
+        "type": "string"
+      }
+    },
+    "required": [
+      "workflow",
+      "target"
+    ],
+    "title": "OperationPlanRequest",
+    "type": "object"
+  },
+  "OperationPlanStepOut": {
+    "description": "One step of a plan; `args` stay server-side, so only the shape is shown.",
+    "properties": {
+      "index": {
+        "title": "Index",
+        "type": "integer"
+      },
+      "op": {
+        "title": "Op",
+        "type": "string"
+      },
+      "summary": {
+        "title": "Summary",
+        "type": "string"
+      }
+    },
+    "required": [
+      "index",
+      "op",
+      "summary"
+    ],
+    "title": "OperationPlanStepOut",
+    "type": "object"
+  },
+  "OperationReviewOut": {
+    "description": "The human-readable summary of what a plan would do, before it runs.",
+    "properties": {
+      "adopts": {
+        "title": "Adopts",
+        "type": "integer"
+      },
+      "cover": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/OperationCoverOut"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "creates": {
+        "title": "Creates",
+        "type": "integer"
+      },
+      "deletes": {
+        "title": "Deletes",
+        "type": "integer"
+      },
+      "excluded": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/OperationExcludedOut"
+        },
+        "title": "Excluded",
+        "type": "array"
+      },
+      "existing_project_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Existing Project Id"
+      },
+      "existing_project_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Existing Project Name"
+      },
+      "groups": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/OperationGroupOut"
+        },
+        "title": "Groups",
+        "type": "array"
+      },
+      "members": {
+        "title": "Members",
+        "type": "integer"
+      },
+      "moves": {
+        "title": "Moves",
+        "type": "integer"
+      },
+      "target": {
+        "title": "Target",
+        "type": "string"
+      },
+      "workflow": {
+        "title": "Workflow",
+        "type": "string"
+      }
+    },
+    "required": [
+      "workflow",
+      "target",
+      "moves",
+      "creates",
+      "adopts",
+      "deletes",
+      "members"
+    ],
+    "title": "OperationReviewOut",
+    "type": "object"
+  },
+  "OperationStepOut": {
+    "description": "One step as read back; `args_json` is never exposed.",
+    "properties": {
+      "error": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Error"
+      },
+      "finished_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Finished At"
+      },
+      "index": {
+        "title": "Index",
+        "type": "integer"
+      },
+      "op": {
+        "title": "Op",
+        "type": "string"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Result"
+      },
+      "started_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Started At"
+      },
+      "status": {
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "index",
+      "op",
+      "status"
+    ],
+    "title": "OperationStepOut",
+    "type": "object"
+  },
+  "OperationSubmitRequest": {
+    "additionalProperties": false,
+    "description": "A submit names a plan this server issued and an idempotency key; no steps.",
+    "properties": {
+      "idempotency_key": {
+        "title": "Idempotency Key",
+        "type": "string"
+      },
+      "plan_id": {
+        "title": "Plan Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "plan_id",
+      "idempotency_key"
+    ],
+    "title": "OperationSubmitRequest",
+    "type": "object"
+  },
+  "OperationUndoOut": {
+    "description": "The result of undoing a finished operation.",
+    "properties": {
+      "operation_id": {
+        "title": "Operation Id",
+        "type": "string"
+      },
+      "project_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Project Id"
+      },
+      "project_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Project Name"
+      },
+      "undone": {
+        "title": "Undone",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "operation_id",
+      "undone"
+    ],
+    "title": "OperationUndoOut",
+    "type": "object"
+  }
+}
