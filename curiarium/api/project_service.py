@@ -20,7 +20,7 @@ household scale and migration 007 stays untouched.
 
 import json
 from datetime import datetime, timezone
-from typing import List, Optional, Sequence, Tuple
+from typing import Iterator, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -273,6 +273,22 @@ def _insert(session: Session, project: Project, member_asset_ids: List[str]) -> 
 MEMBER_QUERY_BATCH = 500
 
 
+def _id_batches(asset_ids: Sequence[str]) -> Iterator[List[str]]:
+    """Split an id list into the contiguous batches one ``IN`` clause may bind.
+
+    The batch size is read from the module global on every call (a plain name
+    lookup, never captured at import) so a test can pin the boundary by
+    monkeypatching `MEMBER_QUERY_BATCH`, exactly as `tests/test_archive_project.py`
+    pins `RESOLVE_QUERY_BATCH`. A batch is comfortably under SQLite's smallest
+    `SQLITE_MAX_VARIABLE_NUMBER`, which is what makes chunking a caller cannot
+    observe safe. `max(1, ...)` keeps a test that pins 0 from looping forever. An
+    empty sequence yields nothing, so it costs no statement at all.
+    """
+    batch_size = max(1, int(MEMBER_QUERY_BATCH))
+    for offset in range(0, len(asset_ids), batch_size):
+        yield list(asset_ids[offset : offset + batch_size])
+
+
 def _known_asset_ids(session: Session, asset_ids: Sequence[str]) -> set[str]:
     """The ids that name a real asset, read in batches of `MEMBER_QUERY_BATCH`.
 
@@ -285,10 +301,26 @@ def _known_asset_ids(session: Session, asset_ids: Sequence[str]) -> set[str]:
     if not asset_ids:
         return set()
     known: set[str] = set()
-    for offset in range(0, len(asset_ids), MEMBER_QUERY_BATCH):
-        batch = asset_ids[offset : offset + MEMBER_QUERY_BATCH]
+    for batch in _id_batches(asset_ids):
         known.update(session.exec(select(Asset.id).where(Asset.id.in_(batch))).all())
     return known
+
+
+def assets_by_ids(session: Session, asset_ids: Sequence[str]) -> List[Asset]:
+    """The asset rows those ids name, read in batches of `MEMBER_QUERY_BATCH`.
+
+    The delete preview needs the rows themselves rather than their ids, because it
+    sums `size`, `is_reference` and `supporting_file_count` over them. The read is
+    chunked for the same reason `_known_asset_ids` is: SQLite caps the host
+    variables a statement may bind, so one ``IN`` list over a caller-supplied id
+    set raises `too many SQL variables` and turns a pure SELECT into a 500. The
+    chunks are contiguous slices concatenated in slice order and the caller only
+    aggregates, so chunking is invisible to it. An empty list issues no query.
+    """
+    rows: List[Asset] = []
+    for batch in _id_batches(asset_ids):
+        rows.extend(session.exec(select(Asset).where(Asset.id.in_(batch))).all())
+    return rows
 
 
 def _require_assets(session: Session, asset_ids: List[str]) -> None:
