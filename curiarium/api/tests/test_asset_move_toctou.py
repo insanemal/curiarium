@@ -28,11 +28,12 @@ from sqlmodel import Session, select
 import asset_service
 import db
 import library_scan
+import move_service
 import settings_service
 from db import engine
 from main import app
 from migrations import run_migrations
-from models import Asset, Folder
+from models import Asset, Folder, MoveLedger
 
 # --- infrastructure ---------------------------------------------------------
 
@@ -353,6 +354,94 @@ def test_concurrent_api_renames_in_one_folder_yield_one_200_one_409(isolated_sto
         before[loser_id].filename,
         before[loser_id].storage_path,
     )
+
+
+def test_a_rename_that_loses_the_target_race_is_a_409_that_keeps_its_own_file(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the API, a clobbered rename refuses and the row keeps the path it owns.
+
+    A gate rather than a dice roll: the pre-flight has read `Boxes/gamma.stl` free,
+    and then the arbiter refuses it - exactly what the byte loop used to read as
+    "landed". Mutation: count it (the loop before the fix did) and the row is
+    rewritten to a path no file filled; the assertions on `storage_path` and on the
+    ledger row name the damage.
+    """
+    storage = isolated_storage
+    asset_id = insert_asset_row("alpha", None, "Boxes/alpha.stl", filename="alpha.stl")
+    write_file(storage / "Boxes" / "alpha.stl", b"alpha bytes")
+    real_move_bytes = move_service.move_bytes
+    blocked = storage / "Boxes" / "gamma.stl"
+
+    def refusing(source: Path, target: Path) -> bool:
+        if Path(target) == blocked:
+            return False
+        return real_move_bytes(source, target)
+
+    monkeypatch.setattr(move_service, "move_bytes", refusing)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(f"/asset/{asset_id}/rename", json={"filename": "gamma.stl"}, headers=auth_header(client))
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Storage path already exists: Boxes/gamma.stl"
+    asset = read_asset(asset_id)
+    assert asset is not None
+    assert asset.storage_path == "Boxes/alpha.stl", "the refused rename rewrote nothing"
+    assert (storage / asset.storage_path).read_bytes() == b"alpha bytes"
+    assert not blocked.exists()
+    with Session(engine) as session:
+        claims = [
+            row
+            for row in session.exec(select(MoveLedger))
+            if row.intent.startswith(f"asset.rename:{asset_id}:")
+        ]
+    assert claims == [], "the rename's ledger row lives in the caller's transaction, which rolled back"
+
+
+def test_concurrent_api_renames_keep_every_row_on_a_file_that_exists(isolated_storage: Path) -> None:
+    """Twenty real races on the same basename: whatever the interleaving, a row keeps its file.
+
+    Probabilistic in one direction only: the 200/409 split is NOT asserted here
+    (the tests above own that contract deterministically). What is asserted is the
+    data-integrity invariant the unconditional `landed += 1` broke for ~5% of
+    single runs - after the fix, no interleaving can leave a row on a path whose
+    bytes a rollback carried away, so the assertion holds for every ordering.
+    """
+    storage = isolated_storage
+    with TestClient(app, raise_server_exceptions=False) as bootstrap:
+        headers = auth_header(bootstrap)
+
+    def rename(asset_id: str, filename: str) -> int:
+        thread_client = TestClient(app, raise_server_exceptions=False)
+        return thread_client.post(f"/asset/{asset_id}/rename", json={"filename": filename}, headers=headers).status_code
+
+    for round_number in range(20):
+        folder = f"Boxes{round_number}"
+        # A name no other round has used: the folder is per-round but the ROWS live
+        # in the root folder (`folder_id=None`), whose name index is session-wide.
+        filename = f"gamma{round_number}.stl"
+        payloads = {
+            insert_asset_row(f"alpha{round_number}", None, f"{folder}/alpha.stl", filename="alpha.stl"): b"alpha bytes",
+            insert_asset_row(f"beta{round_number}", None, f"{folder}/beta.stl", filename="beta.stl"): b"beta bytes",
+        }
+        for asset_id, payload in payloads.items():
+            asset = read_asset(asset_id)
+            assert asset is not None
+            write_file(storage / asset.storage_path, payload)
+
+        statuses = run_concurrently([partial(rename, asset_id, filename) for asset_id in payloads])
+
+        unexpected = [outcome for outcome in statuses if not isinstance(outcome, int)]
+        assert unexpected == [], unexpected
+        assert 200 in statuses, f"round {round_number}: one rename must win"
+        assert set(statuses) <= {200, 409}, f"round {round_number}: {statuses}"
+        for asset_id, payload in payloads.items():
+            asset = read_asset(asset_id)
+            assert asset is not None
+            stored = storage / asset.storage_path
+            assert stored.is_file(), f"round {round_number}: asset {asset_id} points at a missing file"
+            assert stored.read_bytes() == payload, f"round {round_number}: asset {asset_id} points at another move's bytes"
 
 
 # --- a directory is moved by the same, one mover ---------------------------

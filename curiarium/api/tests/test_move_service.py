@@ -240,6 +240,79 @@ def test_undo_refuses_when_a_path_is_present_at_both_ends(isolated_storage: Path
 # --- refusals --------------------------------------------------------------
 
 
+def test_undo_of_a_ledger_carrying_a_row_only_pair_refuses_at_the_missing_end(isolated_storage: Path) -> None:
+    """Finding (Mf-215n): a row-only pair has bytes at NEITHER end, so its undo refuses.
+
+    The guard is `reverse_ledger`'s two-way check: a pair with bytes on both ends or
+    on neither is refused rather than guessed at, which is why a no-copy pair cannot
+    drag another move's file backwards. The consequence is that undoing a ledger
+    that carries one moves nothing at all and says so, instead of skipping the pair
+    and reversing the rest - reported, not changed: shrinking that refusal to a skip
+    is a behaviour change no ticket has asked for yet.
+    """
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    insert_asset("Boxes/one.stl")
+    insert_asset("Mounted/one.stl", filename="mounted.stl")
+    outcome = move_service.move(
+        [
+            move_service.Pair("Boxes/one.stl", "Sorted/one.stl", move_service.KIND_FILE),
+            move_service.Pair("Mounted/one.stl", "Sorted/mounted.stl", move_service.KIND_FILE),
+        ],
+        intent="test:undo-row-only",
+        key="test",
+    )
+
+    with pytest.raises(move_service.MoveRefused) as refusal:
+        move_service.undo_ledger(outcome.ledger_id)
+
+    assert refusal.value.status_code == 409
+    assert "present at neither end" in refusal.value.detail
+    assert (storage / "Sorted" / "one.stl").read_bytes() == b"one bytes", "the refusal moved nothing"
+    assert ledger_rows("test:undo-row-only")[0].undone == 0
+
+
+def test_undo_refuses_a_target_claimed_after_its_check_instead_of_lying(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reverse_ledger` reads both ends; the arbiter moves. A claim between the two is a refusal.
+
+    Mutation: ignore `move_bytes`'s False (as this undo did) and the rows are
+    rewritten onto the old names and the ledger closes `undone` while one pair's
+    bytes never left the name the forward move gave them - a row pointing at no
+    file, and, when the claimant is a real upload, a row describing another
+    request's bytes.
+    """
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    insert_asset("Boxes/one.stl")
+    outcome = move_service.move(
+        [move_service.Pair("Boxes/one.stl", "Sorted/one.stl", move_service.KIND_FILE)],
+        intent="test:undo-claimed",
+        key="test",
+    )
+    before_assets = asset_rows()
+    real_move_bytes = move_service.move_bytes
+    vacated = storage / "Boxes" / "one.stl"
+
+    def claimed(source: Path, target: Path) -> bool:
+        # Free to `reverse_ledger`'s read, occupied by the time the arbiter runs:
+        # the window a check-then-act cannot close.
+        if Path(target) == vacated:
+            return False
+        return real_move_bytes(source, target)
+
+    monkeypatch.setattr(move_service, "move_bytes", claimed)
+
+    with pytest.raises(move_service.Clobbered) as refusal:
+        move_service.undo_ledger(outcome.ledger_id)
+
+    assert refusal.value.detail == "Storage path already exists: Boxes/one.stl"
+    assert (storage / "Sorted" / "one.stl").read_bytes() == b"one bytes", "the bytes are still where the move put them"
+    assert asset_rows() == before_assets, "a refused undo rewrites no row"
+    assert ledger_rows("test:undo-claimed")[0].undone == 0, "and does not claim to have undone anything"
+
+
 def test_an_occupied_target_is_refused_before_anything_is_written(isolated_storage: Path) -> None:
     """AC-4: Clobbered, no ledger row, tree unchanged, and today's exact sentence."""
     storage = isolated_storage
@@ -358,6 +431,154 @@ def test_a_cross_device_move_is_refused_and_records_how_far_it_got(isolated_stor
     assert retried.landed == 1
     assert (storage / "Sorted" / "one.stl").read_bytes() == b"one bytes"
     assert len(ledger_rows("test:cross-device")) == 1
+
+
+# --- a batch: a clobber refuses, a row-only pair lands ---------------------
+
+
+def refuse_one_pair(monkeypatch: pytest.MonkeyPatch, storage: Path, target_relative: str) -> None:
+    """Make the byte arbiter refuse exactly one pair's target, as a racing move would.
+
+    A gate and not a dice roll: the pre-flight has already read every target free,
+    so this is the interleaving its check-then-act window allows - the refusal has
+    to come from the byte loop, which is where the two meanings of `move_bytes`'s
+    False used to be read as one.
+    """
+    real_move_bytes = move_service.move_bytes
+    blocked = storage / target_relative
+
+    def refusing(source: Path, target: Path) -> bool:
+        if Path(target) == blocked:
+            return False
+        return real_move_bytes(source, target)
+
+    monkeypatch.setattr(move_service, "move_bytes", refusing)
+
+
+def test_a_clobbered_pair_in_a_batch_is_refused_and_never_counted_as_landed(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A target taken mid-loop is a REFUSAL, not a skip of a pair that landed.
+
+    Mutation: count the pair anyway (the loop before Mf-215n's fix did) and
+    `landed` reaches 3, the ledger closes `applied`, and the rows are rewritten
+    onto a path whose bytes another move owns - `Boxes/Kit`'s row would name
+    `Sorted/Kit`, which no file ever filled.
+    """
+    storage = isolated_storage
+    three_files(storage)
+    before_assets = asset_rows()
+    before_folders = folder_rows()
+    refuse_one_pair(monkeypatch, storage, "Sorted/Kit")
+
+    with pytest.raises(move_service.Clobbered) as refusal:
+        move_service.move(three_pairs(), intent="test:batch-clobber", key="test")
+
+    assert refusal.value.detail == "Storage path already exists: Sorted/Kit", (
+        "the door's sentence, unchanged: a clobber mid-batch is the same refusal as a clobber up front"
+    )
+    rows = ledger_rows("test:batch-clobber")
+    assert len(rows) == 1
+    assert rows[0].landed == 2, "the two pairs before the refusal landed; the refused one did not"
+    assert rows[0].applied == 0, "a stopped run is not a complete intent"
+    assert not (storage / "Sorted" / "Kit").exists()
+    assert (storage / "Boxes" / "Kit" / "part.stl").read_bytes() == b"part bytes", (
+        "the refused pair's bytes never moved"
+    )
+    assert asset_rows() == before_assets, "no row may be rewritten onto a target that never got its bytes"
+    assert folder_rows() == before_folders
+
+
+def test_a_clobbered_first_pair_in_a_batch_leaves_the_tree_and_every_row_intact(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing landed, so nothing moved, no row moved, and every row still names a file."""
+    storage = isolated_storage
+    three_files(storage)
+    before_tree = tree_digest(storage)
+    before_assets = asset_rows()
+    refuse_one_pair(monkeypatch, storage, "Sorted/one.stl")
+
+    with pytest.raises(move_service.Clobbered):
+        move_service.move(three_pairs(), intent="test:batch-clobber-first", key="test")
+
+    rows = ledger_rows("test:batch-clobber-first")
+    assert (rows[0].landed, rows[0].applied) == (0, 0)
+    assert tree_digest(storage) == before_tree, "a refusal on the first pair moves nothing at all"
+    assert asset_rows() == before_assets
+    for asset_id, relative in asset_rows().items():
+        assert (storage / relative).is_file(), f"asset {asset_id} points at a missing file"
+
+
+def test_a_row_only_pair_in_a_batch_still_lands_without_moving_bytes(isolated_storage: Path) -> None:
+    """A mounted no-copy row owns no file; refusing it would be this fix's own regression.
+
+    Mutation: read `move_bytes`'s False as "nothing to move" (or refuse every pair
+    whose source is absent) and this batch never lands; a fix that dropped the
+    `source.exists()` guard instead raises `FileNotFoundError` out of the loop.
+    """
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    write_file(storage / "Boxes" / "two.stl", b"two bytes")
+    insert_asset("Boxes/one.stl")
+    insert_asset("Boxes/two.stl")
+    mounted = insert_asset("Mounted/one.stl", filename="mounted.stl")  # a row whose bytes were never ours
+
+    outcome = move_service.move(
+        [
+            move_service.Pair("Boxes/one.stl", "Sorted/one.stl", move_service.KIND_FILE),
+            move_service.Pair("Mounted/one.stl", "Sorted/mounted.stl", move_service.KIND_FILE),
+            move_service.Pair("Boxes/two.stl", "Sorted/two.stl", move_service.KIND_FILE),
+        ],
+        intent="test:row-only",
+        key="test",
+    )
+
+    assert (outcome.landed, outcome.moved) == (3, True), "all three landed; only two of them had bytes"
+    assert (storage / "Sorted" / "one.stl").read_bytes() == b"one bytes"
+    assert (storage / "Sorted" / "two.stl").read_bytes() == b"two bytes"
+    assert not (storage / "Sorted" / "mounted.stl").exists(), "there were no bytes to move, so none appeared"
+    assert asset_rows()[mounted] == "Sorted/mounted.stl", "the ROW moved: that is what a no-copy pair is"
+    rows = ledger_rows("test:row-only")
+    assert (rows[0].landed, rows[0].applied) == (3, 1)
+
+
+def test_a_batch_resumes_after_a_clobber_at_the_refused_pair(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal is retryable: the landed pairs are not re-moved, the retry finishes the batch.
+
+    Mutation: treat the incomplete row as `already_applied` and the retry silently
+    moves nothing; re-run the landed pairs and the first one, whose source is gone,
+    raises `FileNotFoundError` out of `move_bytes`.
+    """
+    storage = isolated_storage
+    three_files(storage)
+    real_move_bytes = move_service.move_bytes
+    refuse_one_pair(monkeypatch, storage, "Sorted/two.stl")
+
+    with pytest.raises(move_service.Clobbered):
+        move_service.move(three_pairs(), intent="test:batch-resume", key="test")
+
+    assert (storage / "Sorted" / "one.stl").read_bytes() == b"one bytes", "pair 0 landed before the refusal"
+    assert not (storage / "Boxes" / "one.stl").exists()
+    # The obstruction the race left is gone, and the arbiter is its real self again.
+    # Restored by attribute, not `monkeypatch.undo()`: that would also drop the
+    # storage root patches and point the retry at the real library.
+    monkeypatch.setattr(move_service, "move_bytes", real_move_bytes)
+
+    retried = move_service.move(three_pairs(), intent="test:batch-resume", key="test")
+
+    assert (retried.already_applied, retried.landed) == (False, 3), "an incomplete intent resumes at the refusal"
+    assert (storage / "Sorted" / "one.stl").read_bytes() == b"one bytes", "the landed pair was not moved a second time"
+    assert (storage / "Sorted" / "two.stl").read_bytes() == b"two bytes"
+    assert (storage / "Sorted" / "Kit" / "part.stl").read_bytes() == b"part bytes"
+    rows = ledger_rows("test:batch-resume")
+    assert len(rows) == 1
+    assert (rows[0].landed, rows[0].applied) == (3, 1)
+    assert set(asset_rows().values()) == {"Sorted/one.stl", "Sorted/two.stl", "Sorted/Kit/part.stl"}
+    for asset_id, relative in asset_rows().items():
+        assert (storage / relative).is_file(), f"asset {asset_id} points at a missing file"
 
 
 def test_a_superseded_ledger_refuses_to_undo(isolated_storage: Path) -> None:

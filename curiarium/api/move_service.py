@@ -14,6 +14,16 @@ the four public names above are thin doors onto it:
     `os.rename` fallback is for filesystems that cannot hardlink, and it is also
     what moves a DIRECTORY (link refuses a directory with `EPERM`, which the
     unsupported-errno set treats as "this filesystem cannot hardlink").
+    It answers FALSE for exactly one reason - the destination was occupied, so no
+    byte moved - and every caller must read that as a refusal. It does NOT answer
+    False for a source that has no bytes: a missing source raises the underlying
+    `FileNotFoundError`, and "the row moves but the bytes never did" is the
+    caller's own `source.exists()` decision. Those two facts shared one boolean
+    once, in this module's byte loop; a clobbered pair was counted as landed and
+    its row was rewritten onto another move's path, so the ledger said `applied`
+    about a file that existed under a name no row named (Mf-215n). They are kept
+    apart here, in `move_bytes`'s contract, and at the one call site that has to
+    ask both questions.
   * `move(pairs, intent=...)` is the coarse verb: it refuses before touching
     anything, records ONE ledger row per `intent`, moves the bytes, and rewrites
     the rows. A second call with the same intent is a no-op that reports what it
@@ -317,6 +327,14 @@ def move_bytes(source: Path, target: Path) -> bool:
     under a lock and renames; the lock serialises this process's moving threads
     only, which is why hardlinking is the default. Either way an occupied
     destination is never overwritten: False is returned.
+
+    False means one thing and only one thing: THE DESTINATION WAS OCCUPIED, and
+    no byte moved. It is a refusal, and a caller that has a row to rewrite must
+    raise `Clobbered` rather than skip. It is NOT the answer for a source with
+    no bytes: that is `FileNotFoundError` out of ``os.link`` (or the rename), and
+    the "the row moves, the bytes were never ours" case belongs to the caller's
+    own `source.exists()` guard - `move_managed_file` and `move`'s byte loop both
+    ask it before calling here.
 
     A directory also arrives here and takes the fallback: ``os.link`` on a
     directory raises ``EPERM``, which the unsupported set treats as "this
@@ -701,7 +719,11 @@ def move(
       4. stage the door's audit events into that same transaction, BEFORE the
          bytes move: a failed audit insert must never leave a file relocated
          while the log says nothing happened;
-      5. move the bytes pair by pair, recording `landed` as it goes;
+      5. move the bytes pair by pair, recording `landed` as it goes. A pair whose
+         source has no bytes lands without moving any (the row is the move); a
+         pair whose TARGET is occupied raises `Clobbered` and does not count, so
+         the `except` below records `applied=False, landed=<so far>` and the
+         retry resumes at the refused pair;
       6. rewrite the rows and mark the ledger complete.
 
     `apply_rows=False` is the arrange's shape: it moves the bytes here and writes
@@ -780,12 +802,20 @@ def move(
                 source = root / pair.source
                 target = root / pair.target
                 target.parent.mkdir(parents=True, exist_ok=True)
-                # A row with no bytes on disk - a mounted no-copy asset, or a row the
-                # scan flagged missing - still moves: the row is what an operator sees
-                # and the file was never ours to move. This is the guard
-                # `move_managed_file` has always had, and the pre-flight has already
-                # proved the pair is not a caller error.
-                if source.exists() and move_bytes(source, target):
+                # The two questions are asked separately, and that is the whole point:
+                # a missing source and an occupied target are NOT one fact. Two pairs
+                # land without moving bytes - one whose two ends are one path (never a
+                # relocation: the pre-flight's rule), and one whose source has no bytes
+                # (a mounted no-copy asset, or a row the scan flagged missing, which
+                # still moves because the row is what an operator sees). An occupied
+                # target is neither: it is a CLOBBER, refused here exactly as
+                # `move_managed_file` refuses it. Counting it as landed would rewrite
+                # the row onto a path whose bytes another move owns and close the ledger
+                # claiming a move that never happened.
+                relocates = source.exists() and pair.source != pair.target
+                if relocates:
+                    if not move_bytes(source, target):
+                        raise Clobbered(pair.target)
                     moved = True
                     folder_service.prune_empty_storage_dirs(source.parent)
                 landed += 1
@@ -876,6 +906,12 @@ def undo_ledger(
     in when the child arrives. A second undo refuses (`AlreadyUndone`), and a
     superseded ledger refuses with the operation that superseded it, so the
     answer to "undo that again" is a sentence rather than a second relocation.
+
+    `reverse_ledger` proved each pair's old name was free when it looked; the
+    arbiter is what proves it NOW, and its refusal stops the undo before the rows
+    are rewritten. A pair with bytes at neither end - a row-only move, whose file
+    was never ours - is refused there rather than skipped, so this loop only ever
+    sees pairs the ledger claims moved a file for.
     """
     reversal = reverse_ledger(ledger_id)
     with Session(engine) as session:
@@ -888,7 +924,12 @@ def undo_ledger(
             source = root / pair.source
             target = root / pair.target
             target.parent.mkdir(parents=True, exist_ok=True)
-            move_bytes(source, target)
+            if not move_bytes(source, target):
+                # The old name was free a moment ago and is taken now. Refuse: the
+                # rows below must never be rewritten onto a path the bytes did not
+                # reach, and the ledger must not close `undone` over a pair that is
+                # still where the forward move left it.
+                raise Clobbered(pair.target)
             folder_service.prune_empty_storage_dirs(source.parent)
         audit.stage(session, ctx, *events)
         if applied:
