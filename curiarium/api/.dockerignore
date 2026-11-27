@@ -10,3 +10,10 @@ htmlcov
 *.sqlite
 *.sqlite3
 storage
+# Build inputs only, not builder state: a working tree's virtualenv and ruff cache
+# are local, so the same commit would otherwise build a differently-shaped image per
+# machine (Mf-uwqr). /data is the runtime data dir; the *.db globs above do not reach
+# into it.
+.venv
+.ruff_cache
+/data

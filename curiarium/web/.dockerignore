@@ -1,3 +1,9 @@
 node_modules
 dist
 npm-debug.log*
+# The build stage copies the tree before `npm run build`, so a builder's `.env.local`
+# would be inlined into the shipped bundle (Vite inlines VITE_* at build time), and
+# `coverage/` is local test output, never a build input (Mf-uwqr).
+.env
+.env.*
+coverage
