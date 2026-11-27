@@ -898,10 +898,10 @@ def test_a_failed_audit_write_on_submit_leaves_no_operation_row(
 def test_the_six_routes_are_classified_and_declared_as_the_ticket_decided() -> None:
     expected = {
         ("POST", "/operations/plan"): permissions.CONTRIBUTE,
-        ("POST", "/operations"): permissions.CONTRIBUTE,
+        ("POST", "/operations"): permissions.WRITE,
         ("GET", "/operations/{operation_id}"): permissions.READ,
         ("GET", "/operations"): permissions.READ,
-        ("POST", "/operations/{operation_id}/cancel"): permissions.CONTRIBUTE,
+        ("POST", "/operations/{operation_id}/cancel"): permissions.WRITE,
         ("POST", "/operations/{operation_id}/undo"): permissions.WRITE,
     }
     for key, level in expected.items():
@@ -917,11 +917,15 @@ def test_the_six_routes_are_classified_and_declared_as_the_ticket_decided() -> N
 
 
 def test_the_queue_is_readable_by_a_viewer_and_submitting_is_not() -> None:
-    """The level split, read off the matrix the role sweeps parametrise from.
+    """The level split the owner asked for, read off the matrix.
 
-    The eleven sweeps in `test_permissions_matrix.py` are what actually call each
-    route as each role; this pins the decision they are driven by, so a future
-    route that moves level fails here with the intent in front of the reviewer.
+    Viewers read the queue; a contributor may plan, because a plan writes
+    nothing; submit, cancel and undo are editor routes. The eleven role sweeps
+    in `test_permissions_matrix.py` are what actually call each route as each
+    role, and the WRITE deny sweeps cover these routes parametrically, so no
+    role test is hand-rolled here. This pins the decision the sweeps are driven
+    by, so a future route that moves level fails with the intent in front of the
+    reviewer.
     """
     read_keys = {key for key, level in permissions.ROUTE_PERMISSIONS.items() if level == permissions.READ}
     contribute_keys = {
@@ -930,9 +934,9 @@ def test_the_queue_is_readable_by_a_viewer_and_submitting_is_not() -> None:
     write_keys = {key for key, level in permissions.ROUTE_PERMISSIONS.items() if level == permissions.WRITE}
 
     assert {("GET", "/operations"), ("GET", "/operations/{operation_id}")} <= read_keys
+    assert ("POST", "/operations/plan") in contribute_keys
     assert {
-        ("POST", "/operations/plan"),
         ("POST", "/operations"),
         ("POST", "/operations/{operation_id}/cancel"),
-    } <= contribute_keys
-    assert ("POST", "/operations/{operation_id}/undo") in write_keys
+        ("POST", "/operations/{operation_id}/undo"),
+    } <= write_keys

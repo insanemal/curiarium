@@ -33,7 +33,8 @@ unknown or blank ranks as `public`, i.e. it is denied even reads - fail closed.
 | Create folders                                       |  yes  |  yes   |     yes     |   no   |
 | Create a project, edit its details, add/remove members |  yes  |  yes   |     yes     |   no   |
 | Read the operations queue                            |  yes  |  yes   |     yes     |  yes   |
-| Plan, submit and cancel operations                   |  yes  |  yes   |     yes     |   no   |
+| Plan an operation (a review; writes nothing)         |  yes  |  yes   |     yes     |   no   |
+| Submit or cancel a planned operation                 |  yes  |  yes   |     no      |   no   |
 | Undo a finished operation                            |  yes  |  yes   |     no      |   no   |
 | Rename an asset on disk                             |  yes  |  yes   |     no      |   no   |
 | Move an asset between folders                        |  yes  |  yes   |     no      |   no   |
@@ -53,7 +54,9 @@ The rows are split so that no single row spans the contribute/write line: one
 row that conflated an upload with a rename would make the `contributor` column
 unreadable, which is the whole point of the column. Everything reversible that
 adds to or organises the library is `contribute`; anything that destroys or
-renames a file on disk is `write`.
+renames a file on disk is `write`. Committing a queued operation is also
+`write`, because submit is the decision to let a workflow mutate the library,
+not the mutation itself.
 
 The Settings snapshot card is **admin-only in the UI** -- the storage section that
 mounts it is shown to admins -- while `POST /snapshots` and
@@ -241,7 +244,7 @@ are in
 ## The route matrix
 
 Paths are FastAPI templates exactly as declared. 112 routes: 11 public, 40 read,
-27 contribute, 16 write, 18 admin.
+25 contribute, 18 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -343,13 +346,13 @@ on.
 | POST   | `/bundles/dismiss`                          | hides bundles from the report, or undoes a dismissal: one appconfig value, and it removes nothing from the library |
 | POST   | `/bundles/enrich`                           | asks the vendor page a bundle already names for its missing creator/licence, filling **only empty fields**: an outbound fetch, but the report itself never fetches and a page that states no licence leaves it null |
 | POST   | `/operations/plan`                          | computes a plan and writes nothing: the step list, the counts and every exclusion with its reason. The `plan_id` it returns is the only thing a submit may name |
-| POST   | `/operations`                               | queues a plan this server issued, under an idempotency key; writes a row and answers 202, the in-process runner does the work. The request body has no steps field, so a client cannot invent a step list, and the plan is recomputed at submit so a stale one is a 409 |
-| POST   | `/operations/{operation_id}/cancel`         | a queued operation stops now; a running one is asked to stop after the step it is in completes, and its remaining steps are skipped |
 
 ### write (editor or admin)
 
 Destroy or rename on disk - the editor line. Every route here either moves bytes
-out of the library, renames a file the library owns, or rescans the volume.
+out of the library, renames a file the library owns, rescans the volume, or
+commits a queued operation, which is the decision to let a workflow do one of
+those.
 
 | Method | Path                                        | Why |
 |--------|---------------------------------------------|-----|
@@ -368,6 +371,8 @@ out of the library, renames a file the library owns, or rescans the volume.
 | POST   | `/snapshots/{name}/restore`                 | copies snapshot bytes into `recovered/`; never overwrites |
 | POST   | `/bundles/arrange`                          | applies one previewed arrangement: it moves bytes on the volume for a shape the operator approved, so it is the editor's move, not a contribute; what it renames are the same paths `/asset/{asset_id}/rename` and `/asset/{asset_id}/folder` touch, in bulk |
 | POST   | `/bundles/arrange/{arrange_id}/undo`        | folds that arrangement back through the same mover and restores the rows from its ledger; the reversal is the same power as the move, so it sits on the same line |
+| POST   | `/operations`                               | queues a plan this server issued, under an idempotency key; writes a row and answers 202, the in-process runner does the work. The request body has no steps field, so a client cannot invent a step list, and the plan is recomputed at submit so a stale one is a 409. This is the editor's line, not a contributor's: submitting commits a plan whose steps will change the library |
+| POST   | `/operations/{operation_id}/cancel`         | a queued operation stops now; a running one is asked to stop after the step it is in completes, and its remaining steps are skipped. Cancel acts on a queued or running operation, so it is an editor's move like the submit it undoes |
 | POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by deleting the project row it created and never the files, so it is the same power as `DELETE /project/{project_id}`. Refused with 409 once a later operation over the same paths has superseded it |
 
 ### admin (administrators only)
@@ -425,6 +430,13 @@ everything from the last 30 days; the audit log is the permanent record.
 
 `create-project` is the only workflow so far, and nothing the UI does today
 changed: no client calls these routes yet.
+
+The level split follows the owner's rule: viewers read the queue, a contributor
+may plan (a plan writes nothing, it computes a review), and submit, cancel and
+undo are editor-or-admin routes. The honest consequence is that `POST /projects`
+is still `contribute`, so a contributor can create a project directly but not
+through `POST /operations`; reconciling that belongs to the slice that routes
+creation through operations.
 
 ## Destructive confirmations
 

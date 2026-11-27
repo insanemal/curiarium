@@ -9,10 +9,11 @@ reviewer of the table below can see every level in one place:
 * `READ`    - any authenticated principal, whatever its role. Viewers live here.
 * `CONTRIBUTE` - any authenticated principal at contributor or above: upload,
   import, tag and metadata edits, create folders and projects, add or remove
-  project membership, add supporting files - everything that does not destroy
-  or rename on disk.
+  project membership, add supporting files, and plan an operation - everything
+  that does not destroy or rename on disk.
 * `WRITE`   - editors and administrators: every route that destroys or renames
-  library content on disk.
+  library content on disk, plus submitting, cancelling or undoing an operation,
+  because those are the decision to let a workflow do so.
 * `ADMIN`   - administrators only: settings, user administration, purge.
 
 Enforcement is the *route declaration*: each guarded route names
@@ -386,13 +387,15 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("DELETE", "/sessions/{session_id}"): ADMIN,
     # Purging deleted data is irreversible, so it is not an editor action.
     ("POST", "/trash/purge"): ADMIN,
-    # operations: viewers read the queue; only contributor+ may plan, submit or
-    # cancel; undo is an editor's move because it deletes a project row.
+    # operations: viewers read the queue; a contributor+ may plan, because a plan
+    # writes nothing and only computes a review. Submit, cancel and undo are
+    # editors'/admins' moves: submitting commits a workflow that will mutate the
+    # library, and cancel/undo act on it.
     ("GET", "/operations"): READ,
     ("GET", "/operations/{operation_id}"): READ,
     ("POST", "/operations/plan"): CONTRIBUTE,
-    ("POST", "/operations"): CONTRIBUTE,
-    ("POST", "/operations/{operation_id}/cancel"): CONTRIBUTE,
+    ("POST", "/operations"): WRITE,
+    ("POST", "/operations/{operation_id}/cancel"): WRITE,
     ("POST", "/operations/{operation_id}/undo"): WRITE,
 }
 

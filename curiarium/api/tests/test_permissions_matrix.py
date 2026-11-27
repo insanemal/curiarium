@@ -1260,9 +1260,16 @@ def call_submit_operation(
 ) -> Response:
     plan = operation_plan(client, headers)
     if plan.status_code != 200:
-        # A denied caller is refused the plan, which is the answer this spec's
-        # sweeps assert for the caller; there is no plan_id to name.
-        return plan
+        # Submit sits a level above plan, so a caller denied the plan is not
+        # thereby denied the submit: ask the submit route itself, with an id no
+        # operation has. The guard runs before the handler looks the plan up, so
+        # this returns the submit route's own answer (401/403) rather than
+        # reporting the plan route's denial under the submit route's name.
+        return client.post(
+            "/operations",
+            json={"plan_id": str(uuid4()), "idempotency_key": uuid4().hex},
+            headers=headers,
+        )
     response = client.post(
         "/operations",
         json={"plan_id": plan.json()["plan_id"], "idempotency_key": uuid4().hex},
@@ -1671,13 +1678,15 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 112 routes - 11 public / 40 read / 27 contribute / 16 write / 18 admin.
+    """The matrix is pinned at 112 routes - 11 public / 40 read / 25 contribute / 18 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
     only moves between levels would otherwise keep the total and slip past.
-    Mf-5t30 moved it 106 -> 112: two reads (the queue and one operation), three
-    contributes (plan, submit, cancel) and one write (undo).
+    Mf-5t30 moved it 106 -> 112: two reads (the queue and one operation), and
+    four guarded routes (plan contribute; submit, cancel, undo write). The
+    follow-up then moved submit and cancel from contribute to write, so the
+    split is now 25/18.
     """
     counts = {
         level: len(keys_at(level))
@@ -1687,8 +1696,8 @@ def test_the_matrix_is_the_documented_size() -> None:
     assert counts == {
         permissions.PUBLIC: 11,
         permissions.READ: 40,
-        permissions.CONTRIBUTE: 27,
-        permissions.WRITE: 16,
+        permissions.CONTRIBUTE: 25,
+        permissions.WRITE: 18,
         permissions.ADMIN: 18,
     }, counts
 
@@ -1769,11 +1778,13 @@ def test_viewer_is_denied_every_write_route(client, ids, viewer_headers, key, mo
 
 @pytest.mark.parametrize("key", keys_at(permissions.WRITE), ids=route_id)
 def test_contributor_is_denied_every_write_route(client, ids, contributor_headers, key, monkeypatch) -> None:
-    """AC-2: a contributor is denied all thirteen destructive routes, by sweep.
+    """AC-2: a contributor is denied every WRITE route, by sweep.
 
     The point of the level is that contributing creates and organises while
     destroying stays an editor's move, so this asserts the whole WRITE half of
-    the matrix rather than a hand-picked spot check.
+    the matrix rather than a hand-picked spot check. Since the follow-up that
+    moved submit and cancel off contribute, that includes submitting and
+    cancelling operations.
     """
     response = call(key, client, contributor_headers, ids, monkeypatch)
 

@@ -46,7 +46,7 @@ def plan_operation(
 def submit_operation(
     body: OperationSubmitRequest,
     request: Request,
-    context: Optional[AuthContext] = Depends(require_contribute),
+    context: Optional[AuthContext] = Depends(require_write),
 ):
     """Queue a plan this server issued; the runner executes it, not this route."""
     ctx = audit.context_for(request, context)
@@ -90,7 +90,7 @@ def get_operation_route(
 def cancel_operation(
     operation_id: str,
     request: Request,
-    context: Optional[AuthContext] = Depends(require_contribute),
+    context: Optional[AuthContext] = Depends(require_write),
 ):
     """Cancel a queued operation, or ask a running one to stop after its step."""
     ctx = audit.context_for(request, context)
