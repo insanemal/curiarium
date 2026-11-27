@@ -4,6 +4,70 @@ Notable changes to Curiarium. The product version lives in `curiarium/api/versio
 and its mirrors are checked by `make verify-version`, so this file is a record rather
 than a source of truth.
 
+## [5.2.1] — 2026-11-27
+
+Corrective release: the detection engine is replaced, and the behaviour changes are
+those corrections — not new capability.
+
+Every number below is a measurement **on one reference library** (151 projects, ~2,800
+assets, ~190 detected rows). No count is a promise about another installation: another
+library has different junk, different duplicates and a different number of projects.
+Behaviour is stated as behaviour.
+
+### Changed
+
+- **One detector.** `bundle_detect.py` is deleted (2,038 lines, 78 definitions) and
+  `proposal_engine` now owns both the ranking and the facts — metadata, provenance,
+  hierarchical groups, twin verification, cover selection and documents. The engine runs
+  app-free and offline, and is scored outside the app by `curiarium/scripts/propose_import.py`
+  against real trees and a committed label fixture. On the reference library it agrees with
+  every confirmed label and returns identical answers for eight archetypes under renamed
+  copies, which is what proves the rules are shape-based rather than name-based.
+- **Import is a visible decision.** Every row lists the shapes that fit, recommended first,
+  with counts, and `manual` is always available. High-confidence rows create in one click
+  and land on the project; everything else opens a guided panel where the cover, the
+  metadata source and every value parsed from a document (with its source) is yours to
+  accept, edit or dismiss. A licence is never written without an explicit accept.
+- **Arranging.** Preview → apply → undo, from a review row and from a project page, with
+  moves shown as moves and a stale plan refused rather than re-planned silently.
+- **Adopting.** A project whose folder grew can take on the new files: the preview names
+  them by group, and adopting turns new subfolders into real groups. Undo removes exactly
+  what it added.
+- **PDFs are read.** `pypdf` mines document info and text; on the reference library this
+  gained a fact for 14 of 160 rows (licence +8, source_url +11, description +11) and 34
+  provenance candidates across 13 rows, for 0.67 s over the whole tree.
+- **Uploads land in your folder**, not in a private per-file directory, and a filename that
+  carries a path is honoured or refused — never flattened into underscores.
+- **A checked-out repository is a project boundary.** The API image ships git; when git
+  cannot read a checkout the row says so and is offered as one project, never split.
+
+### Fixed
+
+- git was missing from the API image, so repository detection was silently dead in
+  production and a git project was split into its parts. CI could not see it because eight
+  git tests skipped, and a skipped test is indistinguishable from a passing one. The image
+  now ships git and a test that runs **in the image** reds if it disappears.
+- `sanitize_filename` flattened `/` into `_`, so `Folder/file.stl` became `Folder_file.stl`
+  and named a directory that no folder row described — the disk and the tree disagreed.
+- A path already inside an offered row is no longer offered again; duplicates become
+  members instead of invitations to fragment a product. Print output (a folder of `.gcode`)
+  is not a project.
+- `add_assets` / `remove_assets` / `_extend_project` bound whole member lists into one SQL
+  `IN`; adopting chunks at 500, so a large adopt cannot fail on its own size.
+- `.dockerignore` did not exclude `.venv`, so the build context depended on the builder's
+  machine and could shadow the packages the image installs. Both image contexts are pinned
+  by a test that plants files and asserts they are absent from the built image.
+- A finished rescan refreshes the folder tree from every door, and only when it changed
+  something.
+- ADR 0010's stale mechanics are marked rather than rewritten (83 unmarked blocks → 0);
+  superseded decisions stay on the record and Decision 18 is untouched.
+
+### Upgrade notes
+
+Schema 14, no migration. Auth-disabled deployments are unchanged. Nothing on disk is
+rewritten by the upgrade: rescan to refresh the tree, then review and adopt as you please.
+Arranging is opt-in and undoable.
+
 ## [5.2.0] — 2026-11-10
 
 The first tagged release of the fork. Everything below landed between `v5.2.0-rc.1`
