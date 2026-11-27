@@ -24,7 +24,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import List, NamedTuple, Optional, Tuple
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, select
@@ -32,13 +32,64 @@ from sqlmodel import Session, delete, select
 import audit
 import bundle_service
 import library_scan
+import permissions
 import project_create_service
 import project_service
+from auth import AuthContext
 from db import engine
 from models import Asset, Operation, OperationLock, OperationStep, Project, ProjectAsset
 
 PLAN_VERSION = 1
 WORKFLOWS = ("create-project",)
+
+# The owner's rubric, 2026-11-27 (the Mf-215n amendment): an operation is
+# CONTRIBUTE unless it can REMOVE data with this action - destruction is not a
+# contributor's job, uploading and organising are. The owner's words: "can they
+# REMOVE data with this action".
+#
+# `WORKFLOWS` is still `("create-project",)`: a row for a workflow that does not
+# exist yet is a DECLARATION FOR THE RECORD, not a claim that the workflow runs.
+# Do not invent a workflow to justify a row, and do not add these names to
+# `WORKFLOWS`.
+#
+# Fails closed: `level_for_workflow` refuses a workflow with no row rather than
+# defaulting it to CONTRIBUTE, because an unclassified workflow is a bug.
+#
+# `library-scan` is deliberately WRITE although the rubric reads contribute: it
+# removes nothing, but it is an existing route whose capacity consequence is an
+# open question with the owner, so this slice does not widen it.
+WORKFLOW_LEVELS: dict[str, str] = {
+    "create-project": permissions.CONTRIBUTE,
+    "adopt": permissions.CONTRIBUTE,
+    "extract-and-create": permissions.CONTRIBUTE,
+    "import-folder": permissions.CONTRIBUTE,
+    "import-zip": permissions.CONTRIBUTE,
+    "import-link": permissions.CONTRIBUTE,
+    "enrich": permissions.CONTRIBUTE,
+    "split-and-create": permissions.CONTRIBUTE,
+    "relocate": permissions.CONTRIBUTE,
+    "library-scan": permissions.WRITE,
+}
+
+
+def level_for_workflow(workflow: str) -> str:
+    """The level `workflow` needs; a workflow with no row is refused outright.
+
+    Never defaults to CONTRIBUTE: an unclassified workflow is a bug and must not
+    run, so this refuses every role - an admin included - with the WRITE denial
+    detail rather than guessing what a stranger's workflow would do. The detail
+    names WRITE because that is the strictest level a workflow can require; the
+    refusal itself is unconditional.
+    """
+    if workflow not in WORKFLOW_LEVELS:
+        raise HTTPException(status_code=403, detail=permissions.DENY_DETAIL[permissions.WRITE])
+    return WORKFLOW_LEVELS[workflow]
+
+
+def authorize_workflow(request: Request, context: Optional[AuthContext], workflow: str) -> None:
+    """One decision point: resolve the workflow's level and ask permissions.authorize."""
+    permissions.authorize(request, context, level_for_workflow(workflow))
+
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
@@ -125,6 +176,14 @@ def decode_plan_id(plan_id: str) -> Tuple[dict, str]:
         # workflow" 400 dressed up as a request error.
         raise HTTPException(status_code=400, detail=BAD_PLAN_MESSAGE)
     return intent, digest
+
+
+def workflow_for_plan_id(plan_id: str) -> str:
+    """The workflow a server-issued plan_id names, before anything is written."""
+    # The submit handler decides the level before a row is inserted, without
+    # recomputing the plan on disk twice.
+    intent, _digest = decode_plan_id(plan_id)
+    return intent["workflow"]
 
 
 # Planning ---------------------------------------------------------------------

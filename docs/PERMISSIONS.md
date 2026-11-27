@@ -34,8 +34,8 @@ unknown or blank ranks as `public`, i.e. it is denied even reads - fail closed.
 | Create a project, edit its details, add/remove members |  yes  |  yes   |     yes     |   no   |
 | Read the operations queue                            |  yes  |  yes   |     yes     |  yes   |
 | Plan an operation (a review; writes nothing)         |  yes  |  yes   |     yes     |   no   |
-| Submit or cancel a planned operation                 |  yes  |  yes   |     no      |   no   |
-| Undo a finished operation                            |  yes  |  yes   |     no      |   no   |
+| Submit or cancel a planned operation                 |  yes  |  yes   |     yes     |   no   |
+| Undo a finished operation                            |  yes  |  yes   |     yes     |   no   |
 | Rename an asset on disk                             |  yes  |  yes   |     no      |   no   |
 | Move an asset between folders                        |  yes  |  yes   |     no      |   no   |
 | Rename or move a folder (it carries its tags)        |  yes  |  yes   |     no      |   no   |
@@ -54,9 +54,10 @@ The rows are split so that no single row spans the contribute/write line: one
 row that conflated an upload with a rename would make the `contributor` column
 unreadable, which is the whole point of the column. Everything reversible that
 adds to or organises the library is `contribute`; anything that destroys or
-renames a file on disk is `write`. Committing a queued operation is also
-`write`, because submit is the decision to let a workflow mutate the library,
-not the mutation itself.
+renames a file on disk is `write`. An operation follows the owner's rubric
+(Mf-215n): a workflow is `contribute` unless it can REMOVE data, and the handler
+refuses data-removing workflows to contributors - so submitting, cancelling and
+undoing are only as strict as the workflow they act on.
 
 The Settings snapshot card is **admin-only in the UI** -- the storage section that
 mounts it is shown to admins -- while `POST /snapshots` and
@@ -244,7 +245,7 @@ are in
 ## The route matrix
 
 Paths are FastAPI templates exactly as declared. 112 routes: 11 public, 40 read,
-25 contribute, 18 write, 18 admin.
+28 contribute, 15 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -317,7 +318,9 @@ Everything here adds to or organises the library and is reversible from the
 library's point of view: it creates rows, writes metadata, or uploads new bytes.
 Nothing in this table deletes or renames anything already on disk - that is the
 `write` table below - which is exactly the line the `contributor` role is built
-on.
+on. An operation's three mutations are here because their level is the
+workflow's (see "Operations"), and the handler refuses a workflow that can REMOVE
+data; an operation row is not library content.
 
 | Method | Path                                        | Why |
 |--------|---------------------------------------------|-----|
@@ -346,13 +349,16 @@ on.
 | POST   | `/bundles/dismiss`                          | hides bundles from the report, or undoes a dismissal: one appconfig value, and it removes nothing from the library |
 | POST   | `/bundles/enrich`                           | asks the vendor page a bundle already names for its missing creator/licence, filling **only empty fields**: an outbound fetch, but the report itself never fetches and a page that states no licence leaves it null |
 | POST   | `/operations/plan`                          | computes a plan and writes nothing: the step list, the counts and every exclusion with its reason. The `plan_id` it returns is the only thing a submit may name |
+| POST   | `/operations`                               | queues a plan this server issued, under an idempotency key; writes a row and answers 202, the in-process runner does the work. The request body has no steps field, so a client cannot invent a step list, and the plan is recomputed at submit so a stale one is a 409. Contributing is enough because the handler refuses a data-removing workflow to a contributor (`operations_service.WORKFLOW_LEVELS`) |
+| POST   | `/operations/{operation_id}/cancel`         | a queued operation stops now; a running one is asked to stop after the step it is in completes, and its remaining steps are skipped. Cancelling removes nothing, so the row's workflow decides the level and the handler enforces it |
+| POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by deleting the project row it created and never the files: what it may remove is the workflow's question, enforced per workflow. Refused with 409 once a later operation over the same paths has superseded it |
 
 ### write (editor or admin)
 
 Destroy or rename on disk - the editor line. Every route here either moves bytes
-out of the library, renames a file the library owns, rescans the volume, or
-commits a queued operation, which is the decision to let a workflow do one of
-those.
+out of the library, renames a file the library owns, or rescans the volume.
+Submitting an operation is not on this line: its level is its workflow's, and
+the handler refuses a data-removing workflow to a contributor.
 
 | Method | Path                                        | Why |
 |--------|---------------------------------------------|-----|
@@ -371,9 +377,6 @@ those.
 | POST   | `/snapshots/{name}/restore`                 | copies snapshot bytes into `recovered/`; never overwrites |
 | POST   | `/bundles/arrange`                          | applies one previewed arrangement: it moves bytes on the volume for a shape the operator approved, so it is the editor's move, not a contribute; what it renames are the same paths `/asset/{asset_id}/rename` and `/asset/{asset_id}/folder` touch, in bulk |
 | POST   | `/bundles/arrange/{arrange_id}/undo`        | folds that arrangement back through the same mover and restores the rows from its ledger; the reversal is the same power as the move, so it sits on the same line |
-| POST   | `/operations`                               | queues a plan this server issued, under an idempotency key; writes a row and answers 202, the in-process runner does the work. The request body has no steps field, so a client cannot invent a step list, and the plan is recomputed at submit so a stale one is a 409. This is the editor's line, not a contributor's: submitting commits a plan whose steps will change the library |
-| POST   | `/operations/{operation_id}/cancel`         | a queued operation stops now; a running one is asked to stop after the step it is in completes, and its remaining steps are skipped. Cancel acts on a queued or running operation, so it is an editor's move like the submit it undoes |
-| POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by deleting the project row it created and never the files, so it is the same power as `DELETE /project/{project_id}`. Refused with 409 once a later operation over the same paths has superseded it |
 
 ### admin (administrators only)
 
@@ -399,6 +402,34 @@ those.
 | DELETE | `/snapshots/{name}`            | deleting a snapshot decides what history survives |
 
 ## Operations
+
+A workflow's level follows the owner's rubric (Mf-215n amendment, 2026-11-27):
+**contribute unless the action can REMOVE data.** Destruction is not a
+contributor's job; uploading and organising are. The table below is
+`operations_service.WORKFLOW_LEVELS`, the one source of truth the submit, cancel
+and undo handlers enforce.
+
+| Workflow             | Level      | Removes data? |
+|----------------------|------------|---------------|
+| `create-project`     | contribute | no: writes rows, leaves the member files where they are |
+| `adopt`              | contribute | no: declares a directory a project holds |
+| `extract-and-create` | contribute | no: extracts an archive into its twin directory and creates the project |
+| `import-folder`      | contribute | no: uploads a folder as new bytes |
+| `import-zip`         | contribute | no: uploads a zip as new bytes |
+| `import-link`        | contribute | no: uploads from a URL |
+| `enrich`             | contribute | no: fills only empty metadata fields |
+| `split-and-create`   | contribute | no: splits one directory into several projects in place |
+| `relocate`           | contribute | no: relocates a directory and re-points its rows |
+| `library-scan`       | write      | no, but see below |
+
+**Declarations for the record.** `operations_service.WORKFLOWS` is still
+`("create-project",)`: a row for a workflow that does not exist yet records the
+level the owner decided, it does not mean the workflow runs. Do not read a row
+as a claim about today's code, and do not add these names to `WORKFLOWS`.
+
+**`library-scan` is an OPEN QUESTION.** The rubric reads contribute - a scan
+removes nothing - but it is an existing route whose capacity consequence is
+still with the owner, so it is kept at `write` until that is settled.
 
 Everything under `/operations` is a persisted plan with a review, and the plan
 is the server's: `POST /operations/plan` computes it from the library as it is
@@ -431,12 +462,13 @@ everything from the last 30 days; the audit log is the permanent record.
 `create-project` is the only workflow so far, and nothing the UI does today
 changed: no client calls these routes yet.
 
-The level split follows the owner's rule: viewers read the queue, a contributor
-may plan (a plan writes nothing, it computes a review), and submit, cancel and
-undo are editor-or-admin routes. The honest consequence is that `POST /projects`
-is still `contribute`, so a contributor can create a project directly but not
-through `POST /operations`; reconciling that belongs to the slice that routes
-creation through operations.
+The level split follows the owner's rule: viewers read the queue, and a
+contributor may plan, submit, cancel and undo any workflow that removes nothing
+(a plan writes nothing; submit writes a queued row; cancel and undo act on that
+row). The asymmetry with `POST /projects` is resolved rather than reconciled
+away: a contributor may create a project directly AND through `POST /operations`
+when the workflow removes nothing, because the level is the workflow's, resolved
+from the plan for a submit and from the operation row for cancel and undo.
 
 ## Destructive confirmations
 

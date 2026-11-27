@@ -9,11 +9,14 @@ reviewer of the table below can see every level in one place:
 * `READ`    - any authenticated principal, whatever its role. Viewers live here.
 * `CONTRIBUTE` - any authenticated principal at contributor or above: upload,
   import, tag and metadata edits, create folders and projects, add or remove
-  project membership, add supporting files, and plan an operation - everything
-  that does not destroy or rename on disk.
+  project membership, add supporting files, plan an operation, and submit,
+  cancel or undo an operation whose workflow removes nothing - everything that
+  does not destroy or rename on disk.
 * `WRITE`   - editors and administrators: every route that destroys or renames
-  library content on disk, plus submitting, cancelling or undoing an operation,
-  because those are the decision to let a workflow do so.
+  library content on disk. The owner's rubric (Mf-215n) is "contribute unless
+  the action can REMOVE data", so an operation's real level is the workflow's
+  (`operations_service.WORKFLOW_LEVELS`), enforced in the handler; a submitting
+  route declares CONTRIBUTE and escalates.
 * `ADMIN`   - administrators only: settings, user administration, purge.
 
 Enforcement is the *route declaration*: each guarded route names
@@ -387,16 +390,20 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("DELETE", "/sessions/{session_id}"): ADMIN,
     # Purging deleted data is irreversible, so it is not an editor action.
     ("POST", "/trash/purge"): ADMIN,
-    # operations: viewers read the queue; a contributor+ may plan, because a plan
-    # writes nothing and only computes a review. Submit, cancel and undo are
-    # editors'/admins' moves: submitting commits a workflow that will mutate the
-    # library, and cancel/undo act on it.
+    # operations: viewers read the queue. A plan writes nothing, and submitting,
+    # cancelling or undoing an operation is contribute-level because the HANDLER
+    # refuses data-REMOVING workflows to contributors - the owner's rubric
+    # (Mf-215n) is "contribute unless the action can REMOVE data", so do not
+    # "fix" these three back to WRITE. The per-workflow level lives in
+    # `operations_service.WORKFLOW_LEVELS` and the handler enforces it
+    # (escalation in the handler, like `authorize_metadata_edit`, because a route
+    # may declare only one level).
     ("GET", "/operations"): READ,
     ("GET", "/operations/{operation_id}"): READ,
     ("POST", "/operations/plan"): CONTRIBUTE,
-    ("POST", "/operations"): WRITE,
-    ("POST", "/operations/{operation_id}/cancel"): WRITE,
-    ("POST", "/operations/{operation_id}/undo"): WRITE,
+    ("POST", "/operations"): CONTRIBUTE,
+    ("POST", "/operations/{operation_id}/cancel"): CONTRIBUTE,
+    ("POST", "/operations/{operation_id}/undo"): CONTRIBUTE,
 }
 
 

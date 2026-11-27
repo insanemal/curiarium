@@ -33,8 +33,9 @@ not accepted:
 Auth is disabled in this file (monkeypatched, the same mode `test_permissions_matrix`
 sweeps) because none of these demonstrations is about *who* may call the route -
 the eleven role sweeps own that, parametrised from the matrix. What is proven
-here about permissions is that the six routes are classified and declared, and
-that a caller cannot smuggle a step list in.
+here about permissions is that the six routes are classified and declared, that
+the workflow->level table is the owner's rubric (Mf-215n: contribute unless the
+action can REMOVE data), and that a caller cannot smuggle a step list in.
 """
 
 import json
@@ -46,6 +47,7 @@ from typing import Optional
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlmodel import Session, delete, select
 
@@ -898,11 +900,11 @@ def test_a_failed_audit_write_on_submit_leaves_no_operation_row(
 def test_the_six_routes_are_classified_and_declared_as_the_ticket_decided() -> None:
     expected = {
         ("POST", "/operations/plan"): permissions.CONTRIBUTE,
-        ("POST", "/operations"): permissions.WRITE,
+        ("POST", "/operations"): permissions.CONTRIBUTE,
         ("GET", "/operations/{operation_id}"): permissions.READ,
         ("GET", "/operations"): permissions.READ,
-        ("POST", "/operations/{operation_id}/cancel"): permissions.WRITE,
-        ("POST", "/operations/{operation_id}/undo"): permissions.WRITE,
+        ("POST", "/operations/{operation_id}/cancel"): permissions.CONTRIBUTE,
+        ("POST", "/operations/{operation_id}/undo"): permissions.CONTRIBUTE,
     }
     for key, level in expected.items():
         assert permissions.ROUTE_PERMISSIONS[key] == level, key
@@ -916,16 +918,17 @@ def test_the_six_routes_are_classified_and_declared_as_the_ticket_decided() -> N
     assert declared == {key: [level] for key, level in expected.items()}
 
 
-def test_the_queue_is_readable_by_a_viewer_and_submitting_is_not() -> None:
-    """The level split the owner asked for, read off the matrix.
+def test_the_queue_is_readable_by_a_viewer_and_the_three_mutations_are_contribute() -> None:
+    """The level split the owner decided, read off the matrix.
 
-    Viewers read the queue; a contributor may plan, because a plan writes
-    nothing; submit, cancel and undo are editor routes. The eleven role sweeps
+    Mf-215n's amendment replaced the earlier editor-only rule for submit, cancel
+    and undo: an operation is contribute unless its workflow can REMOVE data, so
+    the route declares the minimum and the handler enforces the workflow's own
+    level. Viewers read the queue and may not mutate it. The eleven role sweeps
     in `test_permissions_matrix.py` are what actually call each route as each
-    role, and the WRITE deny sweeps cover these routes parametrically, so no
-    role test is hand-rolled here. This pins the decision the sweeps are driven
-    by, so a future route that moves level fails with the intent in front of the
-    reviewer.
+    role, so no role test is hand-rolled here; this pins the decision the sweeps
+    are driven by, so a future route that moves level fails with the intent in
+    front of the reviewer.
     """
     read_keys = {key for key, level in permissions.ROUTE_PERMISSIONS.items() if level == permissions.READ}
     contribute_keys = {
@@ -934,9 +937,68 @@ def test_the_queue_is_readable_by_a_viewer_and_submitting_is_not() -> None:
     write_keys = {key for key, level in permissions.ROUTE_PERMISSIONS.items() if level == permissions.WRITE}
 
     assert {("GET", "/operations"), ("GET", "/operations/{operation_id}")} <= read_keys
-    assert ("POST", "/operations/plan") in contribute_keys
     assert {
+        ("POST", "/operations/plan"),
         ("POST", "/operations"),
         ("POST", "/operations/{operation_id}/cancel"),
         ("POST", "/operations/{operation_id}/undo"),
-    } <= write_keys
+    } <= contribute_keys
+    assert {
+        ("GET", "/operations"),
+        ("GET", "/operations/{operation_id}"),
+        ("POST", "/operations/plan"),
+        ("POST", "/operations"),
+        ("POST", "/operations/{operation_id}/cancel"),
+        ("POST", "/operations/{operation_id}/undo"),
+    }.isdisjoint(write_keys)
+
+
+def test_the_workflow_level_table_is_the_owner_rubric() -> None:
+    """The whole table, pinned by equality so any change fails here with a reason.
+
+    The owner's rubric (Mf-215n amendment, 2026-11-27) is "can they REMOVE data
+    with this action": an operation is contribute unless it can REMOVE data, so
+    only a data-removing workflow may be write. A row for a workflow that does
+    not exist yet is a declaration for the record.
+    """
+    assert operations_service.WORKFLOW_LEVELS == {
+        # Contribute: none of these removes data with this action.
+        "create-project": permissions.CONTRIBUTE,
+        "adopt": permissions.CONTRIBUTE,
+        "extract-and-create": permissions.CONTRIBUTE,
+        "import-folder": permissions.CONTRIBUTE,
+        "import-zip": permissions.CONTRIBUTE,
+        "import-link": permissions.CONTRIBUTE,
+        "enrich": permissions.CONTRIBUTE,
+        "split-and-create": permissions.CONTRIBUTE,
+        "relocate": permissions.CONTRIBUTE,
+        # Write: it removes nothing, but it is an existing route whose capacity
+        # consequence is an open question with the owner (Mf-215n).
+        "library-scan": permissions.WRITE,
+    }
+
+
+def test_a_workflow_with_no_table_entry_is_refused_rather_than_defaulted_to_contribute() -> None:
+    """Fail closed: an unclassified workflow is a bug, so it is refused outright.
+
+    Defaulting to contribute would let an unknown workflow run at the loosest
+    mutating level; the refusal names the WRITE requirement instead.
+    """
+    with pytest.raises(HTTPException) as excinfo:
+        operations_service.level_for_workflow("no-such-workflow")
+
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == permissions.DENY_DETAIL[permissions.WRITE]
+
+
+def test_a_declared_workflow_without_a_planner_yet_resolves_to_contribute() -> None:
+    """The owner rubric, table-levelled: organising and splitting are contribute.
+
+    Honest scope: none of these workflows exists in `WORKFLOWS` yet (still
+    `("create-project",)`), so this is a table-level assertion, not an end-to-end
+    one. It becomes end-to-end the moment a planner is added, and it fails the
+    moment somebody changes a level. The owner's rubric (Mf-215n) is "can they
+    REMOVE data with this action": splitting and relocating remove nothing.
+    """
+    for workflow in ("adopt", "split-and-create", "relocate"):
+        assert operations_service.level_for_workflow(workflow) == permissions.CONTRIBUTE, workflow

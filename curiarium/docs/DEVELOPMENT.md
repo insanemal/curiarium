@@ -402,10 +402,14 @@ paths, which registering by key would get wrong for the very plan that is moving
 them. Converging them is a later slice, so nothing here should be read as saying
 the three compose today.
 
-**One asymmetry to leave alone.** A contributor may create a project through
-`POST /projects` (CONTRIBUTE) but may not queue one through `POST /operations`
-(WRITE) - an owner decision under review, recorded so nobody "fixes" one of them
-in passing.
+**The asymmetry, resolved.** A contributor may create a project through
+`POST /projects` (CONTRIBUTE) AND queue one through `POST /operations`, because
+Mf-215n's amendment set the rubric the owner uses: an operation is contribute
+unless the action can REMOVE data. The per-workflow level lives in one table,
+`operations_service.WORKFLOW_LEVELS`, and the handler enforces it (a route may
+declare only one level). A row for a workflow that does not exist yet is a
+declaration for the record, not a claim that it runs - `WORKFLOWS` is still
+`("create-project",)`.
 
 ## The import flow (auto for high confidence, guided for the rest)
 

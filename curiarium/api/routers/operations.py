@@ -1,9 +1,14 @@
 """Operations routes: thin wrappers over `operations_service` (Mf-5t30).
 
-No business logic lives here - only dependencies, one `Session`, one service call
-and one response model. The runner is NOT started here, and these routes never
-execute a workflow inline: a submit writes a queued row and returns 202, and the
-in-process runner does the work.
+No business logic lives here - only dependencies, the per-workflow authorization
+decision, one `Session`, one service call and one response model. The runner is
+NOT started here, and these routes never execute a workflow inline: a submit
+writes a queued row and returns 202, and the in-process runner does the work.
+
+Every mutation is declared CONTRIBUTE because a route may declare only one level
+(`permissions.assert_routes_classified()`), and the real level is the workflow's
+(`operations_service.WORKFLOW_LEVELS`): the handler escalates per workflow, the
+same precedent as `permissions.authorize_metadata_edit`. See Mf-215n.
 """
 
 from typing import List, Optional
@@ -15,7 +20,7 @@ import audit
 import operations_service
 from auth import AuthContext
 from db import engine
-from permissions import require_contribute, require_read, require_write
+from permissions import require_contribute, require_read
 from schemas import (
     OperationOut,
     OperationPlanOut,
@@ -46,9 +51,16 @@ def plan_operation(
 def submit_operation(
     body: OperationSubmitRequest,
     request: Request,
-    context: Optional[AuthContext] = Depends(require_write),
+    context: Optional[AuthContext] = Depends(require_contribute),
 ):
     """Queue a plan this server issued; the runner executes it, not this route."""
+    # The route declares the MINIMUM (contribute) and the handler escalates to the
+    # workflow's own level: a route may declare only one level
+    # (`assert_routes_classified`), the same precedent as
+    # `permissions.authorize_metadata_edit`. The check runs before any row is
+    # written, so a refused submit leaves nothing behind.
+    workflow = operations_service.workflow_for_plan_id(body.plan_id)
+    operations_service.authorize_workflow(request, context, workflow)
     ctx = audit.context_for(request, context)
     with Session(engine) as session:
         operation, _created = operations_service.submit(
@@ -90,11 +102,19 @@ def get_operation_route(
 def cancel_operation(
     operation_id: str,
     request: Request,
-    context: Optional[AuthContext] = Depends(require_write),
+    context: Optional[AuthContext] = Depends(require_contribute),
 ):
     """Cancel a queued operation, or ask a running one to stop after its step."""
+    # The level is a property of the ROW, so it cannot be known before the lookup.
+    # The pre-lookup refusal is the declared CONTRIBUTE dependency, which runs
+    # before any lookup, so a viewer or an anonymous caller never reaches the 404.
+    # Everything a contributor can learn from that 404 is already readable through
+    # `GET /operations/{operation_id}` (READ), so the escalation cannot become an
+    # existence oracle.
     ctx = audit.context_for(request, context)
     with Session(engine) as session:
+        workflow = operations_service.get_operation(session, operation_id).workflow
+        operations_service.authorize_workflow(request, context, workflow)
         operation = operations_service.cancel(session, operation_id, ctx)
         return operations_service.operation_payload(session, operation)
 
@@ -103,9 +123,13 @@ def cancel_operation(
 def undo_operation(
     operation_id: str,
     request: Request,
-    context: Optional[AuthContext] = Depends(require_write),
+    context: Optional[AuthContext] = Depends(require_contribute),
 ):
     """Undo a finished create; deletes the project row, never the files."""
+    # Same ordering and the same reasoning as cancel: the row's workflow is read
+    # first, then the level it demands is enforced.
     ctx = audit.context_for(request, context)
     with Session(engine) as session:
+        workflow = operations_service.get_operation(session, operation_id).workflow
+        operations_service.authorize_workflow(request, context, workflow)
         return operations_service.undo(session, operation_id, ctx)

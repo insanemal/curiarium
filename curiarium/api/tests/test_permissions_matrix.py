@@ -59,6 +59,7 @@ import library_scan
 import login_throttle as login_throttle_module
 import main
 import mfa
+import operations_service
 import permissions
 import settings_service
 import snapshots
@@ -1678,15 +1679,17 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 112 routes - 11 public / 40 read / 25 contribute / 18 write / 18 admin.
+    """The matrix is pinned at 112 routes - 11 public / 40 read / 28 contribute / 15 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
     only moves between levels would otherwise keep the total and slip past.
     Mf-5t30 moved it 106 -> 112: two reads (the queue and one operation), and
     four guarded routes (plan contribute; submit, cancel, undo write). The
-    follow-up then moved submit and cancel from contribute to write, so the
-    split is now 25/18.
+    follow-up then moved submit and cancel from contribute to write (25/18), and
+    Mf-215n moved submit, cancel and undo back to contribute by the owner's
+    rubric - an operation is contribute unless its workflow can REMOVE data - so
+    the split is now 28/15.
     """
     counts = {
         level: len(keys_at(level))
@@ -1696,8 +1699,8 @@ def test_the_matrix_is_the_documented_size() -> None:
     assert counts == {
         permissions.PUBLIC: 11,
         permissions.READ: 40,
-        permissions.CONTRIBUTE: 25,
-        permissions.WRITE: 18,
+        permissions.CONTRIBUTE: 28,
+        permissions.WRITE: 15,
         permissions.ADMIN: 18,
     }, counts
 
@@ -1782,9 +1785,10 @@ def test_contributor_is_denied_every_write_route(client, ids, contributor_header
 
     The point of the level is that contributing creates and organises while
     destroying stays an editor's move, so this asserts the whole WRITE half of
-    the matrix rather than a hand-picked spot check. Since the follow-up that
-    moved submit and cancel off contribute, that includes submitting and
-    cancelling operations.
+    the matrix rather than a hand-picked spot check. Submitting, cancelling and
+    undoing an operation are NOT here since Mf-215n: those routes declare
+    contribute and the handler refuses a data-removing workflow (see
+    `test_a_contributor_is_refused_a_data_removing_action` below).
     """
     response = call(key, client, contributor_headers, ids, monkeypatch)
 
@@ -1902,6 +1906,76 @@ def test_starting_a_scan_is_editor_work(client, ids, editor_headers, contributor
     from_viewer = call(key, client, viewer_headers, ids, monkeypatch)
     assert from_viewer.status_code == 403, f"a viewer started a scan: {from_viewer.status_code} {from_viewer.text}"
     assert from_viewer.json()["detail"] == permissions.DENY_DETAIL[permissions.WRITE]
+
+
+def test_the_measured_levels_do_not_drift() -> None:
+    """The levels measured at 2d089fa, pinned so a permission edit cannot move them silently.
+
+    These are the catalogue's load-bearing classifications: the contributor's
+    creation and membership doors, and the editor's rename/move/scan line. The
+    keys are named here and the levels are read off `ROUTE_PERMISSIONS` itself,
+    so this fails only when the matrix really changes.
+    """
+    matrix = permissions.ROUTE_PERMISSIONS
+
+    for key in (
+        ("POST", "/projects"),
+        ("POST", "/project/{project_id}/assets"),
+        ("POST", "/bundles/create"),
+        ("POST", "/import/archive/project"),
+    ):
+        assert matrix[key] == permissions.CONTRIBUTE, key
+
+    for key in (
+        ("PATCH", "/folder/{folder_id}"),
+        ("POST", "/asset/{asset_id}/folder"),
+        ("POST", "/library/scan"),
+    ):
+        assert matrix[key] == permissions.WRITE, key
+
+
+def test_a_contributor_may_plan_and_submit_an_operation(
+    client, ids, contributor_headers, monkeypatch
+) -> None:
+    """A contributor creates a project through the real submit route, end to end.
+
+    Mf-215n's rubric is "can they REMOVE data with this action": `create-project`
+    removes nothing, so a contributor may queue it. The plan writes nothing and
+    the submit answers 202; the helper discards the queued row afterwards.
+    """
+    planned = call_plan_operation(client, contributor_headers, ids, monkeypatch)
+    assert planned.status_code == 200, planned.text
+
+    submitted = call_submit_operation(client, contributor_headers, ids, monkeypatch)
+    assert submitted.status_code == 202, submitted.text
+    assert submitted.json()["workflow"] == "create-project"
+    assert operations_service.WORKFLOW_LEVELS["create-project"] == permissions.CONTRIBUTE
+
+
+def test_a_viewer_cannot_plan_or_submit_an_operation(
+    client, ids, viewer_headers, monkeypatch
+) -> None:
+    """A viewer stays read-only: the contribute dependency refuses before anything runs."""
+    planned = call_plan_operation(client, viewer_headers, ids, monkeypatch)
+    assert planned.status_code == 403, planned.text
+    assert planned.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
+
+    submitted = call_submit_operation(client, viewer_headers, ids, monkeypatch)
+    assert submitted.status_code == 403, submitted.text
+    assert submitted.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
+
+
+def test_a_contributor_is_refused_a_data_removing_action(client, ids, contributor_headers) -> None:
+    """The rubric's other half: a data-removing action is still an editor's.
+
+    The guard is in the route dependency, so it answers before the lookup - the
+    403 is a permission answer about a project that really exists, not a 404
+    that would pass a looser assertion.
+    """
+    response = client.delete(f"/project/{ids.project_id}", headers=contributor_headers)
+
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == permissions.DENY_DETAIL[permissions.WRITE]
 
 
 def test_every_route_has_an_expectation_or_a_documented_reason() -> None:
