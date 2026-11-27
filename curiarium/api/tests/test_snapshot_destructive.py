@@ -25,12 +25,14 @@ from uuid import uuid4
 import pytest
 import snapshot_fakes
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 from sqlmodel import Session, select
 
 import audit
 import config
 import db
 import library_scan
+import project_service
 import snapshot_guard
 import snapshots
 import trash_service
@@ -860,3 +862,119 @@ def test_the_delete_preview_ignores_unknown_ids(isolated_storage: Path, client, 
     assert response.json()["files"] == 1
     assert response.json()["bytes"] == 7
     assert not (storage / snapshots.SNAPSHOT_DIRNAME).exists()
+
+
+def insert_preview_assets(external_path: Path) -> list[str]:
+    """Eight plain rows sized 1..8, then a reference of 999, in request order.
+
+    The reference is last so a dropped remainder chunk still changes the answer -
+    but its 999 bytes and its file are not reclaimed, so only the eight plain rows
+    count: files 8 and bytes 36.
+    """
+    ids = [
+        insert_asset_row(f"part {index}", None, None, filename=f"part{index}.stl", size=index)
+        for index in range(1, 9)
+    ]
+    ids.append(
+        insert_asset_row(
+            "external", None, None, filename="external.stl", size=999, is_reference=1, source_path=str(external_path)
+        )
+    )
+    return ids
+
+
+def test_the_delete_preview_reads_asset_ids_in_batches(
+    client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A caller-supplied id list must be chunked: one ``IN`` over it can 500 a pure SELECT.
+
+    SQLite binds one host variable per ``IN`` element and refuses a statement past
+    `SQLITE_MAX_VARIABLE_NUMBER`, so quoting a huge dialog would raise `too many
+    SQL variables` from a route that only reads. The read follows
+    `project_service.MEMBER_QUERY_BATCH`, read late: with the batch pinned to 4 the
+    nine ids are three statements, and with the real 500 they are one. The ``== 3``
+    is the discriminator - an unbounded query is one statement, and a hardcoded,
+    import-captured or default argument batch would also be one in both phases.
+    Both phases must also answer identically: the same rows, the same counts.
+    """
+    snapshot_fakes.use_unavailable(monkeypatch)
+    headers = admin_headers(client)
+    external = tmp_path / "external.stl"
+    write_placeholder_file(external, b"external bytes")
+    ids = insert_preview_assets(external)
+    preview_queries: list[str] = []
+
+    def watch(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        # `asset.id IN (...)` is this lookup alone: the guard's preview binds nothing.
+        if "asset.id IN" in statement:
+            preview_queries.append(statement)
+
+    event.listen(engine, "before_cursor_execute", watch)
+    try:
+        monkeypatch.setattr(project_service, "MEMBER_QUERY_BATCH", 4)
+        preview_queries.clear()
+        chunked = client.get("/assets/delete-preview", params={"asset_ids": ids}, headers=headers)
+        chunked_statements = len(preview_queries)
+
+        monkeypatch.setattr(project_service, "MEMBER_QUERY_BATCH", 500)
+        preview_queries.clear()
+        whole = client.get("/assets/delete-preview", params={"asset_ids": ids}, headers=headers)
+        whole_statements = len(preview_queries)
+    finally:
+        event.remove(engine, "before_cursor_execute", watch)
+
+    assert chunked_statements == 3, (
+        "nine ids over a batch of four is three statements - one unbounded query would "
+        "hit the SQLite variable cap this exists to avoid"
+    )
+    assert whole_statements == 1, "the real batch admits the whole list in one statement"
+    assert chunked.status_code == 200, chunked.text
+    assert whole.status_code == 200, whole.text
+    chunked_body = chunked.json()
+    whole_body = whole.json()
+    assert {key: chunked_body[key] for key in ("assets", "files", "bytes")} == {
+        key: whole_body[key] for key in ("assets", "files", "bytes")
+    }, "chunking is unobservable: the aggregates must not depend on the boundary"
+    assert chunked_body["assets"] == 9, "a dropped remainder chunk would report 8"
+    assert chunked_body["files"] == 8, "the reference contributes no file"
+    assert chunked_body["bytes"] == 36, "1..8 summed; the reference's 999 is not reclaimed"
+
+
+def test_the_delete_preview_ignores_unknown_ids_across_a_chunk_boundary(
+    client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unknown id in the middle chunk drops itself, not the chunk around it.
+
+    Two bogus uuids sit at positions five and six, so the middle batch holds two
+    ids that name no row between two that do. The preview must still answer 200
+    with every real asset, and must still run one statement per chunk: skipping a
+    whole chunk that held an unknown id would show two and silently under-count.
+    """
+    snapshot_fakes.use_unavailable(monkeypatch)
+    headers = admin_headers(client)
+    external = tmp_path / "external.stl"
+    write_placeholder_file(external, b"external bytes")
+    ids = insert_preview_assets(external)
+    bogus = ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"]
+    requested = [*ids[:4], *bogus, *ids[4:]]
+    assert len(requested) == 11
+    preview_queries: list[str] = []
+
+    def watch(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        if "asset.id IN" in statement:
+            preview_queries.append(statement)
+
+    monkeypatch.setattr(project_service, "MEMBER_QUERY_BATCH", 4)
+    event.listen(engine, "before_cursor_execute", watch)
+    try:
+        preview_queries.clear()
+        response = client.get("/assets/delete-preview", params={"asset_ids": requested}, headers=headers)
+        statements = len(preview_queries)
+    finally:
+        event.remove(engine, "before_cursor_execute", watch)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["assets"] == 9, "the unknown ids are omitted, not the chunks that held them"
+    assert body["bytes"] == 36
+    assert statements == 3, "one statement per contiguous chunk, unknowns included"

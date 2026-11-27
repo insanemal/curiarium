@@ -104,7 +104,12 @@ def asset_delete_preview(
     """
     ids = require_asset_ids(asset_ids)
     with Session(engine) as s:
-        assets = list(s.exec(select(Asset).where(Asset.id.in_(ids))))
+        # Chunked at `project_service.MEMBER_QUERY_BATCH` because SQLite caps the
+        # host variables one statement may bind; the response is aggregate-only,
+        # which is why the chunking is unobservable. A comment, not docstring text:
+        # this docstring is the served operation's `description`, pinned by
+        # `tests/fixtures/openapi/paths.json`.
+        assets = project_service.assets_by_ids(s, ids)
     return AssetDeletePreviewOut(
         assets=len(assets),
         files=sum(0 if asset.is_reference else 1 + (asset.supporting_file_count or 0) for asset in assets),
