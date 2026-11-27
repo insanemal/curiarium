@@ -11,8 +11,10 @@ type Props = {
    *  error line are reads and stay visible to a viewer. */
   canWrite: boolean;
   surface: ScanSurface;
-  /** The run this mount wants: the panel and empty state call the hook's own
-   *  `run`, while the shell arms its poll flag before starting. */
+  /** The queue's entry point: every mount passes the shell's `scanFromShell`,
+   *  which arms the shell's poll before starting; this component never calls
+   *  `state.run`. The arm is sticky, so the poll outlives this mount: a rescan
+   *  started here is still followed from any view, the library included. */
   onScan: () => void;
 };
 
