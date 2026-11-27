@@ -32,6 +32,14 @@ only module that owns either:
   * `create_project_from_members` — one dedupe pass, then
     `project_service.create_project_with_members`, in one transaction. Either the
     project and every member row land, or nothing does.
+  * the coarse PATH-keyed verb (`create_project`) lives in `bundle_service`, not
+    here, and the reason is a firewall rather than taste: the archive-extract door
+    imports this module, and `tests/test_archive_project.py` refuses to let a bundle
+    module appear anywhere in that door's static import closure. A `create_project`
+    here would have to name `bundle_service.members_of`, and the walker sees a
+    function-local import as an edge like any other. So this module keeps the write
+    half and the dedupe, and the verb that resolves a path lives with the member
+    rule it asks.
 
 Two rules the shape of this module exists to keep:
 

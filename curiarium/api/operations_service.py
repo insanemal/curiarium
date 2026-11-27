@@ -182,9 +182,9 @@ def _plan_create_project(session: Session, target: str, params: dict) -> Tuple[l
     assets = bundle_service.registered_assets(session, key)
     if not assets:
         raise HTTPException(status_code=409, detail=f"no registered files under {key!r}")
-    # The one owner of the member rule. A public alias belongs to a later slice;
-    # `bundle_service.py` is outside this ticket's touch set.
-    member_set = bundle_service._members_of(key, assets)
+    # The one owner of the member rule, through its public name (Mf-215n promoted
+    # the alias, so this door no longer reaches for a private one).
+    member_set = bundle_service.members_of(key, assets)
     entries = list(member_set.entries)
 
     groups: dict = {}

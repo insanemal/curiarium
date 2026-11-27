@@ -31,6 +31,7 @@ import folder_service
 import library_scan
 import login_throttle as login_throttle_module
 import main
+import move_service
 import settings_service
 from db import engine
 from migrations import run_migrations
@@ -281,20 +282,25 @@ def big_split_tree(root: Path, parts: int = 8) -> None:
 def flaky_move(monkeypatch: pytest.MonkeyPatch, fail_on: int) -> tuple[dict, object]:
     """Make the ONE mover fail on its `fail_on`-th call, counting calls.
 
+    `move_service.move` is the primitive the arrange's move loop asks, one pair per
+    call, so the counter still counts MOVES and `fail_on=6` still stops the sixth
+    with five landed - the same injected failure at the same point as before the
+    primitive existed, which is what keeps every count in this file unchanged.
+
     Returns the counter and the real mover: the caller restores the attribute
     with `monkeypatch.setattr` rather than `monkeypatch.undo()`, because that
     fixture object also holds `isolated_storage`'s path patches.
     """
-    real = asset_service.move_managed_file
+    real = move_service.move
     calls = {"count": 0}
 
-    def move(old: Path, new: Path) -> bool:
+    def move(pairs, **kwargs):
         calls["count"] += 1
         if calls["count"] == fail_on:
             raise HTTPException(status_code=409, detail="Storage path already exists: simulated")
-        return real(old, new)
+        return real(pairs, **kwargs)
 
-    monkeypatch.setattr(asset_service, "move_managed_file", move)
+    monkeypatch.setattr(move_service, "move", move)
     return calls, real
 
 
@@ -430,7 +436,7 @@ def test_a_partial_apply_is_replayable_backwards(
     plan_projects = project_ids(client, admin)
     assert len(plan_projects) == 8, "a split creates one project per product root"
 
-    monkeypatch.setattr(asset_service, "move_managed_file", real_move)
+    monkeypatch.setattr(move_service, "move", real_move)
     undo = undo_arrange(client, admin, ledger["id"])
 
     assert undo.status_code == 200, undo.text
@@ -459,7 +465,7 @@ def test_a_partial_apply_finishes_forward_on_a_re_post(
     assert failed.status_code == 409, failed.text
     ledger = ledger_for_plan(client, admin, plan["plan_id"])
     assert ledger["done"] == 5
-    monkeypatch.setattr(asset_service, "move_managed_file", real_move)
+    monkeypatch.setattr(move_service, "move", real_move)
 
     response = apply_plan(client, admin, plan)
 

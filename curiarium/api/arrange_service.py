@@ -20,8 +20,10 @@ The order `apply` keeps is the contract:
    can put it back. A plan that MOVES bytes does not rewrite group names: the walk
    is pre-move, so the paths it would record are ones the moves are about to
    change - deliberate, and named rather than forgotten;
-3. the move loop, through `asset_service.move_managed_file` - the ONE mover. A
-   directory is moved whole by its rename fallback; there is no copy path, so an
+3. the move loop, through `move_service.move` - the primitive's ONE byte arbiter,
+   one intent per move (`arrange:<id>:<index>`, so a resume at index N is a new
+   intent and a re-run of an index that already landed is a no-op). A directory
+   is moved whole by that arbiter's rename fallback; there is no copy path, so an
    `EXDEV` is translated into a refusal and the ledger records how far it got;
 4. commit 2: the rows (`ensure_directory_row` for the created directories, folder
    subtree paths, asset paths, retired wrapper rows) in one transaction;
@@ -50,12 +52,13 @@ from uuid import uuid4
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-import asset_service
+import adopt_service
 import audit
 import bundle_service
 import folder_paths
 import folder_service
 import library_scan
+import move_service
 import project_create_service
 import project_service
 import proposal_engine
@@ -817,9 +820,10 @@ def _create_projects(
 ) -> Tuple[List[str], List[dict], Dict[str, dict]]:
     """Commit 1: one project per target root, with detection marker plus ledger.
 
-    A target that names an existing project is EXTENDED: only the memberships it
-    is missing are inserted, and the ledger's `members` snapshot is exactly those
-    added ids, so undo removes what this arrange added and nothing else.
+    A target that names an existing project is EXTENDED through
+    `adopt_service.adopt`: only the memberships it is missing are inserted, and
+    the ledger's `members` snapshot is exactly those added ids, so undo removes
+    what this arrange added and nothing else.
 
     A membership-only plan (no moves - the folder keeps its name and its layout) also
     refreshes an adopted project's `groups` from the engine's CURRENT measurement:
@@ -828,6 +832,11 @@ def _create_projects(
     it replaced as `projects[*].groups_before` so undo can put it back. A freshly
     CREATED target gets neither: its groups came from `_detection_marker`, which is
     this arrange's own write, and undo must leave them alone.
+
+    The measurement is taken ONCE, lazily, on the first adopted target: a plan is
+    one folder, so walking it per target would be the same walk again. It is also
+    taken only when the plan MOVES nothing - the walk is pre-move, so its group
+    paths name folders the moves are about to change.
 
     Returns the project ids, the ledger's per-project entries, and the `_bundle`
     updates each project's marker needs beyond the ledger itself.
@@ -838,37 +847,35 @@ def _create_projects(
     markers: Dict[str, dict] = {}
     facts: Optional[proposal_engine.Facts] = None
 
-    def record_groups(project_id: str, entry: dict) -> None:
-        """Record what the adopted project's groups become, and what they were.
+    def adopt_target(project_id: str, root_rel: str, member_ids: Sequence[str]) -> dict:
+        """Adopt one target's memberships and return the ledger entry that records it.
 
-        The measurement is taken ONCE, lazily, on the first adopted target: a plan
-        is one folder, so walking it per target would be the same walk again.
+        The group refresh rides on the same call: `adopt_service.adopt` measures
+        and hands back `(groups_before, groups_after)`, and this function is what
+        puts the after-value into the marker update commit 1 writes. Nothing is
+        measured for a moving plan, and `root_rel` is what tells the primitive so -
+        it compares it to the key itself rather than trusting the caller.
         """
         nonlocal facts
-        if moves:
-            # The walk is pre-move, so its group paths name folders the moves are
-            # about to change; a moving plan leaves the marker's groups alone.
-            return
-        if facts is None:
-            facts = proposal_engine.measure(str(_root() / item.key), item.key)
         attached = [
             (asset_id, new_path, size)
             for asset_id, _path, size, new_path in projected
-            if _under(new_path, entry["root"])
+            if _under(new_path, root_rel)
         ]
-        refreshed = _refresh_marker_groups(
+        if not moves and facts is None:
+            facts = proposal_engine.measure(str(_root() / item.key), item.key)
+        outcome = adopt_service.adopt(
             session,
             project_id,
+            member_ids,
             key=item.key,
-            root_rel=entry["root"],
+            root_rel=root_rel,
+            attached=attached,
             facts=facts,
-            members=attached,
         )
-        if refreshed is None:
-            return
-        before, after = refreshed
-        entry["groups_before"] = before
-        markers[project_id] = {"groups": after}
+        if outcome.measured:
+            markers[project_id] = {"groups": outcome.groups_after}
+        return adopt_service.entry_of(outcome, root=root_rel, created=False)
 
     with Session(engine) as session:
         asset_index = project_create_service.project_assets_index(session)
@@ -886,11 +893,8 @@ def _create_projects(
             ]
             member_ids = [member.asset_id for member in members]
             if target.get("reuse"):
-                added = _extend_project(session, target["reuse"], member_ids)
+                projects.append(adopt_target(target["reuse"], root_rel, member_ids))
                 project_ids.append(target["reuse"])
-                entry = {"id": target["reuse"], "root": root_rel, "created": False, "members": added}
-                record_groups(target["reuse"], entry)
-                projects.append(entry)
                 continue
             marker = _detection_marker(row, item.shape, root_rel)
             marker[ARRANGE_KEY] = dict(ledger, done=0, applied=False)
@@ -929,81 +933,13 @@ def _create_projects(
             # existing project the arrange must EXTEND, and the ledger records only
             # what that extend actually added.
             created = outcome.status == project_create_service.STATUS_CREATED
-            added = member_ids
-            entry = {"id": outcome.project_id, "root": root_rel, "created": created, "members": added}
+            entry = {"id": outcome.project_id, "root": root_rel, "created": created, "members": member_ids}
             if outcome.status == project_create_service.STATUS_ALREADY_CREATED:
                 # The same adopt as the reuse branch: the project already existed, so
                 # its groups are the stale ones a rescan grew past.
-                added = _extend_project(session, outcome.project_id, member_ids)
-                entry["members"] = added
-                record_groups(outcome.project_id, entry)
+                entry = adopt_target(outcome.project_id, root_rel, member_ids)
             projects.append(entry)
     return project_ids, projects, markers
-
-
-def _refresh_marker_groups(
-    session: Session,
-    project_id: str,
-    *,
-    key: str,
-    root_rel: str,
-    facts: proposal_engine.Facts,
-    members: Sequence[Tuple[str, str, int]],
-) -> Optional[Tuple[Optional[List[dict]], List[dict]]]:
-    """(before_groups, groups_after) for an adopted project, or None if not its folder.
-
-    `root_rel != key` means the plan renames or hoists the folder: the engine's group
-    paths are relative to a name the disk no longer has once the moves land, so a
-    refresh would record folders that do not exist. Only a membership-only plan - the
-    one whose layout is still the current one - rewrites the marker's groups.
-
-    `attached` is MODEL-scoped by the marker's own vocabulary: it counts the counted
-    MODEL members bucketed by the first path segment after the project key, exactly
-    as the create path's `models_by_group` does, so a project's `attached` means the
-    same thing whether it was created or adopted.
-    """
-    if root_rel != key:
-        return None
-    project = session.get(Project, project_id)
-    if project is None:
-        return None
-    bundle = project_service.bundle_marker_of(project.metadata_json)
-    before = bundle.get("groups")
-    prefix = f"{key}/"
-    attached: Dict[str, int] = {}
-    for _asset_id, path, size in members:
-        if not library_scan.is_counted_model(path, size) or not path.startswith(prefix):
-            continue
-        group_name = path[len(prefix):].split("/", 1)[0]
-        attached[group_name] = attached.get(group_name, 0) + 1
-    after = bundle_service.marker_groups(
-        bundle_service.wire_groups(facts.groups),
-        attached=attached,
-        before=before if isinstance(before, list) else None,
-    )
-    return (before if isinstance(before, list) else None, after)
-
-
-def _extend_project(session: Session, project_id: str, member_ids: Sequence[str]) -> List[str]:
-    """Add only the memberships `project_id` is missing, one bounded chunk at a time.
-
-    The unit of work is one chunk of `project_service.MEMBER_QUERY_BATCH` rows, so a
-    Vault-sized adopt (800+ memberships) never stages one unbounded batch. The write
-    door reuses the same constant the read door batches by, read off the module at
-    call time so a test can pin the boundary, rather than inventing a second number.
-    It is NOT the SQLite host-variable cap `project_service.add_assets` chunks
-    against - that is a different door with a different reason.
-    """
-    held = set(session.exec(select(ProjectAsset.asset_id).where(ProjectAsset.project_id == project_id)))
-    added = [asset_id for asset_id in member_ids if asset_id not in held]
-    stamp = _now()
-    batch = max(1, int(project_service.MEMBER_QUERY_BATCH))
-    for offset in range(0, len(added), batch):
-        for asset_id in added[offset : offset + batch]:
-            session.add(ProjectAsset(project_id=project_id, asset_id=asset_id, added_at=stamp))
-        session.flush()
-    session.commit()
-    return added
 
 
 def _snapshot(moves: Sequence[dict], creates: Sequence[str]) -> dict:
@@ -1109,11 +1045,27 @@ def _groups_before(ledger: Mapping) -> Dict[str, dict]:
 
 
 def _move_forward(root: Path, moves: Sequence[dict], ledger: Mapping, project_ids: Sequence[str], start: int) -> int:
-    """Run the moves from `start`, recording how far it got before it stopped."""
+    """Run the moves from `start`, recording how far it got before it stopped.
+
+    One `move_service.move` per move, not one for the batch, and the index is in
+    the intent: that is what lets a half-landed arrange resume at `done` (the
+    indices before it are already in the move ledger, so a re-run of one is the
+    primitive's no-op) while a move that never landed is a fresh intent. The rows
+    are the arrange's own commit 2, so `apply_rows=False` - this module's ledger
+    is the one that carries the folder and asset snapshots undo restores.
+    """
     landed = start
     try:
-        for move in moves[start:]:
-            asset_service.move_managed_file(root / move["from"], root / move["to"])
+        for index, move in enumerate(moves):
+            if index < start:
+                continue
+            move_service.move(
+                [move_service.Pair(move["from"], move["to"], move["kind"])],
+                intent=f"arrange:{ledger.get('id')}:{index}",
+                key=str(ledger.get("key") or ""),
+                apply_rows=False,
+                root=root,
+            )
             landed += 1
     except HTTPException as error:
         _record_partial(ledger, project_ids, landed)
@@ -1215,73 +1167,25 @@ def _applied_out(ledger: Mapping, project_ids: Sequence[str], *, already_applied
 
 
 def _rewrite_rows(root: Path, moves: Sequence[dict], creates: Sequence[str], folder_ids: Sequence[str]) -> None:
-    """Commit 2: adopt created directories, move rows, retire wrappers, one commit."""
+    """Commit 2: adopt created directories, move rows, retire wrappers, one commit.
+
+    The rows themselves are `move_service.apply_rows` - the same owner the rename
+    and folder doors write through - and this function keeps the two things that
+    are the arrange's own: the directories a plan needs (`ensure_directory_row`,
+    deepest first) and the retirement SCOPE, which is the id set snapshotted in
+    commit 1 rather than "whatever looks empty". A primitive free to retire every
+    empty directory it sees would delete a row another request had just created.
+    """
     with Session(engine) as session:
         for relative in sorted(creates, key=lambda path: (path.count("/"), path)):
             folder_service.ensure_directory_row(session, relative)
-        for move in moves:
-            if move["kind"] != "dir":
-                continue
-            folder = _folder_at(session, move["from"])
-            if folder is None:
-                continue
-            parent_relative = os.path.dirname(move["to"])
-            segment = os.path.basename(move["to"])
-            paths = folder_paths.derive_subtree_paths(session, folder, parent_relative, segment)
-            subtree = {}
-            for row in folder_paths.folder_subtree(session, folder.id):
-                subtree[row.id] = row
-            folder_service.apply_folder_paths(session, subtree, paths)
-            parent_row = _folder_at(session, parent_relative) if parent_relative else None
-            if parent_row is not None:
-                folder.parent_id = parent_row.id
-                session.add(folder)
-            folder_service.apply_asset_path_rewrites(
-                session, folder_service.plan_asset_rewrites(session, move["from"], move["to"])
-            )
-        for move in moves:
-            if move["kind"] != "file":
-                continue
-            asset = session.exec(select(Asset).where(Asset.storage_path == move["from"])).first()
-            if asset is not None:
-                asset.storage_path = move["to"]
-                session.add(asset)
-        _retire_gone_folders(session, root, folder_ids)
+        move_service.apply_rows(
+            [move_service.Pair(move["from"], move["to"], move["kind"]) for move in moves],
+            session=session,
+            root=root,
+            retire_ids=folder_ids,
+        )
         session.commit()
-
-
-def _folder_at(session: Session, relative: str) -> Optional[Folder]:
-    """The row that names `relative`, case-insensitively, or None."""
-    return session.exec(select(Folder).where(Folder.storage_path.collate("NOCASE") == relative)).first()
-
-
-def _retire_gone_folders(session: Session, root: Path, folder_ids: Sequence[str]) -> None:
-    """Delete rows whose directory the moves left empty and gone, deepest first."""
-    wanted = set(folder_ids)
-    asset_paths = [asset.storage_path or "" for asset in session.exec(select(Asset)) if asset.storage_path]
-    rows = [folder for folder in session.exec(select(Folder)) if folder.id in wanted]
-    rows.sort(key=lambda folder: (folder.storage_path or "").count("/"), reverse=True)
-    for folder in rows:
-        path = folder.storage_path or ""
-        if not path:
-            continue
-        absolute = root / path
-        if absolute.exists():
-            try:
-                with os.scandir(absolute) as entries:
-                    if next(entries, None) is not None:
-                        continue
-            except OSError:
-                continue
-            try:
-                os.rmdir(absolute)
-            except OSError:
-                continue
-        if _any_under(asset_paths, path):
-            continue
-        if session.exec(select(Folder).where(Folder.parent_id == folder.id)).first() is not None:
-            continue
-        session.delete(folder)
 
 
 # --- undo ------------------------------------------------------------------
@@ -1321,7 +1225,11 @@ def undo(arrange_id: str, ctx: audit.AuditContext) -> dict:
         has_source = source.exists()
         has_target = target.exists()
         if has_target and not has_source:
-            asset_service.move_managed_file(target, source)
+            # The byte arbiter, not the ledger-writing verb: the arrange ledger in
+            # the project marker is this undo's record, and its `undone` flag is
+            # what makes the second undo a 409.
+            move_service.move_bytes(target, source)
+            folder_service.prune_empty_storage_dirs(target.parent)
         elif has_target and has_source:
             raise HTTPException(
                 status_code=409,
@@ -1352,6 +1260,12 @@ def undo(arrange_id: str, ctx: audit.AuditContext) -> dict:
         ),
         ctx=ctx,
     )
+    # The move rows this arrange's apply wrote no longer describe the disk - this
+    # undo folded them back - so a later `move_service.undo_ledger` on one of them
+    # must refuse instead of relocating those bytes a second, blind time. It runs
+    # last, after the record says undone, so a failure here cannot leave the
+    # arrange half-folded and still undoable.
+    move_service.supersede(f"arrange:{restored.get('id')}:", by=str(restored.get("id") or arrange_id))
     return {
         "arrange_id": restored.get("id") or arrange_id,
         "key": restored.get("key") or "",
@@ -1441,29 +1355,14 @@ def _remove_created_rows(session: Session, root: Path, creates: Sequence[str]) -
 def _remove_added_memberships(session: Session, ledger: Mapping) -> int:
     """Delete exactly the memberships the ledger recorded as added, and nothing else.
 
-    `projects[*].members` is the snapshot of what the arrange ADDED: every member
-    of a project it created, and only the missing ones for a project it extended.
-    A membership the operator added afterwards is not in the snapshot, and a
-    membership that predates the arrange was never snapshotted, so both survive.
+    `adopt_service.undo_entry` owns the rule - memberships named, group snapshot
+    put back, nothing else touched - and this is the ledger walk over it: one call
+    per project entry, and a malformed entry contributes nothing rather than
+    raising, because an undo must not be taken down by a hand-edited marker.
     """
     removed = 0
     for entry in ledger.get("projects") or []:
         if not isinstance(entry, Mapping):
             continue
-        project_id = entry.get("id")
-        if not project_id:
-            continue
-        for asset_id in entry.get("members") or []:
-            if not isinstance(asset_id, str):
-                continue
-            membership = session.exec(
-                select(ProjectAsset).where(
-                    ProjectAsset.project_id == project_id, ProjectAsset.asset_id == asset_id
-                )
-            ).first()
-            if membership is None:
-                continue
-            session.delete(membership)
-            removed += 1
-    session.flush()
+        removed += adopt_service.undo_entry(session, entry)
     return removed

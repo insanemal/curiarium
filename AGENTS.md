@@ -16,7 +16,8 @@ one or two printers.
 ```
 curiarium/api/            FastAPI backend (19 routers, SQLModel, versioned migrations)
   routers/                one module per feature surface; main.py is only app wiring
-  migrations.py           append-only schema ledger (currently 15) - see ADRs 0002
+  migrations.py           append-only schema ledger (currently 16) - see ADRs 0002
+  move_service.py         one owner for relocation: bytes, rows and the move ledger (16)
   permissions.py          ROUTE_PERMISSIONS matrix; refuses to boot on an unclassified route
   audit.py                append-only audit actions; refuses to boot on uncovered mutations
   snapshots.py            snapshot providers: CephFS .snap, ZFS, BTRFS sidecar, null
@@ -24,7 +25,7 @@ curiarium/api/            FastAPI backend (19 routers, SQLModel, versioned migra
   safe_http.py            no-redirect, IP-pinned HTTP client for all outbound fetches
   multipart_stream.py     streams uploads straight to storage (no /tmp spool)
   entry_policy.py         one import policy: junk predicate, size budget, entry naming, failure class
-  tests/                  ~3104 tests; conftest pins the environment
+  tests/                  ~3136 tests; conftest pins the environment
 curiarium/web/            React 18 + Vite + Tailwind
   src/ui/asset-grid/      the virtualised grid, cards, preview queue
   src/ui/settings/        configuration sections (Settings; no work queues)

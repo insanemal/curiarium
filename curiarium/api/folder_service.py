@@ -19,6 +19,7 @@ from sqlmodel import Session, select
 
 import audit
 import folder_paths
+import move_service
 from models import Asset, Folder
 
 log = logging.getLogger(__name__)
@@ -442,6 +443,30 @@ def stale_asset_paths() -> List[str]:
     return sorted(stale)
 
 
+def _folder_change_events(
+    folder_id: str,
+    previous_name: str,
+    previous_parent_id: Optional[str],
+    name: str,
+    parent_id: Optional[str],
+) -> tuple:
+    """One event per field this patch actually changed.
+
+    Tags are an exempt metadata edit. A tags-only PATCH therefore stages nothing,
+    and a rename and a reparent in one request stage two rows, one per fact.
+
+    Returned rather than staged so `move_folder` can hand the very same list to
+    `move_service.move`, which stages it inside the move's transaction - before
+    the bytes move, which is where it has always been staged.
+    """
+    events = []
+    if name != previous_name:
+        events.append(audit.Event(audit.FOLDER_RENAME, folder_id, {"from": previous_name, "to": name}))
+    if parent_id != previous_parent_id:
+        events.append(audit.Event(audit.FOLDER_MOVE, folder_id, {"from": previous_parent_id, "to": parent_id}))
+    return tuple(events)
+
+
 def _stage_folder_changes(
     session: Session,
     folder: Folder,
@@ -451,17 +476,12 @@ def _stage_folder_changes(
     parent_id: Optional[str],
     audit_ctx: Optional[audit.AuditContext],
 ) -> None:
-    """Stage one event per field this patch actually changed.
-
-    Tags are an exempt metadata edit. A tags-only PATCH therefore stages nothing,
-    and a rename and a reparent in one request stage two rows, one per fact.
-    """
-    events = []
-    if name != previous_name:
-        events.append(audit.Event(audit.FOLDER_RENAME, folder.id, {"from": previous_name, "to": name}))
-    if parent_id != previous_parent_id:
-        events.append(audit.Event(audit.FOLDER_MOVE, folder.id, {"from": previous_parent_id, "to": parent_id}))
-    audit.stage(session, audit_ctx, *events)
+    """Stage the events `_folder_change_events` decided, into the caller's session."""
+    audit.stage(
+        session,
+        audit_ctx,
+        *_folder_change_events(folder.id, previous_name, previous_parent_id, name, parent_id),
+    )
 
 
 def move_folder(
@@ -521,21 +541,20 @@ def move_folder(
     except FileNotFoundError:
         source_exists = False
 
-    folders = {subtree_folder.id: subtree_folder for subtree_folder in folder_paths.folder_subtree(session, folder.id)}
-
     if not source_exists:
         # Deliberate convergence: 004 legacy rows whose path was never on disk, and
         # scan/zip-created folders whose directory lives somewhere else. Only rows
-        # change here; nothing is created, moved or deleted. For scan/zip folders
-        # the database then claims a path where nothing exists, which later-phase
-        # work owns.
+        # change here; nothing is created, moved or deleted - and because nothing
+        # moves, no move ledger entry is opened either: a ledger row for a
+        # relocation that never happened would claim an undo that has no bytes to
+        # fold back. For scan/zip folders the database then claims a path where
+        # nothing exists, which later-phase work owns.
         try:
-            apply_folder_paths(
-                session,
-                folders,
-                folder_paths.derive_subtree_paths(session, folder, new_parent_relative, new_segment),
+            move_service.apply_rows(
+                [move_service.Pair(old_relative, new_relative, move_service.KIND_DIRECTORY)],
+                session=session,
+                root=storage_root(),
             )
-            apply_asset_path_rewrites(session, plan_asset_rewrites(session, old_relative, new_relative))
             _stage_folder_changes(session, folder, previous_name, previous_parent_id, name, parent_id, audit_ctx)
             session.commit()
         except IntegrityError:
@@ -552,35 +571,43 @@ def move_folder(
         raise HTTPException(status_code=409, detail=f"Storage path already exists: {new_relative}")
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.rename(source, target)
+        move_service.move(
+            [move_service.Pair(old_relative, new_relative, move_service.KIND_DIRECTORY)],
+            intent=f"folder.move:{folder.id}:{old_relative}->{new_relative}",
+            key=folder.id,
+            ctx=audit_ctx,
+            events=_folder_change_events(folder.id, previous_name, previous_parent_id, name, parent_id),
+            session=session,
+            root=storage_root(),
+        )
+        session.commit()
+    except move_service.MoveRefused as refusal:
+        # The primitive refused before the first byte, so nothing moved and there
+        # is nothing to fold back; the detail is today's own sentence.
+        session.rollback()
+        raise HTTPException(status_code=refusal.status_code, detail=refusal.detail) from None
     except FileNotFoundError:
-        # TOCTOU: the source vanished between the stat() and the rename
+        # TOCTOU: the source vanished between the stat() and the move
+        session.rollback()
         raise HTTPException(status_code=409, detail=f"Storage path already exists: {new_relative}") from None
     except OSError as error:
+        session.rollback()
         if error.errno in _DESTINATION_OCCUPIED_ERRNOS:
             # TOCTOU: the destination appeared between the exists() check and
-            # the rename. POSIX rename would silently replace an empty
-            # directory; that cannot lose bytes, and the unique storage_path
-            # index is the record-level guard, so only the error cases are
-            # translated. Anything else is a real filesystem failure and keeps
-            # its 500.
+            # the move. POSIX rename would silently replace an empty directory;
+            # that cannot lose bytes, and the unique storage_path index is the
+            # record-level guard, so only the error cases are translated.
+            # Anything else - EXDEV above all - is a real filesystem failure and
+            # keeps its 500, which is what this door has always answered.
             raise HTTPException(status_code=409, detail=f"Storage path already exists: {new_relative}") from None
         raise
-
-    try:
-        apply_folder_paths(
-            session,
-            folders,
-            folder_paths.derive_subtree_paths(session, folder, new_parent_relative, new_segment),
-        )
-        apply_asset_path_rewrites(session, plan_asset_rewrites(session, old_relative, new_relative))
-        _stage_folder_changes(session, folder, previous_name, previous_parent_id, name, parent_id, audit_ctx)
-        session.commit()
     except BaseException as error:
         session.rollback()
         # The directory already moved while the rows did not commit; a crash in
         # this window leaves disk and database out of sync, so the undo below is
-        # best effort.
+        # best effort. It is a bare rename and not the move primitive: a rollback
+        # is not a product move, and the primitive would refuse it for the very
+        # clobber this window exists to undo.
         try:
             os.rename(target, source)
         except OSError:

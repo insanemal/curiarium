@@ -799,6 +799,55 @@ def _migration_015_operations_core(conn: Connection) -> None:
     )
 
 
+def _migration_016_move_ledger(conn: Connection) -> None:
+    """The move primitive's own ledger: one row per `intent`.
+
+    This is the move ledger, one row per `intent`. It is append-only in the
+    narrow sense that no column of an earlier migration changes: `move_ledger`
+    is a new table and 016 adds no column to an existing one.
+
+    The UNIQUE index on `intent` is what makes "same intent = same intent" a
+    database fact rather than a convention: the same intent over the same
+    `pairs_json` is a no-op, and the same intent over different pairs is refused
+    by the reader, which cannot be expressed as a key.
+
+    `applied` and `undone` are 0/1 flags rather than a status vocabulary because
+    there are exactly two edges, and a status column would invite a third name
+    that means nothing. `landed` is how many pairs a stopped run got through,
+    mirroring the arrange ledger's `done`.
+
+    A row is pruned (`move_service.prune`), so this table is a bounded tail and
+    `audit_events` (migration 006) stays the permanent record of what moved.
+
+    Every object is `IF NOT EXISTS`, so re-applying 016 is harmless, like
+    004-015.
+    """
+    conn.exec_driver_sql(
+        """CREATE TABLE IF NOT EXISTS move_ledger (
+            id VARCHAR NOT NULL PRIMARY KEY,
+            intent VARCHAR NOT NULL,
+            key VARCHAR NOT NULL,
+            pairs_json TEXT NOT NULL,
+            landed INTEGER NOT NULL DEFAULT 0,
+            applied INTEGER NOT NULL DEFAULT 0,
+            undone INTEGER NOT NULL DEFAULT 0,
+            superseded_by VARCHAR,
+            created_at VARCHAR NOT NULL
+        )"""
+    )
+    conn.exec_driver_sql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_move_ledger_intent_unique "
+        "ON move_ledger(intent)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_move_ledger_created_at "
+        "ON move_ledger(created_at)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_move_ledger_undone ON move_ledger(undone)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial_schema", _migration_001_initial_schema),
     Migration(2, "nested_folders_and_mount_sources", _migration_002_nested_folders_and_mount_sources),
@@ -815,6 +864,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(13, "asset_thumb_version", _migration_013_asset_thumb_version),
     Migration(14, "asset_attribution", _migration_014_asset_attribution),
     Migration(15, "operations_core", _migration_015_operations_core),
+    Migration(16, "move_ledger", _migration_016_move_ledger),
 )
 
 

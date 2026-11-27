@@ -30,6 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, select
 
 import audit
+import bundle_service
 import operations_service
 import project_create_service
 from db import engine
@@ -372,17 +373,26 @@ def _project_id_from_step(session: Session, operation_id: str, step_index: int) 
 
 
 def _create_project(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `create-project` step body: `project_create_service.create_project`, one verb.
+
+    The members are handed IN from the step's args rather than re-resolved from the
+    key, and that is the review contract, not an optimisation: the operator approved
+    a plan that names its members, so the runner must execute that set - a rescan
+    between the review and the run would otherwise attach files nobody approved.
+    The verb still owns the exclusion, the group merge, the dedupe and the write, so
+    a second run of this step is `already_created` with the project the first run
+    made instead of a duplicate.
+    """
     with Session(engine) as session:
-        outcome = project_create_service.create_project_from_members(
+        outcome = bundle_service.create_project(
             session,
+            key=args["key"],
             name=args["name"],
-            origin=project_create_service.ORIGIN_DETECTION,
             members=[
                 project_create_service.MemberCandidate(entry["asset_id"], entry["path"])
                 for entry in args["members"]
             ],
             marker={"key": args["key"], "detector": "operations", "rel_dir": args["key"]},
-            dedupe=project_create_service.Dedupe(key=args["key"], name=args["name"]),
             cover_asset_id=args["cover_asset_id"],
         )
     if outcome.status == project_create_service.STATUS_REFUSED:

@@ -241,3 +241,20 @@ class OperationLock(SQLModel, table=True):
   path: str = Field(primary_key=True)
   operation_id: str = Field(foreign_key="operation.id")
   created_at: str
+
+
+# move_ledger is created by migration 016; this class only describes it for
+# typed queries and must never create the table itself (nothing in this app
+# calls create_all). `applied`/`undone` are 0/1 flags, not a status vocabulary:
+# there are exactly two edges. `landed` is how far a stopped run got.
+class MoveLedger(SQLModel, table=True):
+  __tablename__ = "move_ledger"
+  id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+  intent: str
+  key: str
+  pairs_json: str
+  landed: int = Field(default=0)
+  applied: int = Field(default=0)
+  undone: int = Field(default=0)
+  superseded_by: Optional[str] = None
+  created_at: str

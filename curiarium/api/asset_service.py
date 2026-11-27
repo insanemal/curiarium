@@ -1,11 +1,9 @@
-import errno
 import io
 import json
 import logging
 import os
 import re
 import tempfile
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -20,6 +18,7 @@ from sqlmodel import Session, select
 
 import audit
 import folder_paths
+import move_service
 from asset_file_service import delete_all_asset_files
 from auth import AuthContext
 from config import IMPORT_MAX_BYTES, MOUNT_IMPORT_PATH
@@ -31,21 +30,6 @@ from schemas import ImportRequest
 from settings_service import get_storage_template
 
 log = logging.getLogger(__name__)
-
-# Serialises the no-hardlink fallback across this process's threads. Coarse on
-# purpose: the fallback is rare and a per-destination dict would grow unbounded.
-_FALLBACK_MOVE_LOCK = threading.Lock()
-# Errnos meaning "this filesystem cannot create hardlinks": SMB/FAT and
-# unprivileged Windows mounts refusing link() as a matter of policy (EPERM,
-# EACCES); filesystems with no hardlink support at all (ENOTSUP, EOPNOTSUPP);
-# the link count cap (EMLINK); and FUSE/SMB servers that report "not
-# implemented" or "invalid argument" instead of a dedicated errno (ENOSYS,
-# EINVAL). EXDEV is included for completeness even though a rename cannot cross
-# filesystems either: falling back only re-raises the same EXDEV. Every other
-# OSError propagates unchanged.
-_HARDLINK_UNSUPPORTED_ERRNOS = frozenset(
-    {errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK, errno.ENOSYS, errno.EINVAL}
-)
 
 STORAGE_TEMPLATE_TOKENS = ("folder", "collection", "tags", "creator", "model", "name", "filename", "id")
 # Retired from the settings token picker (ADR 0003) but still validated and
@@ -379,89 +363,44 @@ def _relative_storage_path(path: Path) -> str:
 
 
 def _hardlink_move(old_path: Path, new_path: Path) -> None:
-    """Move bytes by linking then unlinking, so new_path is either created by us or the move fails.
+    """Move bytes by linking then unlinking. Owned by `move_service`; kept here as the name this module's callers use.
 
-    ``os.link`` is atomic and refuses an existing destination (file or
-    directory), so concurrent moves onto one target cannot overwrite committed
-    bytes. It preserves the inode, so content and mtime are unchanged; the
-    unlink then retires the old name. A failed unlink rolls the half-move back:
-    after this function the bytes have exactly one name, never two and never zero.
+    A one-line delegation and not a second implementation: `move_service` is the
+    one arbiter of the bytes (`archive_service` and `snapshot_service` import
+    `_move_without_clobber` from HERE, so the names stay where they are found).
     """
-    os.link(old_path, new_path)
-    try:
-        old_path.unlink()
-    except OSError:
-        new_path.unlink(missing_ok=True)
-        raise
+    move_service._hardlink_move(old_path, new_path)
 
 
 def _move_without_clobber(old_path: Path, new_path: Path) -> bool:
     """Move bytes so new_path is either created by us or left untouched.
 
-    ``os.link`` is the primary arbiter: it is atomic and refuses an existing
-    destination, so concurrent moves onto one target cannot overwrite committed
-    bytes. The fallback for filesystems that cannot hardlink re-checks under a
-    lock and renames; the lock serialises this process's moving threads only,
-    which is why hardlinking is the default and this is the fallback. Either way
-    an occupied destination is never overwritten: False is returned.
+    A one-line delegation to `move_service.move_bytes`, which is the one
+    arbiter: `os.link` primary because it is atomic and refuses an existing
+    destination, the locked `os.rename` fallback for a filesystem that cannot
+    hardlink (and for a directory, which `os.link` refuses with `EPERM`). False
+    means the destination was occupied; `EXDEV` surfaces as a bare `OSError`
+    carrying that errno, exactly as the rename always did.
 
-    A directory also arrives here and takes the fallback: ``os.link`` on a
-    directory raises ``EPERM``, which ``_HARDLINK_UNSUPPORTED_ERRNOS`` treats as
-    "this filesystem cannot hardlink", so the locked ``os.rename`` moves the
-    whole tree. That single errno is what makes a directory move work without a
-    second mover or a copy path.
+    The two cross-boundary importers are deliberate and stay: `archive_service`
+    publishes a staged extraction and `snapshot_service` publishes a downloaded
+    file, and both need the no-clobber publish without a ledger entry.
     """
-    try:
-        _hardlink_move(old_path, new_path)
-        return True
-    except FileExistsError:
-        return False
-    except OSError as error:
-        # EPERM is the directory path: os.link refuses directories outright, and
-        # the rename below is the only way to move one without a copy tree.
-        if error.errno not in _HARDLINK_UNSUPPORTED_ERRNOS:
-            raise
-    with _FALLBACK_MOVE_LOCK:
-        if new_path.exists():
-            return False
-        os.rename(old_path, new_path)
-        return True
+    return move_service.move_bytes(old_path, new_path)
 
 
 def move_managed_file(old_path: Path, new_path: Path) -> bool:
-    """Move one managed file or directory and prune the directory it vacated.
+    """Publish one managed file or directory into its path and prune the directory it vacated.
 
-    This is the ONE mover: a file, a folder and an arrange's directory move all
-    reach here, and there is no second mover and no copy path. A directory is
-    moved whole with its subtree - the arbiter is ``os.link``, which raises
-    ``EPERM`` on a directory, and the locked ``os.rename`` fallback then renames
-    the tree in one step. ``EXDEV`` (and any other error the fallback raises) is
-    not swallowed: it propagates as a bare ``OSError`` for the caller to
-    translate, because a cross-device move would need the copy path this
-    function deliberately does not have.
-
-    Only an explicit rename (same directory) or a folder move reaches here; a
-    metadata edit never does, which is what keeps the storage template from
-    relocating files as a side effect. Whatever the interleaving, new_path is
-    either created by us or the move fails: committed bytes are never overwritten.
+    The absolute-path edge of the move primitive: `routers/uploads` and
+    `asset_file_service` publish streamed bytes through it. It writes NO ledger
+    entry - publishing an upload is not a product move, and a row per upload would
+    bury the moves an operator made. Everything that relocates an operator's file
+    (a rename, a folder change, an arrange, a folder rename) goes through
+    `move_service.move`, which records the ledger entry and the rows in the
+    caller's transaction.
     """
-    if old_path.resolve() == new_path.resolve():
-        return False
-    relative = _relative_storage_path(new_path)
-    # Friendly fast path with today's 409 precedence; exists() is a read, so it
-    # decides nothing once two moves race - the link in _move_without_clobber is
-    # the arbiter.
-    if new_path.exists():
-        raise HTTPException(status_code=409, detail=f"Storage path already exists: {relative}")
-    if not old_path.exists():
-        # mount no-copy rows own no managed file: the row moves, the bytes do not.
-        return False
-    new_path.parent.mkdir(parents=True, exist_ok=True)
-    old_parent = old_path.parent
-    if not _move_without_clobber(old_path, new_path):
-        raise HTTPException(status_code=409, detail=f"Storage path already exists: {relative}")
-    prune_empty_storage_dirs(old_parent)
-    return True
+    return move_service.move_managed_file(old_path, new_path)
 
 
 def restore_moved_file(moved: bool, old_path: Path, new_path: Path) -> None:
@@ -496,10 +435,33 @@ def rename_asset_in_place(asset: Asset, old_path: Path, filename: str) -> bool:
 
     The storage template is never rendered here: only the basename changes, so a
     template containing {tags} or {creator} cannot move a file during a rename.
+
+    The move is `move_service.move`, inside the session the row already lives in
+    (the caller commits; a rollback takes the ledger row with the storage_path it
+    described), under an intent that names both ends so renaming back later is a
+    new intent rather than a refusal. A row with no bytes on disk - a mounted
+    no-copy asset, which the routes refuse to rename anyway - has nothing to
+    relocate and nothing to record, so it keeps `move_managed_file`'s exact
+    answer including its 409 precedence.
     """
     new_path = old_path.parent / filename
-    moved = move_managed_file(old_path, new_path)
-    asset.storage_path = _relative_storage_path(new_path)
+    target = _relative_storage_path(new_path)
+    if not old_path.exists():
+        move_managed_file(old_path, new_path)
+        asset.storage_path = target
+        return False
+    session = Session.object_session(asset)
+    if session is None:
+        moved = move_managed_file(old_path, new_path)
+    else:
+        source = _relative_storage_path(old_path)
+        moved = move_service.move(
+            [move_service.Pair(source, target, move_service.KIND_FILE)],
+            intent=f"asset.rename:{asset.id}:{source}->{target}",
+            key=asset.id,
+            session=session,
+        ).moved
+    asset.storage_path = target
     return moved
 
 
@@ -538,11 +500,39 @@ def folder_storage_directory(session: Session, folder_id: Optional[str], exclude
     return (STORAGE / relative) if relative else STORAGE
 
 
-def move_asset_to_folder(asset: Asset, session: Session, old_path: Path, folder_id: Optional[str]) -> bool:
-    """Move an asset's managed file into the directory its new folder owns."""
+def move_asset_to_folder(
+    asset: Asset,
+    session: Session,
+    old_path: Path,
+    folder_id: Optional[str],
+    *,
+    audit_ctx: Optional[audit.AuditContext] = None,
+    events: tuple = (),
+) -> bool:
+    """Move an asset's managed file into the directory its new folder owns.
+
+    Through `move_service.move`, in the CALLER's session: the audit row, the
+    ledger row, the asset's `storage_path` and the move's own bytes are one
+    transaction, so a rollback cannot leave the ledger describing a relocation
+    the database never agreed to. When the target is where the file already is
+    the pair would say nothing, so no ledger row is written and only the row is
+    (re)assigned, which is what this function always did.
+    """
     new_path = folder_storage_directory(session, folder_id, exclude_asset_id=asset.id) / asset.filename
-    moved = move_managed_file(old_path, new_path)
-    asset.storage_path = _relative_storage_path(new_path)
+    target = _relative_storage_path(new_path)
+    source = _relative_storage_path(old_path)
+    if target == source:
+        asset.storage_path = target
+        return False
+    moved = move_service.move(
+        [move_service.Pair(source, target, move_service.KIND_FILE)],
+        intent=f"asset.folder:{asset.id}:{source}->{target}",
+        key=asset.id,
+        ctx=audit_ctx,
+        events=events,
+        session=session,
+    ).moved
+    asset.storage_path = target
     return moved
 
 
@@ -550,7 +540,8 @@ def move_asset_to_folder_by_id(asset_id: str, folder_id: Optional[str], *, audit
     """Move one asset into a folder: the single-item and batch routes share this.
 
     Order matters and is why this is not inlined in the routes. The audit row is
-    staged before the bytes move, so a failed audit insert can never leave the
+    staged before the bytes move - `move_service.move` stages it after the ledger
+    row and before the first relocation - so a failed audit insert can never leave the
     file relocated while the row still describes the old location. The no-clobber
     move must happen before ``folder_id`` is assigned, otherwise an autoflush
     exposes the moving asset as a witness for its own target directory, and a
@@ -578,10 +569,12 @@ def move_asset_to_folder_by_id(asset_id: str, folder_id: Optional[str], *, audit
         else:
             unique_model_name(s, asset.name, None, exclude_id=asset.id)
         if folder_id != previous_folder_id:
-            audit.stage(s, audit_ctx, audit.Event(audit.ASSET_MOVE, asset_id, {"folder_id": folder_id}))
+            events = (audit.Event(audit.ASSET_MOVE, asset_id, {"folder_id": folder_id}),)
+        else:
+            events = ()
         # Move before assigning folder_id: an autoflush must not expose the moving
         # asset as a witness for its own target directory.
-        moved = move_asset_to_folder(asset, s, old_path, folder_id)
+        moved = move_asset_to_folder(asset, s, old_path, folder_id, audit_ctx=audit_ctx, events=events)
         asset.folder_id = folder_id
         new_path = managed_asset_path(asset)
         # Rollback expires the row, so the conflict classifier gets locals.

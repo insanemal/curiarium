@@ -1110,6 +1110,139 @@ def _members_of(key: str, assets: Sequence[RegisteredAsset]) -> MembersOf:
     return MembersOf(entries=tuple(entries))
 
 
+# The public name for the member rule (Mf-215n). An ALIAS, never a copy: the
+# operations planner, the create primitive and any later door must ask one
+# function, or two doors will eventually disagree about who is a member of a
+# bundle. `_members_of` stays because the create door and thirty tests name it,
+# and a rename here would be a rename of the rule's witness, not of the rule.
+members_of = _members_of
+
+
+def attached_by_group(key: str, members: Sequence["project_create_service.MemberCandidate"], model_ids: Sequence[str]) -> Dict[str, int]:
+    """How many of a create's counted MODELs land in each of the bundle's groups.
+
+    The answer the marker's `attached` field carries, computed once: the bucket is
+    the first path segment after the key, which is the engine's own grouping and
+    the same vocabulary `wire_groups`/`marker_groups` speak. `model_ids` is the
+    answer to "which of these members is a printed part" - the create door reads it
+    off `MembersOf.by_role(library_scan.MODEL)`, the operations planner off its own
+    role walk - and passing it in is what keeps this helper from deciding the role
+    question a second time.
+
+    A member that is not in `model_ids` is not counted; a member whose path is not
+    under `key` would bucket wrongly, and `members_of` has already refused that
+    case at the door that built the list.
+    """
+    wanted = set(model_ids)
+    prefix = f"{key}/"
+    counts: Dict[str, int] = {}
+    for member in members:
+        if member.asset_id not in wanted:
+            continue
+        group_name = member.path[len(prefix):].split("/", 1)[0]
+        counts[group_name] = counts.get(group_name, 0) + 1
+    return counts
+
+
+def create_project(
+    session: Session,
+    *,
+    key: str,
+    name: Optional[str] = None,
+    members: Optional[Sequence[project_create_service.MemberCandidate]] = None,
+    model_ids: Optional[Sequence[str]] = None,
+    marker: Optional[dict] = None,
+    groups: Sequence[Mapping] = (),
+    excluded_groups: Sequence[str] = (),
+    cover_asset_id: Optional[str] = None,
+    dedupe: Optional[project_create_service.Dedupe] = None,
+    require_members: bool = True,
+    refuse: Optional[str] = None,
+    asset_index: Optional[Mapping[str, Tuple[str, ...]]] = None,
+) -> project_create_service.CreateOutcome:
+    """Create the project a library PATH describes, once, whatever the caller re-tries.
+
+    This lives here, beside `members_of` and `attached_by_group`, because the verb
+    asks the member rule and the marker vocabulary; `project_create_service` owns the
+    dedupe and the single write it delegates to, and it deliberately cannot name this
+    module - the archive-extract door imports it, and
+    `tests/test_archive_project.py` keeps every bundle module out of that door's
+    static import closure.
+
+    The order is the contract:
+
+      1. resolve the path's members - every registered file under `key`, with the
+         role the scan gave it - unless the door hands in its own set (`members`),
+         which is what the operations runner does so that the step it executes is
+         the step the operator reviewed;
+      2. drop the members an excluded group owns, so a group the operator said is
+         not part of this product can never be a member of it;
+      3. merge the groups into the marker: `marker_groups` with the
+         `attached_by_group` counts, which is the same pairing the detection door
+         and the adopt path use, so a project's `attached` means one thing whichever
+         door made it;
+      4. ask the dedupe with the identities this verb holds - the path's marker key
+         and the project name - and then write through
+         `project_create_service.create_project_from_members`, so the project and its
+         memberships land in
+         one transaction.
+
+    It writes NO audit row, and cannot: there is no `project.create` action in
+    `audit.ACTIONS`, and the ticket that built this primitive was forbidden to add
+    one. The door that asked audits - `bundle.create` for the detection door, the
+    operation's own lifecycle rows for the operations runner - so the record exists
+    and it is the door's, which is also where the actor and the request id live.
+
+    It does not pick the cover. A cover is a choice made from evidence the path does
+    not hold - the artifact's facts, the operator's click, a recognised preview - so
+    the door hands one in and this verb only guarantees that a cover outside the
+    member set is refused (the guard in `create_project_from_members`).
+    """
+    key = (key or "").strip().strip("/")
+    if not key:
+        raise ValueError("a project is created from a library-relative path, not the library root")
+
+    if members is None:
+        entries = members_of(key, registered_assets(session, key)).entries
+        members = [project_create_service.MemberCandidate(entry.asset.id, entry.asset.path) for entry in entries]
+        model_ids = [entry.asset.id for entry in entries if entry.role == library_scan.MODEL]
+    model_ids = list(model_ids or ())
+
+    prefixes = tuple(f"{key}/{group}" for group in excluded_groups if group)
+    if prefixes:
+        members = [member for member in members if not member.path.startswith(prefixes)]
+        kept = {member.asset_id for member in members}
+        model_ids = [asset_id for asset_id in model_ids if asset_id in kept]
+
+    stored = dict(marker or {})
+    stored.setdefault("key", key)
+    stored.setdefault("rel_dir", key)
+    if groups:
+        stored["groups"] = marker_groups(
+            list(groups),
+            attached=attached_by_group(key, members, model_ids),
+            excluded=set(excluded_groups),
+        )
+
+    resolved_name = (name or "").strip() or key.rsplit("/", 1)[-1]
+    return project_create_service.create_project_from_members(
+        session,
+        name=resolved_name,
+        origin=project_create_service.ORIGIN_DETECTION,
+        members=members,
+        # ALWAYS a marker: this verb's identity is the path, and the marker's `key`
+        # is the only place that identity is written. A create from a path with no
+        # marker would be findable only by name, which is how one folder became two
+        # projects with two names.
+        marker=stored,
+        dedupe=dedupe if dedupe is not None else project_create_service.Dedupe(key=key, name=resolved_name),
+        cover_asset_id=cover_asset_id,
+        require_members=require_members,
+        refuse=refuse,
+        asset_index=asset_index,
+    )
+
+
 def _own_paths(key: str, candidate: BundleCandidate) -> set:
     """The storage paths the row's own subtree listing names, never a child's."""
     return {f"{key}/{rel_path}" for rel_path, _size in candidate.files}
@@ -2453,16 +2586,12 @@ def _create_one(
         # a second membership test - the roles came from `classify_entry` once, in
         # `_members_of`, and this body holds no `classify_entry` call at all.
         model_assets = [entry.asset.id for entry in member_set.by_role(library_scan.MODEL)]
-        attached = set(model_assets)
         # Bucket the attach set by group once, so `attached` below is a lookup
-        # rather than a prefix scan repeated for every group.
-        models_by_group: Dict[str, int] = {}
+        # rather than a prefix scan repeated for every group. `attached_by_group`
+        # is the same bucketing the adopt path asks, so a created project and an
+        # adopted one count their groups with one implementation.
+        models_by_group = attached_by_group(key, members, model_assets)
         key_prefix = f"{key}/"
-        for member in members:
-            if member.asset_id not in attached:
-                continue
-            group_name = member.path[len(key_prefix):].split("/", 1)[0]
-            models_by_group[group_name] = models_by_group.get(group_name, 0) + 1
         cover = row["cover"]
         if cover_choice is not None and cover_choice["mode"] == "none":
             cover = _cover_none_fields(None, COVER_NONE)

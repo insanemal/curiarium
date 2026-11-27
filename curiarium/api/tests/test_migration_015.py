@@ -187,13 +187,17 @@ def test_a_v14_database_upgrades_without_touching_its_rows(tmp_path: Path) -> No
 
 def test_re_applying_015_is_a_no_op(tmp_path: Path) -> None:
     database_engine = sqlite_engine(tmp_path / "reapply.db")
-    assert run_migrations(database_engine) == 15
+    # `MIGRATIONS[-1].version`, not the literal 15: every other migration test
+    # states "a full run reaches the current schema" that way, and a literal here
+    # turns red on the next appended migration for no reason of its own (it did,
+    # at 016). The assertions are unchanged in number and meaning.
+    assert run_migrations(database_engine) == MIGRATIONS[-1].version
 
     with database_engine.begin() as conn:
         insert_operation(conn, "op-1", status="queued")
 
     # A second `run_migrations` sees 15 recorded and applies nothing.
-    assert run_migrations(database_engine) == 15
+    assert run_migrations(database_engine) == MIGRATIONS[-1].version
     # A direct apply of the migration function is harmless (`IF NOT EXISTS`) and
     # keeps the row it finds.
     with database_engine.begin() as conn:
