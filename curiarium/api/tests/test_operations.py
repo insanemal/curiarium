@@ -10,7 +10,9 @@ not accepted:
 * **idempotency, both ways** - the same key with the same plan answers the same
   operation id AND leaves exactly one row and one audit row (a fresh row per
   call would fail the row count); the same key with a different plan answers 409
-  whose detail names both digests (a 202 would fail).
+  whose detail names both digests (a 202 would fail). A replay is answered from
+  the key first, so it still answers the same operation after the operation
+  itself moved the review the digest was taken over.
 * **lock contention, both ways** - two operations declaring one path: one
   dispatch pass promotes exactly one (2 would fail) and the other holds NO lock
   row; two operations on disjoint paths both reach a `threading.Barrier(2)`
@@ -449,6 +451,106 @@ def test_the_same_key_with_a_different_plan_is_a_409_naming_both_digests(
     with Session(engine) as session:
         stored = session.exec(select(Operation)).one()
     assert stored.plan_digest in detail
+    assert "create-project" in detail
+    assert f"'{WIDGET}'" in detail and f"'{GADGET}'" in detail
+
+
+def test_the_key_is_asked_before_the_plan_is_recomputed(
+    client: TestClient, storage: Path, seeded: list[str]
+) -> None:
+    plan = plan_of(client)
+    key = uuid4().hex
+    first = submit_of(client, plan, key)
+
+    # One more registered file moves the digest the submitted plan id carries.
+    body = b"solid extra\nendsolid extra\n"
+    (storage / WIDGET / "extra.stl").write_bytes(body)
+    with Session(engine) as session:
+        session.add(
+            Asset(
+                id=str(uuid4()),
+                name="extra",
+                filename="extra.stl",
+                mime="model/stl",
+                size=len(body),
+                storage_path=f"{WIDGET}/extra.stl",
+            )
+        )
+        session.commit()
+
+    with pytest.raises(HTTPException) as stale:
+        operations_service.recompute_plan(plan["plan_id"])
+    assert stale.value.status_code == 409
+    assert stale.value.detail == operations_service.STALE_PLAN_MESSAGE
+
+    replay = submit_of(client, plan, key)
+
+    assert replay["id"] == first["id"]
+    assert replay["status"] == first["status"]
+
+    refused = client.post("/operations", json={"plan_id": plan["plan_id"], "idempotency_key": uuid4().hex})
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == operations_service.STALE_PLAN_MESSAGE
+    with Session(engine) as session:
+        assert len(session.exec(select(Operation)).all()) == 1
+        assert len(session.exec(select(OperationStep)).all()) == 3
+    assert len(audit_rows(audit.OPERATION_SUBMIT, first["id"])) == 1, "a replay must not write a second row"
+
+
+def test_a_replay_of_a_finished_operation_answers_it_and_starts_no_second_one(
+    client: TestClient, seeded: list[str]
+) -> None:
+    plan = plan_of(client)
+    key = uuid4().hex
+    first = submit_of(client, plan, key)
+    run_to_completion()
+
+    assert operation_of(client, first["id"])["status"] == "done"
+    with Session(engine) as session:
+        assert len(session.exec(select(Project)).all()) == 1
+        project_id = session.exec(select(Project)).one().id
+        members = {(row.project_id, row.asset_id) for row in session.exec(select(ProjectAsset))}
+    assert {project for project, _ in members} == {project_id}, "the seeded members belong to that one project"
+
+    replay = submit_of(client, plan, key)
+
+    assert replay["id"] == first["id"]
+    assert replay["status"] == "done"
+    with Session(engine) as session:
+        assert len(session.exec(select(Operation)).all()) == 1, "a replay must not queue a second operation"
+        assert len(session.exec(select(OperationStep)).all()) == 3
+        assert len(session.exec(select(Project)).all()) == 1, "a replay must not create a second project"
+        replayed_members = {(row.project_id, row.asset_id) for row in session.exec(select(ProjectAsset))}
+    assert replayed_members == members, "a replay must not add or drop a membership"
+    assert len(audit_rows(audit.OPERATION_SUBMIT, first["id"])) == 1
+
+    # The review now names the project this operation created, so the plan the
+    # replay re-submitted would be refused as stale - which is why the key has
+    # to be asked before the plan is recomputed.
+    with pytest.raises(HTTPException) as stale:
+        operations_service.recompute_plan(plan["plan_id"])
+    assert stale.value.status_code == 409
+    assert stale.value.detail == operations_service.STALE_PLAN_MESSAGE
+
+
+def test_the_same_key_with_a_different_plan_is_a_409_after_the_first_one_finished(
+    client: TestClient, storage: Path, seeded: list[str]
+) -> None:
+    seed_tree(storage, GADGET)
+    key = uuid4().hex
+    first = submit_of(client, plan_of(client, WIDGET), key)
+    run_to_completion()
+    gadget = plan_of(client, GADGET)
+
+    conflict = client.post("/operations", json={"plan_id": gadget["plan_id"], "idempotency_key": key})
+
+    assert conflict.status_code == 409
+    detail = conflict.json()["detail"]
+    with Session(engine) as session:
+        stored = session.get(Operation, first["id"]).plan_digest
+    assert stored in detail
+    assert gadget["plan_id"].rsplit(".", 1)[1] in detail
     assert "create-project" in detail
     assert f"'{WIDGET}'" in detail and f"'{GADGET}'" in detail
 

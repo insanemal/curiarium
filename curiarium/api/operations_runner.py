@@ -373,7 +373,7 @@ def _project_id_from_step(session: Session, operation_id: str, step_index: int) 
 
 
 def _create_project(operation_id: str, step_index: int, args: dict) -> dict:
-    """The `create-project` step body: `project_create_service.create_project`, one verb.
+    """The `create-project` step body: `bundle_service.create_project`, one verb.
 
     The members are handed IN from the step's args rather than re-resolved from the
     key, and that is the review contract, not an optimisation: the operator approved

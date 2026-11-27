@@ -387,16 +387,16 @@ def _plan_create_project(session: Session, target: str, params: dict) -> Tuple[l
 # Submit -----------------------------------------------------------------------
 
 
-def _existing_or_conflict(existing: Operation, plan: Plan, key: str) -> Tuple[Operation, bool]:
-    if existing.plan_digest == plan.digest:
+def _existing_or_conflict(existing: Operation, intent: dict, digest: str, key: str) -> Tuple[Operation, bool]:
+    if existing.plan_digest == digest:
         return existing, False
     raise HTTPException(
         status_code=409,
         detail=(
             f"idempotency_key {key!r} was already used for workflow {existing.workflow!r} "
             f"on target {existing.target!r} with plan digest {existing.plan_digest}; "
-            f"this plan is workflow {plan.intent['workflow']!r} on target "
-            f"{plan.intent['target']!r} with plan digest {plan.digest}"
+            f"this plan is workflow {intent['workflow']!r} on target "
+            f"{intent['target']!r} with plan digest {digest}"
         ),
     )
 
@@ -418,11 +418,24 @@ def submit(
     key = (idempotency_key or "").strip()
     if not key:
         raise HTTPException(status_code=400, detail="idempotency_key is required")
-    plan = recompute_plan(plan_id)
+    # The key is asked FIRST, before the plan is recomputed, because a retry
+    # after a timeout must reach the row it already made. `recompute_plan`
+    # refuses a plan whose digest moved, and `create-project`'s review carries
+    # `existing_project_id` and `creates`, which move as a consequence of the
+    # operation itself - so recomputing first made every replay of a finished
+    # operation a dead-end 409, and re-planning then yields a different digest
+    # that the same key refuses too. This is safe because a replay that answers
+    # here resolves to a row that already exists, so no new work is queued and
+    # no second operation is created, while the stale-plan guard still runs for
+    # every key that finds no row - which is the only place a stale plan could
+    # queue unreviewed work.
+    intent, digest = decode_plan_id(plan_id)
 
     existing = session.exec(select(Operation).where(Operation.idempotency_key == key)).first()
     if existing is not None:
-        return _existing_or_conflict(existing, plan, key)
+        return _existing_or_conflict(existing, intent, digest, key)
+
+    plan = recompute_plan(plan_id)
 
     operation = Operation(
         workflow=plan.intent["workflow"],
@@ -478,7 +491,7 @@ def submit(
         existing = session.exec(select(Operation).where(Operation.idempotency_key == key)).first()
         if existing is None:
             raise
-        return _existing_or_conflict(existing, plan, key)
+        return _existing_or_conflict(existing, plan.intent, plan.digest, key)
     session.refresh(operation)
     return operation, True
 
