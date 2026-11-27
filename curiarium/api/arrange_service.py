@@ -1228,7 +1228,17 @@ def undo(arrange_id: str, ctx: audit.AuditContext) -> dict:
             # The byte arbiter, not the ledger-writing verb: the arrange ledger in
             # the project marker is this undo's record, and its `undone` flag is
             # what makes the second undo a 409.
-            move_service.move_bytes(target, source)
+            if not move_service.move_bytes(target, source):
+                # `has_source` was false a moment ago and the old name is taken now:
+                # `move_bytes` refuses rather than clobber, and the two ends are
+                # present again by the time we answer - the same ambiguity the
+                # check above refuses, so it gets the same sentence. Without this
+                # the fold would prune, restore every row onto the old name and
+                # stamp `undone` over a pair whose bytes never left the target.
+                raise HTTPException(
+                    status_code=409,
+                    detail=f'cannot undo: "{entry[0]}" is present at both ends; refusing to guess',
+                )
             folder_service.prune_empty_storage_dirs(target.parent)
         elif has_target and has_source:
             raise HTTPException(

@@ -522,3 +522,56 @@ def test_an_ambiguous_fold_refuses_and_leaves_the_tree_alone(
     assert "both ends" in detail
     assert relative_paths(isolated_storage) == before_tree
     assert folder_paths(client, admin) == before_rows
+
+
+def test_a_claim_mid_fold_is_refused_and_the_fold_is_not_recorded(
+    client: TestClient, admin: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: undo trusting `has_source` when the arbiter says the old name was taken.
+
+    The falsifier: `move_service.move_bytes` returns False for the pair under fold,
+    which is what `os.link` answers when the old name `has_source` just called free
+    was claimed in the window between the check and the link. Ignoring that False (as
+    this undo did) folds nothing, prunes, restores every row onto the old name and
+    stamps `undone: True` - a row naming a file that does not exist, and a second
+    undo answering "already undone", so the lie is permanent.
+
+    Second instance of the defect class closed in
+    ``tests/test_move_service.py::test_undo_refuses_a_target_claimed_after_its_check_instead_of_lying``;
+    same hole, one call site away, on the arrange's own undo path.
+    """
+    series_tree(isolated_storage)
+    scan()
+    plan = preview(client, admin, SERIES_KEY, "one-project")
+    applied = apply_plan(client, admin, plan).json()
+    # The harness's moves are directory moves (`kind == "dir"`), so the pair under
+    # fold - the one `undo` hands the arbiter - is `SERIES_KEY` -> `SERIES_TARGET`,
+    # not a lone file inside them.
+    source_relative = SERIES_KEY
+    target_relative = SERIES_TARGET
+    assert (isolated_storage / target_relative).exists(), "the forward move put the bytes here"
+    before_tree = relative_paths(isolated_storage)
+    before_rows = asset_paths()
+    real_move_bytes = move_service.move_bytes
+
+    def claimed(source: Path, target: Path) -> bool:
+        # Free to `has_source`'s read, occupied by the time the arbiter runs: the
+        # window a check-then-act cannot close.
+        if Path(target) == isolated_storage / source_relative:
+            return False
+        return real_move_bytes(source, target)
+
+    monkeypatch.setattr(move_service, "move_bytes", claimed)
+
+    response = undo_arrange(client, admin, applied["arrange_id"])
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert source_relative in detail
+    assert "both ends" in detail and "refusing to guess" in detail
+    assert relative_paths(isolated_storage) == before_tree, "the refusal moves nothing"
+    assert (isolated_storage / target_relative).exists(), "the bytes stay where the forward move left them"
+    assert not (isolated_storage / source_relative).exists()
+    assert asset_paths() == before_rows, "a refused fold restores no row"
+    assert all((isolated_storage / path).exists() for path in before_rows), "every row still names a file that exists"
+    assert not ledger_for_plan(client, admin, plan["plan_id"]).get("undone"), "the fold is not recorded, so a retry can still try"
