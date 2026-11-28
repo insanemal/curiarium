@@ -664,7 +664,7 @@ function makeScanState(): LibraryScanState {
   };
 }
 
-/** The scan props a direct render needs; no writer, so no action renders. */
+/** The scan props a direct render needs; `canScan: false`, so no action renders. */
 function scanProps(): { scan: LibraryScanState; canScan: boolean; onScan: () => void } {
   return { scan: makeScanState(), canScan: false, onScan: vi.fn() };
 }
@@ -4432,10 +4432,30 @@ describe("BundleReviewView storage scan on an unresolved row", () => {
     expect(within(detail()).getByRole("button", { name: "Rescan storage folder" })).toBeTruthy();
   });
 
-  it("shows a contributor no scan action, because the scan is WRITE", () => {
-    renderView(makeState({ report: makeReport([legacyVase]) }), true, { canScan: false });
+  // The level claim that used to live here was the falsifier: the scan used to
+  // be WRITE, so a contributor was shown nothing. It is CONTRIBUTE now, so a
+  // contributor sees the action - and a mount can still withhold it by passing
+  // `canScan={false}`.
+  it("shows a contributor the scan action, because the scan is CONTRIBUTE", () => {
+    const state = makeState({ report: makeReport([legacyVase]) });
+    const view = renderView(state, true, { canScan: true });
 
     fireEvent.click(rowElement("Legacy_vase"));
+
+    expect(within(detail()).getByRole("button", { name: "Rescan storage folder" })).toBeTruthy();
+    expect(detail().querySelector('[data-scan-surface="detail"]')).toBeTruthy();
+
+    // The same mount withholds it on request: the prop is independent of the
+    // capability, so a mount that does not want the action passes `false`.
+    view.rerender(
+      <BundleReviewView
+        state={state}
+        canContribute
+        scan={makeScanState()}
+        canScan={false}
+        onScan={vi.fn()}
+      />,
+    );
 
     expect(within(detail()).queryByRole("button", { name: "Rescan storage folder" })).toBeNull();
     expect(detail().querySelector('[data-scan-surface="detail"]')).toBeNull();

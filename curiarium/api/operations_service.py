@@ -65,6 +65,7 @@ existing rule for an archive that became a folder.
 import base64
 import hashlib
 import json
+import math
 import os
 import posixpath
 from datetime import datetime, timedelta, timezone
@@ -134,9 +135,11 @@ MAX_SPLIT_MOVES = 400
 # Fails closed: `level_for_workflow` refuses a workflow with no row rather than
 # defaulting it to CONTRIBUTE, because an unclassified workflow is a bug.
 #
-# `library-scan` is deliberately WRITE although the rubric reads contribute: it
-# removes nothing, but it is an existing route whose capacity consequence is an
-# open question with the owner, so this slice does not widen it.
+# `library-scan` is CONTRIBUTE: the rubric's answer (Mf-gciy, 2026-11-27) - a
+# scan removes nothing. Its capacity consequence - an unbounded whole-root walk -
+# is paid for with bounded work in the planner instead of a higher rank:
+# `LIBRARY_SCAN_COOLDOWN_SECONDS` bounds the whole-root case and the plan's
+# `target` already carries a folder scope for the bounded one.
 WORKFLOW_LEVELS: dict[str, str] = {
     "create-project": permissions.CONTRIBUTE,
     "adopt": permissions.CONTRIBUTE,
@@ -148,7 +151,7 @@ WORKFLOW_LEVELS: dict[str, str] = {
     "enrich": permissions.CONTRIBUTE,
     "split-and-create": permissions.CONTRIBUTE,
     "relocate": permissions.CONTRIBUTE,
-    "library-scan": permissions.WRITE,
+    "library-scan": permissions.CONTRIBUTE,
 }
 
 
@@ -1501,6 +1504,79 @@ def _plan_extract(session: Session, target: str, params: dict) -> Tuple[list, di
 
 # --- library-scan -------------------------------------------------------------
 
+# One whole-library walk per window, charged to the LIBRARY rather than to the
+# submitter: a demoted account cannot reset its own allowance by losing its role,
+# and N contributors do not get N walks. The budget is charged on SUBMISSION, so
+# it bounds the queue as well as the disk. It is whole-root only
+# (`target == ""`): a folder walk is bounded by the folder, is serialised by its
+# declared path, never runs the library-wide folder backfill, and is the bounded
+# alternative the refusal names.
+LIBRARY_SCAN_COOLDOWN_SECONDS = 600
+
+# Every status a row can hold while it still counts against the window. A
+# cancelled scan charges only when it started: one cancelled before it ran walked
+# nothing and costs nothing.
+CHARGING_SCAN_STATUSES = frozenset(
+    {STATUS_QUEUED, STATUS_RUNNING, STATUS_CANCELLING, STATUS_DONE, STATUS_FAILED}
+)
+
+
+def _charges_the_library_scan_budget(operation: Operation) -> bool:
+    """Whether one `library-scan` row spent part of the library's scan allowance."""
+    if operation.status in CHARGING_SCAN_STATUSES:
+        return True
+    return operation.status == STATUS_CANCELLED and operation.started_at is not None
+
+
+def whole_root_scan_blocker(session: Session) -> Optional[Tuple[Operation, int]]:
+    """The newest whole-root scan inside the cooldown, and the seconds remaining.
+
+    `None` when a whole-root scan may be planned now. Rows are walked newest-first
+    and the walk stops at the first row that is either outside the window
+    (everything older is outside it too) or charges; a row inside the window that
+    spent nothing is skipped, because it spent nothing.
+    """
+    current = datetime.fromisoformat(now())
+    statement = (
+        select(Operation)
+        .where(Operation.workflow == "library-scan")
+        .where(Operation.target == "")
+        .order_by(Operation.created_at.desc(), Operation.id.desc())
+    )
+    for operation in session.exec(statement):
+        age = (current - datetime.fromisoformat(operation.created_at)).total_seconds()
+        if age >= LIBRARY_SCAN_COOLDOWN_SECONDS:
+            return None
+        if _charges_the_library_scan_budget(operation):
+            return operation, math.ceil(LIBRARY_SCAN_COOLDOWN_SECONDS - age)
+    return None
+
+
+def refuse_whole_root_scan_inside_cooldown(session: Session) -> None:
+    """Refuse a whole-root scan while the library's last one is inside the window.
+
+    A 429 rather than a 409: in this module a 409 means "the library changed,
+    re-review" or "no such folder", a different and actionable fact, while a rate
+    limit is its own fact and `Retry-After` is what a client honours. Raised from
+    the PLANNER, so both doors - `POST /operations/plan` and the submit-time
+    `recompute_plan` - refuse before a row exists.
+    """
+    blocker = whole_root_scan_blocker(session)
+    if blocker is None:
+        return
+    operation, remaining = blocker
+    elapsed = datetime.fromisoformat(now()) - datetime.fromisoformat(operation.created_at)
+    age = max(0, int(elapsed.total_seconds()))
+    raise HTTPException(
+        status_code=429,
+        headers={"Retry-After": str(remaining)},
+        detail=(
+            f"a whole-library scan was submitted by {operation.submitted_by} {age} s ago, and "
+            f"one whole-library scan per {LIBRARY_SCAN_COOLDOWN_SECONDS // 60} minutes is the limit: "
+            f"the next one is allowed in {remaining} s. A folder scan has no cooldown."
+        ),
+    )
+
 
 def _plan_library_scan(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
     """The `library-scan` planner: one `scan` step over the whole library or a folder.
@@ -1517,9 +1593,19 @@ def _plan_library_scan(session: Session, target: str, params: dict) -> Tuple[lis
 
     `declared_paths` is `[scope]`, so a whole-root scan declares `['']` - which
     ``paths_overlap`` already treats as overlapping everything. That means a
-    queued root scan serialises with every operation, a deliberate capacity
-    consequence the owner owns in Mf-gciy.
+    queued root scan serialises with every operation, and the whole-root case is
+    ALSO rate-limited by ``LIBRARY_SCAN_COOLDOWN_SECONDS``: one walk per window,
+    charged to the library on submission, because serialisation alone bounds
+    concurrency and not frequency.
     """
+    # A parameter this planner never reads must not become part of the reviewed
+    # digest: the import planners refuse unknown fields for the same reason, and
+    # a scan's only input is its scope.
+    if params:
+        raise HTTPException(
+            status_code=400,
+            detail=f"a library scan takes no params: {sorted(params)} are not part of this workflow",
+        )
     try:
         scope = library_scan.normalise_scope(target or "")
     except library_scan.ScanScopeError as error:
@@ -1529,6 +1615,11 @@ def _plan_library_scan(session: Session, target: str, params: dict) -> Tuple[lis
             status_code=409,
             detail=f"no folder {scope!r} in the library: nothing was planned",
         )
+    # A scoped plan is never rate-limited: the folder bounds the walk and its
+    # declared path serialises it. The bad-scope 409 above keeps its precedence,
+    # so a caller is never told "too soon" about a folder that does not exist.
+    if not scope:
+        refuse_whole_root_scan_inside_cooldown(session)
 
     steps = [
         {

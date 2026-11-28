@@ -372,8 +372,9 @@ type Props = {
   /** The shell's single storage-scan instance, so a detection row can start and
    *  follow a scan without a second poller. */
   scan: LibraryScanState;
-  /** The WRITE rank (`canDelete` in App), deliberately NOT `canContribute`:
-   *  the `library-scan` workflow is WRITE. */
+  /** The CONTRIBUTE rank (`canContribute` in App), the `library-scan` workflow's
+   *  own level. Kept a separate prop so a mount can withhold the action even
+   *  where the capability holds. */
   canScan: boolean;
   /** Starts the shell's scan. The report is not auto-refreshed after a scan
    *  (the queue's own Refresh stays) - a named boundary, not an omission. */
@@ -1654,7 +1655,7 @@ export default function BundleReviewView({
                 {canScan && needsStorageScan(activeRow) && (
                   <ScanStorageAction
                     state={scan}
-                    canWrite={canScan}
+                    canContribute={canScan}
                     surface="detail"
                     onScan={onScan}
                   />

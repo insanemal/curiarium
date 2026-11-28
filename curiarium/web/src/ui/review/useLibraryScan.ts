@@ -63,7 +63,7 @@ export function scanOutcome(scan: LibraryScanStatus | null): MissingScanOutcome 
  * whether one is walking right now, and the rescan action.
  *
  * The SHELL owns the single instance now: one poller, one announcement, one
- * `adopt` target shared by four write-gated mounts (the library header, the
+ * `adopt` target shared by four contribute-gated mounts (the library header, the
  * missing queue's panel, its empty state and a detection row). The entry read is
  * still once per activation and the poll loop is still `enabled`-gated: that
  * entry read is the point of this hook, because the old settings-owned version

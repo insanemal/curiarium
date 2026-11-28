@@ -118,6 +118,14 @@ export type AssetActionsApi = {
   runPendingConfirm: () => Promise<void>;
 };
 
+/** The library-relative folder that holds `storagePath`; `""` for a file at the
+ *  root, because a root-level file's folder IS the root. */
+function scopeOf(storagePath: string | null | undefined): string {
+  const path = (storagePath ?? "").replace(/^\/+/, "");
+  const cut = path.lastIndexOf("/");
+  return cut <= 0 ? "" : path.slice(0, cut);
+}
+
 /**
  * Per-asset actions (download, rename, move, delete, re-scan) and the single
  * parent-owned confirmation queue every card asks for a dialog through. Deletes
@@ -382,7 +390,7 @@ export function useAssetActions({
     onRequestDelete([asset]);
   });
 
-  const rescanMissing = useStableCallback(async (_asset: Asset) => {
+  const rescanMissing = useStableCallback(async (asset: Asset) => {
     if (rescanning) return;
     setRescanning(true);
     try {
@@ -391,9 +399,12 @@ export function useAssetActions({
         onScanStatus?.(status);
         return status;
       };
+      // A folder-level re-scan picks up a restocked file and is never
+      // rate-limited; a root-level file's folder IS the root, so that card gets
+      // the whole-root walk and its cooldown like any other root scan.
       // The POST must land even when nobody is listening: an optional call
       // would short-circuit its own argument, and the scan would never start.
-      const started = await startLibraryScan();
+      const started = await startLibraryScan(scopeOf(asset.storage_path));
       onScanStatus?.(started);
       const deadline = Date.now() + RESCAN_TIMEOUT_MS;
       let status = await readStatus();

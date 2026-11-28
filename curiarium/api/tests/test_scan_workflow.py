@@ -22,14 +22,18 @@ is written to fail if the operation is not the record:
 * **the whole root declares the empty path** - which the prefix-lock rule treats
   as overlapping everything.
 * **the workflow filter is the server's** - the newest scan is one query.
-* **who may run it** - a contributor is refused at WRITE, an editor is accepted,
-  and the two deleted routes are absent from every matrix, the OpenAPI document
-  and the app itself.
+* **a whole-root scan is rate-limited, a folder scan is not** - one walk per
+  window is charged to the library, and the refusal is a 429 with `Retry-After`
+  that names the blocking submitter; a scoped scan never meets it.
+* **who may run it** - a contributor is accepted at CONTRIBUTE, a viewer is
+  refused, and the two deleted routes are absent from every matrix, the OpenAPI
+  document and the app itself.
 """
 
 import json
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -71,6 +75,8 @@ CONTRIBUTOR_USERNAME = "contributor"
 CONTRIBUTOR_PASSWORD = "contributor-password-1"
 EDITOR_USERNAME = "editor"
 EDITOR_PASSWORD = "editor-password-1"
+VIEWER_USERNAME = "viewer"
+VIEWER_PASSWORD = "viewer-password-1"
 
 SCAN_WAIT_SECONDS = 30.0
 
@@ -412,8 +418,13 @@ def test_a_whole_root_scan_declares_the_empty_path(
 
 
 def test_get_operations_filters_by_workflow(client: TestClient, storage: Path) -> None:
-    """One query answers the newest scan; an unknown workflow is a 400, not an empty page."""
-    plan = plan_scan(client)
+    """One query answers the newest scan; an unknown workflow is a 400, not an empty page.
+
+    The scan is scoped: this test is about the `workflow` filter, and two root
+    plans would put the second behind the whole-root cooldown instead.
+    """
+    _write(storage, "counters/one.stl")
+    plan = plan_scan(client, "counters")
     first = submit_of(client, plan, key="scan-a")
     time.sleep(0.002)
     second = submit_of(client, plan, key="scan-b")
@@ -425,13 +436,152 @@ def test_get_operations_filters_by_workflow(client: TestClient, storage: Path) -
     assert client.get("/operations?workflow=nope").status_code == 400
 
 
-# --- 9: who may run it --------------------------------------------------------
+# --- 9: the whole-root cooldown ----------------------------------------------
 
 
-def test_a_contributor_may_run_every_workflow_but_a_scan(
+def shift_clock(monkeypatch: pytest.MonkeyPatch, seconds: int) -> None:
+    """Move the service clock forward by `seconds` from the real clock, never by sleeping."""
+    real = operations_service.now()
+
+    def shifted() -> str:
+        return (datetime.fromisoformat(real) + timedelta(seconds=seconds)).isoformat(
+            timespec="microseconds"
+        )
+
+    monkeypatch.setattr(operations_service, "now", shifted)
+
+
+def _settle_row(operation_id: str) -> None:
+    """Mark a submitted root row done so the dispatcher cannot run it.
+
+    The row still charges the library's scan budget - the cooldown reads rows, not
+    the dispatcher - but letting the dispatcher claim it would block the scoped
+    row behind `['']` and register the sibling, which is the assertion under test.
+    """
+    with Session(engine) as session:
+        operation = session.get(Operation, operation_id)
+        assert operation is not None
+        operation.status = operations_service.STATUS_DONE
+        operation.started_at = operations_service.now()
+        operation.finished_at = operations_service.now()
+        session.add(operation)
+        session.commit()
+
+
+def test_a_second_whole_root_scan_inside_the_cooldown_is_refused(
+    client: TestClient, storage: Path
+) -> None:
+    """The false state: a second walk of the whole root inside the window.
+
+    The refusal lands before a row exists, so the queue does not grow with walks
+    the library will only serialise one at a time anyway.
+    """
+    _write(storage, "scanone/one.stl")
+    submit_of(client, plan_scan(client))
+    before = client.get("/operations?workflow=library-scan").json()
+
+    refused = client.post(
+        "/operations/plan", json={"workflow": "library-scan", "target": "", "params": {}}
+    )
+
+    assert refused.status_code == 429, refused.text
+    assert int(refused.headers["retry-after"]) > 0
+    detail = refused.json()["detail"]
+    assert "one whole-library scan per 10 minutes" in detail
+    assert "allowed in" in detail
+    assert "A folder scan has no cooldown" in detail
+    after = client.get("/operations?workflow=library-scan").json()
+    assert [row["id"] for row in after] == [row["id"] for row in before]
+
+
+def test_a_whole_root_scan_is_allowed_again_once_the_window_has_passed(
     client: TestClient, storage: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A scan is WRITE, and the deleted route surface is gone everywhere."""
+    """The false state: a cooldown that never releases, so a legitimate re-scan is dead."""
+    _write(storage, "scanone/one.stl")
+    submit_of(client, plan_scan(client))
+    shift_clock(monkeypatch, operations_service.LIBRARY_SCAN_COOLDOWN_SECONDS + 1)
+
+    plan = plan_scan(client)
+    submitted = submit_of(client, plan, key="scan-again")
+
+    assert submitted["workflow"] == "library-scan"
+
+
+def test_a_scoped_scan_is_never_rate_limited(
+    client: TestClient, storage: Path
+) -> None:
+    """The false state: the whole-root cooldown refusing a folder walk too.
+
+    A folder is bounded by itself and serialised by its declared path, so it is
+    the alternative the whole-root refusal names - not a second victim of it.
+    """
+    for index in range(3):
+        _write(storage, f"scanone/part-{index}.stl")
+    for index in range(3):
+        _write(storage, f"scantwo/part-{index}.stl")
+    root = submit_of(client, plan_scan(client), key="root-scan")
+    _settle_row(root["id"])
+
+    plan_scan(client, "scantwo")
+    scoped = plan_scan(client, "scanone")
+
+    submitted = submit_of(client, scoped, key="scoped-scan")
+    run_to_completion()
+    row = operation_of(client, submitted["id"])
+
+    assert row["steps"][0]["result"]["registered"] == 3
+    with Session(engine) as session:
+        sibling = session.exec(
+            select(Asset).where(Asset.storage_path.like("scantwo/%"))
+        ).all()
+        under_scope = session.exec(
+            select(Asset).where(Asset.storage_path.like("scanone/%"))
+        ).all()
+    assert sibling == []
+    assert len(under_scope) == 3
+
+
+def test_a_scan_cancelled_before_it_started_costs_nothing(
+    client: TestClient, storage: Path
+) -> None:
+    """The false state: a scan cancelled before it walked anything still spending budget."""
+    _write(storage, "scanone/one.stl")
+    submitted = submit_of(client, plan_scan(client))
+
+    cancelled = client.post(f"/operations/{submitted['id']}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+
+    plan = plan_scan(client)
+    assert plan["workflow"] == "library-scan"
+
+
+def test_a_scan_plan_refuses_params_it_does_not_read(
+    client: TestClient, storage: Path
+) -> None:
+    """The false state: an unread param folded into the reviewed digest, so the review lies."""
+    refused = client.post(
+        "/operations/plan",
+        json={"workflow": "library-scan", "target": "", "params": {"files": ["a"]}},
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert "files" in refused.json()["detail"]
+
+
+# --- 10: who may run it -------------------------------------------------------
+
+def test_a_contributor_may_run_a_scan_now_that_it_is_contribute(
+    client: TestClient, storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scan is CONTRIBUTE, so a contributor may start one; a viewer may not.
+
+    The level moved in Mf-gciy because the rubric's answer is that a scan removes
+    nothing, and the whole-root walk is paid for with the planner's cooldown. The
+    viewer's plan is scoped: a second root plan would be refused by that cooldown,
+    and this test is about the role decision, not the rate limit.
+    """
     monkeypatch.setattr(auth, "AUTH_ENABLED", True)
     admin = client.post("/login", json=BREAK_GLASS)
     assert admin.status_code == 200, admin.text
@@ -439,9 +589,11 @@ def test_a_contributor_may_run_every_workflow_but_a_scan(
     contributor = sign_in(
         client, admin_token, CONTRIBUTOR_USERNAME, CONTRIBUTOR_PASSWORD, "contributor"
     )
-    editor = sign_in(client, admin_token, EDITOR_USERNAME, EDITOR_PASSWORD, "editor")
+    viewer = sign_in(client, admin_token, VIEWER_USERNAME, VIEWER_PASSWORD, "viewer")
 
-    assert operations_service.WORKFLOW_LEVELS["library-scan"] == permissions.WRITE
+    assert operations_service.WORKFLOW_LEVELS["library-scan"] == permissions.CONTRIBUTE
+
+    _write(storage, "viewerscan/one.stl")
 
     planned = client.post(
         "/operations/plan",
@@ -449,26 +601,40 @@ def test_a_contributor_may_run_every_workflow_but_a_scan(
         headers=bearer(contributor),
     )
     assert planned.status_code == 200, planned.text
-    plan_id = planned.json()["plan_id"]
-
-    refused = client.post(
-        "/operations",
-        json={"plan_id": plan_id, "idempotency_key": "contributor-scan"},
-        headers=bearer(contributor),
-    )
-    assert refused.status_code == 403, refused.text
-    assert refused.json()["detail"] == permissions.DENY_DETAIL[permissions.WRITE]
 
     accepted = client.post(
         "/operations",
-        json={"plan_id": plan_id, "idempotency_key": "editor-scan"},
-        headers=bearer(editor),
+        json={"plan_id": planned.json()["plan_id"], "idempotency_key": "contributor-scan"},
+        headers=bearer(contributor),
     )
     assert accepted.status_code == 202, accepted.text
+
+    scoped = client.post(
+        "/operations/plan",
+        json={"workflow": "library-scan", "target": "viewerscan", "params": {}},
+        headers=bearer(contributor),
+    )
+    assert scoped.status_code == 200, scoped.text
+
+    viewer_planned = client.post(
+        "/operations/plan",
+        json={"workflow": "library-scan", "target": "viewerscan", "params": {}},
+        headers=bearer(viewer),
+    )
+    assert viewer_planned.status_code == 403, viewer_planned.text
+    assert viewer_planned.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
+
+    refused = client.post(
+        "/operations",
+        json={"plan_id": scoped.json()["plan_id"], "idempotency_key": "viewer-scan"},
+        headers=bearer(viewer),
+    )
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
 
     for method, path in (("GET", "/library/scan"), ("POST", "/library/scan")):
         assert (method, path) not in permissions.ROUTE_PERMISSIONS
         assert (method, path) not in audit.ROUTE_ACTIONS
         assert path not in main.app.openapi()["paths"]
-    assert client.get("/library/scan", headers=bearer(editor)).status_code == 404
-    assert client.post("/library/scan", headers=bearer(editor)).status_code == 404
+    assert client.get("/library/scan", headers=bearer(contributor)).status_code == 404
+    assert client.post("/library/scan", headers=bearer(contributor)).status_code == 404

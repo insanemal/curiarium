@@ -392,11 +392,12 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
   // Declared after its callbacks: it registers them for the finish signal, and
   // a hook argument list cannot read a not-yet-initialised `const`. The SHELL
   // owns this single instance: one poller, one announcement and one `adopt`
-  // target shared by four write-gated mounts. Reading the scan's operation row is
-  // READ, so a viewer may read the queue and the status; only the rescan is WRITE
-  // and every mount hides it below editor. The entry read happens once per
-  // activation - opening the missing queue or arming a shell scan - never on app
-  // load, and the poll loop runs only while a scan is walking.
+  // target shared by four contribute-gated mounts. Reading the scan's operation
+  // row is READ, so a viewer may read the queue and the status; only the rescan
+  // is CONTRIBUTE and every mount hides it below contributor. The entry read
+  // happens once per activation - opening the missing queue or arming a shell
+  // scan - never on app load, and the poll loop runs only while a scan is
+  // walking.
   const libraryScan = useLibraryScan({
     enabled: canRead && ((reviewOpen && resolvedQueue === "missing") || scanArmed),
     onUnauthorized: handleUnauthorized,
@@ -804,10 +805,10 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
               />
             )}
             <div className="flex flex-wrap items-center gap-3">
-              {activeView === "library" && canDelete && (
+              {activeView === "library" && canContribute && (
                 <ScanStorageAction
                   state={libraryScan}
-                  canWrite={canDelete}
+                  canContribute={canContribute}
                   surface="header"
                   onScan={scanFromShell}
                 />
@@ -930,7 +931,7 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                         state={bundleReview}
                         canContribute={canContribute}
                         scan={libraryScan}
-                        canScan={canDelete}
+                        canScan={canContribute}
                         onScan={scanFromShell}
                         onProjectsChanged={handleAssetsChanged}
                         onFoldersChanged={handleFoldersChanged}
@@ -951,7 +952,6 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                     {resolvedQueue === "missing" && (
                       <MissingFilesReviewView
                         state={libraryScan}
-                        canWrite={canDelete}
                         canContribute={canContribute}
                         canDelete={canDelete}
                         missingCount={counts ? counts.missing : null}

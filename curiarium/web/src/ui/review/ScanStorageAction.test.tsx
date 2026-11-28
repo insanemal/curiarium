@@ -73,12 +73,27 @@ afterEach(() => {
 });
 
 describe("ScanStorageAction", () => {
+  it("gives a contributor the button, because the scan is CONTRIBUTE", () => {
+    const onScan = vi.fn();
+    render(
+      <ScanStorageAction
+        state={makeState()}
+        canContribute
+        surface="empty"
+        onScan={onScan}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rescan storage folder" }));
+    expect(onScan).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the byte-identical CTA and carries its surface", () => {
     const onScan = vi.fn();
     const { container } = render(
       <ScanStorageAction
         state={makeState()}
-        canWrite
+        canContribute
         surface="header"
         onScan={onScan}
       />,
@@ -96,7 +111,7 @@ describe("ScanStorageAction", () => {
     render(
       <ScanStorageAction
         state={makeState({ scan: makeStatus({ running: true, finished_at: null }) })}
-        canWrite
+        canContribute
         surface="panel"
         onScan={vi.fn()}
       />,
@@ -114,7 +129,7 @@ describe("ScanStorageAction", () => {
         state={makeState({
           scan: makeStatus({ registered: 3, known: 1, missing: 1, failed: 0 }),
         })}
-        canWrite
+        canContribute
         surface="empty"
         onScan={vi.fn()}
       />,
@@ -127,7 +142,7 @@ describe("ScanStorageAction", () => {
     render(
       <ScanStorageAction
         state={makeState({ error: "Failed to plan the operation" })}
-        canWrite
+        canContribute
         surface="detail"
         onScan={vi.fn()}
       />,
@@ -147,7 +162,7 @@ describe("ScanStorageAction", () => {
     render(
       <ScanStorageAction
         state={makeState({ scan })}
-        canWrite
+        canContribute
         surface="detail"
         onScan={vi.fn()}
       />,
@@ -164,7 +179,7 @@ describe("ScanStorageAction", () => {
     const { container } = render(
       <ScanStorageAction
         state={makeState()}
-        canWrite={false}
+        canContribute={false}
         surface="panel"
         onScan={vi.fn()}
       />,
@@ -179,7 +194,7 @@ describe("ScanStorageAction", () => {
     const { container } = render(
       <ScanStorageAction
         state={makeState({ scan: null, loaded: false })}
-        canWrite={false}
+        canContribute={false}
         surface="header"
         onScan={vi.fn()}
       />,

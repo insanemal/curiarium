@@ -214,18 +214,23 @@ export async function getLibraryScanStatus(): Promise<LibraryScanStatus> {
 }
 
 /**
- * Asks for a library scan, as a plan the server issues and then one queued
- * operation - the same two calls every other workflow makes, because the scan
- * no longer has a route of its own.
+ * Asks for a library scan of `scope`, as a plan the server issues and then one
+ * queued operation - the same two calls every other workflow makes, because the
+ * scan no longer has a route of its own.
  *
- * The empty `target` is the whole library, the only scope this action has ever
- * had. A refused plan or submit still throws (the server says why); what does
- * not throw is a scan that cannot take the slot, because the server accepts the
+ * An empty `scope` is the whole library: the one unbounded walk, and the only one
+ * the server rate-limits - one per ten minutes, refused with a 429 whose
+ * sentence is thrown here verbatim so the caller can show it. Any other `scope`
+ * is a library-relative folder: a bounded walk with no cooldown, because the
+ * folder bounds both the cost and the frequency.
+ *
+ * A refused plan or submit still throws (the server says why); what does not
+ * throw is a scan that cannot take the slot, because the server accepts the
  * operation and ends it `failed` with `SCAN_ALREADY_RUNNING`, which the derived
  * status reports as `running: true` - a scan IS walking, just not this row.
  */
-export async function startLibraryScan(): Promise<LibraryScanStatus> {
-  const plan = await planOperation({ workflow: "library-scan", target: "" });
+export async function startLibraryScan(scope = ""): Promise<LibraryScanStatus> {
+  const plan = await planOperation({ workflow: "library-scan", target: scope });
   const operation = await submitOperation({
     planId: plan.plan_id,
     idempotencyKey: crypto.randomUUID(),

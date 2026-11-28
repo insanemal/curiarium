@@ -1743,40 +1743,54 @@ def test_admin_is_never_denied(client, ids, admin_headers, key, monkeypatch) -> 
 
 
 def test_the_scan_level_lives_on_the_workflow_now(
-    client, ids, editor_headers, contributor_headers, monkeypatch
+    client, ids, contributor_headers, viewer_headers
 ) -> None:
-    """The scan routes are gone; the WRITE decision moved to the workflow.
+    """The scan routes are gone; the level is the workflow's, and it widened.
 
     `POST /library/scan` was an editor affordance and `GET /library/scan` a read,
     but part 1/4 of Mf-y2u3 deleted both and made the scan one `library-scan`
-    operation. The level did not widen: `WORKFLOW_LEVELS` still says WRITE, a
-    contributor is refused at submit with the permissions module's own sentence,
-    and an editor is accepted.
+    operation. Mf-gciy moved the level to CONTRIBUTE: a scan removes nothing, and
+    the unbounded whole-root walk is paid for with the planner's cooldown instead
+    of a higher rank. Every leg below uses a real folder scope, so the 202 and
+    the 403 measure the role decision and never the whole-root cooldown.
     """
     assert ("GET", "/library/scan") not in permissions.ROUTE_PERMISSIONS
     assert ("POST", "/library/scan") not in permissions.ROUTE_PERMISSIONS
-    assert operations_service.WORKFLOW_LEVELS["library-scan"] == permissions.WRITE
+    assert operations_service.WORKFLOW_LEVELS["library-scan"] == permissions.CONTRIBUTE
+
+    scope = plan_target(client, contributor_headers)
+    assert scope, "the seeded library must hold a real folder for a scoped scan"
 
     planned = client.post(
         "/operations/plan",
-        json={"workflow": "library-scan", "target": "", "params": {}},
+        json={"workflow": "library-scan", "target": scope, "params": {}},
         headers=contributor_headers,
     )
     assert planned.status_code == 200, planned.text
     plan_id = planned.json()["plan_id"]
 
+    # The plan route is CONTRIBUTE itself, so a viewer is refused there too; the
+    # submit below measures the workflow's level, which is the decision that moved.
+    viewer_planned = client.post(
+        "/operations/plan",
+        json={"workflow": "library-scan", "target": scope, "params": {}},
+        headers=viewer_headers,
+    )
+    assert viewer_planned.status_code == 403, viewer_planned.text
+    assert viewer_planned.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
+
     refused = client.post(
         "/operations",
-        json={"plan_id": plan_id, "idempotency_key": "permissions-scan-contributor"},
-        headers=contributor_headers,
+        json={"plan_id": plan_id, "idempotency_key": "permissions-scan-viewer"},
+        headers=viewer_headers,
     )
     assert refused.status_code == 403, refused.text
-    assert refused.json()["detail"] == permissions.DENY_DETAIL[permissions.WRITE]
+    assert refused.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
 
     accepted = client.post(
         "/operations",
-        json={"plan_id": plan_id, "idempotency_key": "permissions-scan-editor"},
-        headers=editor_headers,
+        json={"plan_id": plan_id, "idempotency_key": "permissions-scan-contributor"},
+        headers=contributor_headers,
     )
     assert accepted.status_code == 202, accepted.text
     discard_operation(accepted.json()["id"])

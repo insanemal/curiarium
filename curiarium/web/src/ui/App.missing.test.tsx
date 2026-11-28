@@ -997,6 +997,24 @@ describe("App missing queue roles (Mf-1tx3)", () => {
     expect(within(menu).getByRole("menuitem", { name: "Forget entry" })).toBeTruthy();
   });
 
+  // The contributor is the role this ticket moved the scan down to: the two scan
+  // surfaces are CONTRIBUTE, so they are here, while the WRITE repairs are not.
+  it("gives a contributor both scan surfaces and no Forget", async () => {
+    getMeMock.mockResolvedValue(me("contributor"));
+
+    await renderApp();
+    await openQueue();
+    await queueReady();
+
+    const card = await findCard(missingAsset.id);
+    expect(screen.getByRole("button", { name: "Rescan storage folder" })).toBeTruthy();
+
+    const menu = openCardMenu(card);
+    expect(within(menu).getByRole("menuitem", { name: "Re-scan" })).toBeTruthy();
+    // Forget entry is the missing card's delete, and that stays WRITE.
+    expect(within(menu).queryByRole("menuitem", { name: "Forget entry" })).toBeNull();
+  });
+
   it("gives a viewer the queue, the banner and no write control at all", async () => {
     getMeMock.mockResolvedValue(me("viewer"));
 
@@ -1015,20 +1033,24 @@ describe("App missing queue roles (Mf-1tx3)", () => {
     const card = await findCard(missingAsset.id);
     expect(within(card).getByText("File missing")).toBeTruthy();
 
-    // Absent from the DOM, not disabled: the rescan is `POST /library/scan`.
+    // Absent from the DOM, not disabled: the rescan is the `library-scan`
+    // operation row, and the workflow is CONTRIBUTE.
     expect(screen.queryByRole("button", { name: "Rescan storage folder" })).toBeNull();
 
     const menu = openCardMenu(card);
     expect(within(menu).queryByRole("menuitem", { name: "Re-scan" })).toBeNull();
     expect(within(menu).queryByRole("menuitem", { name: "Forget entry" })).toBeNull();
 
-    // `GET /library/scan` is READ, so a viewer still reads the status, once.
+    // The scan's operation row is READ, so a viewer still reads the status, once.
     expect(getQueueStatusMock).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("App missing queue empty-state scan action (Mf-7mio)", () => {
-  it("offers the scan inside the empty state for a writer", async () => {
+  // The empty state's action is the same CONTRIBUTE rescan, so the editor default
+  // here already covers a role that holds it; the panel's own gate is pinned in
+  // MissingFilesReviewView.test.tsx.
+  it("offers the scan inside the empty state for a contributor", async () => {
     getAssetCountsMock.mockResolvedValue({ total: 4, unfiled: 0, missing: 0 });
     listAssetsMock.mockImplementation(async () => ({ items: [], hasMore: false }));
 

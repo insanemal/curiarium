@@ -72,6 +72,7 @@ import {
   deleteAsset,
   deleteAssetFile,
   deletePreparedPrint,
+  getLibraryScanStatus,
   listAssetFileLimits,
   listAssetFiles,
   listAssets,
@@ -94,6 +95,24 @@ const listTagsMock = vi.mocked(listTags);
 const listCreatorsMock = vi.mocked(listCreators);
 const listAssetFilesMock = vi.mocked(listAssetFiles);
 const listAssetFileLimitsMock = vi.mocked(listAssetFileLimits);
+const startLibraryScanMock = vi.mocked(startLibraryScan);
+const getLibraryScanStatusMock = vi.mocked(getLibraryScanStatus);
+
+/** A finished scan, so a card's Re-scan poll exits on its first read instead of
+ *  waiting out `RESCAN_TIMEOUT_MS`. */
+function idleScanStatus() {
+  return {
+    running: false,
+    started_at: 1_700_000_000,
+    finished_at: 1_700_000_010,
+    registered: 0,
+    known: 1,
+    ignored: 0,
+    missing: 1,
+    failed: 0,
+    errors: [],
+  };
+}
 
 /** Every endpoint that writes. No viewer interaction may reach one of them. */
 const writeMocks = [
@@ -170,6 +189,8 @@ const assets: Asset[] = [
     url: "/api/assets/m3/file",
     thumb_url: "/api/assets/m3/thumb",
     supporting_file_count: 0,
+    // Library-relative and nested, so a card's Re-scan has a folder to scope to.
+    storage_path: "some/folder/lost-model.png",
     missing_since: "2026-10-27T11:31:34+00:00",
   },
 ];
@@ -375,6 +396,8 @@ describe("AssetGrid role capability", () => {
     listCreatorsMock.mockResolvedValue([]);
     listAssetFilesMock.mockResolvedValue([supportingFile]);
     listAssetFileLimitsMock.mockResolvedValue({ ...NO_FILE_LIMITS, count: 1 });
+    startLibraryScanMock.mockResolvedValue(idleScanStatus());
+    getLibraryScanStatusMock.mockResolvedValue(idleScanStatus());
   });
 
   afterEach(() => {
@@ -591,7 +614,9 @@ describe("AssetGrid role capability", () => {
     /**
      * Destroys and asset-level moves stay WRITE in the API matrix, so no
      * contributor path may reach one of these; `createFolder`, tags, metadata
-     * and supporting-file reorder/rename are contribute and may fire.
+     * and supporting-file reorder/rename are contribute and may fire. The
+     * rescan is CONTRIBUTE too, but none of the clicks below is one, so it must
+     * stay uncalled here.
      */
     const destructiveMocks = [
       deleteAsset,
@@ -641,7 +666,7 @@ describe("AssetGrid role capability", () => {
       expect(dialogScope.getByRole("button", { name: "Save tags" })).toBeTruthy();
     });
 
-    it("loses the destroy controls a viewer also lacks", async () => {
+    it("loses the Forget control and keeps the Re-scan, which scans the card's folder", async () => {
       renderGrid(CONTRIBUTOR);
       await screen.findByText("Calibration cube");
 
@@ -658,11 +683,21 @@ describe("AssetGrid role capability", () => {
       // `DELETE /asset/{id}/files/{file_id}` is WRITE, so Remove goes even
       // though the reorder and rename buttons beside it stay.
       expect(dialogScope.queryByRole("button", { name: "Remove" })).toBeNull();
+      fireEvent.click(dialogScope.getAllByRole("button", { name: "Close" })[0]);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
+      // The rescan is the `library-scan` workflow at CONTRIBUTE, so a
+      // contributor sees it; Forget entry is the missing card's delete and is
+      // still WRITE, so it does not.
       const missingMenu = openCardMenu(cardFor("m3"));
-      expect(within(missingMenu).queryByRole("menuitem", { name: "Re-scan" })).toBeNull();
+      expect(within(missingMenu).getByRole("menuitem", { name: "Re-scan" })).toBeTruthy();
       expect(within(missingMenu).queryByRole("menuitem", { name: "Forget entry" })).toBeNull();
-      closeCardMenu(missingMenu);
+
+      fireEvent.click(within(missingMenu).getByRole("menuitem", { name: "Re-scan" }));
+
+      // The scope is the missing card's own folder, not the whole root: a
+      // folder walk picks up a restocked file and is never rate-limited.
+      await waitFor(() => expect(startLibraryScanMock).toHaveBeenCalledWith("some/folder"));
 
       const preparedMenu = openCardMenu(cardFor("b2"));
       expect(

@@ -35,6 +35,7 @@ if not PERMISSIONS_PATH.exists() and not README_PATH.exists():
         allow_module_level=True,
     )
 
+import operations_service  # noqa: E402  (imported after the host-only skip, like the docs paths above)
 import permissions  # noqa: E402  (imported after the host-only skip, like the docs paths above)
 
 LEVELS = (
@@ -53,6 +54,10 @@ HEADING = re.compile(r"^#{1,3}\s")
 TABLE_ROW = re.compile(r"^\|\s*([A-Z]+)\s*\|\s*`([^`]+)`\s*\|")
 ROUTE_COUNT = re.compile(r"(\d+)\s+routes:")
 LEVEL_COUNT = re.compile(r"(\d+)\s+(public|read|contribute|write|admin)\b", re.IGNORECASE)
+# `| `library-scan` | contribute | no: ... |` - one Operations row per workflow.
+WORKFLOW_ROW = re.compile(r"^\|\s*`([a-z][a-z-]*)`\s*\|\s*(public|read|contribute|write|admin)\s*\|")
+CAPABILITY_ROW = re.compile(r"^\|\s*Start a library scan\s*\|")
+ROLES = ("admin", "editor", "contributor", "viewer")
 
 
 def _lines(path: Path) -> list[str]:
@@ -194,3 +199,69 @@ def test_the_docs_describe_retiring_the_emptied_folders_row() -> None:
         "case-insensitively",
     ):
         assert needle in text
+
+
+def _workflow_level_rows(lines: list[str]) -> dict[str, str]:
+    """The Operations table's `workflow -> level` rows, by workflow name."""
+    rows: dict[str, str] = {}
+    for line in lines:
+        row = WORKFLOW_ROW.match(line)
+        if row:
+            rows[row.group(1)] = row.group(2)
+    return rows
+
+
+def _capability_cells(lines: list[str]) -> list[str]:
+    """The four role cells of the 'Start a library scan' capability row, in role order."""
+    for line in lines:
+        if CAPABILITY_ROW.match(line):
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            return cells[1:]
+    raise AssertionError("docs/PERMISSIONS.md has no '| Start a library scan | ... |' capability row")
+
+
+def test_the_documented_levels_are_the_workflow_levels() -> None:
+    """The Operations table and the scan capability row are `WORKFLOW_LEVELS`, in prose.
+
+    Three false states: a doc table that disagrees with `WORKFLOW_LEVELS` (a
+    workflow omitted, invented, or shown at the wrong level), a capability row
+    that promises a role what its workflow refuses, and a later edit silently
+    dropping the Mf-d588 decision that undo keeps the level of the workflow it
+    acts on. Each is checked from the live tables, so a missing row fails rather
+    than passing vacuously.
+    """
+    lines = _lines(PERMISSIONS_PATH)
+    text = PERMISSIONS_PATH.read_text(encoding="utf-8")
+
+    documented = _workflow_level_rows(lines)
+    assert documented, "docs/PERMISSIONS.md has no '| `workflow` | level | ...' rows to compare"
+    assert set(documented) == set(operations_service.WORKFLOW_LEVELS), (
+        "docs/PERMISSIONS.md's workflow table is "
+        f"{sorted(documented)}, WORKFLOW_LEVELS is {sorted(operations_service.WORKFLOW_LEVELS)}"
+    )
+    wrong = {
+        workflow: (documented[workflow], operations_service.WORKFLOW_LEVELS[workflow])
+        for workflow in documented
+        if documented[workflow] != operations_service.WORKFLOW_LEVELS[workflow]
+    }
+    assert not wrong, f"docs/PERMISSIONS.md documents (doc, code) levels {wrong}"
+
+    cells = _capability_cells(lines)
+    assert len(cells) == len(ROLES), f"the scan capability row has cells {cells}, expected {len(ROLES)} role cells"
+    assert set(cells) <= {"yes", "no"}, f"the scan capability cells are {cells}, expected only yes/no"
+    scan_level = operations_service.WORKFLOW_LEVELS["library-scan"]
+    scan_rank = permissions.LEVEL_RANK[scan_level]
+    problems = []
+    for role, cell in zip(ROLES, cells, strict=True):
+        promised = cell == "yes"
+        allowed = permissions.LEVEL_RANK[permissions.ROLE_LEVELS[role]] >= scan_rank
+        if promised != allowed:
+            problems.append(
+                f"the capability table says {role} 'Start a library scan' = {cell}, "
+                f"but the workflow is {scan_level} and says {'yes' if allowed else 'no'}"
+            )
+    assert not problems, "the scan capability row promises what the workflow refuses:\n  - " + "\n  - ".join(problems)
+
+    assert "waiting on Mf-gciy" not in text
+    assert "`library-scan` is WRITE" not in text
+    assert "Undo keeps the level of the operation it acts on (Mf-d588, 2026-11-27)" in text

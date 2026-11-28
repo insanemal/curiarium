@@ -381,13 +381,35 @@ describe("App storage scan from the cold library header (Mf-7mio)", () => {
     expect(sidebar().getAttribute("data-folders-version")).toBe("1");
   });
 
+  // The header action moved down to CONTRIBUTE (Mf-gciy), so the persona this
+  // ticket exists for is the one that cannot delete: a contributor still gets
+  // the whole-root rescan from the cold library.
+  it("gives a contributor the header action", async () => {
+    getMeMock.mockResolvedValue(me("contributor"));
+
+    await renderApp();
+    await settle(30);
+
+    const headerAction = screen.getByRole("button", { name: "Rescan storage folder" });
+    expect(headerAction.closest('[data-scan-surface="header"]')).toBeTruthy();
+    // Mounting reads nothing: the entry read happens when the scan is armed.
+    expect(getScanStatusMock).not.toHaveBeenCalled();
+    expect(startScanMock).not.toHaveBeenCalled();
+
+    fireEvent.click(headerAction);
+    await flush();
+
+    expect(startScanMock).toHaveBeenCalledTimes(1);
+  });
+
   it("gives a viewer no header action but still reads the status on queue entry", async () => {
     getMeMock.mockResolvedValue(me("viewer"));
 
     await renderApp();
     await settle(30);
 
-    // Absent from the DOM, not disabled: the scan is `POST /library/scan`.
+    // Absent from the DOM, not disabled: the rescan is the `library-scan`
+    // operation row, and the workflow is CONTRIBUTE.
     expect(screen.queryByRole("button", { name: /rescan storage folder/i })).toBeNull();
     expect(document.querySelector('[data-scan-surface="header"]')).toBeNull();
     expect(startScanMock).not.toHaveBeenCalled();

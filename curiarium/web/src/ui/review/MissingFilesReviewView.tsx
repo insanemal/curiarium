@@ -11,8 +11,8 @@ import { scanOutcome, type LibraryScanState } from "./useLibraryScan";
 
 type Props = {
   state: LibraryScanState;
-  /** `editor` and above: the rescan is the `library-scan` workflow (write). */
-  canWrite: boolean;
+  /** `contributor` and above: the rescan is the `library-scan` workflow at
+   *  CONTRIBUTE, so a viewer gets no button while a contributor does. */
   canContribute: boolean;
   canDelete: boolean;
   /** App's `counts?.missing`: `null` until the whole-library counts land. */
@@ -74,7 +74,6 @@ const SCAN_LABELS: Record<MissingScanOutcome, string> = {
  */
 export default function MissingFilesReviewView({
   state,
-  canWrite,
   canContribute,
   canDelete,
   missingCount,
@@ -101,7 +100,7 @@ export default function MissingFilesReviewView({
       lastRefreshedLabel={SCAN_LABELS[missingScan]}
       onRefresh={onRefresh}
     >
-      <LibraryScanPanel state={state} canWrite={canWrite} onScan={onScan} />
+      <LibraryScanPanel state={state} canContribute={canContribute} onScan={onScan} />
       <AssetGrid
         missingOnly
         missingScan={missingScan}
@@ -109,10 +108,10 @@ export default function MissingFilesReviewView({
         canDelete={canDelete}
         assetsVersion={assetsVersion}
         missingEmptyAction={
-          canWrite ? (
+          canContribute ? (
             <ScanStorageAction
               state={state}
-              canWrite={canWrite}
+              canContribute={canContribute}
               surface="empty"
               onScan={onScan}
             />

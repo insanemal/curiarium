@@ -246,9 +246,9 @@ export default function OperationsQueue(props: Props): React.ReactElement {
                 <div id={detailId} data-operations-detail="true" className="flex flex-col gap-1">
                   {/* Cancel and Undo are gated on the CONTRIBUTE capability, never
                       on a client table of per-workflow levels: a workflow the server
-                      currently caps higher (`library-scan` is `write` until Mf-gciy
-                      moves it) answers with its own 403 sentence, which is shown
-                      verbatim - so nothing here has to change when that level does. */}
+                      caps higher answers with its own 403 sentence, which is shown
+                      verbatim - so nothing here has to change when a workflow's level
+                      does. */}
                   {canContribute && isActiveStatus(row.status) && (
                     <div className="review-detail-actions">
                       <button

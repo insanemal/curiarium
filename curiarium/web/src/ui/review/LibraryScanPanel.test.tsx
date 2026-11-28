@@ -70,10 +70,10 @@ function makeState(overrides: Partial<LibraryScanState> = {}): LibraryScanState 
 
 function renderPanel(
   state: LibraryScanState = makeState(),
-  canWrite = true,
+  canContribute = true,
   onScan: () => void = vi.fn(),
 ) {
-  return render(<LibraryScanPanel state={state} canWrite={canWrite} onScan={onScan} />);
+  return render(<LibraryScanPanel state={state} canContribute={canContribute} onScan={onScan} />);
 }
 
 afterEach(() => {
@@ -155,11 +155,11 @@ describe("LibraryScanPanel", () => {
     expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
   });
 
-  // The rescan is `POST /operations` (WRITE, the `library-scan` workflow); the
-  // status line and the failure report are the newest `library-scan` row (READ).
-  // Moving this surface into the queue must broaden no write permission, and
-  // must hide nothing a viewer may read.
-  it("hides the rescan button below editor but keeps the read surfaces", () => {
+  // The rescan is `POST /operations` (CONTRIBUTE, the `library-scan` workflow);
+  // the status line and the failure report are the newest `library-scan` row
+  // (READ). Moving this surface into the queue must broaden no write permission,
+  // and must hide nothing a viewer may read.
+  it("hides the rescan button below contributor but keeps the read surfaces", () => {
     const { container } = renderPanel(
       makeState({ scan: makeStatus({ failed: 2, errors: ["a.stl: IntegrityError: duplicate name"] }) }),
       false,
@@ -173,5 +173,16 @@ describe("LibraryScanPanel", () => {
     // The only button left is the failure report's own Copy.
     expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
     expect(container.querySelectorAll("button")).toHaveLength(1);
+  });
+
+  // The contributor is the role the ticket exists for: the rescan moved down to
+  // it, so the panel must offer the control to a capability that cannot delete.
+  it("offers the rescan to a contributor", () => {
+    const onScan = vi.fn();
+    renderPanel(makeState(), true, onScan);
+
+    fireEvent.click(screen.getByRole("button", { name: "Rescan storage folder" }));
+
+    expect(onScan).toHaveBeenCalledTimes(1);
   });
 });

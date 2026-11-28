@@ -117,7 +117,6 @@ type ViewProps = ComponentProps<typeof MissingFilesReviewView>;
 function viewProps(overrides: Partial<ViewProps> = {}): ViewProps {
   return {
     state: makeState(),
-    canWrite: true,
     canContribute: true,
     canDelete: true,
     missingCount: 0,
@@ -323,21 +322,21 @@ describe("MissingFilesReviewView empty state", () => {
   });
 });
 
-describe("MissingFilesReviewView write permission", () => {
-  // The rescan is `POST /library/scan` (WRITE); the queue itself is a READ
-  // surface, so a viewer reads it and only loses the button.
-  it("offers the rescan only to a writer", async () => {
+describe("MissingFilesReviewView contribute permission", () => {
+  // The rescan is the `library-scan` workflow at CONTRIBUTE; the queue itself is
+  // a READ surface, so a viewer reads it and only loses the button.
+  it("offers the rescan only to a contributor", async () => {
     const { container, rerender } = render(
-      <MissingFilesReviewView {...viewProps({ canWrite: false })} />,
+      <MissingFilesReviewView {...viewProps({ canContribute: false })} />,
     );
 
     expect(screen.queryByRole("button", { name: "Rescan storage folder" })).toBeNull();
     expect(screen.getByText("Files added from outside Curiarium")).toBeTruthy();
 
-    rerender(<MissingFilesReviewView {...viewProps({ canWrite: true })} />);
+    rerender(<MissingFilesReviewView {...viewProps({ canContribute: true })} />);
 
     // The empty state also carries an action now, so scope this to the panel:
-    // the assertion is that the panel owns its own writer-gated control.
+    // the assertion is that the panel owns its own contribute-gated control.
     const panel = container.querySelector<HTMLElement>("[data-library-scan]");
     if (!panel) throw new Error("the scan panel is not rendered");
     expect(within(panel).getByRole("button", { name: "Rescan storage folder" })).toBeTruthy();

@@ -41,7 +41,7 @@ unknown or blank ranks as `public`, i.e. it is denied even reads - fail closed.
 | Rename or move a folder (it carries its tags)        |  yes  |  yes   |     no      |   no   |
 | Delete assets, folders (to the trash), supporting files or prepared prints |  yes  |  yes   |     no      |   no   |
 | Bulk move or bulk delete of assets                   |  yes  |  yes   |     no      |   no   |
-| Start a library scan                                 |  yes  |  yes   |     no      |   no   |
+| Start a library scan                                 |  yes  |  yes   |     yes     |   no   |
 | Take or restore a snapshot                           |  yes  |  yes   |     no      |   no   |
 | Manage retention, delete a snapshot, read scheduler status |  yes  |   no   |     no      |   no   |
 | Change storage / mount-import settings               |  yes  |   no   |     no      |   no   |
@@ -350,7 +350,8 @@ Destroy or rename on disk - the editor line. Every route here either moves bytes
 out of the library, renames a file the library owns, or takes a snapshot.
 Submitting an operation is not on this line: its level is its workflow's, and
 the handler refuses a data-removing workflow to a contributor. A whole-library
-scan is an operation whose workflow is still `write` (see "Operations").
+scan is an operation whose workflow is `contribute` (see "Operations"), kept to
+one whole-library scan per ten minutes; a folder scan has no cooldown.
 
 | Method | Path                                        | Why |
 |--------|---------------------------------------------|-----|
@@ -410,7 +411,7 @@ and undo handlers enforce.
 | `enrich`             | contribute | no: fills only empty metadata fields |
 | `split-and-create`   | contribute | no: splits one directory into several projects in place |
 | `relocate`           | contribute | no: relocates a directory and re-points its rows |
-| `library-scan`       | write      | no, but see below |
+| `library-scan`       | contribute | no: it walks the library, registers the files it finds and stamps the ones it cannot as `missing_since`; it removes nothing, and the whole-library walk is bounded below |
 
 **Undo keeps the level of the operation it acts on (Mf-d588, 2026-11-27).**
 Not the level of the effect it turns out to have: `create-project`'s undo
@@ -449,11 +450,28 @@ deleted ingest doors (`POST /import`, `POST /import/zip`) with them, and `extrac
 when part 3/4 replaced `POST /import/archive` and `GET /import/archive/entries`,
 and `enrich` when part 4/4 replaced `POST /bundles/enrich`.
 
-**`library-scan` is WRITE, waiting on Mf-gciy.** The rubric reads contribute - a
-scan removes nothing - but its capacity consequence is still with the owner, so
-it stays at `write` until Mf-gciy settles that and moves it. The level is now the
-workflow's (`WORKFLOW_LEVELS`), enforced at submit rather than by a route-level
-declaration, and the two deleted routes are gone from the matrix above.
+**`library-scan` is CONTRIBUTE, and the whole-library walk is rate-limited
+(Mf-gciy, 2026-11-27).** The rubric's answer: a scan removes nothing. The
+capacity consequence that used to hold the level at `write` - an unbounded walk
+of the whole root - is paid for with bounded work instead of a higher rank, and
+that work landed first. The planner refuses a whole-library scan while the
+library's last one is inside a 600 s window: one whole-library scan per ten
+minutes, charged to the LIBRARY and not to the submitter, from the newest
+`queued`, `running`, `cancelling`, `done` or `failed` row - so N contributors do
+not get N walks, a demoted account cannot reset its own allowance by losing its
+role, and a scan cancelled before it started walked nothing and costs nothing.
+The refusal is a 429 carrying `Retry-After`, it names the submitter of the
+blocking row, and it says: "a whole-library scan was submitted by <submitter>
+<age> s ago, and one whole-library scan per 10 minutes is the limit: the next
+one is allowed in <remaining> s. A folder scan has no cooldown." The plan's
+`target` IS the scope: `""` is the whole library, the root, and the only target
+that is ever refused; any folder is a scoped and therefore bounded walk, never
+charged, and serialised against every overlapping operation by its declared
+path. That is why the missing queue's per-card Re-scan scans the file's own
+folder. A restore's or an extract's own re-scan does not come through the
+planner at all, so it is never refused. The level is the workflow's
+(`WORKFLOW_LEVELS`), enforced at submit, cancel and undo, and the two deleted
+routes are gone from the matrix above.
 
 Everything under `/operations` is a persisted plan with a review, and the plan
 is the server's: `POST /operations/plan` computes it from the library as it is
@@ -758,16 +776,18 @@ sessions stay valid.
 
 ## Known consequences worth knowing
 
-* **A whole-library scan is `write`, and it is a workflow now.** A scan is
+* **A whole-library scan is `contribute`, and it is a workflow now.** A scan is
   library work - it walks storage, registers files found on disk and refreshes
-  `missing_since` - not an administration job, so editors may start one; it is
-  recorded as an `operation.submit`/`operation.done` pair rather than as the
-  deleted `library.scan.start`, because the operation row carries the actor and
-  the counts. Reading a scan's status is `GET /operations?workflow=library-scan`
-  (`read`), open to every client, so polling is not a write and every client
-  still sees the counters. A viewer *or a contributor* submitting that workflow
-  still gets a 403: starting a scan is not a contribute action, and the
-  missing-file banner only offers Re-scan to editors.
+  `missing_since` - not an administration job, and it removes nothing, so
+  contributors may start one; it is recorded as an `operation.submit`/
+  `operation.done` pair rather than as the deleted `library.scan.start`, because
+  the operation row carries the actor and the counts. Reading a scan's status is
+  `GET /operations?workflow=library-scan` (`read`), open to every client, so
+  polling is not a write and every client still sees the counters. The
+  whole-library walk is rate-limited to one per ten minutes and refused with a
+  429 whose sentence the panel shows verbatim; a folder scan is not. A viewer
+  submitting that workflow still gets a 403, and the missing-file banner offers
+  Re-scan to contributors.
 * **A scan's step result carries `errors: List[str]`** that may contain storage
   filenames. That is the same disclosure class as `storage_path` on `AssetOut`
   and `FolderOut`, which viewers already receive, so it is not a new leak.
@@ -820,8 +840,9 @@ sessions stay valid.
   capabilities locally, and `ui/settings/Settings.tsx` is configuration only:
   it derives no write capability at all. REVIEW's own mutating surfaces each
   take the capability of the route they call: the missing queue's per-card
-  Re-scan (the `library-scan` workflow, `write`) and Forget
-  (`DELETE /asset/{asset_id}`, `write`) render only when `canDelete`, the
+  Re-scan (the `library-scan` workflow, `contribute`) renders when
+  `canContribute`, because it is scoped to that file's folder, Forget
+  (`DELETE /asset/{asset_id}`, `write`) still renders only when `canDelete`, the
   bundle queue's create and dismiss are gated per row at `require_contribute`,
   and Empty trash needs `canPurgeTrash`. The local folder-scan panel in
   `ui/review/ImportsReviewView.tsx` is the one exception: it receives
@@ -856,15 +877,17 @@ sessions stay valid.
   link/zip/project import, asset tag and notes/creator/collection edits, folder
   create and subfolder create, project create/edit/add-member/remove-member,
   attaching files to a project, adding a supporting file, the display-only
-  supporting-file rename and reorder, thumbnail generation, the contribute half
-  of the bulk bar (tags and metadata) and the upload-queue panel (a retry of an
-  upload is a contribute, not a write). They still lose folder rename and move
-  (and therefore folder retagging), asset rename, moving an asset between
-  folders, folder delete, asset delete, supporting-file delete, prepared-print
-  delete, batch move and batch delete, the local folder-scan panel
-  (REVIEW → Imports running, hidden below `editor` although both of its calls
-  are `contribute`) and snapshot actions. The client is still not the boundary: a stale or tampered role cache
-  only hides or shows a button, it cannot change what the API allows.
+  supporting-file rename and reorder, thumbnail generation, the per-card Re-scan
+  of a missing file (the `library-scan` workflow, scoped to that file's folder),
+  the contribute half of the bulk bar (tags and metadata) and the upload-queue
+  panel (a retry of an upload is a contribute, not a write). They still lose
+  folder rename and move (and therefore folder retagging), asset rename, moving
+  an asset between folders, folder delete, asset delete, supporting-file delete,
+  prepared-print delete, batch move and batch delete, the local folder-scan
+  panel (REVIEW → Imports running, hidden below `editor` although both of its
+  calls are `contribute`) and snapshot actions. The client is still not the
+  boundary: a stale or tampered role cache only hides or shows a button, it
+  cannot change what the API allows.
 * **No direct-visit not-permitted state is needed for the contribute or write
   surfaces.** Both capabilities only show or hide controls inside views every
   role may open. There is no client router and no contribute-only or write-only

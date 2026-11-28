@@ -1306,9 +1306,11 @@ def test_the_workflow_level_table_is_the_owner_rubric() -> None:
         "enrich": permissions.CONTRIBUTE,
         "split-and-create": permissions.CONTRIBUTE,
         "relocate": permissions.CONTRIBUTE,
-        # Write: it removes nothing, but it is an existing route whose capacity
-        # consequence is an open question with the owner (Mf-215n).
-        "library-scan": permissions.WRITE,
+        # The rubric's answer (Mf-gciy, 2026-11-27): a scan removes nothing. Its
+        # capacity consequence - an unbounded whole-root walk - is paid for with
+        # bounded work in the planner: `LIBRARY_SCAN_COOLDOWN_SECONDS` bounds the
+        # whole-root case and a scoped target bounds the folder case.
+        "library-scan": permissions.CONTRIBUTE,
     }
 
 

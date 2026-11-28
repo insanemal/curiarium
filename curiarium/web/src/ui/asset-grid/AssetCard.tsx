@@ -132,12 +132,18 @@ const AssetCard = React.memo(function AssetCard({
       disabled: preparedClearing,
     });
   }
-  if (item.missing_since && canDelete) {
+  // The two repair actions now sit at different ranks - the rescan is
+  // CONTRIBUTE, Forget is WRITE - so an editor's menu is unchanged and a
+  // contributor gains the Re-scan. Order is preserved: Re-scan before Forget
+  // before Delete.
+  if (item.missing_since && canContribute) {
     destructiveItems.push({
       label: "Re-scan",
       onSelect: () => onRescanMissing(item),
       disabled: rescanning,
     });
+  }
+  if (item.missing_since && canDelete) {
     destructiveItems.push({ label: "Forget entry", onSelect: () => onForgetMissing(item) });
   }
   if (canDelete) {

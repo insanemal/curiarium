@@ -51,7 +51,12 @@ def _build_tree(root: Path, files: int) -> int:
 
 
 def _cleanup() -> None:
-    """Bulk-delete this test's assets and folders, whatever state the run ended in."""
+    """Bulk-delete this test's rows, whatever state the run ended in.
+
+    Leftover `library-scan` operations go too: the database is shared for the whole
+    session and the whole-root cooldown reads those rows, so a residue from another
+    module would refuse this test's plan with a 429 before the walk ever starts.
+    """
     with Session(engine) as session:
         session.execute(delete(Asset).where(Asset.storage_path.like(f"{ROOT_DIR_PREFIX}-%")))
         session.commit()
@@ -60,6 +65,13 @@ def _cleanup() -> None:
             if folder.name.startswith(ROOT_DIR_PREFIX):
                 session.delete(folder)
         session.commit()
+    with Session(engine) as session:
+        stale = session.exec(select(Operation.id).where(Operation.workflow == "library-scan")).all()
+        if stale:
+            session.execute(delete(OperationStep).where(OperationStep.operation_id.in_(stale)))
+            session.execute(delete(OperationLock).where(OperationLock.operation_id.in_(stale)))
+            session.execute(delete(Operation).where(Operation.id.in_(stale)))
+            session.commit()
 
 
 def _delete_operation(operation_id: str) -> None:

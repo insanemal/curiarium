@@ -5,12 +5,12 @@ import type { LibraryScanState } from "./useLibraryScan";
 type Props = {
   state: LibraryScanState;
   /**
-   * `editor` and above: the `library-scan` workflow is WRITE. The status line
-   * and the failure report are reads (`GET /operations?workflow=library-scan`
+   * `contributor` and above: the `library-scan` workflow is CONTRIBUTE. The
+   * status line and the failure report are reads (`GET /operations?workflow=library-scan`
    * is READ) and stay visible to a viewer, so moving the surface broadens no
    * write permission.
    */
-  canWrite: boolean;
+  canContribute: boolean;
   /**
    * Starts the SHELL's scan (App's `scanFromShell`: arm, then run), not this
    * mount's own copy: the shell owns the one poller, so the finish is observed
@@ -30,7 +30,7 @@ type Props = {
  * finish is observed from any view: the sticky arm keeps the shell's poll alive
  * while the operator is on the library.
  */
-export default function LibraryScanPanel({ state, canWrite, onScan }: Props) {
+export default function LibraryScanPanel({ state, canContribute, onScan }: Props) {
   const { scan } = state;
 
   return (
@@ -43,7 +43,12 @@ export default function LibraryScanPanel({ state, canWrite, onScan }: Props) {
           Files that have disappeared are counted and flagged in the grid, but never removed from the library.
         </p>
       </div>
-      <ScanStorageAction state={state} canWrite={canWrite} surface="panel" onScan={onScan} />
+      <ScanStorageAction
+        state={state}
+        canContribute={canContribute}
+        surface="panel"
+        onScan={onScan}
+      />
       {scan && <LibraryScanFailures failed={scan.failed} errors={scan.errors} />}
     </div>
   );
