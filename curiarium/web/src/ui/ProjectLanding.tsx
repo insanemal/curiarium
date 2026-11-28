@@ -61,7 +61,7 @@ import {
 } from "../lib/settings";
 import { notifyError, notifyInfo } from "../lib/toast";
 import {
-  ADD_DRIFT_PARTS_LABEL,
+  DRIFT_KNOWN,
   DRIFT_NOT_APPLICABLE,
   DRIFT_UNKNOWN,
   driftNoticeLine,
@@ -71,6 +71,7 @@ import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
 import AssetGrid from "./asset-grid/AssetGrid";
 import LicenceChip from "./LicenceChip";
 import AttachFilesControl from "./project-attach/AttachFilesControl";
+import AdoptGrownParts from "./project-attach/AdoptGrownParts";
 import { useAttachDrop } from "./project-attach/useAttachDrop";
 import { useAttachToProject } from "./project-attach/useAttachToProject";
 import Markdown from "./Markdown";
@@ -96,9 +97,9 @@ type Props = {
   onAssetsChanged: () => void;
   /**
    * App's `handleFoldersChanged`. Declared for the host's contract, but this
-   * panel no longer moves files: the drift notice's one action attaches members
-   * through `POST /project/{id}/assets`, which creates no `Folder` rows and
-   * rewrites no `storage_path`, so nothing here bumps the tree.
+   * panel no longer moves files: the drift notice's one action submits the
+   * adopt operation (membership only), so it still creates no `Folder` rows and
+   * rewrites no `storage_path`, and nothing here bumps the tree.
    */
   onFoldersChanged?: () => void;
   onUnauthorized?: () => void;
@@ -321,13 +322,30 @@ export default function ProjectLanding({
   // `not_applicable` instead: it has no folder identity, so there is no question
   // to answer and nothing at all is rendered - not even a dash.
   const [drift, setDrift] = useState<ProjectBundleDrift>(() => idleDrift(bundleMarker));
-  const [driftBusy, setDriftBusy] = useState(false);
+
+  // Whether the notice's adopt control has a run on screen. The notice is keyed on
+  // the drift COUNT, and the adopt itself drives that count to zero - so without
+  // this the host would close the notice the moment the run finished, destroying
+  // the result line and the undo before the operator could read or press them.
+  // The control reports `false` again once the run is undone, and the undo's own
+  // refetch brings the action back if the folder still holds parts.
+  const [adoptActive, setAdoptActive] = useState(false);
+
+  // Which project (and marker) the current answer belongs to. Only a CHANGE of
+  // identity resets to the idle state: a version bump is a refetch of the same
+  // question, so the previous answer - and the adopt control the notice hosts,
+  // with its run's undo - stays on screen until the new answer arrives.
+  const driftIdentity = useRef<string | null>(null);
 
   // Keyed on `assetsVersion` as well as the project, because App bumps it after
-  // every membership change: adding the parts refetches the drift, and the
+  // every membership change: adopting the parts refetches the drift, and the
   // notice then disappears on its own.
   useEffect(() => {
-    setDrift(idleDrift(bundleMarker));
+    const identity = `${project.id}\u0000${String(bundleMarker)}`;
+    if (driftIdentity.current !== identity) {
+      driftIdentity.current = identity;
+      setDrift(idleDrift(bundleMarker));
+    }
     if (!bundleMarker) return;
     let cancelled = false;
     void (async () => {
@@ -350,23 +368,6 @@ export default function ProjectLanding({
   }, [project.id, bundleMarker, assetsVersion]);
 
   const driftLine = driftNoticeLine(drift.state, drift.count);
-
-  // The one action on the notice, through the membership path that already
-  // exists: nothing is attached without the click, and there is no new write
-  // route. The empty-id guard is the same honesty as the sentence: a `known`
-  // count with no ids to send cannot be acted on.
-  const addDriftParts = async () => {
-    if (driftBusy || drift.asset_ids.length === 0) return;
-    setDriftBusy(true);
-    try {
-      await addProjectAssets(project.id, drift.asset_ids);
-      onAssetsChanged();
-    } catch (err) {
-      handleApiError(err, "Failed to add the folder's new parts.");
-    } finally {
-      setDriftBusy(false);
-    }
-  };
 
   // --- Derived hero data ---------------------------------------------------
 
@@ -924,25 +925,27 @@ export default function ProjectLanding({
             groups are a creation-time snapshot, so a new subfolder is not a
             group and a per-group notice would miss exactly this growth. It
             stands while the server names parts the project does not have. */}
-        {driftLine !== null && (
+        {driftLine !== null || adoptActive ? (
           <div
             data-bundle-drift="true"
             className="flex flex-wrap items-center gap-3 rounded-md border border-panel-strong bg-panel-soft px-3 py-2 text-sm"
           >
-            <span className="text-muted">{driftLine}</span>
-            {/* No ids, no action: a count with nothing to send cannot be honoured. */}
-            {canContribute && drift.asset_ids.length > 0 && (
-              <button
-                type="button"
-                className={BUTTON_SECONDARY}
-                disabled={driftBusy}
-                onClick={() => void addDriftParts()}
-              >
-                {ADD_DRIFT_PARTS_LABEL}
-              </button>
-            )}
+            {driftLine !== null && <span className="text-muted">{driftLine}</span>}
+            {/* The ONE action, labelled with the outcome the plan promises. It
+                renders no button until the server's plan exists: a count with
+                nothing to send cannot be honoured. While a run is on screen it
+                stays mounted even though the drift it was opened for is gone. */}
+            {canContribute &&
+              (adoptActive || (drift.state === DRIFT_KNOWN && drift.asset_ids.length > 0)) && (
+                <AdoptGrownParts
+                  projectId={project.id}
+                  onChanged={onAssetsChanged}
+                  onUnauthorized={onUnauthorized}
+                  onActiveChange={setAdoptActive}
+                />
+              )}
           </div>
-        )}
+        ) : null}
       </header>
 
       <div className="flex flex-wrap gap-2">

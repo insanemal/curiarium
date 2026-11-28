@@ -42,17 +42,19 @@ What it deliberately does NOT do:
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Mapping, Optional, Sequence, Tuple
 
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 import bundle_service
 import library_scan
 import project_create_service
 import project_service
-from models import Project, ProjectAsset
+from models import Asset, Project, ProjectAsset
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +89,56 @@ class AdoptOutcome:
     @property
     def measured(self) -> bool:
         return self.groups_after is not None
+
+
+@dataclass(frozen=True)
+class GroupFacts:
+    """The engine's group list, carried from a reviewed plan to the runner.
+
+    `measure_groups` reads exactly one attribute - `facts.groups` - from whatever
+    it is handed. A `proposal_engine.Facts` is the plan-time answer; this is the
+    same attribute carried on the step's args, so the runner refreshes the groups
+    the operator REVIEWED instead of measuring the disk a second time.
+    """
+
+    groups: List[dict]
+
+
+def unregistered_under(session: Session, root: str) -> int:
+    """How many files on disk under `root` have no registered `Asset` row.
+
+    This is the disk-minus-registered count the adopt planner refuses on, because
+    adopting a folder whose registered set is behind the disk would silently leave
+    those files out and call it "already complete" on the next plan. The fix is a
+    rescan, so the refusal names the scan.
+
+    One disk walk and one SQL statement over the exact prefix, never a per-file
+    query. A missing directory answers 0 rather than raising: a folder the walk
+    cannot read has no files this count can be honest about.
+    """
+    prefix = root + "/"
+    registered = set(
+        session.exec(
+            select(Asset.storage_path).where(
+                Asset.storage_path.is_not(None),
+                func.substr(Asset.storage_path, 1, len(prefix)) == prefix,
+            )
+        )
+    )
+    storage = Path(bundle_service.STORAGE)
+    unregistered = 0
+    try:
+        for directory, _dirs, files in os.walk(storage / root):
+            for name in files:
+                # The scan's own basename rule: it never registers a dot file.
+                if name.startswith("."):
+                    continue
+                relative = Path(directory, name).relative_to(storage).as_posix()
+                if relative not in registered:
+                    unregistered += 1
+    except OSError:
+        return 0
+    return unregistered
 
 
 def adopt(

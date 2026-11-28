@@ -2,6 +2,8 @@
 // stays unit-testable without mounting - the same house style as
 // `review/bundleRows.ts`. The state is never decided here: `state` is the wire's
 // word, and `count` is the server's number (null unless the state is known).
+// The notice's ONE action is `project-attach/AdoptGrownParts`, which brings its
+// own outcome-worded label; this module owns the sentence only.
 
 import { formatReviewCount } from "./review/useReviewCounts";
 
@@ -11,8 +13,6 @@ export const DRIFT_KNOWN = "known";
 export const DRIFT_UNKNOWN = "unknown";
 /** The project has no `_bundle` marker, so the question does not apply. */
 export const DRIFT_NOT_APPLICABLE = "not_applicable";
-
-export const ADD_DRIFT_PARTS_LABEL = "Add them";
 
 const DRIFT_TAIL = "parts in this folder are not in the project";
 

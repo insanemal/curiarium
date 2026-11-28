@@ -320,6 +320,14 @@
         "title": "Adopts",
         "type": "integer"
       },
+      "by_role": {
+        "additionalProperties": {
+          "type": "integer"
+        },
+        "default": {},
+        "title": "By Role",
+        "type": "object"
+      },
       "cover": {
         "anyOf": [
           {
@@ -511,8 +519,19 @@
     "type": "object"
   },
   "OperationUndoOut": {
-    "description": "The result of undoing a finished operation, shaped by its workflow.\n\nA `create-project` undo answers the project it deleted and leaves the two\nworkflow-specific keys null; a `split-and-create` undo answers ``moves`` (how\nmany landed moves were folded back) and ``projects_removed`` (the projects it\ncreated and then deleted), and leaves the project pair null. Optional on both\nsides so neither body gains a fabricated zero.",
+    "description": "The result of undoing a finished operation, shaped by its workflow.\n\nA `create-project` undo answers the project it deleted and leaves the two\nworkflow-specific keys null; a `split-and-create` undo answers ``moves`` (how\nmany landed moves were folded back) and ``projects_removed`` (the projects it\ncreated and then deleted), and leaves the project pair null. An `adopt` undo\nanswers the project it RESTORED plus how many memberships it took back\n(``members_removed``); `create-project` and `split-and-create` leave it null.\nOptional on both sides so neither body gains a fabricated zero.",
     "properties": {
+      "members_removed": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Members Removed"
+      },
       "moves": {
         "anyOf": [
           {

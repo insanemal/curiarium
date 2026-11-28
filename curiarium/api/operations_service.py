@@ -13,9 +13,10 @@ pool that reads queued rows, takes prefix locks and executes steps. There is one
 shared queue, attributed to the submitting user - not a queue per user - so two
 operations over the same paths serialise instead of racing.
 
-This module owns the plan codec, both workflow planners (`create-project` and
-`split-and-create`), submit, the reads, cancel, undo, supersede and prune. It
-never executes a workflow: the runner does, and the routes only ever write a row.
+This module owns the plan codec, the three workflow planners (`create-project`,
+`split-and-create` and `adopt`), submit, the reads, cancel, undo, supersede and
+prune. It never executes a workflow: the runner does, and the routes only ever
+write a row.
 
 `split-and-create` is a COMPOSITION, not a second implementation of anything: it
 plans `move_service.preflight_refusals` over the hoists `proposal_engine` implies
@@ -37,7 +38,9 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, select
 
+import adopt_service
 import audit
+import bundle_drift
 import bundle_service
 import library_scan
 import move_service
@@ -51,7 +54,7 @@ from db import engine
 from models import Asset, Folder, Operation, OperationLock, OperationStep, Project, ProjectAsset
 
 PLAN_VERSION = 1
-WORKFLOWS = ("create-project", "split-and-create")
+WORKFLOWS = ("create-project", "split-and-create", "adopt")
 
 # The two shapes a split can enact, and the one it defaults to.
 DEFAULT_SPLIT_SHAPE = "split-top-folders"
@@ -67,7 +70,7 @@ MAX_SPLIT_MOVES = 400
 # `WORKFLOWS` names the workflows that actually run. A row in `WORKFLOW_LEVELS`
 # below for a workflow that is not here is a DECLARATION FOR THE RECORD, not a
 # claim that the workflow runs - but the two lists must not disagree about what
-# exists: `split-and-create` has a planner, so it is in both.
+# exists: `split-and-create` and `adopt` have planners, so they are in both.
 #
 # Fails closed: `level_for_workflow` refuses a workflow with no row rather than
 # defaulting it to CONTRIBUTE, because an unclassified workflow is a bug.
@@ -214,10 +217,14 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
     # are one plan and `Operation.target` reads the way `declared_paths` does.
     normalized = (target or "").strip().strip("/")
     intent = {"v": PLAN_VERSION, "workflow": workflow, "target": normalized, "params": params or {}}
-    if workflow == "split-and-create":
-        steps, review, declared = _plan_split_and_create(session, normalized, params or {})
-    else:
+    if workflow == "create-project":
         steps, review, declared = _plan_create_project(session, normalized, params or {})
+    elif workflow == "split-and-create":
+        steps, review, declared = _plan_split_and_create(session, normalized, params or {})
+    elif workflow == "adopt":
+        steps, review, declared = _plan_adopt(session, normalized, params or {})
+    else:  # pragma: no cover - decode/`WORKFLOWS` refuse this before it can be built
+        raise HTTPException(status_code=400, detail=f"unknown workflow {workflow!r}")
     digest = plan_digest(intent, steps, review)
     return Plan(intent=intent, steps=steps, review=review, digest=digest, declared_paths=declared)
 
@@ -743,6 +750,189 @@ def _plan_split_and_create(session: Session, target: str, params: dict) -> Tuple
     return steps, review, [key, *roots]
 
 
+# --- adopt -------------------------------------------------------------------
+
+
+def _plan_adopt(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
+    """The `adopt` planner: add a folder's registered files to the project they belong to.
+
+    The target IS the project id, not a bundle key: a bundle key is not an
+    identity, because two projects may name one key, so a plan that addressed a
+    folder would not know which project to extend. The project's own marker names
+    the folder (`rel_dir`, else the detection door's `key`), so the folder comes
+    from the row rather than from the request.
+
+    Every refusal happens BEFORE any row exists, and each is one sentence an
+    operator can act on. The disk-minus-registered check is the one that must not
+    be softened: adopting past it would leave the unregistered files out and the
+    next plan would call the project "already complete".
+
+    `declared_paths` is the walk root, so the prefix lock serialises two adopts of
+    one folder and `supersede_overlapping` retires an older one - the paths, not
+    the project id, are what the runner must hold.
+    """
+    if not target:
+        raise HTTPException(status_code=409, detail="the target must be a project id")
+    project = session.get(Project, target)
+    if project is None:
+        raise HTTPException(status_code=409, detail=f"unknown project: {target}")
+    marker = project_service.bundle_marker_of(project.metadata_json)
+    if not marker:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"project {project.name!r} has no bundle marker: it was not made from a folder, "
+                "so there is nothing to adopt"
+            ),
+        )
+
+    candidate = bundle_drift.walk_root(marker)
+    registered = bundle_service.registered_assets(session, candidate) if candidate else []
+    state, root = bundle_drift.classify(
+        marker,
+        root_present=lambda probe: bundle_drift.has_rows_under(
+            [(asset.id, asset.path, asset.size) for asset in registered], probe
+        ),
+    )
+    if state != bundle_drift.DRIFT_KNOWN or root is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"project {project.name!r} has a bundle marker that names no folder this library "
+                f"still holds ({marker.get('key')!r}); its drift cannot be measured, so nothing "
+                "was planned"
+            ),
+        )
+
+    if seams.scan_status().get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"a library scan is running; nothing was planned for {project.name!r}. "
+                "Try again when it finishes"
+            ),
+        )
+
+    entries = list(bundle_service.members_of(root, registered).entries)
+
+    missing = adopt_service.unregistered_under(session, root)
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{missing} file(s) under {root!r} are on disk but not in the library; "
+                "rescan the library, then plan again"
+            ),
+        )
+
+    # Excluded groups subtract FIRST: `str.startswith(())` is False, so an empty
+    # tuple drops nothing and a group the operator excluded is named before the
+    # member rule ever sees it.
+    prefixes = bundle_drift.excluded_prefixes(root, marker)
+    locked = [entry for entry in entries if entry.asset.path.startswith(prefixes)]
+    excluded: List[dict] = [
+        {"path": entry.asset.path, "reason": "this group is excluded from the project"}
+        for entry in locked
+    ]
+    candidates = [entry for entry in entries if not entry.asset.path.startswith(prefixes)]
+
+    existing = project_create_service.ExistingProject(project, project_create_service.MATCH_MARKER)
+    members, excluded_rule = _excluded_members(session, root, candidates, existing)
+    excluded.extend(excluded_rule)
+
+    # The plan resolves the DELTA: a membership the project already holds is not
+    # something this adopt would ADD, so it must not inflate the count the
+    # operator approves - and a project that already holds every file under the
+    # folder has nothing to plan at all.
+    held = set(
+        session.exec(select(ProjectAsset.asset_id).where(ProjectAsset.project_id == project.id))
+    )
+    members = [entry for entry in members if entry.asset.id not in held]
+
+    if not members:
+        raise HTTPException(
+            status_code=409, detail=f"{project.name!r} already holds every file under {root!r}"
+        )
+
+    # The census is STRUCTURAL, not conventional: one bucket per kept member in the
+    # same pass that counts them, and the post-condition below is the proof that
+    # `sum(groups) == members` can never be a sentence without a number behind it.
+    groups: dict = {}
+    by_role = {
+        role: 0
+        for role in (
+            library_scan.MODEL,
+            library_scan.IMAGE,
+            library_scan.TEXT,
+            library_scan.ARCHIVE,
+            library_scan.OTHER,
+        )
+    }
+    for entry in members:
+        name = _group_of(entry.rel_path)
+        group = groups.setdefault(name, {"name": name, "members": 0, "models": 0})
+        group["members"] += 1
+        if entry.role == library_scan.MODEL:
+            group["models"] += 1
+        by_role[entry.role] = by_role.get(entry.role, 0) + 1
+    group_list = list(groups.values())
+    counted = sum(group["members"] for group in group_list)
+    if counted != len(members) or sum(by_role.values()) != len(members):
+        raise RuntimeError(
+            f"adopt review census diverged: {counted} grouped and {sum(by_role.values())} by role, "
+            f"against {len(members)} members"
+        )
+
+    # The engine's groups, ONE walk, and the engine's own list handed to the run:
+    # the adopt step's `facts` shim answers `facts.groups` from it, so the marker is
+    # refreshed from the measurement the operator reviewed rather than from a
+    # second walk of the disk. The wire shape is derived at run time by
+    # `marker_groups`, the one place that shape is built.
+    facts = proposal_engine.measure(str(Path(bundle_service.STORAGE) / root), root)
+    wire = bundle_service.wire_groups(facts.groups)
+
+    member_ids = [entry.asset.id for entry in members]
+    count = len(members)
+    steps = [
+        {
+            "index": 0,
+            "op": "adopt",
+            "summary": f"add {count} file(s) to project {project.name!r}",
+            "args": {"project_id": project.id, "key": root, "member_ids": member_ids, "groups": facts.groups},
+        },
+        {
+            "index": 1,
+            "op": "refresh-groups",
+            "summary": f"refresh the project's {len(wire)} group(s) from the folder",
+            "args": {"project_step": 0},
+        },
+        {
+            "index": 2,
+            "op": "verify-members",
+            "summary": f"verify {count} member file(s) landed in the project",
+            "args": {"project_step": 0, "asset_ids": member_ids},
+        },
+    ]
+    review = {
+        "workflow": "adopt",
+        "target": project.id,
+        "moves": 0,
+        "creates": 0,
+        "adopts": count,
+        "deletes": 0,
+        "members": count,
+        "groups": group_list,
+        "cover": None,
+        "excluded": excluded,
+        "existing_project_id": project.id,
+        "existing_project_name": project.name,
+        "move_list": [],
+        "projects": [],
+        "by_role": by_role,
+    }
+    return steps, review, [root]
+
+
 # Submit -----------------------------------------------------------------------
 
 
@@ -1018,6 +1208,8 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
         return _undo_create_project(session, operation, ctx)
     if operation.workflow == "split-and-create":
         return _undo_split_and_create(session, operation, ctx)
+    if operation.workflow == "adopt":
+        return _undo_adopt(session, operation, ctx)
     raise HTTPException(
         status_code=409, detail=f"undo is not implemented for workflow {operation.workflow!r}"
     )
@@ -1218,6 +1410,67 @@ def _undo_split_and_create(
         "undone": True,
         "moves": folded,
         "projects_removed": removed,
+    }
+
+
+def _undo_adopt(
+    session: Session, operation: Operation, ctx: Optional[audit.AuditContext]
+) -> dict:
+    """Take back exactly the memberships the adopt step recorded, then restore its groups.
+
+    The entry IS the ledger: it is the adopt step's stored result, and
+    `undo_entry` takes back only what that entry snapshotted - so a membership an
+    operator added after the adopt survives. A group the entry never recorded (no
+    `groups_before` key) is never touched, and a recorded `None` removes the
+    marker's `groups` key.
+
+    ONE commit at the end, so the memberships, the group snapshot, the audit row
+    and the `undo_state` flip are one fact. An adopt that added nothing answers a
+    409 WITHOUT touching `undo_state`: it stays `available`, because there is
+    nothing to undo and the next attempt should say the same thing.
+    """
+    statement = (
+        select(OperationStep)
+        .where(OperationStep.operation_id == operation.id, OperationStep.op == "adopt")
+        .order_by(OperationStep.step_index)
+    )
+    step = session.exec(statement).first()
+    result = _result_of(step)
+    entry = result.get("entry") if isinstance(result.get("entry"), dict) else {}
+    members = entry.get("members") or []
+    if not members:
+        raise HTTPException(
+            status_code=409, detail="nothing to undo: this adopt added no memberships"
+        )
+
+    removed = adopt_service.undo_entry(session, entry)
+
+    project_id = entry.get("id") or result.get("project_id")
+    project = session.get(Project, project_id) if project_id else None
+    name = project.name if project else None
+    audit.stage(
+        session,
+        ctx,
+        audit.Event(
+            audit.OPERATION_UNDO,
+            operation.id,
+            {
+                "project_id": project_id,
+                "project_name": name,
+                "members_removed": removed,
+                "groups_restored": adopt_service.ENTRY_GROUPS_BEFORE in entry,
+            },
+        ),
+    )
+    operation.undo_state = UNDO_UNDONE
+    session.add(operation)
+    session.commit()
+    return {
+        "operation_id": operation.id,
+        "undone": True,
+        "project_id": project_id,
+        "project_name": name,
+        "members_removed": removed,
     }
 
 

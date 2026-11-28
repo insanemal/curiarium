@@ -11,6 +11,9 @@ import {
   type OperationReview,
   undoOperation,
 } from "./index";
+// `index.ts` is outside this ticket's surface, so the new symbol is read from
+// its domain module - the same module every other production import uses.
+import { adoptActionLabel } from "./operations";
 
 type MockResponse = {
   ok: boolean;
@@ -60,6 +63,7 @@ const review: OperationReview = {
   deletes: 0,
   members: 7,
   groups: [],
+  by_role: { model: 7, image: 0, text: 0, archive: 0, other: 0 },
   cover: null,
   excluded: [],
   existing_project_id: null,
@@ -161,6 +165,7 @@ describe("operations API client", () => {
       project_name: "a",
       moves: 2,
       projects_removed: ["p2"],
+      members_removed: null,
     };
     const fetchMock = installFetch(respond(undone));
 
@@ -218,5 +223,56 @@ describe("operations API client", () => {
         ],
       }),
     ).toBe("Split into 3 projects");
+  });
+
+  it("labels the adopt action from the plan's own file and group counts", () => {
+    // Catches a label named for the subsystem rather than the outcome, a
+    // singular drawn from the plural string, and the `""` root bucket counted
+    // as a group: that bucket is the folder's own files, and printing it would
+    // promise a group the operator cannot see.
+    const namedGroups = (count: number): OperationReview["groups"] =>
+      Array.from({ length: count }, (_, index) => ({
+        name: `Group ${index + 1}`,
+        members: 19,
+        models: 19,
+      }));
+
+    expect(
+      adoptActionLabel({
+        ...review,
+        members: 171,
+        groups: namedGroups(9),
+        by_role: { model: 171, image: 0, text: 0, archive: 0, other: 0 },
+      }),
+    ).toBe("Add 171 files in 9 groups");
+    expect(
+      adoptActionLabel({
+        ...review,
+        members: 1,
+        groups: [{ name: "Hydra", members: 1, models: 1 }],
+        by_role: { model: 1, image: 0, text: 0, archive: 0, other: 0 },
+      }),
+    ).toBe("Add 1 file in 1 group");
+    expect(
+      adoptActionLabel({
+        ...review,
+        members: 171,
+        groups: [],
+        by_role: { model: 171, image: 0, text: 0, archive: 0, other: 0 },
+      }),
+    ).toBe("Add 171 files");
+    // The `""` bucket rides with a real group here, so the test proves it is
+    // skipped rather than proving an empty list stays empty.
+    expect(
+      adoptActionLabel({
+        ...review,
+        members: 3,
+        groups: [
+          { name: "", members: 2, models: 2 },
+          { name: "Core", members: 1, models: 1 },
+        ],
+        by_role: { model: 3, image: 0, text: 0, archive: 0, other: 0 },
+      }),
+    ).toBe("Add 3 files in 1 group");
   });
 });

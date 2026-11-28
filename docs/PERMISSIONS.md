@@ -350,7 +350,7 @@ data; an operation row is not library content.
 | POST   | `/operations/plan`                          | computes a plan and writes nothing: the step list, the counts and every exclusion with its reason. The `plan_id` it returns is the only thing a submit may name |
 | POST   | `/operations`                               | queues a plan this server issued, under an idempotency key; writes a row and answers 202, the in-process runner does the work. The request body has no steps field, so a client cannot invent a step list, and the plan is recomputed at submit so a stale one is a 409. Contributing is enough because the handler refuses a data-removing workflow to a contributor (`operations_service.WORKFLOW_LEVELS`) |
 | POST   | `/operations/{operation_id}/cancel`         | a queued operation stops now; a running one is asked to stop after the step it is in completes, and its remaining steps are skipped. Cancelling removes nothing, so the row's workflow decides the level and the handler enforces it |
-| POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by putting its own writes back and never deleting the files: a `create-project` deletes the project row it created, a `split-and-create` folds its moves back, deletes the projects it created and restores the retired container row. What it may remove is the workflow's question, enforced per workflow. Refused with 409 once a later operation over the same paths has superseded it |
+| POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by putting its own writes back and never deleting the files: a `create-project` deletes the project row it created, a `split-and-create` folds its moves back, deletes the projects it created and restores the retired container row, and an `adopt` takes back exactly the memberships it added and restores the marker's group snapshot. What it may remove is the workflow's question, enforced per workflow. Refused with 409 once a later operation over the same paths has superseded it |
 
 ### write (editor or admin)
 
@@ -423,8 +423,10 @@ and undo handlers enforce.
 Not the level of the effect it turns out to have: `create-project`'s undo
 deletes the project row it created, `split-and-create`'s undo folds its moves
 back, deletes the projects it created and restores the container folder row it
-retired, and neither of those undos deletes a file - a row removed, a move
-reversed and a row put back, three effects at the one level, `contribute`,
+retired, and `adopt`'s undo takes back the memberships it added and restores the
+marker's group list it refreshed - and none of those undos deletes a file: a row
+removed, a move reversed, a row put back and a membership unjoined, four effects
+at the one level, `contribute`,
 because the level belongs to the workflow the undo acts on and not to what the
 undo removes. The rubric still holds because the row a contributor removes that
 way is one they created moments earlier by an action they were already allowed
@@ -441,12 +443,12 @@ at `write`, a move's at `contribute` - would make one button two different
 levels depending on history.
 
 **Declarations for the record.** `operations_service.WORKFLOWS` is
-`("create-project", "split-and-create")`: those two have a planner and run. Every
-other row records the level the owner decided for a workflow that does not exist
-yet - `adopt`, `relocate`, the import doors and `enrich` are exactly that - so a
-row is a decision, not a claim about today's code. Read a row against `WORKFLOWS`
-before believing it runs; a name reaches `WORKFLOWS` when it has a planner, never
-before.
+`("create-project", "split-and-create", "adopt")`: those three have a planner
+and run. Every other row records the level the owner decided for a workflow that
+does not exist yet - `relocate`, the import doors and `enrich` are exactly that -
+so a row is a decision, not a claim about today's code. Read a row against
+`WORKFLOWS` before believing it runs; a name reaches `WORKFLOWS` when it has a
+planner, never before. `adopt` left this list when its planner landed (Mf-ytig).
 
 **`library-scan` is an OPEN QUESTION.** The rubric reads contribute - a scan
 removes nothing - but it is an existing route whose capacity consequence is
@@ -481,10 +483,12 @@ silently re-run, because its side effects are unknown. Finished operations are
 pruned to the newest 200 plus everything from the last 30 days; the audit log is
 the permanent record.
 
-Two workflows run: `create-project` and `split-and-create`. The client calls these
-routes - `curiarium/web/src/lib/api/operations.ts` plans, submits and undoes for
-the review queue and the guided import panel (`SplitAndCreatePanel`) - and every
-other name in `WORKFLOW_LEVELS` is declared, not runnable.
+Three workflows run: `create-project`, `split-and-create` and `adopt`. The
+client calls these routes - `curiarium/web/src/lib/api/operations.ts` plans,
+submits and undoes for the review queue and the guided import panel
+(`SplitAndCreatePanel`) and for the project page's drift notice
+(`AdoptGrownParts`) - and every other name in `WORKFLOW_LEVELS` is declared, not
+runnable.
 
 The level split follows the owner's rule: viewers read the queue, and a
 contributor may plan, submit, cancel and undo any workflow that removes nothing

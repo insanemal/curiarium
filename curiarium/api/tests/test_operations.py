@@ -844,10 +844,11 @@ def test_the_create_project_undo_body_gains_only_the_two_additive_null_keys(
 ) -> None:
     """The `OperationUndoOut` change is purely additive, and asserted rather than loosened.
 
-    A split's undo answers `moves` and `projects_removed`; a create-project undo
-    answers the project it deleted and leaves those two null. The key set below is
-    EXACT, not a subset: a body that dropped `project_id`, or one that invented a
-    zero for `moves`, reds here with the whole shape in front of the reviewer.
+    A create answers only the project it deleted, and leaves ALL THREE
+    workflow-specific keys null: `moves` and `projects_removed` (a split's) and
+    `members_removed` (an adopt's). The key set below is EXACT, not a subset: a
+    body that dropped `project_id`, or one that invented a zero for `moves` or
+    `members_removed`, reds here with the whole shape in front of the reviewer.
     """
     operation = submit_of(client, plan_of(client))
     run_to_completion()
@@ -863,11 +864,13 @@ def test_the_create_project_undo_body_gains_only_the_two_additive_null_keys(
         "project_name",
         "moves",
         "projects_removed",
+        "members_removed",
     }
     assert body["undone"] is True
     assert body["project_id"] is not None and body["project_name"] is not None
     assert body["moves"] is None
     assert body["projects_removed"] is None
+    assert body["members_removed"] is None
 
 
 def test_a_later_operation_over_the_same_paths_supersedes_the_earlier_undo(
@@ -1147,16 +1150,17 @@ def test_a_workflow_with_no_table_entry_is_refused_rather_than_defaulted_to_cont
 def test_a_declared_workflow_without_a_planner_yet_resolves_to_contribute() -> None:
     """The owner rubric, table-levelled: organising and relocating are contribute.
 
-    Honest scope, in two halves. `adopt` and `relocate` are still DECLARATIONS FOR
-    THE RECORD - neither is in `operations_service.WORKFLOWS`, so their level is a
-    table-level assertion and nothing more. `split-and-create` left that set when
-    its planner landed in Mf-g759: it is a real workflow now and is asserted end to
-    end, roles included, in `tests/test_split_and_create.py`. Both halves fail the
-    moment somebody changes a level, and the first fails the moment a declaration
-    starts claiming to run.
+    Honest scope, in two halves. `relocate` is still a DECLARATION FOR THE RECORD -
+    it is not in `operations_service.WORKFLOWS`, so its level is a table-level
+    assertion and nothing more. `adopt` and `split-and-create` left that set when
+    their planners landed (`adopt` in Mf-ytig, `split-and-create` in Mf-g759): they
+    are real workflows now and are asserted end to end, roles included, in
+    `tests/test_adopt_workflow.py` and `tests/test_split_and_create.py`. Both halves
+    fail the moment somebody changes a level, and the first fails the moment a
+    declaration starts claiming to run.
     """
-    assert set(operations_service.WORKFLOWS) == {"create-project", "split-and-create"}
-    for workflow in ("adopt", "relocate"):
+    assert set(operations_service.WORKFLOWS) == {"create-project", "split-and-create", "adopt"}
+    for workflow in ("relocate",):
         assert workflow not in operations_service.WORKFLOWS, (
             f"{workflow} has a planner now; move it out of the declaration-only list"
         )

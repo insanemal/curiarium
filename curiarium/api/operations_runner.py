@@ -29,12 +29,14 @@ from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, select
 
+import adopt_service
 import audit
 import bundle_service
 import folder_service
 import move_service
 import operations_service
 import project_create_service
+import project_service
 from db import engine
 from models import Folder, Operation, OperationLock, OperationStep, Project, ProjectAsset
 
@@ -357,6 +359,8 @@ def _complete_step(operation_id: str, step_index: int, result: dict) -> None:
 # Step bodies ------------------------------------------------------------------
 # Each body takes `(operation_id, step_index, args)` and returns a JSON-safe
 # result dict; an exception is what marks the step (and operation) failed.
+# `adopt`/`refresh-groups` are the adopt workflow's two writes: membership, then
+# the marker's group list the plan measured.
 
 
 def _project_id_from_step(session: Session, operation_id: str, step_index: int) -> str:
@@ -523,9 +527,91 @@ def _verify_cover(operation_id: str, step_index: int, args: dict) -> dict:
     return payload
 
 
+def _adopt(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `adopt` step body: `adopt_service.adopt`, the members the review named.
+
+    Membership only - it never moves bytes. The ids come from the reviewed plan
+    verbatim (a rescan between review and run must not attach files nobody
+    approved), while `attached` - the candidate list the marker's `attached`
+    counts are bucketed from - is re-read at run time so the flag describes the
+    project as it is. The engine's groups travel on the step's args, so the
+    measurement is the one the operator reviewed; `GroupFacts` is how a
+    serialised group list answers the attribute `measure_groups` reads.
+    """
+    with Session(engine) as session:
+        attached = [
+            (asset.id, asset.path, asset.size)
+            for asset in bundle_service.registered_assets(session, args["key"])
+        ]
+        outcome = adopt_service.adopt(
+            session,
+            args["project_id"],
+            args["member_ids"],
+            key=args["key"],
+            root_rel=args["key"],
+            attached=attached,
+            facts=adopt_service.GroupFacts(list(args.get("groups") or [])),
+        )
+        entry = adopt_service.entry_of(outcome, root=args["key"], created=False)
+    return {
+        "project_id": outcome.project_id,
+        "key": args["key"],
+        "added": len(outcome.added),
+        "already_members": len(outcome.already_members),
+        "groups_before": outcome.groups_before,
+        "groups_after": outcome.groups_after,
+        "entry": entry,
+    }
+
+
+def _refresh_groups(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `refresh-groups` step body: write the groups the adopt step measured.
+
+    The list is read off the adopt step's stored result, never re-measured, so
+    the marker records the groups the operator reviewed. `set_bundle_groups`
+    replaces only `groups` and flushes; this body owns the one commit, then reads
+    the row back in a fresh session so the verification is a read, not an echo of
+    what it just wrote.
+    """
+    project_step = int(args["project_step"])
+    with Session(engine) as session:
+        step = session.exec(
+            select(OperationStep).where(
+                OperationStep.operation_id == operation_id,
+                OperationStep.step_index == project_step,
+            )
+        ).first()
+        if step is None or not step.result_json:
+            raise RuntimeError(f"step {project_step} has no result to refresh groups from")
+        try:
+            result = json.loads(step.result_json)
+        except (TypeError, ValueError):
+            result = {}
+    project_id = result.get("project_id") if isinstance(result, dict) else None
+    if not project_id:
+        raise RuntimeError(f"step {project_step} did not adopt into a project")
+    groups = result.get("groups_after")
+    if groups is None:
+        raise RuntimeError("the adopt step measured no groups to refresh")
+
+    with Session(engine) as session:
+        project_service.set_bundle_groups(session, project_id, groups)
+        session.commit()
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if project is None:
+            raise RuntimeError(f"project {project_id} is gone")
+        stored = project_service.bundle_marker_of(project.metadata_json).get("groups")
+        if stored != groups:
+            raise RuntimeError("the project's marker groups did not land as reviewed")
+    return {"project_id": project_id, "groups": len(groups), "verified": True}
+
+
 _STEP_BODIES = {
     "move": _move,
     "create-project": _create_project,
+    "adopt": _adopt,
+    "refresh-groups": _refresh_groups,
     "verify-members": _verify_members,
     "verify-cover": _verify_cover,
 }

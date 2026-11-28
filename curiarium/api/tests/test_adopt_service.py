@@ -19,6 +19,7 @@ import pytest
 from sqlmodel import Session, select
 
 import adopt_service
+import bundle_service
 import db
 import library_scan
 import project_service
@@ -338,3 +339,85 @@ def test_no_facts_measures_nothing(vault: Vault) -> None:
         assert (outcome.groups_before, outcome.groups_after) == (None, None)
         assert "groups_before" not in entry, "an absent key and a recorded None mean different things to undo"
         assert adopt_service.groups_restore(entry) is None
+
+
+# --- the disk-minus-registered count ----------------------------------------
+
+
+def test_unregistered_under_counts_disk_minus_registered(
+    vault: Vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: counting registered rows instead of disk files, or a scan's dot-file blind spot going the other way.
+
+    The count is `files on disk` minus `registered rows` under the prefix, and only
+    the disk can raise it: a file with no row is exactly the condition the adopt
+    planner refuses on. A dot file is the scan's own exclusion, so it is not a
+    file the count may charge for; a missing directory answers 0 rather than
+    raising, because there is no honest count to give.
+    """
+    monkeypatch.setattr(bundle_service, "STORAGE", vault.root)
+    for name in ("a.stl", "b.stl", ".hidden.stl"):
+        path = vault.root / KEY / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(STL_BYTES)
+
+    def register(session: Session, name: str) -> None:
+        session.add(
+            Asset(
+                name=name,
+                filename=f"{name}.stl",
+                mime="model/stl",
+                size=len(STL_BYTES),
+                storage_path=f"{KEY}/{name}.stl",
+            )
+        )
+        session.commit()
+
+    with Session(engine) as session:
+        register(session, "a")
+        assert adopt_service.unregistered_under(session, KEY) == 1, "b.stl is on disk only; the dot file is ignored"
+
+        register(session, "b")
+        assert adopt_service.unregistered_under(session, KEY) == 0
+        assert adopt_service.unregistered_under(session, "import/NoSuchFolder") == 0
+
+
+# --- the facts shim ---------------------------------------------------------
+
+
+def test_group_facts_answer_the_attribute_measure_groups_reads(vault: Vault) -> None:
+    """Mutation: the runner handing the step's serialised groups in a shape `measure_groups` cannot read.
+
+    The runner carries the reviewed groups on the step's `args` as a JSON list and
+    wraps them in `GroupFacts`, because `measure_groups` reads exactly one
+    attribute - `facts.groups`. Handing `GroupFacts` through `adopt` here proves
+    the shim really is that interface: the measurement answers the group list it
+    was handed, and the `attached` count is bucketed from the run-time candidate
+    list, not from the marker.
+    """
+    with Session(engine) as session:
+        project_id = make_project(session, marker={"key": KEY, "groups": [{"name": "old"}]})
+        member_ids = make_assets(session, "a", "b")
+
+        outcome = adopt_service.adopt(
+            session,
+            project_id,
+            member_ids,
+            key=KEY,
+            root_rel=KEY,
+            attached=[(member_ids[0], f"{KEY}/a/part.stl", len(STL_BYTES))],
+            facts=adopt_service.GroupFacts([group("a")]),
+        )
+
+        assert outcome.measured is True
+        assert outcome.groups_after == [
+            {
+                "name": "a",
+                "model_count": 1,
+                "foreign": False,
+                "separable": True,
+                "included": True,
+                "attached": 1,
+            }
+        ]
+        assert marker_of(session, project_id)["groups"] == [{"name": "old"}], "a measurement is not a write"

@@ -104,6 +104,11 @@ class OperationReviewOut(BaseModel):
   # keys a client may read unconditionally.
   move_list: List[OperationMoveOut] = []
   projects: List[OperationProjectOut] = []
+  # The census of the members the plan would add, one key per role the scan can
+  # assign (model/image/text/archive/other, zeros included), so
+  # `sum(by_role.values()) == members` and the client can render the mix without
+  # counting rows.
+  by_role: Dict[str, int] = {}
 
 
 class OperationPlanStepOut(BaseModel):
@@ -180,8 +185,10 @@ class OperationUndoOut(BaseModel):
   A `create-project` undo answers the project it deleted and leaves the two
   workflow-specific keys null; a `split-and-create` undo answers ``moves`` (how
   many landed moves were folded back) and ``projects_removed`` (the projects it
-  created and then deleted), and leaves the project pair null. Optional on both
-  sides so neither body gains a fabricated zero.
+  created and then deleted), and leaves the project pair null. An `adopt` undo
+  answers the project it RESTORED plus how many memberships it took back
+  (``members_removed``); `create-project` and `split-and-create` leave it null.
+  Optional on both sides so neither body gains a fabricated zero.
   """
 
   operation_id: str
@@ -190,3 +197,4 @@ class OperationUndoOut(BaseModel):
   project_name: Optional[str] = None
   moves: Optional[int] = None
   projects_removed: Optional[List[str]] = None
+  members_removed: Optional[int] = None

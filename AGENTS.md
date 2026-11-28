@@ -25,7 +25,7 @@ curiarium/api/            FastAPI backend (19 routers, SQLModel, versioned migra
   safe_http.py            no-redirect, IP-pinned HTTP client for all outbound fetches
   multipart_stream.py     streams uploads straight to storage (no /tmp spool)
   entry_policy.py         one import policy: junk predicate, size budget, entry naming, failure class
-  tests/                  ~3136 tests; conftest pins the environment
+  tests/                  ~3149 tests; conftest pins the environment
 curiarium/web/            React 18 + Vite + Tailwind
   src/ui/asset-grid/      the virtualised grid, cards, preview queue
   src/ui/settings/        configuration sections (Settings; no work queues)

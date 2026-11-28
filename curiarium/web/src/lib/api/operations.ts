@@ -70,6 +70,13 @@ export type OperationReview = {
   deletes: number;
   members: number;
   groups: OperationGroup[];
+  /** The census of the members a plan would add: one key per scan role
+   *  (model/image/text/archive/other, zeros included), so
+   *  `sum(by_role.values()) === members` and the mix reads without counting
+   *  rows. Optional because the server sends it for every plan but a client
+   *  built against an older API must still be able to read a review: a missing
+   *  census reads as no census, never as five fabricated zeros. */
+  by_role?: Record<string, number>;
   cover: OperationCover | null;
   excluded: OperationExcluded[];
   existing_project_id: string | null;
@@ -140,6 +147,10 @@ export type OperationUndo = {
   project_name: string | null;
   moves: number | null;
   projects_removed: string[] | null;
+  /** An `adopt` undo answers the project it restored and how many memberships
+   *  it took back; the other workflows leave it null, and an older server omits
+   *  the key entirely - both read as "not measured", never as zero. */
+  members_removed?: number | null;
 };
 
 /** What the workflow WOULD do: a dry run the server computes and writes nothing
@@ -224,4 +235,22 @@ export function splitActionLabel(review: OperationReview): string {
   const projects = review.projects.length;
   if (projects <= 1) return "Split into 1 project";
   return `Split into ${projects} projects`;
+}
+
+/** The adopt action's label, named for the OUTCOME and never for the subsystem.
+ *
+ *  Three shapes, said the way the operator would say them: "Add 171 files in
+ *  9 groups" for a folder that grew in several groups, "Add 1 file in 1 group"
+ *  for the smallest group-bearing delta, and "Add 171 files" for a root-only
+ *  delta that names no group at all. Counts come from the plan the server
+ *  issued, so the button promises exactly what the review measured. */
+export function adoptActionLabel(review: OperationReview): string {
+  // The `""` bucket is the folder's own root files, not a group: the server
+  // keeps it so `sum(groups) === members` holds structurally, and counting it
+  // would promise a group the operator cannot see.
+  const groups = review.groups.filter(group => group.name !== "").length;
+  const files = review.members === 1 ? "1 file" : `${review.members} files`;
+  if (groups === 0) return `Add ${files}`;
+  if (groups === 1) return `Add ${files} in 1 group`;
+  return `Add ${files} in ${groups} groups`;
 }

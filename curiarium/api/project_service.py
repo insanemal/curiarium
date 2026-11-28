@@ -20,7 +20,7 @@ household scale and migration 007 stays untouched.
 
 import json
 from datetime import datetime, timezone
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Iterator, List, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -716,6 +716,26 @@ def set_project_metadata_marker(project_id: str, marker: dict) -> None:
         project.updated_at = _now()
         session.add(project)
         session.commit()
+
+
+def set_bundle_groups(session: Session, project_id: str, groups: Sequence[Mapping]) -> dict:
+    """Replace ONLY the marker's `groups`, keeping every sibling key verbatim.
+
+    The adopt workflow's refresh half. `marker_groups` already decided the list;
+    this writes it where the marker lives and touches nothing else - `key`,
+    `detector`, `confidence`, `shape`, `rule`, `rel_dir`, `source`, `archive` and
+    `twin_verified` are the folder's identity and provenance, and an adopt changes
+    neither. The caller owns the commit (the operations runner commits its step
+    together with nothing else), so this flushes and returns the bundle it wrote.
+    """
+    project = get_project(session, project_id)
+    bundle = dict(bundle_marker_of(project.metadata_json))
+    bundle["groups"] = [dict(group) for group in groups]
+    project.metadata_json = merge_project_marker(project.metadata_json, {"_bundle": bundle})
+    project.updated_at = _now()
+    session.add(project)
+    session.flush()
+    return bundle
 
 
 def project_with_stats(project_id: str) -> Tuple[Project, int, int, int]:

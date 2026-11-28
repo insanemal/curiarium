@@ -88,7 +88,17 @@ import {
 } from "../lib/api";
 import { saveResponseToDisk } from "../lib/download";
 import { getProjectBundleDrift, type ProjectBundleDrift } from "../lib/api/projects";
-import { planOperation } from "../lib/api/operations";
+import {
+  getOperation,
+  planOperation,
+  submitOperation,
+  undoOperation,
+  type Operation,
+  type OperationPlan,
+  type OperationReview,
+  type OperationStep,
+  type OperationUndo,
+} from "../lib/api/operations";
 import { getToasts, resetToasts } from "../lib/toast";
 
 const addProjectAssetsMock = vi.mocked(addProjectAssets);
@@ -104,6 +114,9 @@ const uploadAssetFileMock = vi.mocked(uploadAssetFile);
 const saveResponseToDiskMock = vi.mocked(saveResponseToDisk);
 const getProjectBundleDriftMock = vi.mocked(getProjectBundleDrift);
 const planOperationMock = vi.mocked(planOperation);
+const submitOperationMock = vi.mocked(submitOperation);
+const getOperationMock = vi.mocked(getOperation);
+const undoOperationMock = vi.mocked(undoOperation);
 
 function makeProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -243,6 +256,7 @@ beforeEach(() => {
 afterEach(() => {
   gridState.received = null;
   cleanup();
+  vi.useRealTimers();
 });
 
 describe("ProjectLanding hero", () => {
@@ -1174,6 +1188,92 @@ function driftNotice(): HTMLElement | null {
 
 const BUNDLE_MARKER = { key: "Hydra", groups: [{ name: "Hydra", model_count: 3 }] };
 
+/** The adopt plan the page asks for on a grown folder: 3 models in one real
+ *  group, plus the root bucket the server keeps so its sum stays checkable. The
+ *  label it promises is "Add 3 files in 1 group". */
+function makeAdoptReview(overrides: Partial<OperationReview> = {}): OperationReview {
+  return {
+    workflow: "adopt",
+    target: "p1",
+    moves: 0,
+    creates: 0,
+    adopts: 1,
+    deletes: 0,
+    members: 3,
+    groups: [
+      { name: "", members: 0, models: 0 },
+      { name: "Hydra", members: 3, models: 3 },
+    ],
+    by_role: { model: 3, image: 0, text: 0, archive: 0, other: 0 },
+    cover: null,
+    excluded: [],
+    existing_project_id: "p1",
+    existing_project_name: "Hydra",
+    move_list: [],
+    projects: [],
+    ...overrides,
+  };
+}
+
+function makeAdoptPlan(overrides: Partial<OperationPlan> = {}): OperationPlan {
+  return {
+    plan_id: "plan-adopt-1",
+    workflow: "adopt",
+    target: "p1",
+    steps: [
+      { index: 0, op: "adopt", summary: "add 3 files" },
+      { index: 1, op: "refresh-groups", summary: "refresh the project's groups" },
+      { index: 2, op: "verify-members", summary: "verify 3 members" },
+    ],
+    review: makeAdoptReview(),
+    ...overrides,
+  };
+}
+
+function makeAdoptStep(overrides: Partial<OperationStep> = {}): OperationStep {
+  return {
+    index: 0,
+    op: "adopt",
+    status: "pending",
+    result: null,
+    error: null,
+    started_at: null,
+    finished_at: null,
+    ...overrides,
+  };
+}
+
+function makeAdoptOperation(overrides: Partial<Operation> = {}): Operation {
+  return {
+    id: "op-adopt",
+    workflow: "adopt",
+    target: "p1",
+    status: "queued",
+    submitted_by: "u1",
+    created_at: "2026-01-01T00:00:00Z",
+    started_at: null,
+    finished_at: null,
+    error: null,
+    undo_state: "unavailable",
+    superseded_by: null,
+    steps: [],
+    ...overrides,
+  };
+}
+
+function makeAdoptUndone(overrides: Partial<OperationUndo> = {}): OperationUndo {
+  return {
+    operation_id: "op-adopt",
+    undone: true,
+    project_id: "p1",
+    project_name: "Hydra",
+    moves: null,
+    projects_removed: null,
+    members_removed: 3,
+    ...overrides,
+  };
+}
+
 describe("ProjectLanding bundle drift", () => {
   it("asks nothing at all for a project with no _bundle marker", async () => {
     renderLanding();
@@ -1183,28 +1283,43 @@ describe("ProjectLanding bundle drift", () => {
     // answer - not even a request that comes back not_applicable.
     expect(getProjectBundleDriftMock).not.toHaveBeenCalled();
     expect(driftNotice()).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalled();
   });
 
-  it("shows the count and one Add them button for a grown folder", async () => {
+  it("shows the count and one adopt action for a grown folder, and never attaches through the picker", async () => {
+    // Catches a grown folder offering a bare attach - the picker's membership
+    // path - instead of the adopt operation: the one action must submit the
+    // server's plan, and the manual picker must stay untouched by it.
+    planOperationMock.mockResolvedValue(makeAdoptPlan());
+    submitOperationMock.mockReturnValue(new Promise<Operation>(() => {}));
     getProjectBundleDriftMock.mockResolvedValue({
       state: "known",
       count: 3,
       asset_ids: ["a", "b", "c"],
     });
-    const onAssetsChanged = vi.fn();
     renderLanding({
       project: makeProject({ metadata_json: { _bundle: BUNDLE_MARKER } }),
-      onAssetsChanged,
     });
 
     expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
-    expect(screen.getAllByRole("button", { name: "Add them" }).length).toBe(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add them" }));
+    const actions = await screen.findAllByRole("button", { name: "Add 3 files in 1 group" });
+    expect(actions).toHaveLength(1);
+    expect(planOperationMock).toHaveBeenCalledWith({
+      workflow: "adopt",
+      target: "p1",
+      params: {},
+    });
 
-    // The existing membership path, with exactly the ids the count counted.
-    await waitFor(() => expect(addProjectAssetsMock).toHaveBeenCalledWith("p1", ["a", "b", "c"]));
-    await waitFor(() => expect(onAssetsChanged).toHaveBeenCalled());
+    fireEvent.click(actions[0]);
+
+    await waitFor(() =>
+      expect(submitOperationMock).toHaveBeenCalledWith({
+        planId: "plan-adopt-1",
+        idempotencyKey: expect.any(String),
+      }),
+    );
+    expect(addProjectAssetsMock).not.toHaveBeenCalled();
   });
 
   it("shows no notice at all for a fresh project, not a zero", async () => {
@@ -1213,8 +1328,9 @@ describe("ProjectLanding bundle drift", () => {
 
     await waitFor(() => expect(getProjectBundleDriftMock).toHaveBeenCalled());
     expect(driftNotice()).toBeNull();
-    expect(screen.queryByRole("button", { name: "Add them" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Add \d/ })).toBeNull();
     expect(screen.queryByText(/parts in this folder/)).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalled();
   });
 
   it("renders an en dash when the server cannot tell, never a zero", async () => {
@@ -1224,25 +1340,76 @@ describe("ProjectLanding bundle drift", () => {
     const line = await screen.findByText("\u2013 parts in this folder are not in the project");
     expect(line.textContent).not.toContain("0");
     expect(line.textContent).toContain("\u2013");
+    expect(screen.queryByRole("button", { name: /^Add \d/ })).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalled();
   });
 
-  it("clears the notice after Add them: the version bump refetches a known zero", async () => {
-    let answers = 0;
+  it("keeps the run on screen when the drift goes to zero and brings the action back after the undo", async () => {
+    // Catches an action that never reports its completion, an undo the page
+    // cannot read back (the toast names how many memberships came back), and a
+    // notice that outlives the delta it described - and one that does not destroy
+    // the run it hosts when the drift it was opened for goes to zero.
+    let reads = 0;
     getProjectBundleDriftMock.mockImplementation(async () => {
-      answers += 1;
-      // The first read is before the click; every later one is the refetch the
-      // `assetsVersion` bump causes after the parts were added.
-      return answers === 1
-        ? { state: "known", count: 3, asset_ids: ["a", "b", "c"] }
-        : { state: "known", count: 0, asset_ids: [] };
+      reads += 1;
+      // The first read is before the click; the second is the refetch after the
+      // run finished, when the adopted parts are members and the delta is gone;
+      // the third is the refetch after the undo, when the delta is back. The
+      // second answer is the one that used to unmount the control - and with it
+      // the result line and the undo - mid-run.
+      if (reads === 1) return { state: "known", count: 3, asset_ids: ["a", "b", "c"] };
+      if (reads === 2) return { state: "known", count: 0, asset_ids: [] };
+      return { state: "known", count: 3, asset_ids: ["a", "b", "c"] };
     });
+    planOperationMock.mockResolvedValue(makeAdoptPlan());
+    submitOperationMock.mockResolvedValue(makeAdoptOperation({ status: "queued" }));
+    getOperationMock.mockResolvedValue(
+      makeAdoptOperation({
+        status: "done",
+        undo_state: "available",
+        steps: [
+          makeAdoptStep({ index: 0, op: "adopt", status: "done" }),
+          makeAdoptStep({ index: 1, op: "refresh-groups", status: "done" }),
+          makeAdoptStep({ index: 2, op: "verify-members", status: "done" }),
+        ],
+      }),
+    );
+    undoOperationMock.mockResolvedValue(makeAdoptUndone());
     render(<DriftHarness project={makeProject({ metadata_json: { _bundle: BUNDLE_MARKER } })} />);
 
     expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Add them" }));
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Add 3 files in 1 group" }));
+    });
 
-    await waitFor(() => expect(driftNotice()).toBeNull());
-    expect(getProjectBundleDriftMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    await waitFor(() =>
+      expect(document.querySelector("[data-adopt-result]")?.textContent).toBe(
+        "Done: 3 files added",
+      ),
+    );
+    // The drift refetched to a known zero, so the sentence is gone - and the run
+    // is still on screen, which is the whole point of keeping the notice mounted.
+    await waitFor(() =>
+      expect(screen.queryByText("3 parts in this folder are not in the project")).toBeNull(),
+    );
+    expect(driftNotice()).not.toBeNull();
+    await waitFor(() => expect(document.querySelector("[data-adopt-undo]")).not.toBeNull());
+
+    const undo = document.querySelector("[data-adopt-undo]") as HTMLButtonElement;
+    expect(undo.textContent).toBe("Undo this adopt");
+    await act(async () => {
+      fireEvent.click(undo);
+    });
+
+    expect(undoOperationMock).toHaveBeenCalledWith("op-adopt");
+    expect(document.querySelector("[data-adopt-undo]")).toBeNull();
+    expect(getToasts().some(toast => toast.message === "Adopt undone")).toBe(true);
+    // The undo reported the run inactive and its version bump re-read the drift,
+    // which names the parts again - so the action comes back for a second run.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Add 3 files in 1 group" })).toBeTruthy(),
+    );
+    expect(getProjectBundleDriftMock.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 
   it("still shows the notice to a viewer, with no button to press", async () => {
@@ -1258,7 +1425,8 @@ describe("ProjectLanding bundle drift", () => {
 
     expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
     // The fact stays readable; the write does not exist for this role.
-    expect(screen.queryByRole("button", { name: "Add them" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Add \d/ })).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalled();
   });
 
   it("keeps a failed drift read as the en dash and toasts nothing", async () => {
@@ -1323,10 +1491,11 @@ describe("ProjectLanding bundle drift", () => {
     expect(getToasts()).toEqual([]);
   });
 
-  it("offers the notice's one action and no split door, and plans nothing", async () => {
-    // The landing has one action for a grown folder - "Add them" - and no split
-    // door beside it. Offering one would invite a plan request this page cannot
-    // narrate, so the reads below must stay empty.
+  it("offers the notice's one action and no split door, and plans only the adopt", async () => {
+    // A grown folder now DOES plan: the one action is the adopt operation. The
+    // notice still offers no split door - a second plan request this page cannot
+    // narrate - and no split panel is mounted beside it.
+    planOperationMock.mockResolvedValue(makeAdoptPlan());
     getProjectBundleDriftMock.mockResolvedValue({
       state: "known",
       count: 3,
@@ -1339,10 +1508,36 @@ describe("ProjectLanding bundle drift", () => {
     });
 
     expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Add them" })).toBeTruthy();
+    await waitFor(() =>
+      expect(planOperationMock).toHaveBeenCalledWith({
+        workflow: "adopt",
+        target: "p1",
+        params: {},
+      }),
+    );
+    expect(planOperationMock).toHaveBeenCalledTimes(1);
     const notice = driftNotice();
     expect(notice?.querySelector("[data-split-plan]")).toBeNull();
     expect(notice?.querySelector("[data-split-action-button]")).toBeNull();
-    expect(planOperationMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: "Split preview" })).toBeNull();
+    expect(document.querySelector("[data-split-dialog]")).toBeNull();
+  });
+
+  it("keeps the manual attach control for a contributor beside the drift action", async () => {
+    // Catches the adopt action replacing the picker: the two doors answer
+    // different questions - the whole delta versus chosen files - so both must
+    // be on the page.
+    getProjectBundleDriftMock.mockResolvedValue({
+      state: "known",
+      count: 3,
+      asset_ids: ["a", "b", "c"],
+    });
+    planOperationMock.mockResolvedValue(makeAdoptPlan());
+    renderLanding({ project: makeProject({ metadata_json: { _bundle: BUNDLE_MARKER } }) });
+
+    expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Attach files" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Attach folder" })).toBeTruthy();
+    expect(addProjectAssetsMock).not.toHaveBeenCalled();
   });
 });
