@@ -677,13 +677,13 @@ export function importShapes(row: BundleDetectItem): string[] {
 /** The shape the pane is offering: the operator's choice whenever the row still
  *  offers it, and the first enactable shape on offer only when the choice is
  *  gone. A refused-but-offered reading MUST survive here: it is exactly the
- *  shape the arrange door exists for, and falling back to the recommendation
- *  would make that door unreachable no matter which radio was chosen. Asking
- *  the row rather than trusting the stored choice still keeps a refetch that
- *  stopped offering it from sending a shape the server no longer knows. If a
- *  row offers nothing enactable and nothing was chosen, the first offered shape
- *  stands and the server refuses it with `needs-arrange` rather than the client
- *  crashing. */
+ *  shape the split panel (`SplitAndCreatePanel`) exists for, and falling back
+ *  to the recommendation would make that panel unreachable no matter which
+ *  radio was chosen. Asking the row rather than trusting the stored choice
+ *  still keeps a refetch that stopped offering it from sending a shape the
+ *  server no longer knows. If a row offers nothing enactable and nothing was
+ *  chosen, the first offered shape stands and the server refuses it with
+ *  `needs-arrange` rather than the client crashing. */
 export function activeShape(row: BundleDetectItem, chosen: string | undefined): string {
   const matches = importMatches(row);
   const chosenMatch = chosen === undefined ? undefined : matches.find(m => m.shape === chosen);

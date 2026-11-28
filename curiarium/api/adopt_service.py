@@ -1,11 +1,12 @@
 """The ONE owner for the membership delta: adding files to a project, and taking them back.
 
-`arrange_service` grew this logic two ways - `_extend_project` inserted only the
-memberships a project was missing, in bounded chunks, and `_refresh_marker_groups`
-measured the project's groups from the engine's facts and wrote them through
-`bundle_service.marker_groups`. Both now live here, and the arrange calls them
-through `adopt`, so the answer to "what does this project hold now" has one
-implementation instead of one per door.
+The detected-bundle arrange grew this logic two ways - a create-or-extend path
+inserted only the memberships a project was missing, in bounded chunks, and a
+marker refresh measured the project's groups from the engine's facts and wrote
+them through `bundle_service.marker_groups`. The arrange itself is gone: its door
+is `operations_service`'s `split-and-create` workflow plus the create-project
+primitive, and both reach this logic through `adopt`, so the answer to "what does
+this project hold now" has one implementation instead of one per door.
 
 What this module owns:
 
@@ -116,8 +117,10 @@ def adopt(
     thing that must not be left half-written by a race with a delete.
 
     The commit is the caller's to make - except the membership chunk commits
-    itself, exactly as `_extend_project` did, so a Vault-sized adopt never holds
-    one unbounded write transaction open while it walks its chunks.
+    itself, which is `adopt`'s own rule and belongs to no helper: one flush per
+    chunk of `project_service.MEMBER_QUERY_BATCH` rows rather than one write
+    transaction for the whole set, so a Vault-sized adopt never holds an unbounded
+    transaction open while it walks its chunks.
     """
     held = set(session.exec(select(ProjectAsset.asset_id).where(ProjectAsset.project_id == project_id)))
     ordered = list(dict.fromkeys(member_ids))
@@ -209,8 +212,12 @@ def groups_restore(entry: Mapping) -> Optional[dict]:
 
     A recorded `None` is not "write nothing": it means the marker had no `groups`
     key before the adopt, so undo's marker write must REMOVE the key. The caller
-    maps that `None` to its own removal rule (`arrange_service._write_ledger`'s
-    `None` value), because the removal is the caller's write, not this module's.
+    maps that `None` to its own removal rule, because the removal is the caller's
+    write, not this module's. That rule lived in the arrange's ledger
+    (`arrange_service._write_ledger` removed the key), and the arrange is deleted
+    (`Mf-g759`): `operations_service`'s `split-and-create` undo deletes the
+    projects it created, so a created project's marker goes with the row rather
+    than being rewritten.
     """
     if ENTRY_GROUPS_BEFORE not in entry:
         return None

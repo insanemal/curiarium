@@ -93,6 +93,13 @@ operator can still approve, preview and undo. Each move the preview returns carr
 token. The detection decision below is unchanged - the arrange reads the row, it
 never rewrites what a rule offered).
 
+**Status:** 2026-11-28 - ticket `Mf-g759` (batch 65 deletes the arrange routes: a
+`creatable: false` match is still ACTIONABLE, but through the `split-and-create`
+operation workflow - `POST /operations/plan` computes the moves, `POST /operations`
+approves and runs them, `POST /operations/{id}/undo` folds them back - and the
+three `/bundles/arrange` routes named above are gone. The `Mf-v9eg` ruling stands;
+only the door it named changed).
+
 **Status of the mechanics, as of 2026-11-27.** Every RULING recorded below
 stands. A large part of the MECHANICS prose no longer names the code: the
 detector this document was written about - `curiarium/api/bundle_detect.py`,
@@ -4001,6 +4008,9 @@ otherwise one unparseable README makes a perfectly good bundle unusable.
       `note = "needs arranging first: <consequence>"`, enacted by the EXISTING
       `GET/POST /bundles/arrange` (`ENGINE_SHAPES` already covers both sets). No
       route was added, and `permissions.py`/`audit.py` are untouched.
+      (2026-11-28, `Mf-g759`: those `/bundles/arrange` routes are deleted; the
+      `split-and-create` operation workflow enacts the verdict now. This bullet
+      records the cutover, not today's wire.)
     * **`archive_only` survives as the NAME of the one door, never as a verdict.**
       A `.zip` row still carries `blocked_reason: "archive_only"` because that
       string is what `ui/review/bundleRows.ts`/`BundleReviewView.tsx` key the

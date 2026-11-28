@@ -350,7 +350,7 @@ data; an operation row is not library content.
 | POST   | `/operations/plan`                          | computes a plan and writes nothing: the step list, the counts and every exclusion with its reason. The `plan_id` it returns is the only thing a submit may name |
 | POST   | `/operations`                               | queues a plan this server issued, under an idempotency key; writes a row and answers 202, the in-process runner does the work. The request body has no steps field, so a client cannot invent a step list, and the plan is recomputed at submit so a stale one is a 409. Contributing is enough because the handler refuses a data-removing workflow to a contributor (`operations_service.WORKFLOW_LEVELS`) |
 | POST   | `/operations/{operation_id}/cancel`         | a queued operation stops now; a running one is asked to stop after the step it is in completes, and its remaining steps are skipped. Cancelling removes nothing, so the row's workflow decides the level and the handler enforces it |
-| POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by deleting the project row it created and never the files: what it may remove is the workflow's question, enforced per workflow. Refused with 409 once a later operation over the same paths has superseded it |
+| POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by putting its own writes back and never deleting the files: a `create-project` deletes the project row it created, a `split-and-create` folds its moves back, deletes the projects it created and restores the retired container row. What it may remove is the workflow's question, enforced per workflow. Refused with 409 once a later operation over the same paths has superseded it |
 
 ### write (editor or admin)
 
@@ -419,10 +419,13 @@ and undo handlers enforce.
 | `relocate`           | contribute | no: relocates a directory and re-points its rows |
 | `library-scan`       | write      | no, but see below |
 
-**Declarations for the record.** `operations_service.WORKFLOWS` is still
-`("create-project",)`: a row for a workflow that does not exist yet records the
-level the owner decided, it does not mean the workflow runs. Do not read a row
-as a claim about today's code, and do not add these names to `WORKFLOWS`.
+**Declarations for the record.** `operations_service.WORKFLOWS` is
+`("create-project", "split-and-create")`: those two have a planner and run. Every
+other row records the level the owner decided for a workflow that does not exist
+yet - `adopt`, `relocate`, the import doors and `enrich` are exactly that - so a
+row is a decision, not a claim about today's code. Read a row against `WORKFLOWS`
+before believing it runs; a name reaches `WORKFLOWS` when it has a planner, never
+before.
 
 **`library-scan` is an OPEN QUESTION.** The rubric reads contribute - a scan
 removes nothing - but it is an existing route whose capacity consequence is
@@ -447,17 +450,23 @@ in parallel. Cancel lands between steps: a queued operation is cancelled at
 once, while a running one finishes the step it is in, skips the rest, and
 reports `cancelling` until it does.
 
-Undo lasts only until a later operation changes the same paths: the later one
-marks the earlier `superseded` and names itself, and both the 409 reason and
-`superseded_by` on `GET /operations/{operation_id}` say which operation it was.
-A restart resumes an interrupted operation from the step ledger - the steps that
-finished are skipped, the step that never started runs - and a step caught
-mid-flight fails the operation instead of being silently re-run, because its
-side effects are unknown. Finished operations are pruned to the newest 200 plus
-everything from the last 30 days; the audit log is the permanent record.
+Undo puts back what the operation itself wrote and never deletes files: a
+`create-project` removes the project row it created, while a `split-and-create`
+folds its moves back, deletes the projects it created and restores the retired
+container row. Undo lasts only until a later operation changes the same paths:
+the later one marks the earlier `superseded` and names itself, and both the 409
+reason and `superseded_by` on `GET /operations/{operation_id}` say which
+operation it was. A restart resumes an interrupted operation from the step
+ledger - the steps that finished are skipped, the step that never started runs -
+and a step caught mid-flight fails the operation instead of being silently
+re-run, because its side effects are unknown. Finished operations are pruned to
+the newest 200 plus everything from the last 30 days; the audit log is the
+permanent record.
 
-`create-project` is the only workflow so far, and nothing the UI does today
-changed: no client calls these routes yet.
+Two workflows run: `create-project` and `split-and-create`. The client calls these
+routes - `curiarium/web/src/lib/api/operations.ts` plans, submits and undoes for
+the review queue and the guided import panel (`SplitAndCreatePanel`) - and every
+other name in `WORKFLOW_LEVELS` is declared, not runnable.
 
 The level split follows the owner's rule: viewers read the queue, and a
 contributor may plan, submit, cancel and undo any workflow that removes nothing

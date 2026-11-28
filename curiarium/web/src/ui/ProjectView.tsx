@@ -40,8 +40,11 @@ type Props = {
   onProjectUpdated: (project: Project) => void;
   onProjectDeleted: (id: string) => void;
   onAssetsChanged: () => void;
-  /** App's `handleFoldersChanged`, forwarded to the landing's arrange door.
-   *  Optional because a host with no sidebar tree has nothing to bump. */
+  /** App's `handleFoldersChanged`, forwarded to `ProjectLanding`, where nothing
+   *  bumps the tree any more: the drift notice keeps one action, "Add them", and
+   *  it attaches members through `POST /project/{id}/assets`, which creates no
+   *  `Folder` rows and rewrites no `storage_path`. Optional because a host with
+   *  no sidebar tree has nothing to bump. */
   onFoldersChanged?: () => void;
   assetsVersion: number;
   onUnauthorized?: () => void;
