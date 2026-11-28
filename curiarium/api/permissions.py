@@ -251,7 +251,6 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("GET", "/imports/runs"): READ,
     ("GET", "/imports/runs/{run_id}"): READ,
     # A read of an archive the library already holds; it writes nothing.
-    ("GET", "/import/archive/entries"): READ,
     ("GET", "/file/{asset_id}/{name}"): READ,
     ("GET", "/asset/{asset_id}/files"): READ,
     ("GET", "/asset/{asset_id}/files/{file_id}"): READ,
@@ -291,7 +290,6 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     # does not destroy or rename library content on disk.
     ("POST", "/upload"): CONTRIBUTE,
     # Also an outbound-fetch oracle, like /import/inspect, and it mutates a project.
-    ("POST", "/import/project"): CONTRIBUTE,
     # No mutation and no library bytes, but both are outbound-fetch oracles
     # (arbitrary URL in, remote response out), so a viewer must not have them;
     # a contributor needs them to plan a link or zip import in the client.
@@ -299,7 +297,6 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("POST", "/import/zip/entries"): CONTRIBUTE,
     # Extraction writes files into the library; nothing existing is overwritten
     # (a collision is a 409 before a byte is written), so it is not a WRITE.
-    ("POST", "/import/archive"): CONTRIBUTE,
     ("POST", "/asset/{asset_id}/files"): CONTRIBUTE,
     ("PATCH", "/asset/{asset_id}/files/{file_id}"): CONTRIBUTE,
     ("PUT", "/asset/{asset_id}/files/order"): CONTRIBUTE,

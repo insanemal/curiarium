@@ -640,20 +640,26 @@ def test_the_filed_archive_gains_a_row_even_when_it_had_none(
 def test_the_plan_is_the_entries_door_listing(client: TestClient, storage: Path) -> None:
     """AC-1/parity-2. Mutation: a plan that counts something other than the listing.
 
-    The entries door still publishes what the archive holds (READ, untouched). The
-    plan's `members` must be that listing minus the members no extract would write,
-    which is the only "list them before writing" the operator needs.
+    The entries door is the `extract` workflow's review now (Mf-y2u3 3/4): the
+    same `archive_service.plan_extraction` answers both plans, so the two `members`
+    and the two `excluded` lists must be the same fact. The plan's `members` must
+    be that listing minus the members no extract would write, which is the only
+    "list them before writing" the operator needs.
     """
     register_archive()
-    listing = client.get("/import/archive/entries", params={"path": ARCHIVE})
+    listing = client.post(
+        "/operations/plan",
+        json={"workflow": "extract", "target": ARCHIVE, "params": {}},
+    )
     assert listing.status_code == 200, listing.text
-    published = listing.json()["entries"]
-    assert len(published) == len(PAYLOAD) + len(JUNK) + 1
+    published = listing.json()["review"]
+    assert published["members"] + len(published["excluded"]) == len(PAYLOAD) + len(JUNK) + 1
 
     plan = plan_extract(client)
     excluded = {entry["path"] for entry in plan["review"]["excluded"]}
-    assert plan["review"]["members"] == len(published) - len(excluded)
+    assert plan["review"]["members"] == len(PAYLOAD) + len(JUNK) + 1 - len(excluded)
     assert plan["review"]["members"] == 20
+    assert plan["review"]["excluded"] == published["excluded"]
 
 
 def test_a_subset_selection_writes_and_attaches_only_the_subset(client: TestClient, storage: Path) -> None:
@@ -1119,20 +1125,33 @@ def test_the_old_route_is_gone_from_the_routes_the_wire_and_the_vocabulary(
 ) -> None:
     """AC-8. Mutation: leaving a shim, or a schema/action row behind the deleted handler."""
     pairs = _app_route_pairs()
-    assert ("POST", "/import/archive/project") not in pairs
-    assert ("GET", "/import/archive/project") not in pairs
+    for path in ("/import/archive/project", "/import/project", "/import/archive", "/import/archive/entries"):
+        assert ("POST", path) not in pairs
+        assert ("GET", path) not in pairs
     # Not 405 with an allow header: the path is not declared at all.
     assert client.post("/import/archive/project", json={"path": ARCHIVE}).status_code == 404
     assert client.get("/import/archive/project").status_code == 404
+    assert client.post("/import/project", json={"url": "https://example.com/x"}).status_code == 404
+    assert client.post("/import/archive", json={"path": ARCHIVE}).status_code == 404
+    assert client.get("/import/archive/entries", params={"path": ARCHIVE}).status_code == 404
 
     schema = client.get("/openapi.json").json()
-    assert "/import/archive/project" not in schema["paths"]
+    for path in ("/import/archive/project", "/import/project", "/import/archive", "/import/archive/entries"):
+        assert path not in schema["paths"]
     components = schema["components"]["schemas"]
     assert "ArchiveProjectOut" not in components
     assert "ArchiveProjectRequest" not in components
 
     assert ("POST", "/import/archive/project") not in permissions.ROUTE_PERMISSIONS
     assert ("POST", "/import/archive/project") not in audit.ROUTE_ACTIONS
+    for key in (
+        ("POST", "/import/project"),
+        ("POST", "/import/archive"),
+        ("GET", "/import/archive/entries"),
+    ):
+        assert key not in permissions.ROUTE_PERMISSIONS
+    assert ("POST", "/import/project") not in audit.ROUTE_ACTIONS
+    assert ("POST", "/import/archive") not in audit.ROUTE_ACTIONS
     assert "archive.project.create" not in audit.ACTIONS
     assert not hasattr(audit, "ARCHIVE_PROJECT_CREATE")
     assert importlib.util.find_spec("archive_project_service") is None
@@ -1164,22 +1183,26 @@ def test_the_deleted_route_is_reconciled_in_every_count() -> None:
     ROUTE_ACTIONS 49, WORKFLOWS 5. Part 2/4 deleted POST /import and POST
     /import/zip (both contribute, both ASSET_CREATE rows) and added their two
     workflows, so 104 (11/38/25/12/18), GET 42, ACTIONS 58, ROUTE_ACTIONS 47,
-    EXEMPT 15, WORKFLOWS 7.
+    EXEMPT 15, WORKFLOWS 7. Part 3/4 deleted POST /import/project and
+    POST /import/archive (both contribute) and GET /import/archive/entries (read)
+    and added the `extract` workflow, so 101 (11/37/23/12/18), GET 41, ACTIONS 58,
+    ROUTE_ACTIONS 45, EXEMPT 15, WORKFLOWS 8.
     """
-    assert len(permissions.ROUTE_PERMISSIONS) == 104
+    assert len(permissions.ROUTE_PERMISSIONS) == 101
     by_level: dict[str, int] = {}
     for level in permissions.ROUTE_PERMISSIONS.values():
         by_level[level] = by_level.get(level, 0) + 1
-    assert by_level == {"public": 11, "read": 38, "contribute": 25, "write": 12, "admin": 18}
-    assert sum(1 for method, _path in permissions.ROUTE_PERMISSIONS if method == "GET") == 42
+    assert by_level == {"public": 11, "read": 37, "contribute": 23, "write": 12, "admin": 18}
+    assert sum(1 for method, _path in permissions.ROUTE_PERMISSIONS if method == "GET") == 41
     assert len(audit.ACTIONS) == 58
-    assert len(audit.ROUTE_ACTIONS) == 47
+    assert len(audit.ROUTE_ACTIONS) == 45
     assert len(audit.EXEMPT_ROUTES) == 15
     assert operations_service.WORKFLOWS == (
         "create-project",
         "split-and-create",
         "adopt",
         "extract-and-create",
+        "extract",
         "library-scan",
         "import-link",
         "import-zip",
@@ -1330,8 +1353,9 @@ def test_the_extract_step_executes_the_entry_policy_instead_of_restating_it() ->
     # ... and the primitive the workflow DOES call is the explicit one, once.
     assert _calls_in(runner, "library_scan", "register") == 1
     service = _module_tree("operations_service.py")
-    # Two call sites, one primitive: the declared path and the filed copy.
-    assert _calls_in(service, "archive_service", "plan_extraction") == 2
+    # Three call sites, one primitive: this workflow's declared path and filed copy,
+    # plus the `extract` planner's one listing (Mf-y2u3 3/4). No caller restates it.
+    assert _calls_in(service, "archive_service", "plan_extraction") == 3
     # The old firewall's claim is not restated anywhere: the workflow deliberately
     # goes through bundle_service.create_project, the same verb every bundle door
     # uses.

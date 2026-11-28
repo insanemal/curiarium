@@ -193,6 +193,10 @@ class OperationUndoOut(BaseModel):
   `import-zip` undo answers how many assets and mirrored folder rows it removed
   (``assets_removed``/``folders_removed``) and echoes the entries the run itself
   could not write (``entries_failed``), so the operator's retry list survives.
+  An `extract` undo answers the folder rows it pruned and ``payload_residue``,
+  the sentence that says the extracted files stay; an `attach-project` undo
+  answers the project it left or removed (``project_removed``) and how many
+  memberships it took back.
   Optional on both sides so neither body gains a fabricated zero: a leg says only
   what its own run wrote, and everything it has nothing to say about stays null.
   """
@@ -209,3 +213,5 @@ class OperationUndoOut(BaseModel):
   assets_removed: Optional[int] = None
   folders_removed: Optional[int] = None
   entries_failed: Optional[List[str]] = None
+  project_removed: Optional[bool] = None
+  payload_residue: Optional[str] = None

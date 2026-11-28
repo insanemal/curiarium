@@ -81,7 +81,7 @@ import zip_service
 # inherits its guarantee instead of growing a second one that can disagree.
 from asset_service import _move_without_clobber
 from file_utils import is_model_path
-from schemas import ArchiveEntriesOut, ArchiveExtractOut, ZipEntryOut
+from schemas import ArchiveExtractOut
 
 ARCHIVE_SUFFIX = ".zip"
 FINGERPRINT_CHARS = 16
@@ -134,19 +134,6 @@ class ExtractionPlan(NamedTuple):
     common_root: Optional[str]
     groups: Tuple[ListingGroup, ...]
     fingerprint: str
-
-
-def entries_out(path: str) -> ArchiveEntriesOut:
-    """One archive's entries, as the entries door reports them. Writes nothing."""
-    normalized = normalise(path)
-    source = source_archive(normalized)
-    try:
-        entries = zip_service.list_zip_entries(source)
-    except BadZipFile:
-        raise HTTPException(status_code=400, detail="Invalid zip file") from None
-    if not entries:
-        raise HTTPException(status_code=400, detail="No files found in zip")
-    return ArchiveEntriesOut(path=normalized, entries=[ZipEntryOut(**entry) for entry in entries])
 
 
 def extract_out(

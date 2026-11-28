@@ -244,8 +244,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 104 routes: 11 public, 38 read,
-25 contribute, 12 write, 18 admin.
+Paths are FastAPI templates exactly as declared. 101 routes: 11 public, 37 read,
+23 contribute, 12 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -282,7 +282,6 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | POST   | `/mfa/recovery-codes`                  | replaces the caller's ten recovery codes; the plaintext is returned once |
 | GET    | `/imports/runs`                         | mount-import history; same disclosure class as scan errors |
 | GET    | `/imports/runs/{run_id}`                | one run with its bounded per-file errors |
-| GET    | `/import/archive/entries`               | lists the entries of an archive already in the library; reads the archive, writes nothing |
 | GET    | `/file/{asset_id}/{name}`               | download |
 | GET    | `/asset/{asset_id}/files`               | list supporting files |
 | GET    | `/asset/{asset_id}/files/{file_id}`     | download a supporting file |
@@ -323,10 +322,8 @@ data; an operation row is not library content.
 | Method | Path                                        | Why |
 |--------|---------------------------------------------|-----|
 | POST   | `/upload`                                   | creates an asset: new bytes in, nothing existing touched |
-| POST   | `/import/project`                           | import a URL into a new or existing project (one step) |
 | POST   | `/import/inspect`                           | no mutation, but an outbound-fetch oracle (URL in, remote response out). Contribute rather than read because the client's link-import flow calls it immediately before it plans `import-link`: whoever may start an import needs it, and nobody below contributor starts one |
 | POST   | `/import/zip/entries`                       | same: outbound fetch, no mutation, and the zip-import dialog calls it to list entries before it plans `import-zip` |
-| POST   | `/import/archive`                           | extracts an archive already in the library into its twin directory; a collision is a 409 before a byte is written, so nothing existing is overwritten |
 | POST   | `/asset/{asset_id}/files`                   | uploads a supporting file next to an asset; removes nothing |
 | PATCH  | `/asset/{asset_id}/files/{file_id}`         | renames a supporting file (display only; the bytes never move) |
 | PUT    | `/asset/{asset_id}/files/order`             | rewrites the supporting-file display order (display only; the bytes never move) |
@@ -407,6 +404,7 @@ and undo handlers enforce.
 | `create-project`     | contribute | no: writes rows, leaves the member files where they are |
 | `adopt`              | contribute | no: declares a directory a project holds |
 | `extract-and-create` | contribute | no: extracts an archive into its twin directory and creates the project |
+| `extract`            | contribute | no: extracts an archive into its twin directory and registers the files; the bytes stay |
 | `import-folder`      | contribute | no: uploads a folder as new bytes |
 | `import-zip`         | contribute | no: uploads a zip as new bytes |
 | `import-link`        | contribute | no: uploads from a URL |
@@ -439,16 +437,17 @@ at `write`, a move's at `contribute` - would make one button two different
 levels depending on history.
 
 **Declarations for the record.** `operations_service.WORKFLOWS` is
-`("create-project", "split-and-create", "adopt", "extract-and-create",
-"library-scan", "import-link", "import-zip")`: those seven have a planner and run.
+`("create-project", "split-and-create", "adopt", "extract-and-create", "extract",
+"library-scan", "import-link", "import-zip")`: those eight have a planner and run.
 Every other row records the level the owner decided for a workflow that does not
 exist yet - `relocate`, `import-folder` and `enrich` are exactly that - so a row
 is a decision, not a claim about today's code. Read a row against `WORKFLOWS`
 before believing it runs; a name reaches `WORKFLOWS` when it has a planner, never
 before. `adopt` left this list when its planner landed (Mf-ytig), `library-scan`
 when part 1/4 of Mf-y2u3 replaced the deleted `GET`/`POST /library/scan` routes
-with the workflow, and `import-link`/`import-zip` when part 2/4 replaced the two
-deleted ingest doors (`POST /import`, `POST /import/zip`) with them.
+with the workflow, `import-link`/`import-zip` when part 2/4 replaced the two
+deleted ingest doors (`POST /import`, `POST /import/zip`) with them, and `extract`
+when part 3/4 replaced `POST /import/archive` and `GET /import/archive/entries`.
 
 **`library-scan` is WRITE, waiting on Mf-gciy.** The rubric reads contribute - a
 scan removes nothing - but its capacity consequence is still with the owner, so
@@ -497,7 +496,19 @@ doors as operations: one `fetch`/`fetch-zip` step whose args are the request the
 door read off `ImportRequest`, so the file is fetched once, at run time, and the
 plan is the review the door never had. Planning an import fetches nothing:
 `normalize_import_url` resolves DNS, so the planner keeps to string checks and
-the paid/gated table, and the review names what the run will refuse.
+the paid/gated table, and the review names what the run will refuse. When a plan
+names a project (`project_id` or `project_name`), its one step is
+`attach-project`, which calls the deleted `POST /import/project` door's own
+primitive: the gated outcome is the fetch and its page together, so it is one
+step, never a `[fetch, attach]` split.
+
+`extract` is the deleted in-library archive door without its door: the plan's
+review is the listing (its `excluded` is the old entries route's junk verdict),
+and the run is two steps, `extract` then `register`. It is not
+`extract-and-create`: it files no archive and creates no project, and a second
+extract answers `already_present` rather than a zero-step plan. Its undo removes
+only the empty folder rows the register step measured creating; the extracted
+files stay, and the response says so.
 
 The level split follows the owner's rule: viewers read the queue, and a
 contributor may plan, submit, cancel and undo any workflow that removes nothing

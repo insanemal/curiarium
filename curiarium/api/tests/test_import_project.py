@@ -23,22 +23,24 @@ import zlib
 from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError
+from uuid import uuid4
 from zipfile import ZipFile
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select
 
 import asset_file_service
 import asset_service
-import audit
 import bundle_service
 import db
 import import_resolvers
 import import_service
 import library_scan
 import main
+import operations_runner
+import operations_service
 import permissions
 import project_create_service
 import project_import
@@ -1417,37 +1419,229 @@ def test_a_garbage_stored_source_does_not_break_an_unrelated_import(monkeypatch:
     assert project_row(outcome.project_id).name == "Benchy Boat"
 
 
-# --- route wiring -----------------------------------------------------------
+# --- workflow wiring --------------------------------------------------------
 
 
-def test_the_route_is_contribute_and_audited() -> None:
-    assert permissions.ROUTE_PERMISSIONS[("POST", "/import/project")] == permissions.CONTRIBUTE
-    assert audit.ROUTE_ACTIONS[("POST", "/import/project")] == (audit.ASSET_CREATE,)
+def run_attach_project(
+    client: TestClient,
+    headers: dict,
+    *,
+    workflow: str,
+    url: str,
+    entries: list[str] | None = None,
+    project_id: str | None = None,
+    project_name: str | None = None,
+    expect_done: bool = True,
+) -> dict:
+    """Plan, submit and run one import whose one step is `attach-project`."""
+    params: dict = {}
+    if entries is not None:
+        params["entries"] = entries
+    if project_id is not None:
+        params["project_id"] = project_id
+    if project_name is not None:
+        params["project_name"] = project_name
+    planned = client.post(
+        "/operations/plan",
+        json={"workflow": workflow, "target": url, "params": params},
+        headers=headers,
+    )
+    assert planned.status_code == 200, planned.text
+    plan = planned.json()
+    assert [step["op"] for step in plan["steps"]] == ["attach-project"]
+    submitted = client.post(
+        "/operations",
+        json={"plan_id": plan["plan_id"], "idempotency_key": f"attach-{uuid4().hex}"},
+        headers=headers,
+    )
+    assert submitted.status_code == 202, submitted.text
+    operations_runner.dispatch_once()
+    operations_runner.wait_idle(timeout=30)
+    operation = client.get(f"/operations/{submitted.json()['id']}", headers=headers).json()
+    if expect_done:
+        assert operation["status"] == "done", operation
+    return operation
 
 
-def test_the_route_answers_with_the_project_and_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    target = page("https://makerworld.com/en/models/2-paid", MAKERWORLD_PAID_PAGE)
+def test_a_link_entry_selection_needs_a_project_target() -> None:
+    """`entries` on a link import chooses a project import's members, nothing else."""
+    with TestClient(main.app) as client:
+        planned = client.post(
+            "/operations/plan",
+            json={
+                "workflow": "import-link",
+                "target": "https://example.com/models.zip",
+                "params": {"entries": ["a.stl"]},
+            },
+            headers=auth_header(client),
+        )
+    assert planned.status_code == 400, planned.text
+    assert planned.json()["detail"] == "entries is only valid when the import names a project"
+
+
+def test_the_workflow_is_contribute_and_the_gated_outcome_is_a_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deleted project door's level and its gated outcome, as a step result."""
+    assert operations_service.WORKFLOW_LEVELS["import-link"] == permissions.CONTRIBUTE
+    assert operations_service.WORKFLOW_LEVELS["import-zip"] == permissions.CONTRIBUTE
+    assert ("POST", "/import/project") not in permissions.ROUTE_PERMISSIONS
+
+    paid_url = "https://makerworld.com/en/models/2-paid"
     monkeypatch.setattr(main, "normalize_import_url", lambda raw: raw)
-    stub_attempt(monkeypatch, ImportAttempt(page=target, error=HTTPException(status_code=403, detail="forbidden")))
+    stub_attempt(
+        monkeypatch,
+        ImportAttempt(
+            page=page(paid_url, MAKERWORLD_PAID_PAGE),
+            error=HTTPException(status_code=403, detail="forbidden"),
+        ),
+    )
 
     with TestClient(main.app) as client:
         headers = auth_header(client)
-        response = client.post(
-            "/import/project",
-            json={"url": "https://makerworld.com/en/models/2-paid"},
-            headers=headers,
+        operation = run_attach_project(
+            client, headers, workflow="import-link", url=paid_url, project_name="Paid Vase"
         )
+        body = operation["steps"][0]["result"]
+        assert body["gated"] is True
+        assert body["created"] is True
+        assert body["message"] == GATED_IMPORT_DETAIL
+        assert body["assets"] == []
+        project = project_row(body["project_id"])
+        assert project.origin == "imported"
+        assert project.source_url == paid_url
+        assert json.loads(project.metadata_json) == {"_files": "user-supplied"}
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["gated"] is True
-    assert body["created"] is True
-    assert body["message"] == GATED_IMPORT_DETAIL
-    assert body["assets"] == []
-    assert body["project"]["origin"] == "imported"
-    assert body["project"]["source_url"] == "https://makerworld.com/en/models/2-paid"
-    assert body["project"]["metadata_json"] == {"_files": "user-supplied"}
-    assert body["project"]["asset_count"] == 0
+        undone = client.post(f"/operations/{operation['id']}/undo", headers=headers)
+        assert undone.status_code == 200, undone.text
+        undo_body = undone.json()
+        assert undo_body["project_id"] == body["project_id"]
+        assert undo_body["project_removed"] is True
+        assert undo_body["members_removed"] == 0
+        with Session(engine) as session:
+            assert session.get(Project, body["project_id"]) is None
+
+        # The same shape, but the site refused the CREDENTIAL: that is the cookie
+        # remedy, never a gated outcome, and it leaves no project behind.
+        refusal_url = "https://www.thingiverse.com/thing:5390184"
+        refusal = import_resolvers.CredentialRefusal(
+            status_code=403,
+            detail="Thingiverse answered the view-token request without a token. "
+            + import_resolvers.THINGIVERSE_COOKIE_REMEDY,
+        )
+        stub_attempt(
+            monkeypatch,
+            ImportAttempt(page=page(refusal_url, THINGIVERSE_FREE_PAGE), error=refusal),
+        )
+        before = project_count()
+        refused = run_attach_project(
+            client,
+            headers,
+            workflow="import-link",
+            url=refusal_url,
+            project_name="Never created",
+            expect_done=False,
+        )
+        assert refused["status"] == "failed"
+        assert "view-token request without a token" in refused["steps"][0]["error"]
+        assert project_count() == before, "a refused credential must leave no project behind"
+
+
+def test_a_cross_door_witness_on_the_zip_project_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_storage: Path
+) -> None:
+    """The workflow and the service write the SAME `_bundle` marker.
+
+    The zip-as-project primitive was not rewritten: `attach-project` calls
+    `import_into_project`, which calls `_zip_project_facts`. This witness runs one
+    fixture through both doors into two explicit projects and compares the stored
+    `metadata_json`, so a step body that reimplemented the marker would fail here
+    with two different documents.
+    """
+    url = "https://www.printables.com/model/999-witness"
+    names = ["Thing/one.stl", "Thing/two.stl"]
+    entries = list(names)
+    with Session(engine) as session:
+        direct_target_id = project_service.create_project(session, "Direct witness", None, None).id
+        workflow_target_id = project_service.create_project(session, "Workflow witness", None, None).id
+
+    direct_dir = tmp_path / "direct"
+    direct_dir.mkdir()
+    direct_zip = make_zip(direct_dir, names)
+    stub_attempt(
+        monkeypatch,
+        ZipAttempt(
+            tmp_path=direct_zip,
+            filename="download.zip",
+            mime="application/zip",
+            page=page(url, PRINTABLES_FREE_PAGE),
+        ),
+    )
+    direct = project_import.import_into_project(
+        url,
+        ImportProjectRequest(url=url, entries=entries, project_id=direct_target_id),
+    )
+
+    direct_marker = json.loads(project_row(direct.project_id).metadata_json)["_bundle"]
+    # The two doors write the same managed paths, so the direct run's rows and
+    # bytes are cleared before the workflow's run: the second import is the same
+    # fixture into an empty library, not a name-collision witness.
+    with Session(engine) as session:
+        session.exec(delete(ProjectAsset))
+        session.exec(delete(AssetFile))
+        session.exec(delete(Asset))
+        session.commit()
+    for leftover in isolated_storage.rglob("*"):
+        if leftover.is_file():
+            leftover.unlink()
+
+    workflow_dir = tmp_path / "workflow"
+    workflow_dir.mkdir()
+    workflow_zip = make_zip(workflow_dir, names)
+    stub_attempt(
+        monkeypatch,
+        ZipAttempt(
+            tmp_path=workflow_zip,
+            filename="download.zip",
+            mime="application/zip",
+            page=page(url, PRINTABLES_FREE_PAGE),
+        ),
+    )
+    with TestClient(main.app) as client:
+        headers = auth_header(client)
+        operation = run_attach_project(
+            client,
+            headers,
+            workflow="import-zip",
+            url=url,
+            entries=entries,
+            project_id=workflow_target_id,
+        )
+    attached = operation["steps"][0]["result"]
+    assert attached["project_id"] == workflow_target_id
+    assert attached["created"] is False
+
+    workflow_marker = json.loads(project_row(attached["project_id"]).metadata_json)["_bundle"]
+    assert workflow_marker == direct_marker
+    assert workflow_marker["key"] == project_import.ZIP_PROJECT_KEY_PREFIX + canonical_url(url)
+    assert workflow_marker["groups"] == [
+        {"name": "Thing", "model_count": 2, "foreign": False, "included": True, "attached": 2}
+    ]
+    assert workflow_marker["cover"] == direct_marker["cover"]
+
+    # Undo removes exactly the two memberships and keeps the project it did not
+    # create (and the assets, which are library content now).
+    undone = client.post(f"/operations/{operation['id']}/undo", headers=headers)
+    assert undone.status_code == 200, undone.text
+    undo_body = undone.json()
+    assert undo_body["project_removed"] is False
+    assert undo_body["members_removed"] == 2
+    assert project_row(workflow_target_id) is not None
+    with Session(engine) as session:
+        remaining = list(
+            session.exec(select(ProjectAsset).where(ProjectAsset.project_id == workflow_target_id))
+        )
+    assert remaining == []
 
 
 # --- a dead credential is not a gated model (Mm-alfd) ----------------------

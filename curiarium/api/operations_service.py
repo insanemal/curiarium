@@ -14,16 +14,27 @@ shared queue, attributed to the submitting user - not a queue per user - so two
 operations over the same paths serialise instead of racing.
 
 This module owns the plan codec, the workflow planners (`create-project`,
-`split-and-create`, `adopt`, `extract-and-create`, `library-scan`, `import-link`
-and `import-zip`), submit, the reads, cancel, undo, supersede and prune. It never
-executes a workflow: the runner does, and the routes only ever write a row.
+`split-and-create`, `adopt`, `extract-and-create`, `extract`, `library-scan`,
+`import-link` and `import-zip`), submit, the reads, cancel, undo, supersede and
+prune. It never executes a workflow: the runner does, and the routes only ever
+write a row.
 
 `import-link` and `import-zip` are the two ingest doors without their doors: the
 same primitives (`import_service.import_asset_from_url`,
 `zip_service.extract_zip_entries_to_assets`) now run inside a step body, and the
 plan is the review the one-call route never had. Planning an import fetches
 nothing: `normalize_import_url` resolves DNS, so the planner keeps to string
-checks and the paid/gated table, and the fetch happens once, at run time.
+checks and the paid/gated table, and the fetch happens once, at run time. When a
+plan names a project, its single step is `attach-project` instead of
+`fetch`/`fetch-zip`: the gated outcome is a property of the fetch and its page
+together, so splitting it would reimplement `import_into_project`'s decision.
+
+`extract` is the in-place archive door without its door: the deleted
+`POST /import/archive` and `GET /import/archive/entries` are one plan and two
+steps (`extract`, `register`), and the review's `excluded` is the listing's junk
+verdict. It is not `extract-and-create`: it files no archive, creates no project
+and is not idempotent at plan time, because a second extract is a fact about the
+disk the operator must see rather than a zero-step answer.
 
 `split-and-create` is a COMPOSITION, not a second implementation of anything: it
 plans `move_service.preflight_refusals` over the hoists `proposal_engine` implies
@@ -87,6 +98,7 @@ WORKFLOWS = (
     "split-and-create",
     "adopt",
     "extract-and-create",
+    "extract",
     "library-scan",
     "import-link",
     "import-zip",
@@ -121,6 +133,7 @@ WORKFLOW_LEVELS: dict[str, str] = {
     "import-folder": permissions.CONTRIBUTE,
     "import-zip": permissions.CONTRIBUTE,
     "import-link": permissions.CONTRIBUTE,
+    "extract": permissions.CONTRIBUTE,
     "enrich": permissions.CONTRIBUTE,
     "split-and-create": permissions.CONTRIBUTE,
     "relocate": permissions.CONTRIBUTE,
@@ -256,6 +269,11 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
     normalized = (target or "").strip()
     if workflow not in ("import-link", "import-zip"):
         normalized = normalized.strip("/")
+    if workflow == "extract":
+        # An extract names a library path, and a path is not a directory spelling:
+        # a leading space is part of the file name, so nothing is trimmed here.
+        # `archive_service` normalises the path itself, containment included.
+        normalized = target or ""
     intent = {"v": PLAN_VERSION, "workflow": workflow, "target": normalized, "params": params or {}}
     if workflow == "create-project":
         steps, review, declared = _plan_create_project(session, normalized, params or {})
@@ -265,6 +283,8 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
         steps, review, declared = _plan_adopt(session, normalized, params or {})
     elif workflow == "extract-and-create":
         steps, review, declared = _plan_extract_and_create(session, normalized, params or {})
+    elif workflow == "extract":
+        steps, review, declared = _plan_extract(session, normalized, params or {})
     elif workflow == "library-scan":
         steps, review, declared = _plan_library_scan(session, normalized, params or {})
     elif workflow == "import-link":
@@ -616,8 +636,9 @@ def _plan_split_and_create(session: Session, target: str, params: dict) -> Tuple
         raise HTTPException(
             status_code=409,
             detail=(
-                "this row is an archive: extract it first with POST /import/archive, then split the "
-                "folder it produced (the split never copies or unpacks)"
+                "this row is an archive: extract it first with the extract operation "
+                "(POST /operations/plan with workflow 'extract'), then split the folder it "
+                "produced (the split never copies or unpacks)"
             ),
         )
 
@@ -1289,6 +1310,152 @@ def _plan_adopt(session: Session, target: str, params: dict) -> Tuple[list, dict
     return steps, review, [root]
 
 
+# --- extract ------------------------------------------------------------------
+
+
+INPLACE_EXTRACT_PAYLOAD_RESIDUE = (
+    "the extracted files stay: they are library content now and their asset rows are the "
+    "library's, so only the empty folder rows this run created are removed"
+)
+
+
+def _plan_extract(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
+    """The `extract` planner: the deleted in-library archive door as two steps.
+
+    This is the workflow that replaced `POST /import/archive` and
+    `GET /import/archive/entries` together: the listing is the review, and the
+    write is the run. `archive_service.plan_extraction` reads the archive ONCE
+    and is the one source of both the planned list and the junk verdict, so the
+    review's `excluded` is exactly the listing the deleted GET served.
+
+    The extract step writes the CALLER'S SELECTION - `params["entries"]` when it
+    is a list, else the whole archive - which is the write set the deleted door
+    had, so no member it would have written is lost: a hidden member the review
+    excludes is still written to disk. The REGISTER step names only the `planned`
+    paths, because the scan's own naming rules are what turn files into rows; a
+    written file the scan would never register therefore gets no row.
+
+    There is deliberately NO zero-step plan here, unlike `extract-and-create`: a
+    second extract of the same archive is not a run that already happened, it is
+    a run whose answer is `already_present`. The operator asked to extract and
+    the workflow must report that it looked - a zero-step plan would hide the
+    idempotent answer behind an empty step list.
+
+    The scan-running guard is the extract-and-create planner's, sentence for
+    sentence: `library_scan.register` rewrites rows a concurrent walk also
+    writes, so the register step waits for the walk exactly as that workflow's
+    register step does.
+    """
+    archive = target or ""
+    if not archive:
+        raise HTTPException(
+            status_code=409, detail="the target must be a library-relative archive path"
+        )
+    entries = params.get("entries")
+    if entries is not None and (
+        not isinstance(entries, list) or any(not isinstance(name, str) for name in entries)
+    ):
+        # A selection is a list of archive-relative names; a bare string would be
+        # iterated character by character and a number would die inside the
+        # normaliser, so the shape is checked before the zip is opened.
+        raise HTTPException(
+            status_code=400, detail="params.entries must be a list of entry paths, or omitted"
+        )
+    if seams.scan_status().get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"a library scan is running; nothing was planned for {archive!r}. "
+                "Try again when it finishes"
+            ),
+        )
+
+    selection = archive_service.plan_extraction(archive, entries)
+    planned = list(selection.planned)
+    if not planned:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"nothing to extract from {archive!r}: every selected entry is junk, a "
+                "directory member, or a name the library scan would never register"
+            ),
+        )
+
+    cover = next((entry for entry in planned if is_model_path(entry.rel_path)), None)
+    steps = [
+        {
+            "index": 0,
+            "op": "extract",
+            "summary": (
+                f"extract {len(planned)} file(s) from {posixpath.basename(archive)!r} "
+                f"into {selection.twin!r} ({len(selection.excluded)} left out of the listing)"
+            ),
+            # `audit_ctx` is the ONE difference from extract-and-create's extract
+            # step: this extract IS the operator's own action, so the primitive's
+            # `archive.extract` row is written under the runner's context. The
+            # composition records itself through its own steps instead.
+            #
+            # The SELECTION, not the planned list: the deleted door wrote whatever
+            # it was handed (`extract_out` re-derives `plan_selection` itself and
+            # drops junk), so passing the planned list would lose every member the
+            # review excludes on the scan's account - a hidden file would exist on
+            # disk after the door and stop existing after this workflow.
+            "args": {
+                "path": archive,
+                "entries": entries if isinstance(entries, list) else None,
+                "audit_ctx": True,
+                "folders": _folder_snapshot(session, selection.twin),
+            },
+        },
+        {
+            "index": 1,
+            "op": "register",
+            "summary": (
+                f"register the {len(planned)} file(s) the extraction wrote "
+                f"under {selection.twin!r}"
+            ),
+            # The archive path rides along so the archive keeps the row a scan
+            # would have left at its own path; it is not a member.
+            "args": {
+                "key": selection.twin,
+                "paths": [{"path": entry.rel_path, "entry": entry.entry} for entry in planned],
+                "archive_path": archive,
+                "folders": _folder_snapshot(session, selection.twin),
+            },
+        },
+    ]
+    review = {
+        "workflow": "extract",
+        "target": archive,
+        "moves": 0,
+        "creates": 0,
+        "adopts": 0,
+        "deletes": 0,
+        "members": len(planned),
+        "groups": [
+            {"name": group.name, "members": group.members, "models": group.models}
+            for group in selection.groups
+        ],
+        # A PATH, not an id: the register step resolves the cover from the
+        # planned order, because no asset row exists until it runs.
+        "cover": (
+            {
+                "asset_id": None,
+                "rel_path": cover.rel_path,
+                "reason": "the first model file in the listing",
+            }
+            if cover is not None
+            else None
+        ),
+        "excluded": list(selection.excluded),
+        "existing_project_id": None,
+        "existing_project_name": None,
+        "move_list": [],
+        "projects": [],
+    }
+    return steps, review, [archive, selection.twin]
+
+
 # --- library-scan -------------------------------------------------------------
 
 
@@ -1498,6 +1665,35 @@ def _import_exclusions(url: str, destination: str, *, zip_entries: bool) -> List
     return rules
 
 
+def _project_target(session: Session, params: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """The project an import attaches to: (id, requested name, existing name).
+
+    An explicit `project_id` is proved to EXIST here, at plan time, so a stale
+    target is refused before the plan exists instead of after the fetch has
+    downloaded something. The primitive's 404 becomes a 409 because this is the
+    plan refusing - not an import discovering a missing row mid-run - and the
+    sentence is the primitive's own. A `project_name` is only checked for not
+    being blank: a name is a NAME, so a collision and its suffix are decided by
+    the run that creates the row, never guessed here.
+    """
+    project_id = params.get("project_id") or None
+    project_name = params.get("project_name")
+    if project_name is not None:
+        if not isinstance(project_name, str) or not project_name.strip():
+            raise HTTPException(status_code=400, detail="params.project_name must not be blank")
+    existing_name: Optional[str] = None
+    if project_id:
+        if not isinstance(project_id, str):
+            raise HTTPException(status_code=400, detail="params.project_id must be a project id")
+        try:
+            project_service.require_project(project_id)
+        except HTTPException as error:
+            raise HTTPException(status_code=409, detail=str(error.detail)) from error
+        project = session.get(Project, project_id)
+        existing_name = project.name if project is not None else None
+    return project_id, project_name, existing_name
+
+
 def _import_review(
     workflow: str,
     url: str,
@@ -1506,6 +1702,8 @@ def _import_review(
     creates: int,
     members: int,
     zip_entries: bool,
+    existing_project_id: Optional[str] = None,
+    existing_project_name: Optional[str] = None,
 ) -> dict:
     """The standard review key set, with the import's own prohibitions as `excluded`."""
     return {
@@ -1519,29 +1717,87 @@ def _import_review(
         "groups": [],
         "cover": None,
         "excluded": _import_exclusions(url, destination, zip_entries=zip_entries),
-        "existing_project_id": None,
-        "existing_project_name": None,
+        "existing_project_id": existing_project_id,
+        "existing_project_name": existing_project_name,
         "move_list": [],
         "projects": [],
     }
 
 
 def _plan_import_link(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
-    """The `import-link` planner: the deleted link door as ONE `fetch` step.
+    """The `import-link` planner: the deleted link door as ONE step.
 
     The target IS the page URL. The paid/gated refusal runs FIRST and its 403 is
     the door's own sentence - it is a URL-only check, so it precedes the one call
     that would resolve DNS (`normalize_import_url`, which the runner makes at run
     time and this planner never makes at all).
 
-    `creates` is 1 because the import always creates exactly one asset row: a name
+    When `params` name a project the one step is `attach-project`, not `fetch`,
+    and the plan's `[fetch, attach-project]` split is deliberately refused: the
+    gated outcome (a 401/403 with a readable page, the page's own gated flag, and
+    a `CredentialRefusal` never being gated) is ONE decision `import_into_project`
+    makes from the attempt AND its page together. Splitting the fetch from the
+    attach would reimplement `attempt.page`, `parse_page_metadata`, `_is_gated`
+    and the details-only `{'_files'}` marker, which is exactly the rewrite the
+    ticket forbids. One step keeps the primitive whole.
+
+    `creates` is 1 because the single-file import always creates exactly one asset
+    row; a zip selection inside a project creates one per selected entry. A name
     collision is the 409 the door answered, not a plan-time count to reconcile.
     """
     url = _import_url(target)
     import_policy.refuse_paid_or_gated(url)
-    body = _import_body(url, params)
+    body = _import_body(url, params, extra=("project_id", "project_name", "entries"))
     declared, destination = _import_destination(session, params)
     request = body.model_dump(exclude={"url"}, exclude_none=True)
+    project_id, project_name, existing_name = _project_target(session, params)
+    entries = params.get("entries")
+    if entries is not None and (
+        not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries)
+    ):
+        raise HTTPException(status_code=400, detail="entries must be a list of zip entry paths")
+    if entries is not None and not (project_id or project_name):
+        # A link selection exists only to choose which members a PROJECT import
+        # extracts; a plain link import has no member list, so accepting one and
+        # ignoring it would be a plan that does not say what the run will do.
+        raise HTTPException(
+            status_code=400, detail="entries is only valid when the import names a project"
+        )
+    host = urlparse(url).hostname or url
+
+    if project_id or project_name:
+        label = project_name or project_id
+        if entries is None:
+            summary = f"fetch {host} and attach it to project {label}"
+        else:
+            summary = f"fetch {host} and attach {len(entries)} file(s) to project {label}"
+        steps = [
+            {
+                "index": 0,
+                "op": "attach-project",
+                "summary": summary,
+                "args": {
+                    "url": url,
+                    "request": request,
+                    "entries": list(entries) if entries is not None else None,
+                    "project_id": project_id,
+                    "project_name": project_name,
+                },
+            }
+        ]
+        creates = 1 if entries is None else len(entries)
+        review = _import_review(
+            "import-link",
+            url,
+            destination,
+            creates=creates,
+            members=len(entries) if entries is not None else 0,
+            zip_entries=entries is not None,
+            existing_project_id=project_id,
+            existing_project_name=existing_name,
+        )
+        return steps, review, declared
+
     steps = [
         {
             "index": 0,
@@ -1559,7 +1815,7 @@ def _plan_import_link(session: Session, target: str, params: dict) -> Tuple[list
 
 
 def _plan_import_zip(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
-    """The `import-zip` planner: the deleted zip door as ONE `fetch-zip` step.
+    """The `import-zip` planner: the deleted zip door as ONE step.
 
     The entry list is required and validated at PLAN time: it is the selection the
     operator confirmed in the entries modal, so an archive's own listing can never
@@ -1571,15 +1827,50 @@ def _plan_import_zip(session: Session, target: str, params: dict) -> Tuple[list,
     download from the extraction would hand that temp path across a step boundary
     that no step owns, so a cancelled or failed operation would leak it - one body
     keeps the door's guarantee that the temp file is always deleted.
+
+    When `params` name a project the one step is `attach-project`, for the reason
+    `_plan_import_link` records: the gated outcome and its page are one decision
+    inside `import_into_project`, so the primitive stays whole.
     """
     url = _import_url(target)
     import_policy.refuse_paid_or_gated(url)
-    body = _import_body(url, params, extra=("entries",))
+    body = _import_body(url, params, extra=("entries", "project_id", "project_name"))
     entries = params.get("entries")
     if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
         raise HTTPException(status_code=400, detail="entries must be a list of zip entry paths")
     declared, destination = _import_destination(session, params)
     request = body.model_dump(exclude={"url"}, exclude_none=True)
+    project_id, project_name, existing_name = _project_target(session, params)
+    host = urlparse(url).hostname or url
+
+    if project_id or project_name:
+        label = project_name or project_id
+        steps = [
+            {
+                "index": 0,
+                "op": "attach-project",
+                "summary": f"fetch {host} and attach {len(entries)} file(s) to project {label}",
+                "args": {
+                    "url": url,
+                    "request": request,
+                    "entries": list(entries),
+                    "project_id": project_id,
+                    "project_name": project_name,
+                },
+            }
+        ]
+        review = _import_review(
+            "import-zip",
+            url,
+            destination,
+            creates=len(entries),
+            members=len(entries),
+            zip_entries=True,
+            existing_project_id=project_id,
+            existing_project_name=existing_name,
+        )
+        return steps, review, declared
+
     noun = "entry" if len(entries) == 1 else "entries"
     steps = [
         {
@@ -1874,7 +2165,13 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
     step created, and the zip leg also deletes the folder rows the mirrored tree
     created - never a folder that predated the run, and never a file it did not
     write. What neither leg does is put the remote file back: there is nothing on
-    the library side to restore, so the undo removes what the run added.
+    the library side to restore, so the undo removes what the run added. A plan
+    whose step attached the import to a project delegates to the attach leg
+    first, which removes the memberships and only the project the run created.
+
+    `extract` removes only the empty folder rows its register step measured
+    creating, and never the bytes: the extracted files are library content now,
+    and its response says so.
     """
     operation = get_operation(session, operation_id)
     if operation.undo_state == UNDO_SUPERSEDED:
@@ -1903,6 +2200,8 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
         return _undo_adopt(session, operation, ctx)
     if operation.workflow == "extract-and-create":
         return _undo_extract_and_create(session, operation, ctx)
+    if operation.workflow == "extract":
+        return _undo_extract(session, operation, ctx)
     if operation.workflow == "import-link":
         return _undo_import_link(session, operation, ctx)
     if operation.workflow == "import-zip":
@@ -2351,9 +2650,142 @@ def _undo_payload(operation: Operation, **own) -> dict:
         "assets_removed": None,
         "folders_removed": None,
         "entries_failed": None,
+        "project_removed": None,
+        "payload_residue": None,
     }
     payload.update(own)
     return payload
+
+
+def _undo_extract(
+    session: Session, operation: Operation, ctx: Optional[audit.AuditContext]
+) -> dict:
+    """Remove only the empty folder rows the `register` step measured creating.
+
+    The register step records `created_folders` as the ids after minus the ids
+    before its own call, so a folder that already existed is not in the list and
+    is never a candidate. The ids are then tried deepest first and only while
+    empty: a folder that holds a child or an asset (the extraction's own files, or
+    anything an operator put there later) keeps its row. This is the same pass the
+    zip import's undo uses, because it answers the same question.
+
+    It NEVER un-extracts. The extracted bytes are library content now, their asset
+    rows are the library's, and removing them would be a delete workflow rather
+    than an undo - so the response says the payload stays, in words. A resumed
+    undo finds the folders already gone and still writes its one row.
+    """
+    result = _result_of(_step_of(session, operation.id, "register"))
+    created_folders = [
+        folder_id for folder_id in result.get("created_folders") or [] if isinstance(folder_id, str)
+    ]
+    folders_removed = _remove_created_import_folders(created_folders)
+
+    event = _import_undo_event(
+        operation,
+        {
+            "folders_removed": folders_removed,
+            "payload_residue": INPLACE_EXTRACT_PAYLOAD_RESIDUE,
+        },
+    )
+    with Session(engine) as final:
+        current = final.get(Operation, operation.id)
+        if current is not None:
+            audit.stage(final, ctx, event)
+            current.undo_state = UNDO_UNDONE
+            final.add(current)
+            final.commit()
+
+    return _undo_payload(
+        operation,
+        folders_removed=len(folders_removed),
+        payload_residue=INPLACE_EXTRACT_PAYLOAD_RESIDUE,
+    )
+
+
+def _undo_attach_project(
+    session: Session, operation: Operation, ctx: Optional[audit.AuditContext]
+) -> dict:
+    """Take back exactly the memberships the `attach-project` step added.
+
+    `added` in the step's result IS the list of memberships the run created, so a
+    membership an operator added afterwards is not in it and survives. The project
+    row is deleted only when that same result says the step CREATED it: an import
+    into a project the operator already had must leave that project alone, and the
+    `created` flag is the step's own answer, re-read rather than recomputed.
+
+    The shared supersede guard has already run before this body: a project a later
+    operation adopted makes this operation `superseded`, so the delete is as safe
+    as the row it names.
+
+    One `operation.undo` row, staged into the same commit as the delete; a resumed
+    undo finds the memberships and the project already gone and still records the
+    act.
+    """
+    result = _result_of(_step_of(session, operation.id, "attach-project"))
+    project_id = result.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        raise HTTPException(
+            status_code=409, detail="nothing to undo: this import attached no project"
+        )
+    created = bool(result.get("created"))
+    added = [asset_id for asset_id in result.get("added") or [] if isinstance(asset_id, str)]
+
+    removed = 0
+    with Session(engine) as member_session:
+        present = [
+            member.asset_id
+            for member in member_session.exec(
+                select(ProjectAsset).where(
+                    ProjectAsset.project_id == project_id,
+                    ProjectAsset.asset_id.in_(added),
+                )
+            )
+        ] if added else []
+        if present:
+            member_session.exec(
+                delete(ProjectAsset).where(
+                    ProjectAsset.project_id == project_id,
+                    ProjectAsset.asset_id.in_(present),
+                )
+            )
+            member_session.commit()
+        removed = len(present)
+
+    project_removed = False
+    project_name: Optional[str] = None
+    with Session(engine) as final:
+        project = final.get(Project, project_id)
+        if project is not None:
+            project_name = project.name
+        event = _import_undo_event(
+            operation,
+            {
+                "project_id": project_id,
+                "project_name": project_name,
+                "members_removed": removed,
+                "project_removed": created and project is not None,
+            },
+        )
+        audit.stage(final, ctx, event)
+        current = final.get(Operation, operation.id)
+        if current is not None:
+            current.undo_state = UNDO_UNDONE
+            final.add(current)
+        if created and project is not None:
+            # `delete_project` commits once, so the membership delete, the audit
+            # row, the `undo_state` flip and the project's two tables are one fact.
+            project_service.delete_project(final, project, audit_ctx=None)
+            project_removed = True
+        else:
+            final.commit()
+
+    return _undo_payload(
+        operation,
+        project_id=project_id,
+        project_name=project_name,
+        members_removed=removed,
+        project_removed=project_removed,
+    )
 
 
 def _undo_import_link(
@@ -2376,6 +2808,8 @@ def _undo_import_link(
     library, so nothing is put back. A path a later operation has taken is already
     refused by the shared superseded guard, which runs before this body.
     """
+    if _step_of(session, operation.id, "attach-project") is not None:
+        return _undo_attach_project(session, operation, ctx)
     result = _result_of(_step_of(session, operation.id, "fetch"))
     asset_id = result.get("asset_id")
     filename = result.get("filename")
@@ -2489,6 +2923,8 @@ def _undo_import_zip(
     folder at the same name keeps its row. Resumable, not atomic: every step is
     idempotent, so a crash between the deletes is repaired by the next attempt.
     """
+    if _step_of(session, operation.id, "attach-project") is not None:
+        return _undo_attach_project(session, operation, ctx)
     result = _result_of(_step_of(session, operation.id, "fetch-zip"))
     created = [asset_id for asset_id in result.get("created") or [] if isinstance(asset_id, str)]
     created_folders = [

@@ -1,14 +1,19 @@
-"""The one policy for both zip doors: vocabulary, naming, budget and failure.
+"""The one policy for every archive ingest: vocabulary, naming, budget and failure.
 
-Five routes answer an archive question, and every one of them comes here:
+Two read-only routes answer an archive question, and both come here:
 
-* ``POST /import/zip`` - bytes the server just fetched, extracted into managed
-  assets (the upload door);
-* ``POST /import/zip/entries`` - that door's listing;
-* ``POST /import/archive`` - an archive already in the library, extracted in
-  place into its twin directory (the archive door);
-* ``GET /import/archive/entries`` - that door's listing;
-* ``POST /import/project`` - a project import whose zip branch calls the same
+* ``POST /import/zip/entries`` - an archive's listing, fetched and never written;
+* ``POST /import/inspect`` - a URL's filename, mime and whether it is a zip.
+
+The WRITES this policy governs are the operations workflows, which execute it
+through the two extractors rather than through a route:
+
+* ``import-zip`` - bytes the server just fetched, extracted into managed assets
+  (the upload door);
+* ``extract`` - an archive already in the library, extracted in place into its
+  twin directory (the archive door);
+* and, for a project-targeted entry selection, the ``attach-project`` step of
+either ingest, whose zip branch calls the same
   ``zip_service.extract_zip_entries_to_assets`` as the upload door.
 
 The vocabulary is case-folded and matched per normalised path *segment*:

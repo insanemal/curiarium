@@ -389,8 +389,9 @@ def test_both_entries_doors_flag_the_same_junk(
     """One verdict, two doors: the upload seam and the in-library file.
 
     The first door answers from bytes the server has fetched to a temp file; the
-    second from a real `.zip` in the storage root. Both go through
-    `list_zip_entries`, so a junk set that disagreed would mean two vocabularies.
+    second is the `extract` plan's review, read from a real `.zip` in the storage
+    root. Both go through `entry_policy`, so a junk set that disagreed would mean
+    two vocabularies.
     """
     storage = isolated_storage
     install_zip_download(monkeypatch, tmp_path / "models.zip", NASTY_ENTRIES)
@@ -401,11 +402,15 @@ def test_both_entries_doors_flag_the_same_junk(
     uploaded = upload.json()["entries"]
 
     write_zip(storage / "nasty.zip", NASTY_ENTRIES)
-    listing = client.get("/import/archive/entries", params={"path": "nasty.zip"}, headers=headers)
-    assert listing.status_code == 200, listing.text
-    listed = listing.json()["entries"]
+    planned = client.post(
+        "/operations/plan",
+        json={"workflow": "extract", "target": "nasty.zip", "params": {}},
+        headers=headers,
+    )
+    assert planned.status_code == 200, planned.text
+    review = planned.json()["review"]
 
     assert {entry["path"] for entry in uploaded if entry["junk"]} == NASTY_JUNK
-    assert {entry["path"] for entry in listed if entry["junk"]} == NASTY_JUNK
+    assert {entry["path"] for entry in review["excluded"]} == NASTY_JUNK
     assert {entry["path"] for entry in uploaded if not entry["junk"]} == NASTY_PAYLOAD
-    assert {entry["path"] for entry in listed if not entry["junk"]} == NASTY_PAYLOAD
+    assert review["members"] == len(NASTY_PAYLOAD)

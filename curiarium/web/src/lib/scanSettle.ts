@@ -3,13 +3,17 @@
  *
  * A scan is asynchronous by design: starting one queues an operation that
  * answers as soon as the row exists, and the files a caller just wrote are only
- * visible once the walk registers them. Anything that must observe the result
- * of a write (an archive extract today, an import later) therefore polls the
- * scan's status here instead of growing its own retry loop - and that status is
- * read off the newest `library-scan` operation row, because the row is the only
- * evidence the browser has. Keeping the loop in one module also keeps its two
- * awkward rules in one place: a read that never happened cannot claim the scan
- * settled, and a revoked session must never be mistaken for a slow scan.
+ * visible once the walk registers them. A caller that must observe the result of
+ * a write therefore polls the scan's status here instead of growing its own
+ * retry loop - and that status is read off the newest `library-scan` operation
+ * row, because the row is the only evidence the browser has. In this tree that
+ * caller is bundle detection (`ui/review/useBundleDetect.ts`), which waits for
+ * the walk its own extraction relies on; the asset grid's extract no longer
+ * does, because the `extract` operation's `register` step writes those rows
+ * in-process and queues no walk at all. Keeping the loop in one module also
+ * keeps its two awkward rules in one place: a read that never happened cannot
+ * claim the scan settled, and a revoked session must never be mistaken for a
+ * slow scan.
  *
  * Domain modules only, never the `lib/api` barrel: `App`'s tests replace that
  * barrel with a fixed object, so a named import from it would throw "No export

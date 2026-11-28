@@ -72,8 +72,8 @@ could honestly reconstruct.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
 |---|---|---|---|---|
-| `asset.create` | `POST /upload`; `POST /import/project`; the `import-link` and `import-zip` operations' `fetch`/`fetch-zip` steps (one row per created asset) | the new asset id, so `GET /audit?target=<id>` finds it | `{"via", "name"}` | fail-closed: staged in the same transaction as the insert |
-| `archive.extract` | `POST /import/archive` | the library-relative archive path | `{"destination", "files", "bytes", "scan_started"}` | fail-loud: the files are already published when the row is written |
+| `asset.create` | `POST /upload`; the `import-link` and `import-zip` operations' `fetch`/`fetch-zip`/`attach-project` steps (one row per created asset) | the new asset id, so `GET /audit?target=<id>` finds it | `{"via", "name"}` | fail-closed: staged in the same transaction as the insert |
+| `archive.extract` | the `extract` operation's `extract` step (through `archive_service.extract_out`, the primitive the deleted `POST /import/archive` called) | the library-relative archive path | `{"destination", "files", "bytes", "scan_started"}` | fail-loud: the files are already published when the row is written |
 | `asset.delete` | `DELETE /asset/{asset_id}`; `POST /assets/batch/delete` (one row per asset) | asset id | `{"filename"}` | fail-closed |
 | `asset.rename` | `POST /asset/{asset_id}/rename`; `POST /asset/{asset_id}/meta` (only when the name changes) | asset id | `{"from", "to"}` names | fail-closed |
 | `asset.move` | `POST /asset/{asset_id}/folder`; `POST /assets/batch/folder` (one row per asset) | asset id | `{"folder_id"}` (new folder, or `null` for the root) | fail-closed |
@@ -195,14 +195,14 @@ change more than one fact or act on more than one target:
   whose filename has no extension fails the same way (Mf-ls9v). Both come back
   in the response's `failed` list on a 200, not as an error, so there is no row
   and no `folder.*` row for a directory that only junk would have created. The
-  in-library door (`POST /import/archive`) applies the same OS-metadata
-  predicate through `entry_policy`: a selected member it refuses is never
-  written, and a selection that is entirely OS metadata writes no files at all,
-  so it records no `archive.extract` row - the same rule as a request whose
-  every destination already existed: a request that changes nothing writes
-  nothing. That door returns no `failed` list: it skips a member by
-  classification and aborts the whole request (400/409/413) on everything else,
-  so it never partially fails an entry.
+  in-library `extract` operation applies the same OS-metadata predicate through
+  `entry_policy`: a selected member it refuses is never written, and a selection
+  that is entirely OS metadata is a PLAN refusal now (`nothing to extract`),
+  so it records no `archive.extract` row - the same rule as a run whose every
+  destination already existed: a step that changes nothing writes nothing. Its
+  extract step returns no `failed` list: it skips a member by classification and
+  aborts the whole step (400/409/413) on everything else, so it never partially
+  fails an entry.
   The predicate governs extracted archive members only: an ordinary file upload
   and a file already on disk (registered by the storage scan) are outside it.
 * `PATCH /users/{user_id}` - one row per changed field. Changing role and
@@ -245,8 +245,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 104 routes, 42
-of them `GET`; the remaining 62 split into 47 audited keys and 15 exempt keys.
+out of scope by construction: they change nothing. The matrix has 101 routes, 41
+of them `GET`; the remaining 60 split into 45 audited keys and 15 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without

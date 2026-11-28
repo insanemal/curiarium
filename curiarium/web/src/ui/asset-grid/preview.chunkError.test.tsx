@@ -16,14 +16,6 @@ vi.mock("../ModelViewer", () => {
 
 vi.mock("../LightBurnPreview", () => ({ default: () => null }));
 
-// Only the two archive calls are replaced; the rest of the barrel (`fileUrl`
-// among them) has to stay real for the preview to render at all.
-vi.mock("../../lib/api", async importOriginal => ({
-  ...(await importOriginal<typeof import("../../lib/api")>()),
-  listArchiveEntries: vi.fn(),
-  extractArchive: vi.fn(),
-}));
-
 import type { Asset } from "../../lib/api";
 import { renderPreviewContent } from "./preview";
 

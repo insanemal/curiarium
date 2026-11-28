@@ -43,6 +43,7 @@ import library_scan
 import move_service
 import operations_service
 import project_create_service
+import project_import
 import project_service
 import schemas
 import seams
@@ -376,6 +377,9 @@ def _complete_step(operation_id: str, step_index: int, result: dict) -> None:
 # turns the plan's named files into rows, refused while any planned file is
 # missing. `fetch`/`fetch-zip` are the two ingest doors' own calls: one link, one
 # archive, each the primitive the deleted route used with the plan as its review.
+# `attach-project` is the project variant of either ingest: one call to
+# `project_import.import_into_project`, because the gated outcome and the page it
+# reads are one decision that cannot be split across steps.
 
 
 def _refusal_detail(error: HTTPException) -> str:
@@ -399,13 +403,22 @@ def _extract(operation_id: str, step_index: int, args: dict) -> dict:
     path.
 
     The entry policy is EXECUTED, never restated: this body hands the selection to
-    the same `extract_out` the extract route calls, so junk, the budget, the
+    the same `extract_out` the deleted route called, so junk, the budget, the
     no-clobber arbiter and the all-or-nothing preflight are that door's, and a
     refusal arrives with that door's sentence (and nothing written).
+
+    `audit_ctx` is the one difference from extract-and-create's extract step. The
+    in-place extract IS the operator's own action, so the primitive's own
+    `archive.extract` row is written under the runner's context; extract-and-create
+    records its composition through its own steps and passes None, so its
+    committed behaviour is unchanged.
     """
     try:
         result = archive_service.extract_out(
-            args["path"], args.get("entries"), None, start_scan=False
+            args["path"],
+            args.get("entries"),
+            audit.runner_context() if args.get("audit_ctx") else None,
+            start_scan=False,
         )
     except HTTPException as error:
         raise RuntimeError(_refusal_detail(error)) from error
@@ -449,6 +462,10 @@ def _register(operation_id: str, step_index: int, args: dict) -> dict:
     `members` and `count` are the shape the create step and the workflow's
     witnesses read; `registered`/`known`/`absent`/`failed` are the primitive's own
     report, kept verbatim so a step row says what was written and what was not.
+
+    `created_folders` is measured with two id sets around the primitive, so an
+    undo can delete exactly the folder rows this step made and never one that
+    already existed.
     """
     pairs = args.get("paths") or []
     # The ENTRY is what the operator saw in the listing; `path` is where the plan
@@ -458,7 +475,9 @@ def _register(operation_id: str, step_index: int, args: dict) -> dict:
     if args.get("archive_path"):
         named.append(args["archive_path"])
     try:
+        folders_before = _folder_ids()
         result = library_scan.register(named)
+        created_folders = sorted(_folder_ids() - folders_before)
     except library_scan.RegisterPathError as error:
         raise RuntimeError(str(error)) from error
 
@@ -494,6 +513,7 @@ def _register(operation_id: str, step_index: int, args: dict) -> dict:
         "known": [entry.rel_path for entry in result.known],
         "absent": list(result.absent),
         "failed": list(result.failed),
+        "created_folders": created_folders,
     }
 
 
@@ -1123,6 +1143,65 @@ def _fetch_zip(operation_id: str, step_index: int, args: dict) -> dict:
     }
 
 
+def _attach_project(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `attach-project` step body: the deleted project door's own call.
+
+    `project_import.import_into_project` is ONE decision from the fetch to the
+    membership: it reads the attempt and its page, decides whether a refusal is a
+    gated outcome or the original error, and writes the `{'_files'}` marker only
+    when the project it found has no members. Splitting that across steps would
+    reimplement `attempt.page`, `parse_page_metadata` and `_is_gated`, so this
+    body calls the whole function exactly as the route did.
+
+    `origin` names the link door here; the primitive re-stamps every zip member's
+    row `zip-import` itself (`_zip_assets`), so a zip selection inside a project is
+    attributed honestly without this body branching.
+
+    A door refusal becomes the step's own sentence, without its status prefix.
+    `_scrub_cookies` sits between the request object and the call for the same
+    reason as `fetch`: the credential rides in the persisted plan until the body
+    has taken it, and no failure after this point can leave it at rest.
+
+    `added` is the membership ids the run created, and it is the whole ledger the
+    undo needs: a membership an operator adds later is not in it.
+    """
+    origin = _import_origin(operation_id, "link-import")
+    body = schemas.ImportProjectRequest(
+        url=args["url"],
+        entries=args.get("entries"),
+        project_id=args.get("project_id"),
+        project_name=args.get("project_name"),
+        **args["request"],
+    )
+    try:
+        import_policy.refuse_paid_or_gated(args["url"])
+        url = seams.normalize_import_url(args["url"])
+        _scrub_cookies(operation_id, step_index, args)
+        outcome = project_import.import_into_project(url, body, origin=origin)
+    except HTTPException as error:
+        raise RuntimeError(_refusal_detail(error)) from error
+    return {
+        "project_id": outcome.project_id,
+        "created": outcome.created,
+        "gated": outcome.gated,
+        "message": outcome.message,
+        "added": outcome.added,
+        "skipped": outcome.skipped,
+        "failed": outcome.failed,
+        "created_assets": [asset.id for asset in outcome.assets],
+        "assets": [
+            {
+                "asset_id": asset.id,
+                "path": asset.storage_path,
+                "filename": asset.filename,
+                "size": asset.size,
+            }
+            for asset in outcome.assets
+        ],
+        "url": url,
+    }
+
+
 _STEP_BODIES = {
     "extract": _extract,
     "move": _move,
@@ -1140,6 +1219,10 @@ _STEP_BODIES = {
     # deleted ingest doors, whose bodies now run in the runner's thread.
     "fetch": _fetch,
     "fetch-zip": _fetch_zip,
+    # `attach-project` is the project target of either ingest workflow, not a
+    # workflow of its own: one step, because the primitive's gated decision is
+    # the fetch and its page together.
+    "attach-project": _attach_project,
 }
 
 

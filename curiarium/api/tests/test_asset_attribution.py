@@ -438,21 +438,23 @@ def test_a_single_file_project_import_is_a_link_import(
 ) -> None:
     install_single_attempt_stub(monkeypatch)
 
-    response = client.post(
-        "/import/project",
-        json={"url": "https://example.com/model.stl"},
+    # `POST /import/project` is the `attach-project` step of `import-link` now
+    # (Mf-y2u3 3/4); naming a project is what chooses that step.
+    operation = run_workflow(
+        client,
+        "import-link",
+        "https://example.com/model.stl",
         headers=bearer(contributor.token),
+        project_name="Attribution project",
     )
 
-    assert response.status_code == 200, response.text
-    body = response.json()
+    body = operation["steps"][0]["result"]
     assert len(body["assets"]) == 1
-    assert_attributed(
+    assert_workflow_attributed(
         client,
         contributor.admin_token,
-        body["assets"][0],
-        actor=contributor.username,
-        created_by=contributor.username,
+        asset_id=body["assets"][0]["asset_id"],
+        submitted_by=contributor.username,
         created_via="link-import",
     )
 
@@ -462,22 +464,23 @@ def test_a_zip_project_import_is_a_zip_import(
 ) -> None:
     install_project_zip_stub(monkeypatch, tmp_path)
 
-    response = client.post(
-        "/import/project",
-        json={"url": "https://example.com/models.zip", "entries": ["a.stl"]},
+    operation = run_workflow(
+        client,
+        "import-zip",
+        "https://example.com/models.zip",
         headers=bearer(contributor.token),
+        entries=["a.stl"],
+        project_name="Attribution zip project",
     )
 
-    assert response.status_code == 200, response.text
-    body = response.json()
+    body = operation["steps"][0]["result"]
     assert body["failed"] == []
     assert len(body["assets"]) == 1
-    assert_attributed(
+    assert_workflow_attributed(
         client,
         contributor.admin_token,
-        body["assets"][0],
-        actor=contributor.username,
-        created_by=contributor.username,
+        asset_id=body["assets"][0]["asset_id"],
+        submitted_by=contributor.username,
         created_via="zip-import",
     )
 

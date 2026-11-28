@@ -1,18 +1,19 @@
-"""Web imports, zip inspection/entry selection and project imports (Mf-avo9 split)."""
+"""Web imports: the two read-only preflights and the models the workflows use.
+
+No route writes an import any more (Mf-y2u3 parts 2/4 and 3/4): every import is
+an `import-link`, `import-zip` or `extract` operation. What a route still answers
+is `POST /import/inspect` (a URL's filename, mime and whether it is a zip) and
+`POST /import/zip/entries` (that zip's listing); both write nothing. The request
+models and `ArchiveExtractOut` are what the operation step bodies build.
+"""
 
 from typing import List, Optional
 
 from pydantic import BaseModel
 
-from .assets import AssetOut
-from .projects import ProjectOut
-
 __all__ = [
-  "ArchiveEntriesOut",
   "ArchiveExtractOut",
-  "ArchiveExtractRequest",
   "ImportInspectOut",
-  "ImportProjectOut",
   "ImportProjectRequest",
   "ImportRequest",
   "ImportZipEntriesOut",
@@ -44,32 +45,14 @@ class ZipEntryOut(BaseModel):
 
   `junk` is the server's verdict (`entry_policy.is_junk_entry`) that the member
   is OS metadata - `__MACOSX/`, `.DS_Store`, `Thumbs.db`, an AppleDouble `._*` -
-  and both server extract doors refuse it: `/import/zip` reports it in `failed`,
-  `/import/archive` leaves it out of the extraction. The server decides it; the
-  browser only uses it to choose the modal's default ticks.
+  and both extract workflows refuse it: `import-zip` reports it in `failed`, and
+  `extract` names it in the plan's `excluded`. The server decides it; the browser
+  only uses it to choose the modal's default ticks.
   """
 
   path: str
   size: int
   junk: bool
-
-
-class ArchiveEntriesOut(BaseModel):
-  """One archive the library already holds, as the entries door lists it.
-
-  `path` echoes the request's library-relative path (normalised), so a client can
-  show what it read without re-deriving it.
-  """
-
-  path: str
-  entries: List[ZipEntryOut]
-
-
-class ArchiveExtractRequest(BaseModel):
-  """An archive already in the library; `entries=None` means every member."""
-
-  path: str
-  entries: Optional[List[str]] = None
 
 
 class ArchiveExtractOut(BaseModel):
@@ -117,22 +100,3 @@ class ImportProjectRequest(ImportRequest):
   project_name: Optional[str] = None
   entries: Optional[List[str]] = None
 
-
-class ImportProjectOut(BaseModel):
-  """An import into a project: the project, what changed and why it may be empty.
-
-  `assets` are the assets the import itself produced (already serialized), and
-  `added`/`skipped` are their member ids. `failed` lists zip entry paths that
-  could not be extracted, never member-id failures. `gated` is true when the
-  site refused the files and only the page details were stored; `message` then
-  explains how to attach them.
-  """
-
-  project: ProjectOut
-  created: bool
-  assets: List[AssetOut] = []
-  added: List[str] = []
-  skipped: List[str] = []
-  failed: List[str] = []
-  gated: bool = False
-  message: str = ""

@@ -330,6 +330,8 @@ UNDO_WIRE_KEYS = {
     "assets_removed",
     "folders_removed",
     "entries_failed",
+    "project_removed",
+    "payload_residue",
 }
 
 

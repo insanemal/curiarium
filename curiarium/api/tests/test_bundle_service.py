@@ -8411,9 +8411,23 @@ def test_the_zip_row_keeps_its_extract_door_after_its_archive_became_a_project(
     )
     headers = auth_header(client)
 
-    extracted = client.post("/import/archive", json={"path": zip_rel}, headers=headers)
-    assert extracted.status_code == 200, extracted.text
-    assert extracted.json()["destination"] == twin_rel
+    planned = client.post(
+        "/operations/plan",
+        json={"workflow": "extract", "target": zip_rel, "params": {}},
+        headers=headers,
+    )
+    assert planned.status_code == 200, planned.text
+    submitted = client.post(
+        "/operations",
+        json={"plan_id": planned.json()["plan_id"], "idempotency_key": uuid4().hex},
+        headers=headers,
+    )
+    assert submitted.status_code == 202, submitted.text
+    operations_runner.dispatch_once()
+    operations_runner.wait_idle(timeout=30)
+    extracted = client.get(f"/operations/{submitted.json()['id']}", headers=headers).json()
+    assert extracted["status"] == "done", extracted
+    assert extracted["steps"][0]["result"]["destination"] == twin_rel
     scan()
 
     with Session(engine) as session:

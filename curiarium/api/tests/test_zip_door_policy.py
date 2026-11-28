@@ -185,10 +185,35 @@ def new_rows(before_assets: set, before_folders: set) -> tuple[list[Asset], list
     return assets, folders
 
 
-def extract_archive(client: TestClient, headers: dict, path: str = "Nasty.zip") -> dict:
-    response = client.post("/import/archive", json={"path": path}, headers=headers)
-    assert response.status_code == 200, response.text
-    return response.json()
+def plan_extract(
+    client: TestClient, headers: dict, path: str = "Nasty.zip", entries: list[str] | None = None
+):
+    """Plan one `extract`; the review's `excluded` is the deleted entries listing."""
+    params = {"entries": entries} if entries is not None else {}
+    return client.post(
+        "/operations/plan",
+        json={"workflow": "extract", "target": path, "params": params},
+        headers=headers,
+    )
+
+
+def extract_archive(
+    client: TestClient, headers: dict, path: str = "Nasty.zip", entries: list[str] | None = None
+) -> dict:
+    """Plan, submit and run one `extract`; the extract step is the old 200 body."""
+    planned = plan_extract(client, headers, path, entries)
+    assert planned.status_code == 200, planned.text
+    submitted = client.post(
+        "/operations",
+        json={"plan_id": planned.json()["plan_id"], "idempotency_key": f"extract-door-{uuid4().hex}"},
+        headers=headers,
+    )
+    assert submitted.status_code == 202, submitted.text
+    operations_runner.dispatch_once()
+    operations_runner.wait_idle(timeout=30)
+    operation = client.get(f"/operations/{submitted.json()['id']}", headers=headers).json()
+    assert operation["status"] == "done", operation
+    return operation["steps"][0]["result"]
 
 
 def run_import_zip(client: TestClient, headers: dict, entries: list[str]) -> dict:
@@ -281,12 +306,12 @@ def test_the_archive_entries_door_flags_the_door_archive(
     write_door_archive(storage / "Nasty.zip")
     headers = auth_header(client)
 
-    response = client.get("/import/archive/entries", params={"path": "Nasty.zip"}, headers=headers)
+    response = plan_extract(client, headers)
 
     assert response.status_code == 200, response.text
-    entries = response.json()["entries"]
-    assert {entry["path"] for entry in entries if entry["junk"]} == DOOR_JUNK
-    assert {entry["path"] for entry in entries if not entry["junk"]} == DOOR_PAYLOAD
+    review = response.json()["review"]
+    assert {entry["path"] for entry in review["excluded"]} == DOOR_JUNK
+    assert review["members"] == len(DOOR_PAYLOAD)
 
 
 # --- symptom 1: the archive door writes junk on disk ----------------------
@@ -394,14 +419,8 @@ def test_a_junk_member_spends_no_budget_on_either_door(
     selection = sorted(DOOR_ARCHIVE)
 
     zip_body = run_import_zip(client, headers, selection)
-    archive_response = client.post(
-        "/import/archive",
-        json={"path": "Nasty.zip", "entries": selection},
-        headers=headers,
-    )
-    archive_body = archive_response.json()
+    archive_body = extract_archive(client, headers, entries=selection)
 
-    assert archive_response.status_code == 200, f"archive door {archive_response.status_code}: {archive_body}"
     assert archive_body["bytes"] == DOOR_PAYLOAD_BYTES, archive_body
     # Both doors agree on what the junk member cost: nothing. The zip door's own
     # accounting is the sum of the sizes it imported; they must be the same 10.
@@ -426,34 +445,27 @@ def test_a_junk_only_archive_selection_writes_nothing_and_records_no_audit_row(
     storage = isolated_storage
     write_door_archive(storage / "Nasty.zip")
     headers = auth_header(client)
-    stub_scan(monkeypatch)
     request_id = str(uuid4())
     before = tree(storage)
 
     response = client.post(
-        "/import/archive",
-        json={"path": "Nasty.zip", "entries": sorted(DOOR_JUNK)},
+        "/operations/plan",
+        json={"workflow": "extract", "target": "Nasty.zip", "params": {"entries": sorted(DOOR_JUNK)}},
         headers={**headers, "X-Request-ID": request_id},
     )
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["files"] == 0, body
-    assert body["bytes"] == 0, body
-    assert body["already_present"] is False, body
-    assert body["scan_started"] is False, body
+    assert response.status_code == 409, response.text
+    assert "nothing to extract from 'Nasty.zip'" in response.json()["detail"]
     with Session(engine) as session:
         assert list(session.exec(select(AuditEvent).where(AuditEvent.request_id == request_id))) == []
     assert tree(storage) == before, "a selection that writes nothing changes nothing"
     assert not (storage / "Nasty").exists(), "a junk-only selection creates no twin directory"
 
-    empty = client.post("/import/archive", json={"path": "Nasty.zip", "entries": []}, headers=headers)
+    empty = plan_extract(client, headers, entries=[])
     assert empty.status_code == 400, empty.text
     assert empty.json()["detail"] == "No zip entries selected"
 
-    ghost = client.post(
-        "/import/archive", json={"path": "Nasty.zip", "entries": ["part.stl", "ghost.stl"]}, headers=headers
-    )
+    ghost = plan_extract(client, headers, entries=["part.stl", "ghost.stl"])
     assert ghost.status_code == 400, ghost.text
     assert ghost.json()["detail"] == "Selection names entries that are not in the archive: ghost.stl"
     assert tree(storage) == before, "a refused selection changes nothing"
@@ -472,7 +484,6 @@ def test_the_two_nothing_written_outcomes_are_distinguishable(
     storage = isolated_storage
     write_door_archive(storage / "Nasty.zip")
     headers = auth_header(client)
-    stub_scan(monkeypatch)
 
     first = extract_archive(client, headers)
     assert first["files"] == len(DOOR_PAYLOAD), first
@@ -482,19 +493,12 @@ def test_the_two_nothing_written_outcomes_are_distinguishable(
     assert repeated["already_present"] is True, repeated
     assert repeated["scan_started"] is False, repeated
 
-    junk_only = client.post(
-        "/import/archive", json={"path": "Nasty.zip", "entries": sorted(DOOR_JUNK)}, headers=headers
-    )
-    assert junk_only.status_code == 200, junk_only.text
-    junk_body = junk_only.json()
-    assert junk_body["files"] == 0, junk_body
-    assert junk_body["already_present"] is False, junk_body
-    assert junk_body["scan_started"] is False, junk_body
-
-    assert (junk_body["files"], junk_body["already_present"]) != (
-        repeated["files"],
-        repeated["already_present"],
-    ), "the two nothing-written outcomes are indistinguishable through the response"
+    # The junk-only outcome is a PLAN refusal now, not a 200 that wrote nothing:
+    # `_plan_extract` refuses an empty planned list before any step exists, so the
+    # two answers a client reads are `already_present` and `nothing to extract`.
+    junk_only = plan_extract(client, headers, entries=sorted(DOOR_JUNK))
+    assert junk_only.status_code == 409, junk_only.text
+    assert "nothing to extract" in junk_only.json()["detail"]
 
 
 # --- the sentinel: all four doors ask the one predicate --------------------
@@ -572,12 +576,13 @@ def test_the_sentinel_predicate_reaches_both_entries_doors(
     uploaded = upload.json()["entries"]
 
     write_door_archive(storage / "Nasty.zip")
-    listing = client.get("/import/archive/entries", params={"path": "Nasty.zip"}, headers=headers)
+    listing = plan_extract(client, headers)
     assert listing.status_code == 200, listing.text
-    listed = listing.json()["entries"]
+    review = listing.json()["review"]
 
-    for entries in (uploaded, listed):
-        assert {entry["path"] for entry in entries if entry["junk"]} == DOOR_JUNK | {"part.stl"}
-        assert {entry["path"] for entry in entries if not entry["junk"]} == DOOR_PAYLOAD - {"part.stl"}
+    assert {entry["path"] for entry in uploaded if entry["junk"]} == DOOR_JUNK | {"part.stl"}
+    assert {entry["path"] for entry in uploaded if not entry["junk"]} == DOOR_PAYLOAD - {"part.stl"}
+    assert {entry["path"] for entry in review["excluded"]} == DOOR_JUNK | {"part.stl"}
+    assert review["members"] == len(DOOR_PAYLOAD) - 1
 
     assert "part.stl" in sentinel_junk, sentinel_junk

@@ -2,15 +2,31 @@
 //
 // A library `.zip` has two doors: the preview footer's extract action and the
 // card kebab. These probes pin that the kebab is the SAME door — one
-// `ArchiveExtractDialog`, one `{path, entries: null}` request, and no preview
-// opened on the way — that a `.zip` with no `storage_path` (a mount/reference
-// row, whose file is not the library's own copy) gets no item at all, and that
-// a viewer's kebab never carries the door.
+// `ArchiveExtractDialog`, one `extract` operation submitted through the shared
+// action, and no preview opened on the way — that a `.zip` with no
+// `storage_path` (a mount/reference row, whose file is not the library's own
+// copy) gets no item at all, and that a viewer's kebab never carries the door.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import type { Asset } from "../lib/api";
 import type { ArchiveExtractResult } from "../lib/api/imports";
+// The action drives the operations ledger through `useOperationRun`, which
+// imports the domain module directly: the barrel mock below cannot stand in for
+// it, so the three calls are replaced where the panel reads them.
+const operationsApi = vi.hoisted(() => ({
+  planOperation: vi.fn(),
+  submitOperation: vi.fn(),
+  getOperation: vi.fn(),
+  undoOperation: vi.fn(),
+}));
+vi.mock("../lib/api/operations", async importOriginal => ({
+  ...(await importOriginal<typeof import("../lib/api/operations")>()),
+  planOperation: operationsApi.planOperation,
+  submitOperation: operationsApi.submitOperation,
+  getOperation: operationsApi.getOperation,
+  undoOperation: operationsApi.undoOperation,
+}));
 
 vi.mock("../lib/api", () => ({
   UnauthorizedError: class UnauthorizedError extends Error {},
@@ -29,8 +45,6 @@ vi.mock("../lib/api", () => ({
   getAssetDeletePreview: vi.fn(),
   getLibraryScanStatus: vi.fn(),
   assetFilePreviewUrl: vi.fn((rel: string) => `${rel}?inline=1`),
-  extractArchive: vi.fn(),
-  listArchiveEntries: vi.fn(),
   listAssetFileLimits: vi.fn(async () => ({
     count: 0,
     total_bytes: 0,
@@ -63,8 +77,9 @@ vi.mock("../LightBurnPreview", () => ({
   default: () => null,
 }));
 
-// The real settle waits up to ten minutes of polls: a component test must never
-// run it, and its outcome is not what these probes are about.
+// The real settle can poll for ten minutes of a clock a component test does not
+// own. Nothing in this door may call it any more - the extract's `register` step
+// writes the rows in-process - so the mock is here to make that observable.
 vi.mock("../lib/scanSettle", () => ({
   settleAfterExtract: vi.fn(async () => "settled"),
   waitForScanSettle: vi.fn(async () => "settled"),
@@ -72,16 +87,26 @@ vi.mock("../lib/scanSettle", () => ({
   SETTLE_TIMEOUT_MS: 600000,
 }));
 
-import { extractArchive, listArchiveEntries, listAssets } from "../lib/api";
-import { settleAfterExtract, type SettleOutcome } from "../lib/scanSettle";
+import { listAssets } from "../lib/api";
+import {
+  getOperation,
+  planOperation,
+  submitOperation,
+  type Operation,
+  type OperationPlan,
+  type OperationReview,
+  type OperationStep,
+} from "../lib/api/operations";
+import { settleAfterExtract } from "../lib/scanSettle";
 import AssetGrid from "./asset-grid/AssetGrid";
 
 const listAssetsMock = vi.mocked(listAssets);
-const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
-const extractArchiveMock = vi.mocked(extractArchive);
+const planOperationMock = vi.mocked(planOperation);
+const submitOperationMock = vi.mocked(submitOperation);
+const getOperationMock = vi.mocked(getOperation);
 const settleAfterExtractMock = vi.mocked(settleAfterExtract);
 
-/** A managed library copy: `storage_path` is what the extract API takes. */
+/** A managed library copy: `storage_path` is what the extract operation targets. */
 const MOAI_ZIP: Asset = {
   id: "z1",
   name: "Moai",
@@ -104,8 +129,79 @@ const EXTRACTED: ArchiveExtractResult = {
   files: 2,
   bytes: 2560,
   already_present: false,
-  scan_started: true,
+  scan_started: false,
 };
+
+function extractReview(): OperationReview {
+  return {
+    workflow: "extract",
+    target: "Moai.zip",
+    moves: 0,
+    creates: 0,
+    adopts: 0,
+    deletes: 0,
+    members: 2,
+    groups: [{ name: "", members: 2, models: 1 }],
+    cover: null,
+    excluded: [{ path: "__MACOSX/._Moai.stl", reason: "system metadata" }],
+    existing_project_id: null,
+    existing_project_name: null,
+    move_list: [],
+    projects: [],
+  };
+}
+
+const PLAN: OperationPlan = {
+  plan_id: "plan-Moai.zip",
+  workflow: "extract",
+  target: "Moai.zip",
+  steps: [
+    { index: 0, op: "extract", summary: "extract 2 file(s) from 'Moai.zip'" },
+    { index: 1, op: "register", summary: "register the 2 file(s) the extraction wrote" },
+  ],
+  review: extractReview(),
+};
+
+function step(overrides: Partial<OperationStep> = {}): OperationStep {
+  return {
+    index: 0,
+    op: "extract",
+    status: "pending",
+    result: null,
+    error: null,
+    started_at: null,
+    finished_at: null,
+    ...overrides,
+  };
+}
+
+function queuedRow(): Operation {
+  return {
+    id: "op-1",
+    workflow: "extract",
+    target: "Moai.zip",
+    status: "queued",
+    submitted_by: "u1",
+    created_at: "2026-01-01T00:00:00Z",
+    started_at: null,
+    finished_at: null,
+    error: null,
+    undo_state: "unavailable",
+    superseded_by: null,
+    steps: [],
+  };
+}
+
+function finishedRow(result: ArchiveExtractResult): Operation {
+  return {
+    ...queuedRow(),
+    status: "done",
+    steps: [
+      step({ index: 0, op: "extract", status: "done", result: { ...result } }),
+      step({ index: 1, op: "register", status: "done" }),
+    ],
+  };
+}
 
 function serve(asset: Asset): void {
   listAssetsMock.mockResolvedValue({ items: [asset], hasMore: false });
@@ -118,30 +214,25 @@ function openKebab(): void {
 }
 
 /**
- * Walks kebab -> Extract archive… -> List -> Confirm, and stops once the one
- * `extractArchive` request has been made. The count is taken up front so a
- * second extraction in the same test (after a `cleanup`) still waits for its
- * own request instead of matching the first one.
+ * Walks kebab -> Extract archive… -> plan -> confirm, and stops once the one
+ * submit has been made. The count is taken up front so a second extraction in
+ * the same test (after a `cleanup`) still waits for its own request instead of
+ * matching the first one.
  */
 async function extractThroughDialog(): Promise<void> {
-  const before = extractArchiveMock.mock.calls.length;
+  const before = submitOperationMock.mock.calls.length;
 
   openKebab();
   fireEvent.click(screen.getByRole("menuitem", { name: "Extract archive…" }));
   fireEvent.click(screen.getByRole("button", { name: "Extract Moai.zip" }));
   fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
-  await waitFor(() => expect(extractArchiveMock).toHaveBeenCalledTimes(before + 1));
-  expect(extractArchiveMock).toHaveBeenLastCalledWith({ path: "Moai.zip", entries: null });
-}
-
-/** A promise the test settles by hand: the ordering must be the test's, not the clock's. */
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(res => {
-    resolve = res;
+  // The plan's id is the whole request: the dialog assembles nothing itself.
+  await waitFor(() => expect(submitOperationMock).toHaveBeenCalledTimes(before + 1));
+  expect(submitOperationMock).toHaveBeenLastCalledWith({
+    planId: "plan-Moai.zip",
+    idempotencyKey: expect.any(String),
   });
-  return { promise, resolve };
 }
 
 beforeEach(() => {
@@ -151,24 +242,21 @@ beforeEach(() => {
   settleAfterExtractMock.mockReset();
   settleAfterExtractMock.mockResolvedValue("settled");
   serve(MOAI_ZIP);
-  listArchiveEntriesMock.mockResolvedValue({
-    path: "Moai.zip",
-    entries: [
-      { path: "Moai.stl", size: 2048 },
-      { path: "readme.txt", size: 512 },
-    ],
-  });
-  extractArchiveMock.mockResolvedValue(EXTRACTED);
+  planOperationMock.mockReset();
+  planOperationMock.mockResolvedValue(PLAN);
+  submitOperationMock.mockReset();
+  submitOperationMock.mockResolvedValue(queuedRow());
+  getOperationMock.mockReset();
+  getOperationMock.mockResolvedValue(finishedRow(EXTRACTED));
 });
 
 afterEach(cleanup);
 
 describe("extracting an archive from the card kebab", () => {
   it("extracts a zip from the card kebab without opening the preview", async () => {
-    // Proves the kebab opens the shared extract dialog rather than the
-    // preview, then walks the dialog's own List -> Confirm -> Extract flow that
-    // the preview footer already owns, and that the request is the whole
-    // archive (`entries: null`), not a selection.
+    // Proves the kebab opens the shared extract dialog rather than the preview,
+    // then walks the dialog's own plan -> confirm -> submit flow that the preview
+    // footer already owns, and that the operation targets the whole archive.
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Moai");
 
@@ -184,8 +272,13 @@ describe("extracting an archive from the card kebab", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     await waitFor(() =>
-      expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Moai.zip", entries: null }),
+      expect(planOperationMock).toHaveBeenCalledWith({
+        workflow: "extract",
+        target: "Moai.zip",
+        params: expect.any(Object),
+      }),
     );
+    await waitFor(() => expect(submitOperationMock).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("dialog", { name: "Moai" })).toBeNull();
   });
 
@@ -203,37 +296,21 @@ describe("extracting an archive from the card kebab", () => {
     expect(screen.getByRole("menuitem", { name: "Add to project…" })).toBeTruthy();
   });
 
-  it("waits for the library scan before refetching the assets", async () => {
-    // Pins `refreshAfterExtract` (useAssetActions.ts): `await settleAfterExtract(...)`
-    // must come BEFORE `await refresh()`, or the refetch races the walk.
-    const settle = deferred<SettleOutcome>();
-    settleAfterExtractMock.mockReturnValueOnce(settle.promise);
-
+  it("refetches the assets without waiting for a library scan", async () => {
+    // Pins `refreshAfterExtract` (useAssetActions.ts): the extract's register step
+    // writes the asset rows in-process, so there is no walk to settle - a wait
+    // here would poll a scan that was never started, and the refetch would be
+    // held hostage by it.
     render(<AssetGrid canContribute canDelete theme="dark" />);
     await screen.findByText("Moai");
-    // The mount's own page-1 walk has landed; freeze its count so every later
-    // call is, by definition, the post-extract refetch.
-    await act(async () => {
-      await Promise.resolve();
-    });
     const callsBeforeExtract = listAssetsMock.mock.calls.length;
 
     await extractThroughDialog();
 
-    await waitFor(() => expect(settleAfterExtractMock).toHaveBeenCalledTimes(1));
-    // The wait is asked about exactly the results the dialog reported.
-    expect(settleAfterExtractMock.mock.calls[0][0]).toEqual([EXTRACTED]);
-    // The scan is still running: nothing may have re-read the listing yet.
-    // This is the race the ticket exists to close, so it fails loudly if
-    // `settleAfterExtract` is dropped.
-    expect(listAssetsMock).toHaveBeenCalledTimes(callsBeforeExtract);
-
-    settle.resolve("settled");
-
-    // ...and once the scan has settled, the refetch does happen.
     await waitFor(() =>
       expect(listAssetsMock.mock.calls.length).toBeGreaterThan(callsBeforeExtract),
     );
+    expect(settleAfterExtractMock).not.toHaveBeenCalled();
   });
 
   it("files the new assets with the app once the extract wrote something", async () => {
@@ -252,7 +329,7 @@ describe("extracting an archive from the card kebab", () => {
     // Second half: every result was already on disk, so the extract wrote
     // nothing and there is no count for App to refresh.
     cleanup();
-    extractArchiveMock.mockResolvedValue({ ...EXTRACTED, already_present: true });
+    getOperationMock.mockResolvedValue(finishedRow({ ...EXTRACTED, already_present: true }));
     const filedNothing = vi.fn();
     render(
       <AssetGrid canContribute canDelete theme="dark" onAssetsFiled={filedNothing} />,

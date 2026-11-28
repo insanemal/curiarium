@@ -22,25 +22,130 @@ vi.mock("../LightBurnPreview", () => ({
   },
 }));
 
-// The preview footer mounts `ArchiveExtractAction`, which imports the api barrel.
-// Only the two archive calls are replaced; the rest of the barrel (`fileUrl`,
-// the grant transport) has to stay real for the modal to render at all.
-vi.mock("../../lib/api", async importOriginal => ({
-  ...(await importOriginal<typeof import("../../lib/api")>()),
-  listArchiveEntries: vi.fn(),
-  extractArchive: vi.fn(),
+// The preview footer mounts `ArchiveExtractAction`, which drives the operations
+// ledger. The panel imports the domain module directly, so the mock lives there -
+// the original is spread back so every other export keeps working.
+const operationsApi = vi.hoisted(() => ({
+  planOperation: vi.fn(),
+  submitOperation: vi.fn(),
+  getOperation: vi.fn(),
+  undoOperation: vi.fn(),
+}));
+vi.mock("../../lib/api/operations", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../lib/api/operations")>()),
+  planOperation: operationsApi.planOperation,
+  submitOperation: operationsApi.submitOperation,
+  getOperation: operationsApi.getOperation,
+  undoOperation: operationsApi.undoOperation,
 }));
 
-import { extractArchive, listArchiveEntries, type Asset, type Folder, type PreparedPrint } from "../../lib/api";
+import { type Asset, type Folder, type PreparedPrint } from "../../lib/api";
+import type { ArchiveExtractResult } from "../../lib/api/imports";
+import {
+  getOperation,
+  planOperation,
+  submitOperation,
+  type Operation,
+  type OperationPlan,
+  type OperationReview,
+  type OperationStep,
+} from "../../lib/api/operations";
 import { AssetPreviewModal, PreparedPrintSummary, renderPreviewContent } from "./preview";
+
+/** One archive's plan: two members, one of them left out with its own reason. */
+function extractReview(target: string): OperationReview {
+  return {
+    workflow: "extract",
+    target,
+    moves: 0,
+    creates: 0,
+    adopts: 0,
+    deletes: 0,
+    members: 2,
+    groups: [{ name: "", members: 2, models: 1 }],
+    cover: null,
+    excluded: [{ path: "__MACOSX/._Moai.stl", reason: "system metadata" }],
+    existing_project_id: null,
+    existing_project_name: null,
+    move_list: [],
+    projects: [],
+  };
+}
+
+function extractPlan(target: string): OperationPlan {
+  return {
+    plan_id: `plan-${target}`,
+    workflow: "extract",
+    target,
+    steps: [
+      { index: 0, op: "extract", summary: `extract 2 file(s) from '${target}'` },
+      { index: 1, op: "register", summary: "register the 2 file(s) the extraction wrote" },
+    ],
+    review: extractReview(target),
+  };
+}
+
+const EXTRACTED: ArchiveExtractResult = {
+  path: "Moai.zip",
+  destination: "Moai",
+  files: 2,
+  bytes: 2560,
+  already_present: false,
+  scan_started: false,
+};
+
+function step(overrides: Partial<OperationStep> = {}): OperationStep {
+  return {
+    index: 0,
+    op: "extract",
+    status: "pending",
+    result: null,
+    error: null,
+    started_at: null,
+    finished_at: null,
+    ...overrides,
+  };
+}
+
+function queuedRow(): Operation {
+  return {
+    id: "op-plan-Moai.zip",
+    workflow: "extract",
+    target: "Moai.zip",
+    status: "queued",
+    submitted_by: "u1",
+    created_at: "2026-01-01T00:00:00Z",
+    started_at: null,
+    finished_at: null,
+    error: null,
+    undo_state: "unavailable",
+    superseded_by: null,
+    steps: [],
+  };
+}
+
+function finishedRow(): Operation {
+  return {
+    ...queuedRow(),
+    status: "done",
+    steps: [
+      step({ index: 0, op: "extract", status: "done", result: { ...EXTRACTED } }),
+      step({ index: 1, op: "register", status: "done" }),
+    ],
+  };
+}
 
 afterEach(cleanup);
 
 beforeEach(() => {
   lightBurnProps.length = 0;
   modelSnapshotProps.length = 0;
-  vi.mocked(listArchiveEntries).mockReset();
-  vi.mocked(extractArchive).mockReset();
+  vi.mocked(planOperation).mockReset();
+  vi.mocked(planOperation).mockImplementation(async ({ target }) => extractPlan(target));
+  vi.mocked(submitOperation).mockReset();
+  vi.mocked(submitOperation).mockResolvedValue(queuedRow());
+  vi.mocked(getOperation).mockReset();
+  vi.mocked(getOperation).mockResolvedValue(finishedRow());
 });
 
 /** The summary line sits on the outer div; the Clear button is a sibling. */
@@ -264,10 +369,6 @@ describe("AssetPreviewModal dialog upgrade", () => {
 
 describe("AssetPreviewModal archive extraction", () => {
   const ZIP_ASSET: Asset = { ...MODAL_ASSET, filename: "Moai.zip", mime: "application/zip" };
-  const ENTRIES = [
-    { path: "Moai.stl", size: 2048 },
-    { path: "readme.txt", size: 512 },
-  ];
 
   /** A promise the test settles itself, to observe a stage that lasts one request. */
   function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -320,10 +421,10 @@ describe("AssetPreviewModal archive extraction", () => {
     // The footer inherits the action's recovery rather than copying it: before
     // the fix every stage advance dropped the caret to <body>, where neither the
     // dialog's Tab trap nor this Escape handler could reach it.
-    const listing = deferred<Awaited<ReturnType<typeof listArchiveEntries>>>();
-    vi.mocked(listArchiveEntries).mockReturnValue(listing.promise);
-    const extracting = deferred<Awaited<ReturnType<typeof extractArchive>>>();
-    vi.mocked(extractArchive).mockReturnValue(extracting.promise);
+    const planning = deferred<OperationPlan>();
+    vi.mocked(planOperation).mockReturnValue(planning.promise);
+    const submitting = deferred<Operation>();
+    vi.mocked(submitOperation).mockReturnValue(submitting.promise);
     const onClose = vi.fn();
     render(
       <AssetPreviewModal
@@ -336,14 +437,14 @@ describe("AssetPreviewModal archive extraction", () => {
     trigger.focus();
     fireEvent.click(trigger);
 
-    // `listing` disables the only control: the action's container is the home.
+    // `planning` disables the only control: the action's container is the home.
     const actionContainer = trigger.parentElement;
     await waitFor(() => expect(document.activeElement).toBe(actionContainer));
     expect(panel.contains(document.activeElement)).toBe(true);
     expect(document.activeElement).not.toBe(document.body);
 
     await act(async () => {
-      listing.resolve({ path: "Moai.zip", entries: ENTRIES });
+      planning.resolve(extractPlan("Moai.zip"));
     });
 
     const confirmButton = await screen.findByRole("button", { name: "Extract 2 files" });
@@ -372,19 +473,16 @@ describe("AssetPreviewModal archive extraction", () => {
     expect(document.activeElement).not.toBe(document.body);
 
     await act(async () => {
-      extracting.resolve({
-        path: "Moai.zip",
-        destination: "Moai",
-        files: 2,
-        bytes: 2560,
-        already_present: false,
-        scan_started: true,
-      });
+      submitting.resolve(queuedRow());
     });
 
-    // Back on the action's own trigger, its accessible name still the label.
-    const archiveButton = screen.getByRole("button", { name: "Extract Moai.zip" });
-    expect(archiveButton.textContent).toBe("Extract archive");
+    // Back on the action's own trigger once the poll has read the finished row;
+    // its accessible name is still the label.
+    const archiveButton = await waitFor(() => {
+      const button = screen.getByRole("button", { name: "Extract Moai.zip" });
+      expect(button.textContent).toBe("Extract archive");
+      return button;
+    });
     await waitFor(() => expect(document.activeElement).toBe(archiveButton));
     expect(panel.contains(document.activeElement)).toBe(true);
   });

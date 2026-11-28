@@ -66,9 +66,10 @@ A ``.zip`` row is always ``blocked``/``archive_only``, because creation happens
 from registered assets and its door is extraction. That string is not a verdict -
 it is the NAME of the only door, and the client keys the Extract action off it
 (``extractPathFor``); whether that door is actionable comes from the engine, in
-``matches[0].creatable``. The extraction/registration door is
-``POST /import/archive`` (Mf-1zmd): it extracts the zip in place, the next scan
-registers it, and the folder it produced becomes a row of its own.
+``matches[0].creatable``. The extraction/registration door used to be
+``POST /import/archive`` (Mf-1zmd); it is the ``extract`` operation now (Mf-y2u3):
+it extracts the zip in place, its ``register`` step writes the rows, and the
+folder it produced becomes a row of its own.
 
 **Why ``_folder_index`` keys on ``Folder.storage_path``.** A bundle is only
 creatable when its directory is a *registered* directory, meaning a ``Folder``

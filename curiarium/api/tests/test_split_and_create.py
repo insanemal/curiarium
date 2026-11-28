@@ -911,7 +911,9 @@ def test_the_plan_refuses_every_shape_the_split_cannot_enact(
 
     status, detail = refused_plan(client, "Vault.zip")
     assert status == 409
-    assert "POST /import/archive" in detail, "an archive is extracted first, never moved"
+    # The door the sentence names is the `extract` operation now (Mf-y2u3 part 3/4
+    # deleted `POST /import/archive`): an archive is extracted first, never moved.
+    assert "the extract operation" in detail, "an archive is extracted first, never moved"
 
     with monkeypatch.context() as patch:
         patch.setattr(operations_service, "MAX_SPLIT_MOVES", 1)

@@ -3,24 +3,6 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within, type RenderResult } from "@testing-library/react";
 
-// Both surfaces must answer identically: `ArchiveExtractAction` reaches the
-// barrel and the one-step door reaches the domain module, and a test that mocks
-// them with two different pairs would pass while the app imported two
-// different functions.
-const archiveApi = vi.hoisted(() => ({
-  listArchiveEntries: vi.fn(),
-  extractArchive: vi.fn(),
-}));
-vi.mock("../../lib/api", () => ({
-  listArchiveEntries: archiveApi.listArchiveEntries,
-  extractArchive: archiveApi.extractArchive,
-}));
-vi.mock("../../lib/api/imports", async importOriginal => ({
-  ...(await importOriginal<typeof import("../../lib/api/imports")>()),
-  listArchiveEntries: archiveApi.listArchiveEntries,
-  extractArchive: archiveApi.extractArchive,
-}));
-
 // The cover's derived half renders a snapshot. Hoisted so the props can be
 // asserted (a null renderer would prove nothing), and lazy-resolved the same way
 // `ui/asset-grid/preview.test.tsx` does it. `generateModelSnapshot` is part of
@@ -66,7 +48,7 @@ vi.mock("../../lib/api/operations", async importOriginal => ({
   undoOperation: operationsApi.undoOperation,
 }));
 
-import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
+import type { ArchiveExtractResult } from "../../lib/api/imports";
 import type { LibraryScanStatus } from "../../lib/api/settings";
 import {
   ENRICH_MAX_KEYS,
@@ -91,7 +73,6 @@ import {
 import type { SettleOutcome } from "../../lib/scanSettle";
 import { UnauthorizedError } from "../../lib/api/http";
 import { getToasts, resetToasts } from "../../lib/toast";
-import Toaster from "../Toaster";
 import BundleReviewView from "./BundleReviewView";
 import {
   EXTRACT_AND_CREATE_ROW_TITLE,
@@ -106,17 +87,10 @@ import {
 import type { BundleDetectState } from "./useBundleDetect";
 import type { LibraryScanState } from "./useLibraryScan";
 
-const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
-const extractArchiveMock = vi.mocked(extractArchive);
 const planOperationMock = vi.mocked(planOperation);
 const submitOperationMock = vi.mocked(submitOperation);
 const undoOperationMock = vi.mocked(undoOperation);
 const getOperationMock = vi.mocked(getOperation);
-
-const ARCHIVE_ENTRIES = [
-  { path: "Moai.stl", size: 2048 },
-  { path: "readme.txt", size: 512 },
-];
 
 const EXTRACT_RESULT: ArchiveExtractResult = {
   path: "import/Moai.zip",
@@ -124,7 +98,9 @@ const EXTRACT_RESULT: ArchiveExtractResult = {
   files: 2,
   bytes: 2560,
   already_present: false,
-  scan_started: true,
+  // The `extract` step runs with the walk off: its `register` step writes the
+  // asset rows in-process, so no scan is started by an extraction any more.
+  scan_started: false,
 };
 
 /** The matches every fixture serves, from the one helper that knows the wire's
@@ -295,15 +271,6 @@ const moaiZip = makeBundle({
  *  instance unless something keys it. */
 const ALPHA_KEY = "Alpha.zip";
 const BETA_KEY = "Beta.zip";
-const ALPHA_ENTRIES = [
-  { path: "alpha.stl", size: 1024 },
-  { path: "alpha.txt", size: 256 },
-];
-const BETA_ENTRIES = [
-  { path: "beta.stl", size: 1024 },
-  { path: "beta.txt", size: 256 },
-  { path: "beta.jpg", size: 512 },
-];
 const alphaZip = makeBundle({
   key: ALPHA_KEY,
   rel_path: ALPHA_KEY,
@@ -756,16 +723,6 @@ function detailTitle(): string | null {
   return within(detail()).getByRole("heading").textContent;
 }
 
-/** One answer per path, so the confirmation's count names the archive that was
- *  listed. The file-wide mock answers every path the same way, which would leave
- *  a stale panel and a fresh one reading identically. */
-function installArchiveListings(): void {
-  listArchiveEntriesMock.mockImplementation(async (path: string) => ({
-    path,
-    entries: path === "Beta.zip" ? BETA_ENTRIES : ALPHA_ENTRIES,
-  }));
-}
-
 /** Both reveal toggles need live setters, exactly as the hook supplies them. */
 function VisibilityHarness({ initial }: { initial: BundleDetectState }) {
   const [showDismissed, setShowDismissed] = React.useState(initial.showDismissed);
@@ -795,19 +752,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   resetToasts();
   modelSnapshotProps.length = 0;
-  listArchiveEntriesMock.mockReset();
-  listArchiveEntriesMock.mockResolvedValue({ path: "Moai.zip", entries: ARCHIVE_ENTRIES });
-  extractArchiveMock.mockReset();
-  extractArchiveMock.mockResolvedValue(EXTRACT_RESULT);
   // Both operation doors plan on mount, so a test that reaches one without
   // saying what the server answers gets a real plan rather than an undefined
   // `.then`. The suite that cares asserts the call; the others are unaffected.
   planOperationMock.mockReset();
-  planOperationMock.mockImplementation(async input =>
-    input.workflow === "extract-and-create"
-      ? extractPlanFor(input.target)
-      : makeOperationPlan(),
-  );
+  planOperationMock.mockImplementation(async input => {
+    if (input.workflow === "extract-and-create") return extractPlanFor(input.target);
+    if (input.workflow === "extract") return extractOnlyPlanFor(input.target);
+    return makeOperationPlan();
+  });
   submitOperationMock.mockReset();
   getOperationMock.mockReset();
   undoOperationMock.mockReset();
@@ -1320,10 +1273,10 @@ describe("BundleReviewView writes", () => {
 
   it("reports the extraction to the hook and leaves the refetch to it", async () => {
     const state = makeState({ report: makeReport([moaiZip]) });
+    serveExtract("import/Moai.zip", EXTRACT_RESULT);
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
-    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip"));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     await waitFor(() => expect(state.afterExtract).toHaveBeenCalledTimes(1));
@@ -1338,13 +1291,18 @@ describe("BundleReviewView writes", () => {
     // The hook owns the refetch: a refresh here would race the walk that has to
     // register the extracted files before the row can read `ready`.
     expect(state.refresh).not.toHaveBeenCalled();
-    expect(extractArchiveMock).toHaveBeenCalledWith({ path: "import/Moai.zip", entries: null });
+    // The write is the plan's id handed back, and nothing else: the door cannot
+    // name an archive the plan did not describe.
+    expect(submitOperationMock).toHaveBeenCalledWith({
+      planId: `plan-extract-only:import/Moai.zip`,
+      idempotencyKey: expect.any(String),
+    });
   });
 
   it("promises no scan and reports nothing when the extract wrote no files", async () => {
     // The server's junk-only early return: no bytes, no scan, and
     // `already_present: false` because no destination existed to be already there.
-    extractArchiveMock.mockResolvedValue({
+    serveExtract("import/Moai.zip", {
       path: "import/Moai.zip",
       destination: "import/Moai",
       files: 0,
@@ -1356,7 +1314,7 @@ describe("BundleReviewView writes", () => {
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
-    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip"));
+    await waitFor(() => expect(plannedExtractTargets()).toEqual(["import/Moai.zip"]));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     // The dialog's own done line is the anchor that says the round trip finished.
@@ -1364,6 +1322,7 @@ describe("BundleReviewView writes", () => {
     // A junk-only extract registers nothing, so the wait would be a fiction and
     // the notice would promise a refetch that no scan will ever justify.
     expect(screen.queryByText(/waiting for the library scan to register/)).toBeNull();
+    expect(screen.queryByText(/library scan/i)).toBeNull();
     expect(state.afterExtract).not.toHaveBeenCalled();
   });
 
@@ -2297,11 +2256,12 @@ describe("BundleReviewView archive extraction", () => {
     expect(detailTitle()).toBe(before);
   });
 
-  it("extracts the archive a real-shaped row IS, then waits for the scan", async () => {
+  it("extracts the archive a real-shaped row IS, then reports it", async () => {
     // The wire shape for a zip-only row: `archive: null`, and the row's own path
     // is the archive. Every door above is driven by this fixture; this one proves
-    // the bulk door hands the API that path rather than a twin that does not exist.
+    // the bulk door plans that path rather than a twin that does not exist.
     const state = makeState({ report: makeReport([moaiZip]) });
+    serveExtract("import/Moai.zip", EXTRACT_RESULT);
     renderView(state);
 
     fireEvent.click(selectionCheck(moaiZip.key));
@@ -2313,7 +2273,7 @@ describe("BundleReviewView archive extraction", () => {
 
     expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
     // The dialog holds the same idle action the detail pane does: its trigger
-    // lists the archive, and the confirmation is the step that writes.
+    // opens the plan's confirmation, and the confirmation is the step that writes.
     fireEvent.click(
       within(screen.getByRole("dialog", { name: "Extract Moai zip" })).getByRole("button", {
         name: "Extract Moai zip",
@@ -2322,9 +2282,9 @@ describe("BundleReviewView archive extraction", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     await waitFor(() =>
-      expect(extractArchiveMock).toHaveBeenCalledWith({
-        path: "import/Moai.zip",
-        entries: null,
+      expect(submitOperationMock).toHaveBeenCalledWith({
+        planId: "plan-extract-only:import/Moai.zip",
+        idempotencyKey: expect.any(String),
       }),
     );
     await waitFor(() => expect(state.afterExtract).toHaveBeenCalledWith([EXTRACT_RESULT]));
@@ -2346,9 +2306,8 @@ describe("BundleReviewView archive extraction", () => {
 
     expect(rowElement("import/endorphin").getAttribute("aria-keyshortcuts")).toBe("Enter");
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Endorphin pile" }));
-    await waitFor(() =>
-      expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/endorphin.zip"),
-    );
+    // The twin is what is planned - never the directory the row's key names.
+    await waitFor(() => expect(plannedExtractTargets()).toEqual(["import/endorphin.zip"]));
   });
 
   it("offers no extract door on a blocked row that is not an archive", () => {
@@ -2459,10 +2418,10 @@ describe("BundleReviewView archive extraction", () => {
         }),
     );
     const state = makeState({ report: makeReport([moaiZip]), afterExtract });
+    serveExtract("import/Moai.zip", EXTRACT_RESULT);
     renderView(state);
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
-    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip"));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     const notice = await screen.findByText(/waiting for the library scan to register/);
@@ -2486,7 +2445,6 @@ describe("BundleReviewView archive extraction", () => {
       }),
     );
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
-    await waitFor(() => expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip"));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 
     const timedOut = await screen.findByText(/taking longer than expected/);
@@ -2540,7 +2498,6 @@ describe("BundleReviewView archive extraction", () => {
   });
 
   it("drops a stale confirmation when the row changes to another archive", async () => {
-    installArchiveListings();
     renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
 
     fireEvent.click(rowElement(ALPHA_KEY));
@@ -2558,37 +2515,38 @@ describe("BundleReviewView archive extraction", () => {
   });
 
   it("writes the archive the new row names, never the one the row left behind", async () => {
-    installArchiveListings();
+    serveExtract(BETA_KEY);
     renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
 
     fireEvent.click(rowElement(ALPHA_KEY));
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Alpha" }));
     await screen.findByRole("button", { name: "Extract 2 files" });
-    // Alpha was listed only to reach its confirmation - nothing was written.
-    expect(listArchiveEntriesMock).toHaveBeenCalledTimes(1);
-    expect(listArchiveEntriesMock).toHaveBeenCalledWith("Alpha.zip");
+    // Alpha's plan was a READ on the way to its confirmation - nothing written.
+    expect(plannedExtractTargets()).toEqual([ALPHA_KEY]);
 
     fireEvent.click(rowElement(BETA_KEY));
     // The row change is where the old bug fired: a confirmation still armed for
     // Alpha was the one on screen, so the write it led to named Alpha.
-    expect(extractArchiveMock).not.toHaveBeenCalled();
+    expect(submitOperationMock).not.toHaveBeenCalled();
 
     fireEvent.click(within(detail()).getByRole("button", { name: "Extract Beta" }));
     fireEvent.click(await screen.findByRole("button", { name: "Extract 3 files" }));
 
-    await waitFor(() => expect(extractArchiveMock).toHaveBeenCalledTimes(1));
-    expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Beta.zip", entries: null });
+    await waitFor(() => expect(submitOperationMock).toHaveBeenCalledTimes(1));
+    // The plan submitted is Beta's own: the archived count (3) is a fact about
+    // the archive the plan describes, and the id names it.
+    expect(submitOperationMock).toHaveBeenCalledWith({
+      planId: `plan-extract-only:${BETA_KEY}`,
+      idempotencyKey: expect.any(String),
+    });
 
-    // Alpha.zip is legitimately listed on the way to its confirmation, so the
-    // "never Alpha" claim is scoped to the write and to every listing after the
-    // row change - the call pinned above makes the first of those the only one.
-    expect(extractArchiveMock.mock.calls.map(([request]) => request.path)).toEqual(["Beta.zip"]);
-    const listedAfterRowChange = listArchiveEntriesMock.mock.calls.slice(1).map(([path]) => path);
-    expect(listedAfterRowChange).toEqual(["Beta.zip"]);
+    // Alpha is legitimately planned on the way to its confirmation (a READ), so
+    // the "never Alpha" claim is scoped to the write and to every plan after the
+    // row change - the submit pinned above makes the first of those the only one.
+    expect(plannedExtractTargets().slice(1)).toEqual([BETA_KEY]);
   });
 
   it("does not take focus when the remount drops the stale confirmation", async () => {
-    installArchiveListings();
     renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
 
     fireEvent.click(rowElement(ALPHA_KEY));
@@ -2608,7 +2566,6 @@ describe("BundleReviewView archive extraction", () => {
   });
 
   it("leaves the operator's caret on the row that changed", async () => {
-    installArchiveListings();
     renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
 
     fireEvent.click(rowElement(ALPHA_KEY));
@@ -2639,6 +2596,7 @@ describe("BundleReviewView archive extraction", () => {
       });
       return <BundleReviewView state={state} canContribute {...scanProps()} />;
     }
+    serveExtract("import/Moai.zip", EXTRACT_RESULT);
     render(<RefetchHarness />);
 
     const trigger = within(detail()).getByRole("button", { name: "Extract Moai zip" });
@@ -2675,69 +2633,6 @@ describe("BundleReviewView archive extraction", () => {
     expect(document.activeElement).toBe(rowElement("import/Moai.zip"));
   });
 
-  it("reports a failed extraction that landed after the row changed, naming the one that failed", async () => {
-    // A file-wide mock answers every path identically, which would let a panel
-    // listing the wrong archive still show the expected count.
-    installArchiveListings();
-    const message = "Refusing to overwrite: beta.stl";
-    let rejectExtract: (reason: unknown) => void = () => {};
-    extractArchiveMock.mockReturnValue(
-      new Promise<ArchiveExtractResult>((_resolve, reject) => {
-        rejectExtract = reject;
-      }),
-    );
-
-    const view = render(
-      <>
-        <BundleReviewView
-          {...scanProps()}
-          state={makeState({ report: makeReport([alphaZip, betaZip]) })}
-          canContribute
-        />
-        <Toaster />
-      </>,
-    );
-
-    fireEvent.click(rowElement(BETA_KEY));
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Beta" }));
-    // Three entries, not two: Beta is the archive that was actually listed.
-    fireEvent.click(await screen.findByRole("button", { name: "Extract 3 files" }));
-
-    // The write is in flight before the row moves, so the rejection below has no
-    // live instance left to paint into.
-    await waitFor(() =>
-      expect(extractArchiveMock).toHaveBeenCalledWith({ path: "Beta.zip", entries: null }),
-    );
-
-    fireEvent.click(rowElement(ALPHA_KEY));
-    expect(detailTitle()).toBe("Alpha");
-
-    await act(async () => {
-      rejectExtract(new Error(message));
-    });
-
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain(`Extract Beta.zip failed: ${message}`);
-    expect(alert.textContent).not.toContain("Alpha.zip");
-    expect(getToasts()).toHaveLength(1);
-    // The aside is showing Alpha now, so a line about Beta can only be a lie.
-    expect(within(detail()).queryByText(/Extract Beta\.zip failed/)).toBeNull();
-
-    // The settle refetch drops the archive that failed: the toast is all that is
-    // left of that press, and it must not go away with the row.
-    view.rerender(
-      <>
-        <BundleReviewView state={makeState({ report: makeReport([alphaZip]) })} canContribute {...scanProps()} />
-        <Toaster />
-      </>,
-    );
-    expect(rowElement(ALPHA_KEY)).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toContain(
-      `Extract Beta.zip failed: ${message}`,
-    );
-    expect(getToasts()).toHaveLength(1);
-    expect(within(detail()).queryByText(/Extract Beta\.zip failed/)).toBeNull();
-  });
 });
 
 describe("BundleReviewView keyboard and focus", () => {
@@ -2846,6 +2741,7 @@ describe("BundleReviewView keyboard and focus", () => {
       });
       return <BundleReviewView state={state} canContribute {...scanProps()} />;
     }
+    serveExtract("import/Moai.zip", EXTRACT_RESULT);
     render(<EmptyingHarness />);
 
     const trigger = within(detail()).getByRole("button", { name: "Extract Moai zip" });
@@ -2876,6 +2772,7 @@ describe("BundleReviewView keyboard and focus", () => {
       });
       return <BundleReviewView state={state} canContribute {...scanProps()} />;
     }
+    serveExtract("import/Moai.zip", EXTRACT_RESULT);
     render(<RefetchHarness />);
 
     // First the aside's own recovery, which is what leaves a stale flag behind
@@ -4182,7 +4079,6 @@ describe("BundleReviewView bulk extract and create", () => {
   }
 
   it("states the aggregate payload and writes nothing until confirmed", async () => {
-    installArchiveListings();
     const state = makeState({ report: makeReport([alphaZip, betaZip]) });
     renderView(state);
     planOperationMock.mockClear();
@@ -4198,15 +4094,16 @@ describe("BundleReviewView bulk extract and create", () => {
 
     await waitFor(() => expect(confirmPanel()).toBeTruthy());
 
-    // ALPHA holds 1 model and 1 document; BETA 1 model, 1 image and 1 document.
-    // One sentence, from the summed plans of the same classifier the plain
-    // Extract panel uses - never a sum of per-archive prose.
+    // ALPHA plans 2 members with 1 model, BETA 3 members with 1 model: one
+    // sentence, from the CENSUS the two extract plans reported. The figures the
+    // review does not measure (images, documents, nested archives) are not
+    // claimed at all - the deleted listing was their only source.
     expect((confirmPanel() as HTMLElement).textContent).toContain(
-      "Extracting 2 archives: 2 models, 1 image, 2 documents, 5 files in all.",
+      "Extracting 2 archives: 2 models, 5 files in all.",
     );
-    // One listing per archive, read once, before anything is queued. (The detail
-    // pane's own panel may have planned for the active row; that is a READ.)
-    expect(listArchiveEntriesMock).toHaveBeenCalledTimes(2);
+    // One plan per archive, read once, before anything is queued. (The detail
+    // pane's own panels may have planned for the active row; that is a READ.)
+    expect(plannedExtractTargets()).toEqual([ALPHA_KEY, BETA_KEY]);
     expect(
       planOperationMock.mock.calls.filter(([input]) => input.workflow === "extract-and-create"),
     ).toEqual([]);
@@ -4241,8 +4138,6 @@ describe("BundleReviewView bulk extract and create", () => {
   });
 
   it("drives one operation per archive and reports Created 2 projects", async () => {
-    installArchiveListings();
-    planOperationMock.mockImplementation(async input => extractPlanFor(input.target));
     submitOperationMock.mockImplementation(async input => {
       const target = input.planId.replace("plan-extract:", "");
       return createdOperation(target, target === ALPHA_KEY ? "p-alpha" : "p-beta", target.replace(/\.zip$/, ""));
@@ -4296,8 +4191,6 @@ describe("BundleReviewView bulk extract and create", () => {
   });
 
   it("lands on the project when the click named exactly one archive", async () => {
-    installArchiveListings();
-    planOperationMock.mockImplementation(async input => extractPlanFor(input.target));
     submitOperationMock.mockResolvedValue(createdOperation(ALPHA_KEY, "p-alpha", "Alpha"));
     const onProjectsChanged = vi.fn();
     const onProjectImported = vi.fn();
@@ -4326,8 +4219,8 @@ describe("BundleReviewView bulk extract and create", () => {
   });
 
   it("the notice names every archive it acted on", async () => {
-    installArchiveListings();
     planOperationMock.mockImplementation(async input => {
+      if (input.workflow !== "extract-and-create") return extractOnlyPlanFor(input.target);
       if (input.target === GAMMA_KEY) {
         // The server's own zero-step answer: this archive already has a project,
         // so nothing is submitted for it.
@@ -4398,7 +4291,6 @@ describe("BundleReviewView bulk extract and create", () => {
   });
 
   it("derives the confirm stale when the selection changes under it", async () => {
-    installArchiveListings();
     renderView(makeState({ report: makeReport([alphaZip, betaZip]) }));
 
     fireEvent.click(selectionCheck(ALPHA_KEY));
@@ -4432,8 +4324,6 @@ describe("BundleReviewView bulk extract and create", () => {
   });
 
   it("does not let Escape abandon a run that is already writing", async () => {
-    installArchiveListings();
-    planOperationMock.mockImplementation(async input => extractPlanFor(input.target));
     // The submit is held open, so the run is mid-flight: the archive may already
     // be being written and the progress line is the only door state on screen.
     let finish: (value: Operation) => void = () => {};
@@ -4713,6 +4603,95 @@ function makeExtractPlan(
 /** The same plan, named after the archive, for a bulk run's per-archive answer. */
 function extractPlanFor(target: string): OperationPlan {
   return makeExtractPlan(target);
+}
+
+/** One archive's plain `extract` plan: the census the confirm step renders and the
+ *  two steps that run it - the write, then the register that writes the rows
+ *  in-process. `members` differs per archive, so a confirmation can only be
+ *  speaking about the plan it was actually handed. */
+function extractOnlyPlanFor(target: string): OperationPlan {
+  const members = target === BETA_KEY ? 3 : 2;
+  return {
+    plan_id: `plan-extract-only:${target}`,
+    workflow: "extract",
+    target,
+    steps: [
+      { index: 0, op: "extract", summary: `extract ${members} file(s) from '${target}'` },
+      { index: 1, op: "register", summary: `register the ${members} file(s)` },
+    ],
+    review: {
+      workflow: "extract",
+      target,
+      moves: 0,
+      creates: 0,
+      adopts: 0,
+      deletes: 0,
+      members,
+      groups: [{ name: "", members, models: 1 }],
+      cover: null,
+      excluded: [{ path: "__MACOSX/._model.stl", reason: "system metadata" }],
+      existing_project_id: null,
+      existing_project_name: null,
+      move_list: [],
+      projects: [],
+    },
+  };
+}
+
+/** What one archive's `extract` step reports: the shape the deleted route used to
+ *  answer, which is exactly what the door maps onto its `onExtracted`. */
+function extractResultFor(target: string): ArchiveExtractResult {
+  return {
+    path: target,
+    destination: target.replace(/\.zip$/, ""),
+    files: 2,
+    bytes: 2560,
+    already_present: false,
+    scan_started: false,
+  };
+}
+
+/** Serves the extract door's two calls for one archive: the submit answers a
+ *  queued row and the poll answers the finished one, whose extract step reports
+ *  `result`. A test that reaches the confirm step without this would leave the
+ *  door waiting on a row nobody wrote. */
+function serveExtract(
+  target: string,
+  result: ArchiveExtractResult = extractResultFor(target),
+): void {
+  submitOperationMock.mockResolvedValue(
+    makeOperation({
+      id: `op-extract:${target}`,
+      workflow: "extract",
+      target,
+      status: "queued",
+      undo_state: "unavailable",
+      steps: [],
+    }),
+  );
+  getOperationMock.mockResolvedValue(
+    makeOperation({
+      id: `op-extract:${target}`,
+      workflow: "extract",
+      target,
+      status: "done",
+      undo_state: "unavailable",
+      steps: [
+        makeOperationStep({ index: 0, op: "extract", status: "done", result: { ...result } }),
+        makeOperationStep({ index: 1, op: "register", status: "done" }),
+      ],
+    }),
+  );
+}
+
+/** The archives the plain extract door has asked about, in call order. The
+ *  extract-and-create panel plans for the same row, so the filter is by WORKFLOW:
+ *  the two doors ask the server two different questions. */
+function plannedExtractTargets(): string[] {
+  return planOperationMock.mock.calls
+    .map(([input]) => input)
+    .filter(input => input.workflow === "extract")
+    .map(input => input.target);
 }
 
 function makeOperationStep(overrides: Partial<OperationStep> = {}): OperationStep {

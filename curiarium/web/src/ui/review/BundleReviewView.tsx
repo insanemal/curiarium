@@ -11,13 +11,18 @@ import {
   type BundleReport,
 } from "../../lib/api/bundles";
 // Domain module, not the `../../lib/api` barrel: the tests replace that barrel
-// with a fixed object (that is what `ArchiveExtractAction` reaches), so a named
-// runtime import from it would throw "No export is defined on the mock".
-import { listArchiveEntries, type ArchiveExtractResult } from "../../lib/api/imports";
+// with a fixed object, so a named runtime import from it would throw "No export
+// is defined on the mock". The type is all that is left of this module's surface.
+import type { ArchiveExtractResult } from "../../lib/api/imports";
 import { fileUrl } from "../../lib/api/mediaUrls";
 // The bulk door drives the same ledger the panels do, so its three calls are
 // imported from the domain module for the same reason.
-import { getOperation, planOperation, submitOperation } from "../../lib/api/operations";
+import {
+  getOperation,
+  planOperation,
+  submitOperation,
+  type OperationReview,
+} from "../../lib/api/operations";
 import { extOf } from "../../lib/assetKinds";
 import { copyText } from "../../lib/clipboard";
 import type { ResolvedTheme } from "../../lib/settings";
@@ -25,6 +30,7 @@ import { notifyError, notifyInfo } from "../../lib/toast";
 import { useFileGrants } from "../../lib/useFileGrants";
 import ArchiveExtractAction from "../archive/ArchiveExtractAction";
 import ArchiveExtractDialog, { type ExtractTarget } from "../archive/ArchiveExtractDialog";
+import type { ArchivePlan } from "../archive/archivePlan";
 import ErrorBoundary from "../ErrorBoundary";
 import { ModelSnapshot } from "../ModelViewer";
 import {
@@ -83,10 +89,11 @@ import {
   bulkStopLine,
   bulkSummaryLine,
   bulkVerdictLines,
-  planExtractAndCreateMany,
   runExtractAndCreateMany,
   type BulkArchiveTarget,
+  type BulkListedArchive,
   type BulkPlan,
+  type BulkPlanTotals,
   type BulkRunResult,
 } from "./extractAndCreate";
 import ExtractAndCreatePanel from "./ExtractAndCreatePanel";
@@ -228,6 +235,102 @@ type BulkExtractState =
       lines: string[];
     }
   | { phase: "running"; rows: BundleDetectItem[]; targets: BulkArchiveTarget[]; line: string };
+
+/**
+ * One archive's plan, said in the shape the bulk confirm narrates (`ArchivePlan`).
+ *
+ * The file list this door used to read - and then classify - is gone with its
+ * route (`GET /import/archive/entries`), so the numbers here are the ones the
+ * server itself measured on the `extract` plan: `members` is the file count it
+ * would write and each group's `models` is its own model count. Everything the
+ * review does not measure - bytes, images, documents, nested archives, the common
+ * root - stays at zero, which `bulkPlanLines` reads as "not counted" (its `counted`
+ * drops a zero rather than printing one) rather than as a claim that the archive
+ * holds none. `excluded` is deliberately not folded into `junk`: it carries every
+ * member the extractor would leave out, for its own reasons, and a client guess at
+ * which of them are OS metadata would be a word the server never said.
+ */
+function censusPlan(review: OperationReview): ArchivePlan {
+  return {
+    files: review.members,
+    bytes: 0,
+    models: review.groups.reduce((sum, group) => sum + group.models, 0),
+    images: 0,
+    documents: 0,
+    nestedArchives: 0,
+    nestedArchivePaths: [],
+    junk: 0,
+    unregistered: 0,
+    root: null,
+    modelsOnlyInsideNestedArchive: false,
+  };
+}
+
+/** The thrown message, or a sentence saying the plan read itself failed. The API
+ *  layer already turns the server's `detail` into `Error.message`, so this is the
+ *  one place a plan-pass failure is worded - and it paraphrases nothing it did not
+ *  decide. */
+function planFailureDetail(err: unknown): string {
+  return err instanceof Error && err.message
+    ? err.message
+    : "the plan could not be read";
+}
+
+/**
+ * Step one of the many-archive door: ask the server what each selected archive
+ * would write, one plan at a time, and add the census up.
+ *
+ * The catch is per archive on purpose: one archive the planner refuses (a corrupt
+ * zip, an archive a running scan blocks) must not cost the operator the others,
+ * and the queue has to be able to name the one that failed rather than say "the
+ * plan failed". Nothing is written here - a plan is a dry run - so a confirm that
+ * is never made costs one plan per archive and no bytes.
+ *
+ * Never rejects, for the same reason: a failure is a value (`detail`), and the
+ * cosmetic progress line is dropped if it throws. `entries` is the deleted
+ * listing's field and nothing downstream reads it (the census rides on `plan`),
+ * so it stays empty rather than carrying an invented file list.
+ */
+async function planBulkExtract(
+  targets: readonly BulkArchiveTarget[],
+  onProgress?: (line: string) => void,
+): Promise<BulkPlan> {
+  const archives: BulkListedArchive[] = [];
+  const totals: BulkPlanTotals = {
+    files: 0,
+    bytes: 0,
+    models: 0,
+    images: 0,
+    documents: 0,
+    nestedArchives: 0,
+    junk: 0,
+    unregistered: 0,
+  };
+  const total = targets.length;
+
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index];
+    try {
+      const plan = await planOperation({ workflow: "extract", target: target.path });
+      const census = censusPlan(plan.review);
+      archives.push({ ...target, entries: [], plan: census, detail: null });
+      totals.files += census.files;
+      totals.models += census.models;
+    } catch (err) {
+      archives.push({ ...target, entries: null, plan: null, detail: planFailureDetail(err) });
+    }
+    // 1-based and counting archives *attempted*, so a failed plan still advances
+    // the line: the operator is being told where the pass has got to, not how
+    // much of it succeeded. A cosmetic line that throws is dropped, not fatal.
+    try {
+      onProgress?.(`Reading ${index + 1} of ${total} archive plans…`);
+    } catch {
+      // Nothing to do: the line is decoration on a pass that already worked.
+    }
+  }
+
+  return { archives, totals };
+}
 
 /** The detail pane's one enrichment door: a row with a gap gets the first
  *  pass, and a row the page already answered can only be re-checked. Returns
@@ -905,27 +1008,24 @@ export default function BundleReviewView({
     setGuidedForKey(guidedKey);
   };
 
-  // The many-archive door, step one: read every listing and say what the whole
+  // The many-archive door, step one: plan every archive and say what the whole
   // click would write. Nothing is extracted or created here, so an abandoned
-  // confirm costs one listing per archive and no bytes. The rows and targets are
-  // snapshotted now; the plan pass only ever adds the listings to them.
+  // confirm costs one plan per archive and no bytes. The rows and targets are
+  // snapshotted now; the plan pass only ever adds the server's census to them.
   const startBulkExtractAndCreate = (): void => {
     if (!canContribute || actionsLocked) return;
     const rows = extractableSelected.slice();
     const targets = bulkTargets(rows, names);
     if (targets.length === 0) return;
     setBulkNotice(null);
-    setBulkExtract({ phase: "planning", rows, targets, line: "Reading the archives' file lists…" });
-    void planExtractAndCreateMany({
-      targets,
-      listEntries: listArchiveEntries,
+    setBulkExtract({ phase: "planning", rows, targets, line: "Reading the archives' plans…" });
+    void planBulkExtract(targets, line =>
       // A function of the current state, so a plan that answered after the
       // confirm was cancelled never resurrects it.
-      onProgress: line =>
-        setBulkExtract(current =>
-          current && current.phase === "planning" ? { ...current, line } : current,
-        ),
-    }).then(plan => {
+      setBulkExtract(current =>
+        current && current.phase === "planning" ? { ...current, line } : current,
+      ),
+    ).then(plan => {
       setBulkExtract(current =>
         current && current.phase === "planning"
           ? { phase: "confirm", rows, targets, plan, lines: bulkPlanLines(plan) }
@@ -950,7 +1050,7 @@ export default function BundleReviewView({
   }, [bulkExtract]);
 
   // Escape is the cancel for both open phases of the bulk door: the planning
-  // pass and the confirm. Neither has written anything - planning is N listing
+  // pass and the confirm. Neither has written anything - planning is N plan
   // round-trips and the confirm is a snapshot - so leaving is free, which is
   // exactly why it must be one keystroke. `running` is deliberately not bound:
   // that run is already writing projects and is not cancellable.

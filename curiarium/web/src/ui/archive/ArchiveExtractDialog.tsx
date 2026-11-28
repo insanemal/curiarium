@@ -36,12 +36,12 @@ function countLabel(count: number): string {
  * beside themselves.
  *
  * It holds no extract logic of its own: every archive goes through
- * `ArchiveExtractAction`, which lists, confirms and extracts. For a batch this
- * component only walks the targets one at a time, because the action is a
- * self-contained per-archive control and running two at once would race on the
- * same destination check. It also means a failed archive keeps its own inline
- * error, and the batch moves on via `Skip this archive` instead of swallowing
- * it.
+ * `ArchiveExtractAction`, which plans, confirms and submits that archive's own
+ * `extract` operation. For a batch this component only walks the targets one at
+ * a time, because the action is a self-contained per-archive control and running
+ * two at once would race on the same destination check. It also means a failed
+ * archive keeps its own inline error, and the batch moves on via `Skip this
+ * archive` instead of swallowing it.
  */
 export default function ArchiveExtractDialog({
   targets,
@@ -137,7 +137,7 @@ export default function ArchiveExtractDialog({
         event.preventDefault();
         return;
       }
-      // The action's busy stages (`listing`, `extracting`) pin focus on their
+      // The action's busy stages (`planning`, `extracting`) pin focus on their
       // own `tabindex="-1"` container: inside the panel, but not in the Tab
       // ring, so the anchor rules alone would let Tab walk out of this
       // `aria-modal` dialog. This dialog is the only caller opting in.
@@ -188,8 +188,7 @@ export default function ArchiveExtractDialog({
     body = (
       <div className="flex flex-col gap-3">
         <p className="text-sm text-muted">
-          Extract this archive into a new folder beside it. The library scan registers the files
-          afterwards.
+          Each archive is extracted into a new folder beside it and registered.
         </p>
         <ArchiveExtractAction
           canContribute={canContribute}

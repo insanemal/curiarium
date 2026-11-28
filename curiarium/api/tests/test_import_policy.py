@@ -177,12 +177,13 @@ def test_free_public_urls_are_not_refused(url):
     "path,payload",
     [
         ("/import/inspect", PAID_PAYLOAD),
-        ("/import/project", PAID_PAYLOAD),
         ("/import/zip/entries", PAID_PAYLOAD),
     ],
 )
 def test_paid_import_issues_no_request_and_no_cookie(monkeypatch, path, payload):
-    # Every import route must fail before any credentialed request exists.
+    # Every surviving import preflight must fail before any credentialed request
+    # exists; the deleted project route is a workflow plan now, pinned by
+    # test_import_workflows.py's paid-plan test.
     def refuse_to_open(*args, **kwargs):
         raise AssertionError("a paid import must not open a connection")
 

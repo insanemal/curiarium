@@ -29,7 +29,6 @@ import {
 } from "../../lib/bulkUi";
 import { saveResponseToDisk } from "../../lib/download";
 import { primeGrants } from "../../lib/fileGrants";
-import { settleAfterExtract } from "../../lib/scanSettle";
 import type {
   EngravingSettings,
   SlicerSettings,
@@ -424,11 +423,15 @@ export function useAssetActions({
 
   const refreshAfterExtract = useStableCallback(async (results: ArchiveExtractResult[]) => {
     try {
-      // The extract's `scan_started` flag is only a hint about a daemon thread:
-      // the walk may not have seen the new folder yet, so this waits for it in
-      // one place (`lib/scanSettle.ts`) before re-reading the listing. Without
-      // the wait the refetch races the scan and paints the pre-extract grid.
-      await settleAfterExtract(results, { onUnauthorized });
+      // No scan to wait for. An extract runs as the `extract` operation, and its
+      // `register` step writes the asset rows for exactly the files it planned
+      // IN-PROCESS, inside the runner - so by the time the operation reports
+      // `done`, the listing already holds them and `settleAfterExtract`'s wait
+      // would be a wait for a walk that is never coming (it polls a scan that was
+      // never started, and re-kicks nothing because the step's
+      // `scan_started` was false). The helper stays for the one path that still
+      // reads it: bundle detection (`ui/review/useBundleDetect.ts`), which is a
+      // different ticket's.
       await refresh();
       // Extraction registers new assets, so App's counts (sidebar badge, queue
       // header) must refetch, exactly as `rescanMissing` does.

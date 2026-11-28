@@ -18,7 +18,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
-from zipfile import ZipFile
 
 import pytest
 import snapshot_fakes
@@ -26,10 +25,6 @@ from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from httpx import Response
 from sqlmodel import Session, delete, select
-
-# The creation sweep needs the same fake remote response the attribution matrix
-# uses, so the import routes run their real code with no socket opened.
-from test_asset_attribution import FakeImportResponse
 
 # The MFA helpers live with the end-to-end tests, so all three modules enrol an
 # account exactly one way. Importing the names (never `*`) keeps this module's
@@ -45,7 +40,6 @@ import bundle_service
 import config
 import db
 import import_resolvers
-import import_service
 import library_scan
 import login_throttle as login_throttle_module
 import main
@@ -419,43 +413,11 @@ def call_batch_delete(client, headers, ids, monkeypatch) -> Response:
     )
 
 
-# The four creation routes (Mf-0u1y). `asset.create` is a real row written by the
-# real handler: only the transport is faked, through the `main` patch points the
+# The creation route (Mf-0u1y). `asset.create` is a real row written by the real
+# handler: only the transport is faked, through the `main` patch points the
 # production code documents, so no socket is ever opened.
 def call_upload(client, headers, ids, monkeypatch) -> Response:
     return client.post("/upload", files={"file": ("sweep.stl", STL_BYTES, "model/stl")}, headers=headers)
-
-
-def persist_fake(url: str, body, origin) -> Asset:
-    """The real persist path over a fake remote response, so no socket is opened."""
-    return import_service.persist_asset_from_response(FakeImportResponse(STL_BYTES), url, body, origin=origin)
-
-
-def install_single_file_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`POST /import/project` without `entries`: the attempt seam answers with one."""
-
-    def attempt(url: str, body, *, origin=None):
-        return import_service.ImportAttempt(asset=persist_fake(url, body, origin))
-
-    monkeypatch.setattr(main, "normalize_import_url", lambda url: url)
-    monkeypatch.setattr(main, "import_asset_attempt", attempt)
-
-
-def call_import_project(client, headers, ids, monkeypatch) -> Response:
-    install_single_file_attempt(monkeypatch)
-    return client.post("/import/project", json={"url": "https://example.com/sweep-project.stl"}, headers=headers)
-
-
-def call_import_archive(client, headers, ids, monkeypatch) -> Response:
-    # An archive already in the temp storage root, so the request exercises the real
-    # extract path. The scan is stubbed because a real background walk would race
-    # the row assertion: this sweep is about the audit row, not the scan.
-    storage = Path(db.STORAGE)
-    storage.mkdir(parents=True, exist_ok=True)
-    with ZipFile(storage / "sweep.zip", "w") as archive:
-        archive.writestr("sweep.stl", STL_BYTES)
-    monkeypatch.setattr(main, "start_scan", lambda: True)
-    return client.post("/import/archive", json={"path": "sweep.zip"}, headers=headers)
 
 
 def call_rename_asset(client, headers, ids, monkeypatch) -> Response:
@@ -866,8 +828,6 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("DELETE", "/me/sessions/{session_id}"): call_delete_own_session,
     ("DELETE", "/sessions/{session_id}"): call_admin_delete_session,
     ("POST", "/upload"): call_upload,
-    ("POST", "/import/project"): call_import_project,
-    ("POST", "/import/archive"): call_import_archive,
     ("DELETE", "/asset/{asset_id}"): call_delete_asset,
     ("POST", "/assets/batch/delete"): call_batch_delete,
     ("POST", "/asset/{asset_id}/rename"): call_rename_asset,

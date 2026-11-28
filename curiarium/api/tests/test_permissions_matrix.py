@@ -636,15 +636,6 @@ def call_upload(client: TestClient, headers: dict[str, str], ids: Ids, monkeypat
     return client.post("/upload", files={"file": ("probe.stl", STL_BYTES, "model/stl")}, headers=headers)
 
 
-def call_import_project(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    monkeypatch.setattr(main, "normalize_import_url", stub_normalize)
-    # Both attempt seams: the route picks one from `entries`, so neither may reach
-    # the network. A 400 is "not 403" for the sweeps, which is all they assert.
-    monkeypatch.setattr(main, "import_asset_attempt", stub_outbound)
-    monkeypatch.setattr(main, "download_zip_attempt", stub_outbound)
-    return client.post("/import/project", json={"url": IMPORT_URL}, headers=headers)
-
-
 def call_import_inspect(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     monkeypatch.setattr(main, "normalize_import_url", stub_normalize)
     monkeypatch.setattr(main, "open_import_response", stub_outbound)
@@ -655,19 +646,6 @@ def call_import_zip_entries(client: TestClient, headers: dict[str, str], ids: Id
     monkeypatch.setattr(main, "normalize_import_url", stub_normalize)
     monkeypatch.setattr(main, "download_import_to_temp", stub_outbound)
     return client.post("/import/zip/entries", json={"url": IMPORT_URL}, headers=headers)
-
-
-def call_import_archive_entries(
-    client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch
-) -> Response:
-    # A path that is not in the library: a 404 before any read, so the sweep has
-    # no side effect and no archive has to be staged for every parametrised run.
-    return client.get("/import/archive/entries", params={"path": "missing.zip"}, headers=headers)
-
-
-def call_import_archive(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    # Same reason: the archive is missing, so the refusal is the 404 under test.
-    return client.post("/import/archive", json={"path": "missing.zip"}, headers=headers)
 
 
 def call_upload_supporting_file(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
@@ -1268,11 +1246,8 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("GET", "/folder/{folder_id}/download"): call_folder_download,
     ("GET", "/trash"): call_trash,
     ("POST", "/upload"): call_upload,
-    ("POST", "/import/project"): call_import_project,
     ("POST", "/import/inspect"): call_import_inspect,
     ("POST", "/import/zip/entries"): call_import_zip_entries,
-    ("GET", "/import/archive/entries"): call_import_archive_entries,
-    ("POST", "/import/archive"): call_import_archive,
     ("GET", "/imports/runs"): call_list_import_runs,
     ("GET", "/imports/runs/{run_id}"): call_import_run_detail,
     ("POST", "/asset/{asset_id}/files"): call_upload_supporting_file,
@@ -1335,7 +1310,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/operations/{operation_id}/undo"): call_undo_operation,
 }
 
-# What a permitted caller must get back. The three surviving `/import*` routes are
+# What a permitted caller must get back. The two surviving `/import*` routes are
 # absent on purpose: their handlers reach the network, which the stubs above
 # refuse, so they are pinned at "not 403" instead (see the module docstring).
 EXPECTED_STATUS: dict[tuple[str, str], int] = {
@@ -1364,8 +1339,6 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("GET", "/imports/runs/{run_id}"): 200,
     # Mf-1zmd: the archive is not in the library, so both doors answer the honest
     # 404 without reading or writing anything.
-    ("GET", "/import/archive/entries"): 404,
-    ("POST", "/import/archive"): 404,
     ("GET", "/file/{asset_id}/{name}"): 200,
     ("GET", "/asset/{asset_id}/files"): 200,
     ("GET", "/asset/{asset_id}/files/{file_id}"): 200,
@@ -1585,7 +1558,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 104 routes - 11 public / 38 read / 25 contribute / 12 write / 18 admin.
+    """The matrix is pinned at 101 routes - 11 public / 37 read / 23 contribute / 12 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1602,17 +1575,20 @@ def test_the_matrix_is_the_documented_size() -> None:
     and contribute 28 -> 27. Part 1/4 of Mf-y2u3 deleted GET and POST
     /library/scan, so the total fell 108 -> 106, read 39 -> 38 and write 13 -> 12.
     Part 2/4 deleted POST /import and POST /import/zip (both contribute), so the
-    total fell 106 -> 104 and contribute 27 -> 25.
+    total fell 106 -> 104 and contribute 27 -> 25. Part 3/4 deleted
+    POST /import/project and POST /import/archive (both contribute) and
+    GET /import/archive/entries (read), so the total fell 104 -> 101, read
+    38 -> 37 and contribute 25 -> 23.
     """
     counts = {
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 104, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 101, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 38,
-        permissions.CONTRIBUTE: 25,
+        permissions.READ: 37,
+        permissions.CONTRIBUTE: 23,
         permissions.WRITE: 12,
         permissions.ADMIN: 18,
     }, counts
@@ -1904,10 +1880,9 @@ def test_a_contributor_is_refused_a_data_removing_action(client, ids, contributo
 
 
 def test_every_route_has_an_expectation_or_a_documented_reason() -> None:
-    """Keeps `EXPECTED_STATUS` honest: only the three surviving import routes may be absent."""
+    """Keeps `EXPECTED_STATUS` honest: only the two surviving import preflights may be absent."""
     unpinned = set(CALLS) - set(EXPECTED_STATUS)
     assert unpinned == {
-        ("POST", "/import/project"),
         ("POST", "/import/inspect"),
         ("POST", "/import/zip/entries"),
     }, sorted(unpinned)

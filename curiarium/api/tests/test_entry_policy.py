@@ -23,8 +23,10 @@ import pytest
 from fastapi import HTTPException
 
 import asset_service
+import audit
 import entry_policy
 import operations_service
+import permissions
 
 API_ROOT = Path(__file__).resolve().parents[1]
 VOCABULARY_NAMES = {"JUNK_SEGMENTS", "JUNK_BASENAMES", "JUNK_PREFIXES"}
@@ -40,7 +42,7 @@ def _write_zip(path: Path, entries: Dict[str, bytes]) -> Path:
 # --- the docstring is the policy's own statement of scope -------------------
 
 
-def test_the_policy_docstring_names_every_door_it_governs() -> None:
+def test_the_policy_docstring_names_the_surviving_door_and_the_workflows() -> None:
     """Symptom 4 of Mf-znu1: two comments overclaimed, so one docstring names the scope.
 
     The comments said junk "can never become an asset" and that both doors
@@ -51,17 +53,37 @@ def test_the_policy_docstring_names_every_door_it_governs() -> None:
     ordinary upload or an on-disk file, so "junk can never be an asset" holds of
     the archive-member route, not of the library.
 
-    `POST /import/zip` is the `import-zip` operation now (Mf-y2u3 part 2/4), and
-    `entry_policy`'s docstring still names that door: the module is outside this
-    part's touch set, so the drift is pinned honestly here - the workflow is
-    asserted to exist - and reported rather than papered over by a docstring edit
-    this ticket may not make.
+    The two doors that still call this policy are `import-zip` and `extract`
+    (Mf-y2u3 parts 2/4 and 3/4), plus the `attach-project` step of either ingest
+    for a project-targeted entry selection; the one surviving read-only route is
+    `POST /import/zip/entries`, with `POST /import/inspect` beside it.
+
+    The false state this catches: a docstring that still presents the three
+    deleted routes (`POST /import/archive`, `GET /import/archive/entries`,
+    `POST /import/project`) or a bare `POST /import/zip` as live doors. Naming
+    them back would tell a reader that an opaque write route exists when only a
+    plan-and-run workflow does.
     """
     docstring = entry_policy.__doc__ or ""
 
-    for route in ("/import/zip/entries", "/import/archive", "/import/archive/entries", "/import/project"):
-        assert route in docstring, f"the policy docstring no longer names the route {route}"
-    assert "import-zip" in operations_service.WORKFLOWS, "the door that left is an operation now"
+    for name in ("/import/zip/entries", "/import/inspect", "import-zip", "extract", "attach-project"):
+        assert name in docstring, f"the policy docstring no longer names {name!r}"
+    for deleted in ("/import/archive", "/import/archive/entries", "/import/project"):
+        assert deleted not in docstring, f"the docstring names the deleted route {deleted!r} as live"
+    assert docstring.count("/import/zip") == docstring.count("/import/zip/entries"), (
+        "the docstring still names bare /import/zip as a door"
+    )
+    for workflow in ("import-zip", "extract"):
+        assert workflow in operations_service.WORKFLOWS, f"{workflow} must own this policy as a workflow"
+    for key in (
+        ("POST", "/import/project"),
+        ("POST", "/import/archive"),
+        ("GET", "/import/archive/entries"),
+    ):
+        assert key not in permissions.ROUTE_PERMISSIONS, f"the deleted route {key} is still in the matrix"
+    assert ("POST", "/import/project") not in audit.ROUTE_ACTIONS
+    assert ("POST", "/import/archive") not in audit.ROUTE_ACTIONS
+
     assert "IMPORT_MAX_BYTES" in docstring, "the docstring no longer says which per-file cap it owns"
     assert "IMPORT_ZIP_MAX_BYTES" in docstring, "the docstring no longer says which cumulative cap it owns"
     assert "is_entry_failure" in docstring, "the docstring no longer names the one failure classification"

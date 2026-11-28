@@ -1,12 +1,11 @@
-"""Web imports: the doors that read, and the ones part 3/4 has not reached yet.
+"""Web imports: the two read-only preflights, and nothing that writes.
 
-`POST /import` and `POST /import/zip` are gone (Mf-y2u3 part 2/4): a link or a
-zip import is the `import-link`/`import-zip` operation now, planned, reviewed and
-run by the in-process runner, so no route both fetches and writes in one opaque
-call. What stays here is what a client needs to REVIEW a fetch before it is
-planned - `POST /import/inspect` and `POST /import/zip/entries` fetch a URL and
-write nothing - plus the project import and the in-library archive door, which
-part 3/4 of the same ticket moves.
+Every import is an `import-link`, `import-zip` or `extract` operation now (Mf-y2u3
+parts 2/4 and 3/4): `POST /import`, `POST /import/zip`, `POST /import/project`,
+`POST /import/archive` and `GET /import/archive/entries` are gone, so no route
+both fetches or reads an archive and writes in one opaque call. What stays is what
+a client needs to REVIEW a fetch before it is planned - `POST /import/inspect` and
+`POST /import/zip/entries` fetch a URL and write nothing.
 
 Split from main.py in Mf-x9dx; behaviour-preserving move.
 """
@@ -15,25 +14,15 @@ from pathlib import Path
 from typing import Optional
 from zipfile import BadZipFile
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 
-import archive_service
-import asset_service
-import audit
 import seams
 from auth import AuthContext
 from file_utils import build_import_filename, mime_from_content_type
 from import_policy import refuse_paid_or_gated
-from permissions import require_contribute, require_read
-from project_import import import_into_project
-from routers.presenters import import_project_to_out
+from permissions import require_contribute
 from schemas import (
-    ArchiveEntriesOut,
-    ArchiveExtractOut,
-    ArchiveExtractRequest,
     ImportInspectOut,
-    ImportProjectOut,
-    ImportProjectRequest,
     ImportRequest,
     ImportZipEntriesOut,
     ImportZipEntriesRequest,
@@ -41,20 +30,6 @@ from schemas import (
 from zip_service import list_zip_entries
 
 router = APIRouter()
-
-
-@router.post("/import/project", response_model=ImportProjectOut)
-def import_link_into_project(
-    request: Request,
-    body: ImportProjectRequest,
-    context: Optional[AuthContext] = Depends(require_contribute),
-):
-    # Before normalize_import_url: normalization resolves DNS, so the refusal must
-    # precede it to keep a paid/gated URL off the network entirely.
-    refuse_paid_or_gated(body.url)
-    url = seams.normalize_import_url(body.url)
-    origin = asset_service.AssetOrigin.for_principal(request, context, "link-import")
-    return import_project_to_out(import_into_project(url, body, origin=origin))
 
 
 @router.post("/import/inspect", response_model=ImportInspectOut)
@@ -67,27 +42,6 @@ def inspect_import_link(body: ImportRequest, _: Optional[AuthContext] = Depends(
         mime = mime_from_content_type(resp.headers.get("Content-Type", ""), filename)
     is_zip = Path(filename).suffix.lower() == ".zip"
     return ImportInspectOut(filename=filename, mime=mime, is_zip=is_zip)
-
-
-@router.get("/import/archive/entries", response_model=ArchiveEntriesOut)
-def list_import_archive_entries(path: str, _: Optional[AuthContext] = Depends(require_read)):
-    """List an archive the library already holds; reads only, writes nothing."""
-    return archive_service.entries_out(path)
-
-
-@router.post("/import/archive", response_model=ArchiveExtractOut)
-def import_archive_entries(
-    request: Request,
-    body: ArchiveExtractRequest,
-    context: Optional[AuthContext] = Depends(require_contribute),
-):
-    """Extract an archive already in the library into its twin directory.
-
-    Thin on purpose: the containment, budget, no-clobber and audit decisions live
-    in ``archive_service``, which maps a ``SnapshotPathError`` with
-    ``snapshot_guard.status_for`` itself.
-    """
-    return archive_service.extract_out(body.path, body.entries, audit.context_for(request, context))
 
 
 @router.post("/import/zip/entries", response_model=ImportZipEntriesOut)
