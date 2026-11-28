@@ -419,6 +419,27 @@ and undo handlers enforce.
 | `relocate`           | contribute | no: relocates a directory and re-points its rows |
 | `library-scan`       | write      | no, but see below |
 
+**Undo keeps the level of the operation it acts on (Mf-d588, 2026-11-27).**
+Not the level of the effect it turns out to have: `create-project`'s undo
+deletes the project row it created, `split-and-create`'s undo folds its moves
+back, deletes the projects it created and restores the container folder row it
+retired, and neither of those undos deletes a file - a row removed, a move
+reversed and a row put back, three effects at the one level, `contribute`,
+because the level belongs to the workflow the undo acts on and not to what the
+undo removes. The rubric still holds because the row a contributor removes that
+way is one they created moments earlier by an action they were already allowed
+to take, and because no undo is a way onto a destructive route: the project,
+folder and asset deletes are `write` (`DELETE /project/{project_id}`,
+`/folder/{folder_id}`, `/asset/{asset_id}`) and the account and snapshot
+deletes are `admin`, so undo is not a second, wider door onto deletion, only a
+way back out of what this workflow itself just did. That is the falsifier the
+decision rests on: a contributor cannot use undo to remove a row they could not
+remove through the direct destructive route. What is deliberately NOT encoded
+is an undo whose level follows its effect: it would need a per-workflow table
+of what each undo really does, and the first divergent case - a create's undo
+at `write`, a move's at `contribute` - would make one button two different
+levels depending on history.
+
 **Declarations for the record.** `operations_service.WORKFLOWS` is
 `("create-project", "split-and-create")`: those two have a planner and run. Every
 other row records the level the owner decided for a workflow that does not exist
@@ -450,18 +471,15 @@ in parallel. Cancel lands between steps: a queued operation is cancelled at
 once, while a running one finishes the step it is in, skips the rest, and
 reports `cancelling` until it does.
 
-Undo puts back what the operation itself wrote and never deletes files: a
-`create-project` removes the project row it created, while a `split-and-create`
-folds its moves back, deletes the projects it created and restores the retired
-container row. Undo lasts only until a later operation changes the same paths:
-the later one marks the earlier `superseded` and names itself, and both the 409
-reason and `superseded_by` on `GET /operations/{operation_id}` say which
-operation it was. A restart resumes an interrupted operation from the step
-ledger - the steps that finished are skipped, the step that never started runs -
-and a step caught mid-flight fails the operation instead of being silently
-re-run, because its side effects are unknown. Finished operations are pruned to
-the newest 200 plus everything from the last 30 days; the audit log is the
-permanent record.
+Undo is bounded rather than final. It lasts only until a later operation changes
+the same paths: the later one marks the earlier `superseded` and names itself,
+and both the 409 reason and `superseded_by` on `GET /operations/{operation_id}`
+say which operation it was. A restart resumes an interrupted operation from the
+step ledger - the steps that finished are skipped, the step that never started
+runs - and a step caught mid-flight fails the operation instead of being
+silently re-run, because its side effects are unknown. Finished operations are
+pruned to the newest 200 plus everything from the last 30 days; the audit log is
+the permanent record.
 
 Two workflows run: `create-project` and `split-and-create`. The client calls these
 routes - `curiarium/web/src/lib/api/operations.ts` plans, submits and undoes for
