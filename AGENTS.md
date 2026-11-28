@@ -16,7 +16,7 @@ one or two printers.
 ```
 curiarium/api/            FastAPI backend (19 routers, SQLModel, versioned migrations)
   routers/                one module per feature surface; main.py is only app wiring
-  migrations.py           append-only schema ledger (currently 16) - see ADRs 0002
+  migrations.py           append-only schema ledger (currently 17) - see ADRs 0002
   move_service.py         one owner for relocation: bytes, rows and the move ledger (16)
   permissions.py          ROUTE_PERMISSIONS matrix; refuses to boot on an unclassified route
   audit.py                append-only audit actions; refuses to boot on uncovered mutations

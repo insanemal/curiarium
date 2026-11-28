@@ -4,11 +4,11 @@ import { cleanup, renderHook } from "@testing-library/react";
 
 import type { AssetCounts } from "../../lib/api/assets";
 import type { BundleDetectItem, BundleReport } from "../../lib/api/bundles";
-import type { ImportRunDetail } from "../../lib/api/settings";
+import type { MountImportStatus } from "../../lib/api/settings";
 import type { TrashEntry, TrashList } from "../../lib/api/trash";
 import { needsDecision } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
-import type { ImportRunsState } from "./useImportRuns";
+import type { MountImportState } from "./useMountImport";
 import {
   bundleBadgeCount,
   countAwaitingText,
@@ -20,13 +20,15 @@ import {
   useReviewCounts,
 } from "./useReviewCounts";
 
-function makeRun(overrides: Partial<ImportRunDetail> = {}): ImportRunDetail {
+function makeStatus(overrides: Partial<MountImportStatus> = {}): MountImportStatus {
   return {
-    id: "run-1",
-    status: "succeeded",
+    status: "done",
+    running: false,
+    outcome: "registered",
     mode: "copy",
     root: "/mnt/models",
     reason: null,
+    error: null,
     started_at: 1_700_000_000,
     finished_at: 1_700_000_042,
     registered: 4,
@@ -45,9 +47,9 @@ function makeRun(overrides: Partial<ImportRunDetail> = {}): ImportRunDetail {
  * The full state shape, so a test states only what it is about. The default is
  * "nothing loaded yet": the imports count is unknown, not zero.
  */
-function importsState(overrides: Partial<ImportRunsState> = {}): ImportRunsState {
+function importsState(overrides: Partial<MountImportState> = {}): MountImportState {
   return {
-    run: null,
+    status: null,
     loading: false,
     refreshing: false,
     loaded: false,
@@ -265,26 +267,59 @@ describe("countAwaitingText", () => {
 });
 
 describe("importsBadgeCount (AC-8)", () => {
-  it("returns null before the first successful fetch, even with no run", () => {
-    // `run === null` cannot tell "the first fetch failed" from "no run has ever
-    // happened", so `loaded` is what decides between a dash and a zero.
+  it("returns null before the first successful fetch, even with no row", () => {
+    // `status === null` cannot tell "the first fetch failed" from "the ledger
+    // holds no mount import", so `loaded` is what decides between a dash and a
+    // zero.
     expect(importsBadgeCount(importsState())).toBeNull();
   });
 
-  it("returns 1 while the newest run is running", () => {
+  it("returns null even when the status is the empty one, until a read succeeds", () => {
+    // The empty status is a fact, but the badge still owes a dash until a read
+    // succeeded: an unloaded queue must never claim a zero.
     expect(
       importsBadgeCount(
-        importsState({ loaded: true, run: makeRun({ status: "running", finished_at: null }) }),
+        importsState({
+          status: makeStatus({ status: null, outcome: null, running: false }),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it.each(["queued", "running"])("returns 1 while the newest row is %s", status => {
+    expect(
+      importsBadgeCount(
+        importsState({
+          loaded: true,
+          status: makeStatus({ status, outcome: null, running: true, finished_at: null }),
+        }),
       ),
     ).toBe(1);
   });
 
-  it("returns 0 for a loaded queue that has never had a run", () => {
-    expect(importsBadgeCount(importsState({ loaded: true, run: null }))).toBe(0);
+  it("returns 0 for a loaded queue whose ledger holds no walk", () => {
+    expect(
+      importsBadgeCount(
+        importsState({ loaded: true, status: makeStatus({ status: null, outcome: null }) }),
+      ),
+    ).toBe(0);
   });
 
-  it("returns 0 once the loaded run has succeeded, so a zero means idle", () => {
-    expect(importsBadgeCount(importsState({ loaded: true, run: makeRun() }))).toBe(0);
+  it("returns 0 once the loaded row is terminal, so a zero means idle", () => {
+    expect(importsBadgeCount(importsState({ loaded: true, status: makeStatus() }))).toBe(0);
+    expect(
+      importsBadgeCount(
+        importsState({ loaded: true, status: makeStatus({ status: "failed", outcome: null }) }),
+      ),
+    ).toBe(0);
+    expect(
+      importsBadgeCount(
+        importsState({
+          loaded: true,
+          status: makeStatus({ status: "cancelled", outcome: null }),
+        }),
+      ),
+    ).toBe(0);
   });
 });
 
@@ -380,7 +415,7 @@ describe("useReviewCounts", () => {
     const counts = makeCounts({ missing: 2 });
     type Args = {
       bundle: BundleDetectState;
-      imports: ImportRunsState;
+      imports: MountImportState;
       counts: AssetCounts;
       trash: TrashList;
     };
@@ -413,9 +448,9 @@ describe("useReviewCounts", () => {
     expect(result.current).toBe(initial);
   });
 
-  it("recomputes when the imports run starts running", () => {
+  it("recomputes when the newest mounted import starts running", () => {
     const report = makeReport([makeBundle()]);
-    type Args = { imports: ImportRunsState };
+    type Args = { imports: MountImportState };
     const { result, rerender } = renderHook(
       ({ imports }: Args) => useReviewCounts(makeState(report), imports, null, null, null),
       { initialProps: { imports: importsState({ loaded: true }) } },
@@ -424,7 +459,10 @@ describe("useReviewCounts", () => {
     expect(result.current.imports).toBe(0);
 
     rerender({
-      imports: importsState({ loaded: true, run: makeRun({ status: "running", finished_at: null }) }),
+      imports: importsState({
+        loaded: true,
+        status: makeStatus({ status: "running", outcome: null, running: true, finished_at: null }),
+      }),
     });
 
     expect(result.current.imports).toBe(1);

@@ -11,11 +11,12 @@ vi.mock("../lib/api/bundles", () => ({
   setBundleDismissed: vi.fn(),
 }));
 
-// The import-run history moved to REVIEW, and the hook imports it from this
-// domain module. This mock is what makes "Settings makes no GET /imports/runs"
-// observable: the barrel mock below is a fixed object with no `getImportRuns`,
-// so a regression that reached for the barrel would surface as a swallowed
-// "Import run history is unavailable." while this mock stayed uncalled.
+// The mounted import moved to REVIEW, and its hook imports the ledger read from
+// this domain module. This mock is what makes "Settings makes no
+// GET /operations?workflow=mount-import" observable: the barrel mock below is a
+// fixed object with no `getMountImportStatus`, so a regression that reached for
+// the barrel would surface as a swallowed "The mount import status is
+// unavailable." while this mock stayed uncalled.
 // The storage scan is the same trap for the same reason: `useLibraryScan` moved
 // to REVIEW -> Missing files and imports its two calls from here, so a Settings
 // regression would fire these spies rather than fail to resolve a module.
@@ -23,8 +24,7 @@ vi.mock("../lib/api/settings", async importOriginal => {
   const actual = await importOriginal<typeof import("../lib/api/settings")>();
   return {
     ...actual,
-    getImportRuns: vi.fn(),
-    getImportRun: vi.fn(),
+    getMountImportStatus: vi.fn(),
     getLibraryScanStatus: vi.fn(),
     startLibraryScan: vi.fn(),
   };
@@ -80,9 +80,8 @@ import {
 } from "../lib/api";
 import { createBundles, getBundleReport, setBundleDismissed } from "../lib/api/bundles";
 import {
-  getImportRun,
-  getImportRuns,
   getLibraryScanStatus,
+  getMountImportStatus,
   startLibraryScan,
 } from "../lib/api/settings";
 import { getTrash, purgeTrash } from "../lib/api/trash";
@@ -91,8 +90,7 @@ import type { AppSettings } from "../lib/settings";
 const createBundlesMock = vi.mocked(createBundles);
 const getBundleReportMock = vi.mocked(getBundleReport);
 const setBundleDismissedMock = vi.mocked(setBundleDismissed);
-const getImportRunsMock = vi.mocked(getImportRuns);
-const getImportRunMock = vi.mocked(getImportRun);
+const getMountImportStatusMock = vi.mocked(getMountImportStatus);
 const getLibraryScanStatusMock = vi.mocked(getLibraryScanStatus);
 const startLibraryScanMock = vi.mocked(startLibraryScan);
 const getMountImportSettingsMock = vi.mocked(getMountImportSettings);
@@ -297,8 +295,7 @@ describe("Settings imports (AC-5)", () => {
     createBundlesMock.mockReset();
     getBundleReportMock.mockReset();
     setBundleDismissedMock.mockReset();
-    getImportRunsMock.mockReset();
-    getImportRunMock.mockReset();
+    getMountImportStatusMock.mockReset();
     // These are shared spies: without a reset here a request made by another
     // section's test would read as a Settings regression (or hide one).
     getStorageSettingsMock.mockReset();
@@ -323,13 +320,13 @@ describe("Settings imports (AC-5)", () => {
 
   /** The run history and the folder scan are work surfaces, not configuration. */
   function expectNoWorkSurface(): void {
-    expect(screen.queryByText("Latest run")).toBeNull();
-    expect(screen.queryByText("No import currently running")).toBeNull();
+    expect(screen.queryByText("Latest walk")).toBeNull();
+    expect(screen.queryByText("No walk currently running")).toBeNull();
     expect(screen.queryByText("Mount import runs")).toBeNull();
     expect(screen.queryByText("Local folder scan")).toBeNull();
-    // The missing-export trap: a run-history import that only reached the fixed
-    // barrel mock would land here as the panel's swallowed error string instead.
-    expect(screen.queryByText("Import run history is unavailable.")).toBeNull();
+    // The missing-export trap: a walk read that only reached the fixed barrel
+    // mock would land here as the panel's swallowed error string instead.
+    expect(screen.queryByText("The mount import status is unavailable.")).toBeNull();
   }
 
   it.each<"admin" | "editor" | "contributor" | "viewer">([
@@ -337,14 +334,13 @@ describe("Settings imports (AC-5)", () => {
     "editor",
     "contributor",
     "viewer",
-  ])("shows no run surface and makes no import-run request for a %s", async role => {
+  ])("shows no walk surface and reads no mount import for a %s", async role => {
     await renderImports(role);
 
     expectNoWorkSurface();
-    // The removal proof is the call, not the DOM: Settings used to fire this on
-    // every mount, from any section.
-    expect(getImportRunsMock).not.toHaveBeenCalled();
-    expect(getImportRunMock).not.toHaveBeenCalled();
+    // The removal proof is the call, not the DOM: Settings used to fire the run
+    // history read on every mount, from any section.
+    expect(getMountImportStatusMock).not.toHaveBeenCalled();
   });
 
   it("keeps the section labelled Import sources", async () => {
@@ -423,8 +419,7 @@ describe("Settings imports (AC-5)", () => {
     expect(getMountImportSettingsMock).not.toHaveBeenCalled();
     expect(getStorageSettingsMock).not.toHaveBeenCalled();
     expect(getBundleReportMock).not.toHaveBeenCalled();
-    expect(getImportRunsMock).not.toHaveBeenCalled();
-    expect(getImportRunMock).not.toHaveBeenCalled();
+    expect(getMountImportStatusMock).not.toHaveBeenCalled();
     // No review destination lives inside Settings, for any role.
     expect(screen.queryByRole("button", { name: /^Bundles to confirm/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /^Imports running/ })).toBeNull();
@@ -437,8 +432,7 @@ describe("Settings imports (AC-5)", () => {
     // queue only needs CONTRIBUTE - a contributor acts there, not here.
     expectNoWorkSurface();
     expect(getBundleReportMock).not.toHaveBeenCalled();
-    expect(getImportRunsMock).not.toHaveBeenCalled();
-    expect(getImportRunMock).not.toHaveBeenCalled();
+    expect(getMountImportStatusMock).not.toHaveBeenCalled();
   });
 });
 

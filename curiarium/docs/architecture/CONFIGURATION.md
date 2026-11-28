@@ -472,9 +472,12 @@ environment knob.
 | `IMPORT_MOUNT_ON_STARTUP` | `false` in canonical production manifest | Enables the startup scan. The code default remains `true` when a path is configured, so configuring a mount path is what opts a deployment in. |
 | `IMPORT_MOUNT_COPY` | `true` | Copy into managed storage instead of indexing in place. Copy mode mirrors the mount's relative directory structure into the storage root (a mount holding `a/b/c.stl` registers `a/b/c.stl` and the folder chain `a` -> `a/b`); reference mode registers `is_reference` rows that point at the mount and copy nothing. |
 
-Each attempt is recorded in the `import_run` table (status, mode, counters and
-bounded per-file errors) and readable at `GET /imports/runs`. The table keeps the
-newest 50 runs; skipped runs are recorded too, with their reason.
+Each attempt is recorded as a `mount-import` operation row (status, mode, root,
+counters and bounded per-file errors) and readable at
+`GET /operations?workflow=mount-import` (`read`). Skipped runs are recorded too,
+with their reason in the step result. How many attempts survive is the operations
+ledger's own prune - the newest 200 terminal rows union everything from the last
+30 days - not a bound local to the record.
 
 ## Storage snapshot capabilities
 
@@ -665,9 +668,9 @@ These are per-browser and are not server `AppConfig` values; the optional
 
 The current database-backed settings are mounted-import enable/copy behavior, the
 managed-storage template, snapshot retention and the admin-wide MFA policy. These
-settings are shared by the instance. Mounted import run history is a table
-(`import_run`), not an `AppConfig` value, so it is bounded separately and never
-parsed as a setting.
+settings are shared by the instance. Mounted import attempts are `mount-import`
+operation rows, not an `AppConfig` value, so they are bounded by the operations
+ledger's prune and never parsed as a setting.
 
 ### The managed-storage template
 

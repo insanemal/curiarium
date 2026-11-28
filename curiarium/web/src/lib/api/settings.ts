@@ -1,4 +1,4 @@
-// Server settings, library scans and import-run history. Distinct from
+// Server settings, library scans and the mounted import. Distinct from
 // `../settings`, the client-side settings cache.
 
 import { authHeaders } from "../auth";
@@ -239,18 +239,32 @@ export async function startLibraryScan(scope = ""): Promise<LibraryScanStatus> {
 }
 
 /**
- * One mounted-import run as the API reports it. `status` stays a plain string
- * because the server may add outcomes; the UI treats unknown values as neutral.
+ * One mounted import as one `mount-import` operation row words it, or the empty
+ * answer when the ledger holds no such row.
+ *
+ * A walk is a system operation now - it has no route of its own and no run
+ * history table - so every field is read off the row the server wrote and
+ * nothing is guessed: `status` is the row's own, the outcome and counters are
+ * the single step's report, and the times are epoch seconds. `status === null`
+ * is the one value the wire cannot produce: it means the ledger holds no walk
+ * at all, which the panel states rather than dressing as a zeroed run.
  */
-export type ImportRunSummary = {
-  id: string;
-  status: string;
+export type MountImportStatus = {
+  status: Operation["status"] | null;
+  /** The row is `queued` or `running`: a walk holds the queue right now. The
+   *  badge and the poll both read this, so the rule lives in one place. */
+  running: boolean;
+  outcome: "registered" | "skipped" | null;
+  /** `copy` or `reference`; a plain string because the server may add modes. */
   mode: string | null;
   root: string | null;
   reason: string | null;
+  /** The failed step's own sentence, else the operation's: the walk's words
+   *  first, because the runner quotes the step it was executing. */
+  error: string | null;
   /** Epoch seconds. */
-  started_at: number;
-  /** Epoch seconds; null while the run is still walking. */
+  started_at: number | null;
+  /** Epoch seconds; null until the walk finished. */
   finished_at: number | null;
   registered: number;
   known: number;
@@ -261,36 +275,147 @@ export type ImportRunSummary = {
   discovered: number;
   /** `known + ignored`. */
   skipped: number;
+  errors: string[];
 };
 
-export type ImportRunDetail = ImportRunSummary & { errors: string[] };
+/** Everything the walk's single step reports - the outcome, the policy it ran
+ *  under and the counters - as opposed to the status and `running` the
+ *  operation row itself carries. */
+type MountImportReport = Pick<
+  MountImportStatus,
+  | "outcome"
+  | "mode"
+  | "root"
+  | "reason"
+  | "registered"
+  | "known"
+  | "ignored"
+  | "failed"
+  | "rejected"
+  | "discovered"
+  | "skipped"
+  | "errors"
+>;
 
-export type ImportRunList = {
-  runs: ImportRunSummary[];
-  total: number;
-  limit: number;
-  offset: number;
-};
-
-/** Newest-first page of mounted-import runs. */
-export async function getImportRuns(limit = 20, offset = 0): Promise<ImportRunList> {
-  const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
-  const res = await fetch(`${apiBase()}/imports/runs?${qs.toString()}`, { headers: authHeaders() });
-  if (res.status === 401) throw new UnauthorizedError();
-  if (!res.ok) {
-    throw new Error(await readErrorMessage(res, "Failed to load mount import runs"));
-  }
-  return res.json();
+/** Nothing walked and nothing counted: a fresh object every call, so a caller
+ *  that sorts `errors` cannot reorder another caller's report. */
+function emptyMountImportReport(): MountImportReport {
+  return {
+    outcome: null,
+    mode: null,
+    root: null,
+    reason: null,
+    registered: 0,
+    known: 0,
+    ignored: 0,
+    failed: 0,
+    rejected: 0,
+    discovered: 0,
+    skipped: 0,
+    errors: [],
+  };
 }
 
-/** One run with its per-file errors (already bounded server-side). */
-export async function getImportRun(id: string): Promise<ImportRunDetail> {
-  const res = await fetch(`${apiBase()}/imports/runs/${encodeURIComponent(id)}`, {
-    headers: authHeaders(),
-  });
-  if (res.status === 401) throw new UnauthorizedError();
-  if (!res.ok) {
-    throw new Error(await readErrorMessage(res, "Failed to load the mount import run"));
+/** A string a step reported, or null. Same defensive read as `reportedCount`:
+ *  the report is the server's JSON, so a missing or wrong-typed field reads as
+ *  "not recorded" rather than throwing inside the panel. */
+function reportedString(result: Record<string, unknown>, key: string): string | null {
+  const value = result[key];
+  return typeof value === "string" ? value : null;
+}
+
+/** One of the two outcomes the walk can answer, or null for a report that named
+ *  neither (a walk still running, or one that failed before reporting). The
+ *  client recognises exactly the two words the server writes. */
+function reportedOutcome(result: Record<string, unknown>): "registered" | "skipped" | null {
+  const value = result.outcome;
+  if (value === "registered" || value === "skipped") return value;
+  return null;
+}
+
+/** What the walk's step reported. The report carries its own epoch seconds, so
+ *  a finished walk's timing needs no conversion at all.
+ *
+ * A `failed` step wrote no report, so its counters stay zero and its sentence
+ * is the whole of what it said - the same rule the scan fold follows. */
+function reportFromStep(step: OperationStep | undefined): MountImportReport {
+  if (!step || step.status === "failed" || !step.result) return emptyMountImportReport();
+  const result = step.result;
+  return {
+    outcome: reportedOutcome(result),
+    mode: reportedString(result, "mode"),
+    root: reportedString(result, "root"),
+    reason: reportedString(result, "reason"),
+    registered: reportedCount(result, "registered"),
+    known: reportedCount(result, "known"),
+    ignored: reportedCount(result, "ignored"),
+    failed: reportedCount(result, "failed"),
+    rejected: reportedCount(result, "rejected"),
+    discovered: reportedCount(result, "discovered"),
+    skipped: reportedCount(result, "skipped"),
+    errors: reportedErrors(result),
+  };
+}
+
+/** An epoch-seconds number the report carries, or null. The report's times are
+ *  already seconds, so this is a guard rather than a conversion. */
+function reportedSeconds(result: Record<string, unknown> | null, key: string): number | null {
+  if (!result) return null;
+  const value = result[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The mounted import as one operation row words it, or the empty answer when the
+ * ledger holds no walk at all.
+ *
+ * The browser's only evidence about a walk is the row the server wrote, so the
+ * status, `running` and the failure sentence are the row's own, and the outcome,
+ * mode, root, reason and counters are the single step's report. The report's own
+ * epoch seconds are preferred over the row's ISO times because they are the
+ * walk's own clock; a step that never reported falls back to the row's, and a
+ * row that never started has no times to convert.
+ */
+export function mountImportStatusFromOperation(row: Operation | null): MountImportStatus {
+  if (!row) {
+    return {
+      status: null,
+      running: false,
+      error: null,
+      started_at: null,
+      finished_at: null,
+      ...emptyMountImportReport(),
+    };
   }
-  return res.json();
+  const step = row.steps[0];
+  const report = reportFromStep(step);
+  return {
+    status: row.status,
+    // A `cancelling` row is not counted as running: its walk has already been
+    // told to stop, and the badge must not keep promising a walk that is on its
+    // way out.
+    running: row.status === "queued" || row.status === "running",
+    error: step?.error ?? row.error,
+    started_at:
+      reportedSeconds(step?.result ?? null, "started_at") ?? epochSeconds(row.started_at),
+    finished_at:
+      reportedSeconds(step?.result ?? null, "finished_at") ?? epochSeconds(row.finished_at),
+    ...report,
+  };
+}
+
+/**
+ * What the newest mounted import said, derived from the operations ledger.
+ *
+ * The walk is one `mount-import` operation now - the `GET /imports/runs` pair it
+ * used to answer on is gone - so the newest row of that workflow is the whole
+ * record: the runner owns it, and polling this reads the status the server wrote
+ * instead of one the browser assembled. During a walk the step has not reported
+ * yet, so the counters stay zero until it does; that is the ledger's shape, not a
+ * missing read. An empty ledger answers the empty status rather than throwing,
+ * because "no walk has happened" is a fact and the panel must be able to say so.
+ */
+export async function getMountImportStatus(): Promise<MountImportStatus> {
+  const rows = await listOperations({ workflow: "mount-import", limit: 1 });
+  return mountImportStatusFromOperation(rows[0] ?? null);
 }

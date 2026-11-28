@@ -68,6 +68,7 @@ import json
 import math
 import os
 import posixpath
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Sequence, Tuple
@@ -88,6 +89,7 @@ import bundle_service
 import folder_service
 import import_policy
 import library_scan
+import mount_import
 import move_service
 import permissions
 import project_create_service
@@ -152,7 +154,22 @@ WORKFLOW_LEVELS: dict[str, str] = {
     "split-and-create": permissions.CONTRIBUTE,
     "relocate": permissions.CONTRIBUTE,
     "library-scan": permissions.CONTRIBUTE,
+    # The mount import is submitted by the SERVER at boot, never by a client: it is
+    # deliberately absent from `WORKFLOWS` so `build_plan`/`decode_plan_id` refuse
+    # it, and "can the server walk an arbitrary path" stays unanswerable. The row
+    # here is not decoration - it is what `level_for_workflow`/`authorize_workflow`
+    # resolve for CANCEL and UNDO on an existing row. CONTRIBUTE by the owner's
+    # rubric: the walk removes nothing.
+    "mount-import": permissions.CONTRIBUTE,
 }
+
+# Every workflow this build can SERVE a row for, which is what a `?workflow=`
+# filter may name: the plan-able ones plus the ones that exist only as a row (a
+# boot-submitted or for-the-record workflow). It must NOT become the gate the
+# planners use - `build_plan` and `decode_plan_id` keep refusing anything outside
+# `WORKFLOWS`, which is what makes `POST /operations{,/plan}` unable to start work
+# this server does not let a client ask for.
+KNOWN_WORKFLOWS = frozenset(WORKFLOWS) | frozenset(WORKFLOW_LEVELS)
 
 
 def level_for_workflow(workflow: str) -> str:
@@ -195,6 +212,23 @@ UNDO_NONE = "none"
 UNDO_AVAILABLE = "available"
 UNDO_UNDONE = "undone"
 UNDO_SUPERSEDED = "superseded"
+
+# Workflows whose undo nobody owns, so it is never advertised (Mf-i9ko). A mount
+# import's undo would have to delete the rows AND the copied bytes a run wrote - a
+# delete workflow at WRITE that no ticket owns, the same answer `library-scan`
+# gets. The set is the seam a later ticket adds a workflow to.
+NO_UNDO_WORKFLOWS = frozenset({"mount-import"})
+
+
+def undo_state_after(workflow: str, done_count: int) -> str:
+    """The undo state a finished row gets: `available` only when it can be honoured.
+
+    `library-scan` keeps today's behaviour; a mount import's undo would be a
+    delete workflow nobody owns, so it is never advertised.
+    """
+    if done_count > 0 and workflow not in NO_UNDO_WORKFLOWS:
+        return UNDO_AVAILABLE
+    return UNDO_NONE
 
 PRUNE_KEEP_NEWEST = 200
 PRUNE_MAX_AGE_DAYS = 30
@@ -1651,6 +1685,49 @@ def _plan_library_scan(session: Session, target: str, params: dict) -> Tuple[lis
     return steps, review, [scope]
 
 
+def _plan_mount_import(root: str) -> Plan:
+    """The `mount-import` planner: one step, built from CONFIG ONLY, never the disk.
+
+    Unlike every other planner this one is not reachable through `build_plan`,
+    because `mount-import` is deliberately absent from `WORKFLOWS`: the walk is
+    submitted by the server at boot, and a client that could name it could make
+    the server walk a path of its choosing.
+
+    It reads a setting or an env var and nothing more, for `_plan_library_scan`'s
+    reason: the walk IS the operation, so a plan-time walk would double the cost
+    and make the digest depend on the disk. What the review can honestly name is
+    the POLICY - the mode, whether hidden entries are included, and whether the
+    extension list is all of them or a count of configured ones - never a count of
+    files.
+
+    `declared_paths` is `['']`: in copy mode the walk writes rows AND bytes
+    anywhere under the storage root, so it overlaps everything and serialises with
+    every queued operation, exactly as a whole-root scan already does.
+    """
+    copy_files = mount_import.get_mount_import_copy(mount_import.MOUNT_IMPORT_COPY)
+    # `parse_mount_import_exts` answers `None` for "all extensions", a set
+    # otherwise; `DEFAULT_MOUNT_IMPORT_EXTS` means the list is always non-empty.
+    extensions = mount_import.parse_mount_import_exts(mount_import.MOUNT_IMPORT_EXTS_RAW)
+    steps = [
+        {
+            "index": 0,
+            "op": "mount-import",
+            "summary": "Walk the mounted folder and register what it holds",
+            "args": {},
+        }
+    ]
+    review = {
+        "workflow": "mount-import",
+        "target": root,
+        "mode": "copy" if copy_files else "reference",
+        "include_hidden": bool(mount_import.MOUNT_IMPORT_INCLUDE_HIDDEN),
+        "extensions": "all" if extensions is None else f"{len(extensions)} configured",
+    }
+    intent = {"v": PLAN_VERSION, "workflow": "mount-import", "target": root, "params": {}}
+    digest = plan_digest(intent, steps, review)
+    return Plan(intent=intent, steps=steps, review=review, digest=digest, declared_paths=[""])
+
+
 # --- import-link / import-zip -------------------------------------------------
 
 # The fields the deleted doors read off `ImportRequest`. `url` is deliberately
@@ -2213,42 +2290,25 @@ def _existing_or_conflict(existing: Operation, intent: dict, digest: str, key: s
     )
 
 
-def submit(
+def insert_operation(
     session: Session,
-    plan_id: str,
-    idempotency_key: str,
+    plan: Plan,
+    key: str,
     *,
     ctx: Optional[audit.AuditContext],
     submitted_by: str,
     submitted_by_id: Optional[str],
 ) -> Tuple[Operation, bool]:
-    """Insert one queued operation and its steps, or answer an existing one.
+    """Insert one queued operation and its steps under an already-claimed key.
+
+    The ONE insert seam, shared by the client's `submit()` and the server's
+    `submit_mount_import()`, so a boot-submitted row is the same row shape as a
+    requested one. Callers do the idempotency lookup and plan recompute; nothing
+    here re-reads the disk.
 
     FAIL-CLOSED: the audit row is staged in the same transaction as the
     operation row, so an audit insert failure rolls the operation back too.
     """
-    key = (idempotency_key or "").strip()
-    if not key:
-        raise HTTPException(status_code=400, detail="idempotency_key is required")
-    # The key is asked FIRST, before the plan is recomputed, because a retry
-    # after a timeout must reach the row it already made. `recompute_plan`
-    # refuses a plan whose digest moved, and `create-project`'s review carries
-    # `existing_project_id` and `creates`, which move as a consequence of the
-    # operation itself - so recomputing first made every replay of a finished
-    # operation a dead-end 409, and re-planning then yields a different digest
-    # that the same key refuses too. This is safe because a replay that answers
-    # here resolves to a row that already exists, so no new work is queued and
-    # no second operation is created, while the stale-plan guard still runs for
-    # every key that finds no row - which is the only place a stale plan could
-    # queue unreviewed work.
-    intent, digest = decode_plan_id(plan_id)
-
-    existing = session.exec(select(Operation).where(Operation.idempotency_key == key)).first()
-    if existing is not None:
-        return _existing_or_conflict(existing, intent, digest, key)
-
-    plan = recompute_plan(plan_id)
-
     operation = Operation(
         workflow=plan.intent["workflow"],
         target=plan.intent["target"],
@@ -2306,6 +2366,95 @@ def submit(
         return _existing_or_conflict(existing, plan.intent, plan.digest, key)
     session.refresh(operation)
     return operation, True
+
+
+def submit(
+    session: Session,
+    plan_id: str,
+    idempotency_key: str,
+    *,
+    ctx: Optional[audit.AuditContext],
+    submitted_by: str,
+    submitted_by_id: Optional[str],
+) -> Tuple[Operation, bool]:
+    """Insert one queued operation and its steps, or answer an existing one.
+
+    This is the CLIENT door: the workflow must be one `WORKFLOWS` names, because
+    the plan is decoded (`decode_plan_id`) and then recomputed before it is
+    inserted. `insert_operation` is the shared write, so the audit row is staged
+    in the same transaction as the operation row and an audit insert failure rolls
+    the operation back too.
+    """
+    key = (idempotency_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="idempotency_key is required")
+    # The key is asked FIRST, before the plan is recomputed, because a retry
+    # after a timeout must reach the row it already made. `recompute_plan`
+    # refuses a plan whose digest moved, and `create-project`'s review carries
+    # `existing_project_id` and `creates`, which move as a consequence of the
+    # operation itself - so recomputing first made every replay of a finished
+    # operation a dead-end 409, and re-planning then yields a different digest
+    # that the same key refuses too. This is safe because a replay that answers
+    # here resolves to a row that already exists, so no new work is queued and
+    # no second operation is created, while the stale-plan guard still runs for
+    # every key that finds no row - which is the only place a stale plan could
+    # queue unreviewed work.
+    intent, digest = decode_plan_id(plan_id)
+
+    existing = session.exec(select(Operation).where(Operation.idempotency_key == key)).first()
+    if existing is not None:
+        return _existing_or_conflict(existing, intent, digest, key)
+
+    plan = recompute_plan(plan_id)
+    return insert_operation(
+        session,
+        plan,
+        key,
+        ctx=ctx,
+        submitted_by=submitted_by,
+        submitted_by_id=submitted_by_id,
+    )
+
+
+def submit_mount_import() -> Tuple[Operation, bool]:
+    """Submit the boot's one mount import, or answer the row already in flight.
+
+    The submitter is the SERVER, and the row says so: `submitted_by` reads
+    `"system"` and the audit row carries `audit.system_context()`, so the
+    operation and its audit row name the same principal.
+
+    An existing `queued`/`running`/`cancelling` row for the SAME target is
+    answered instead of inserting a second one. The walk is idempotent, and after
+    a mid-walk crash `resume_on_startup` re-queues the old row - one row in flight
+    is the ledger fact we want, and a second submit would only race that repair.
+
+    The idempotency key names the boot (`mount-import:<root>:<uuid4>`) ON PURPOSE:
+    a key derived from the root alone would make the SECOND boot answer the first
+    boot's row and never walk again, which is the one thing a startup import must
+    not do. That is also why nothing here keeps a fixed number of rows: growth is
+    bounded by the ledger's own `prune()` (newest `PRUNE_KEEP_NEWEST` terminal rows
+    union `PRUNE_MAX_AGE_DAYS` days), not by a bespoke KEEP.
+    """
+    root = mount_import.MOUNT_IMPORT_PATH
+    plan = _plan_mount_import(root)
+    with Session(engine) as session:
+        in_flight = session.exec(
+            select(Operation)
+            .where(Operation.workflow == plan.intent["workflow"])
+            .where(Operation.target == root)
+            .where(Operation.status.in_((STATUS_QUEUED, STATUS_RUNNING, STATUS_CANCELLING)))
+            .order_by(Operation.created_at.desc(), Operation.id.desc())
+        ).first()
+        if in_flight is not None:
+            return in_flight, False
+        return insert_operation(
+            session,
+            plan,
+            f"mount-import:{root}:{uuid.uuid4()}",
+            ctx=audit.system_context(),
+            submitted_by=audit.ACTOR_SYSTEM_USERNAME,
+            submitted_by_id=None,
+        )
 
 
 # Reads ------------------------------------------------------------------------
@@ -2371,6 +2520,11 @@ def list_operations(
     `state` and `workflow` are vocabulary and are therefore validated: an unknown
     value is a client bug, refused with the list it should have used.
 
+    `workflow` is checked against `KNOWN_WORKFLOWS`, not `WORKFLOWS`: a
+    boot-submitted row has to be readable (`GET /operations?workflow=mount-import`
+    is how the browser reads the newest walk), while `build_plan`/`decode_plan_id`
+    keep refusing it, so a readable workflow is not a startable one.
+
     `target` and `submitted_by` are exact-match and deliberately NOT validated.
     They exist because two questions are properties of the whole ledger, not of a
     page: "is there an operation for THIS target I can resume" must be one exact
@@ -2382,7 +2536,7 @@ def list_operations(
     """
     if state is not None and state not in STATUSES:
         raise HTTPException(status_code=400, detail="unknown state")
-    if workflow is not None and workflow not in WORKFLOWS:
+    if workflow is not None and workflow not in KNOWN_WORKFLOWS:
         raise HTTPException(status_code=400, detail="unknown workflow")
     filters = []
     if state:

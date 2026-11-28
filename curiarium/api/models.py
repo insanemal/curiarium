@@ -162,27 +162,6 @@ class ProjectAsset(SQLModel, table=True):
   added_at: str
 
 
-# import_run is created by migration 008; this class only describes it for typed
-# queries and must never create the table itself (nothing in this app calls
-# create_all). Rows are written by `import_runs` outside the scan write lock.
-class ImportRun(SQLModel, table=True):
-  __tablename__ = "import_run"
-  id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-  kind: str = Field(default="mount")
-  status: str
-  mode: Optional[str] = None
-  root: Optional[str] = None
-  started_at: float
-  finished_at: Optional[float] = None
-  registered: int = Field(default=0)
-  known: int = Field(default=0)
-  ignored: int = Field(default=0)
-  failed: int = Field(default=0)
-  rejected: int = Field(default=0)
-  reason: Optional[str] = None
-  errors_json: str = Field(default="[]")
-
-
 # oidc_identities is created by migration 010; this class only describes it for
 # typed queries and must never create the table itself. The unique (issuer,
 # subject) index is the only thing that binds a provider principal to an

@@ -124,6 +124,15 @@ export function operationStatusLine(step: OperationStep): string {
         failed: "the files could not be registered",
         pending: "waiting to register the files",
       });
+    case "mount-import":
+      // One step, and it is the walk itself: the mounted folder is walked and
+      // what it holds is registered, so both halves belong in the phrase.
+      return stepPhrase(step.status, {
+        done: "walked the mounted folder and registered what it holds",
+        running: "walking the mounted folder\u2026",
+        failed: "the mounted folder could not be walked",
+        pending: "waiting to walk the mounted folder",
+      });
     default:
       return `${step.op} ${step.status}`;
   }
@@ -244,6 +253,26 @@ export function extractResult(operation: Operation): ArchiveExtractResult | null
   };
 }
 
+/** One step's raw report by `op`, or null when the runner wrote none. The report
+ *  is the server's JSON of a shape the client only half-knows, so every reader
+ *  below guards the field it takes - and null stays "no report", never a zero. */
+function stepResult(operation: Operation, op: string): Record<string, unknown> | null {
+  const step = operation.steps.find(candidate => candidate.op === op);
+  return step?.result ?? null;
+}
+
+/** A count a step reported, or zero. */
+function stepCount(result: Record<string, unknown>, key: string): number {
+  const value = result[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** A sentence a step reported, or the empty string. */
+function stepText(result: Record<string, unknown>, key: string): string {
+  const value = result[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
 /** The adopt action's label, named for the OUTCOME and never for the subsystem.
  *  Counts come from the plan the server issued. The `""` bucket is the folder's
  *  own root files, not a group: counting it would promise a group the operator
@@ -297,6 +326,11 @@ export function actionLabel(
       }
       return "Read the source page";
     }
+    case "mount-import":
+      // The walk's scope is the configured mount, not a library path, so the
+      // label names the folder the operator configured rather than a count the
+      // plan cannot know - the mount is walked, nothing is enumerated first.
+      return "Walk the mounted folder";
     default:
       return `Run ${workflow}`;
   }
@@ -385,6 +419,8 @@ export function workflowLabel(workflow: string): string {
       return "Import a zip";
     case "enrich":
       return "Enrich from the source page";
+    case "mount-import":
+      return "Mounted import";
     default:
       return workflow;
   }
@@ -412,6 +448,8 @@ function operationNoun(workflow: string): string {
       return "import";
     case "enrich":
       return "enrichment";
+    case "mount-import":
+      return "walk";
     default:
       return workflow;
   }
@@ -493,6 +531,30 @@ export function doneLine(
     }
     case "library-scan":
       return "Done: the scan finished.";
+    case "mount-import": {
+      const report = stepResult(operation, "mount-import");
+      if (report === null) return "Done: the walk finished without a report.";
+      // A skipped walk never looked at the mount, so its reason IS the outcome
+      // and printing counters beside it would claim a walk that did not happen.
+      if (report.outcome === "skipped") {
+        const why = stepText(report, "reason");
+        if (why) return `Done: the walk skipped the mounted folder - ${why}`;
+        return "Done: the walk skipped the mounted folder.";
+      }
+      const registered = stepCount(report, "registered");
+      const failed = stepCount(report, "failed");
+      if (registered === 0 && failed === 0) {
+        return "Done: the walk found nothing to register in the mounted folder.";
+      }
+      if (failed > 0) {
+        return `Done: registered ${fileCount(registered)}, ${counted(
+          failed,
+          "file",
+          "files",
+        )} could not be read.`;
+      }
+      return `Done: registered ${fileCount(registered)} from the mounted folder.`;
+    }
     case "import-link":
     case "import-zip":
       if (plan !== null && plan.review.members > 0) {

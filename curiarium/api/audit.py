@@ -54,6 +54,15 @@ ACTOR_FIRST_RUN_ROLE = "unauthenticated"
 ACTOR_RUNNER_USERNAME = "operations-runner"
 ACTOR_RUNNER_ROLE = "system"
 ACTOR_RUNNER_KIND = "system"
+# The server's own boot submit (Mf-i9ko). A mount import is submitted by the
+# SERVER at startup - not by a request, and not by the runner - so its actor is
+# the fixed `system` principal rather than the runner's `operations-runner`: the
+# actor that SUBMITS the operation row and the actor stamped on the audit row
+# must be the same principal, and `runner_context()`'s actor is the thing that
+# EXECUTES a row, not the thing that submits one.
+ACTOR_SYSTEM_USERNAME = "system"
+ACTOR_SYSTEM_ROLE = "system"
+ACTOR_SYSTEM_KIND = "system"
 
 ASSET_CREATE = "asset.create"
 ASSET_DELETE = "asset.delete"
@@ -270,6 +279,16 @@ def runner_context() -> AuditContext:
         actor=Actor(ACTOR_RUNNER_USERNAME, ACTOR_RUNNER_ROLE, ACTOR_RUNNER_KIND, None),
         request_id="-",
         method="RUNNER",
+        path="/operations",
+    )
+
+
+def system_context() -> AuditContext:
+    """The context for work the SERVER submits at boot: not a request, not the runner."""
+    return AuditContext(
+        actor=Actor(ACTOR_SYSTEM_USERNAME, ACTOR_SYSTEM_ROLE, ACTOR_SYSTEM_KIND, None),
+        request_id="-",
+        method="BOOT",
         path="/operations",
     )
 

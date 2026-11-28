@@ -17,10 +17,10 @@ describe("visibleQueues", () => {
     },
   );
 
-  // `GET /imports/runs`, `GET /assets?missing=true+`, `GET /trash` and
-  // `GET /operations` are all require_read, so a viewer keeps those four rows;
-  // only bundles needs CONTRIBUTE, and only the queues' own controls
-  // (rescan/purge/cancel/undo) need a write.
+  // `GET /operations?workflow=mount-import`, `GET /assets?missing=true+`,
+  // `GET /trash` and `GET /operations` are all require_read, so a viewer keeps
+  // those four rows; only bundles needs CONTRIBUTE, and only the queues' own
+  // controls (rescan/purge/cancel/undo) need a write.
   it("lists the four read surfaces for a viewer and withholds the bundle row", () => {
     expect(visibleQueues("viewer").map(queue => queue.key)).toEqual([
       "imports",

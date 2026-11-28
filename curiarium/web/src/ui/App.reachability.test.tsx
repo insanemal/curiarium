@@ -28,8 +28,7 @@ vi.mock("../lib/api/bundles", () => ({
 }));
 
 vi.mock("../lib/api/settings", () => ({
-  getImportRuns: vi.fn(),
-  getImportRun: vi.fn(),
+  getMountImportStatus: vi.fn(),
   getLibraryScanStatus: vi.fn(),
   startLibraryScan: vi.fn(),
 }));
@@ -125,10 +124,10 @@ import App from "./App";
 import { getMe, type Me } from "../lib/api";
 import { getBundleReport, type BundleReport } from "../lib/api/bundles";
 import {
-  getImportRuns,
   getLibraryScanStatus,
-  type ImportRunList,
+  getMountImportStatus,
   type LibraryScanStatus,
+  type MountImportStatus,
 } from "../lib/api/settings";
 import { getTrash, type TrashList } from "../lib/api/trash";
 import indexCss from "../index.css?raw";
@@ -138,7 +137,7 @@ import type { ReviewQueueKey } from "./views";
 
 const getMeMock = vi.mocked(getMe);
 const getBundleReportMock = vi.mocked(getBundleReport);
-const getImportRunsMock = vi.mocked(getImportRuns);
+const getMountImportStatusMock = vi.mocked(getMountImportStatus);
 const getLibraryScanStatusMock = vi.mocked(getLibraryScanStatus);
 const getTrashMock = vi.mocked(getTrash);
 
@@ -223,7 +222,27 @@ const EMPTY_REPORT: BundleReport = {
   stale_dismissals: [],
 };
 
-const EMPTY_RUNS: ImportRunList = { runs: [], total: 0, limit: 1, offset: 0 };
+/** The ledger's answer when it holds no `mount-import` row: a status, not a
+ *  list - "no walk has happened" is a fact the panel states. */
+const EMPTY_MOUNT_IMPORT: MountImportStatus = {
+  status: null,
+  running: false,
+  outcome: null,
+  mode: null,
+  root: null,
+  reason: null,
+  error: null,
+  started_at: null,
+  finished_at: null,
+  registered: 0,
+  known: 0,
+  ignored: 0,
+  failed: 0,
+  rejected: 0,
+  discovered: 0,
+  skipped: 0,
+  errors: [],
+};
 
 const FINISHED_SCAN: LibraryScanStatus = {
   running: false,
@@ -378,8 +397,8 @@ beforeEach(() => {
   getMeMock.mockReset();
   getBundleReportMock.mockReset();
   getBundleReportMock.mockResolvedValue(EMPTY_REPORT);
-  getImportRunsMock.mockReset();
-  getImportRunsMock.mockResolvedValue(EMPTY_RUNS);
+  getMountImportStatusMock.mockReset();
+  getMountImportStatusMock.mockResolvedValue(EMPTY_MOUNT_IMPORT);
   getLibraryScanStatusMock.mockReset();
   getLibraryScanStatusMock.mockResolvedValue(FINISHED_SCAN);
   getTrashMock.mockReset();
@@ -620,7 +639,7 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
     expect(getBundleReportMock, `${context}: the switch issues no bundle request`).toHaveBeenCalledTimes(
       1,
     );
-    expect(getImportRunsMock, `${context}: the switch issues no imports request`).toHaveBeenCalledTimes(
+    expect(getMountImportStatusMock, `${context}: the switch issues no imports request`).toHaveBeenCalledTimes(
       0,
     );
     expect(
@@ -637,7 +656,7 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
 
     // app load arms none of the four queues.
     expect(getBundleReportMock, `${context}: no walk on app load`).toHaveBeenCalledTimes(0);
-    expect(getImportRunsMock, `${context}: no run read on app load`).toHaveBeenCalledTimes(0);
+    expect(getMountImportStatusMock, `${context}: no walk read on app load`).toHaveBeenCalledTimes(0);
     expect(getLibraryScanStatusMock, `${context}: no scan read on app load`).toHaveBeenCalledTimes(0);
     expect(getTrashMock, `${context}: no trash read on app load`).toHaveBeenCalledTimes(0);
 
@@ -645,7 +664,7 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
     await openReview(context);
     expectSelectedQueue("bundles", context);
     await waitFor(() => expect(getBundleReportMock).toHaveBeenCalledTimes(1));
-    expect(getImportRunsMock, `${context}: imports is not armed on entry`).toHaveBeenCalledTimes(0);
+    expect(getMountImportStatusMock, `${context}: imports is not armed on entry`).toHaveBeenCalledTimes(0);
     expect(getLibraryScanStatusMock, `${context}: missing is not armed on entry`).toHaveBeenCalledTimes(
       0,
     );
@@ -668,7 +687,7 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
       1,
     );
     expect(
-      getImportRunsMock,
+      getMountImportStatusMock,
       `${context}: focus movement never fetches imports`,
     ).toHaveBeenCalledTimes(0);
     expect(
@@ -680,7 +699,7 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
     // Enter is the activation, and it fetches exactly the focused queue.
     fireEvent.keyDown(bundlesTab, { key: "ArrowRight" });
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Enter" });
-    await waitFor(() => expect(getImportRunsMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getMountImportStatusMock).toHaveBeenCalledTimes(1));
     expectSelectedQueue("imports", context);
     expect(getBundleReportMock, `${context}: activating imports leaves bundles alone`).toHaveBeenCalledTimes(
       1,
@@ -693,7 +712,7 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
     // a mode switch with the queue open issues nothing.
     fireEvent.click(screen.getByRole("radio", { name: "Projects" }));
     await settle(30);
-    expect(getImportRunsMock, `${context}: a mode switch reads no imports`).toHaveBeenCalledTimes(1);
+    expect(getMountImportStatusMock, `${context}: a mode switch reads no imports`).toHaveBeenCalledTimes(1);
     expect(getBundleReportMock, `${context}: a mode switch walks no bundles`).toHaveBeenCalledTimes(1);
 
     // leaving and re-entering the destination refetches once. The control names
@@ -705,7 +724,7 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     await screen.findByRole("tablist", { name: "Review" });
-    await waitFor(() => expect(getImportRunsMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getMountImportStatusMock).toHaveBeenCalledTimes(2));
     expect(getBundleReportMock, `${context}: the bundle queue stays closed on re-entry`).toHaveBeenCalledTimes(
       1,
     );

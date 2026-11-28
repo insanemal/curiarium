@@ -1217,14 +1217,19 @@ def test_the_deleted_route_is_reconciled_in_every_count() -> None:
     ROUTE_ACTIONS 45, EXEMPT 15, WORKFLOWS 8. Part 4/4 deleted POST
     /bundles/enrich (contribute) and added the `enrich` workflow, so 100
     (11/37/22/12/18), GET 41, ACTIONS 58, ROUTE_ACTIONS 44, EXEMPT 15,
-    WORKFLOWS 9.
+    WORKFLOWS 9. Mf-i9ko then deleted the two read-only `GET /imports/runs`
+    routes the mount import no longer needs (its record is the `mount-import`
+    operation row now), so 98 (11/35/22/12/18), GET 39, ACTIONS 58,
+    ROUTE_ACTIONS 44, EXEMPT 15, WORKFLOWS 9: a GET is never audited, and the
+    system submit reuses the operation actions, so only the two permission rows
+    and the two path entries moved.
     """
-    assert len(permissions.ROUTE_PERMISSIONS) == 100
+    assert len(permissions.ROUTE_PERMISSIONS) == 98
     by_level: dict[str, int] = {}
     for level in permissions.ROUTE_PERMISSIONS.values():
         by_level[level] = by_level.get(level, 0) + 1
-    assert by_level == {"public": 11, "read": 37, "contribute": 22, "write": 12, "admin": 18}
-    assert sum(1 for method, _path in permissions.ROUTE_PERMISSIONS if method == "GET") == 41
+    assert by_level == {"public": 11, "read": 35, "contribute": 22, "write": 12, "admin": 18}
+    assert sum(1 for method, _path in permissions.ROUTE_PERMISSIONS if method == "GET") == 39
     assert len(audit.ACTIONS) == 58
     assert len(audit.ROUTE_ACTIONS) == 44
     assert len(audit.EXEMPT_ROUTES) == 15

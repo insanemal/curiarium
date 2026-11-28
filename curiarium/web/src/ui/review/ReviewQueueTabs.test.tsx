@@ -32,8 +32,9 @@ describe("ReviewQueueTabs role gating", () => {
     expect(!!screen.queryByRole("tab", { name: /^Bundles to confirm/ })).toBe(visible);
   });
 
-  // `GET /imports/runs` is require_read, so the imports row is a viewer surface:
-  // gating it at contributor would delete a read surface a viewer already has.
+  // `GET /operations?workflow=mount-import` is require_read, so the imports row
+  // is a viewer surface: gating it at contributor would delete a read surface a
+  // viewer already has.
   it.each<[Role, boolean]>([
     ["viewer", true],
     ["contributor", true],

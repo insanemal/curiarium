@@ -40,12 +40,12 @@ import os
 import re
 import shutil
 import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from sqlmodel import Session, select
 
-import import_runs
 import library_scan
 from config import (
     DEFAULT_MOUNT_IMPORT_EXTS,
@@ -129,41 +129,114 @@ def _tracked_keys(root: Path) -> set:
     return keys
 
 
-def scan_mount_imports() -> Optional[ScanState]:
-    """Register the files of the configured mount. Returns its counters.
+@dataclass
+class MountImportReport:
+    """What one mount import did: the walk's counters, or why it refused.
 
-    ``None`` means the run did not start (no mount configured, mount missing, a
-    mount that contains or sits inside the storage root, a reference-mode mount
-    that is the storage root, or an aborted run). Every started or skipped
-    attempt after the no-path early return is recorded in ``import_run``.
+    ``outcome`` is ``"registered"`` for a completed walk and ``"skipped"`` for
+    every case that never walked, so a skip always carries a ``reason``. The
+    counters are attributes, exactly like ``library_scan.ScanState``'s, so a
+    caller reads ``report.registered`` the way it read the walk state's.
+    """
+
+    outcome: str
+    mode: Optional[str]
+    root: str
+    started_at: float
+    finished_at: Optional[float]
+    registered: int = 0
+    known: int = 0
+    ignored: int = 0
+    failed: int = 0
+    rejected: int = 0
+    reason: Optional[str] = None
+    errors: List[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        """The wire view: the counters, their two derived sums, and the errors.
+
+        ``discovered`` is every file the walk looked at and ``skipped`` is the
+        part of it that needed no write; both are derived here so no caller
+        has to re-add the same four numbers (and get it wrong differently).
+        """
+        data = asdict(self)
+        data["discovered"] = self.registered + self.known + self.ignored + self.failed
+        data["skipped"] = self.known + self.ignored
+        return data
+
+
+def _import_mode() -> Tuple[str, bool]:
+    """The mode the setting selects, and whether it copies the bytes."""
+    copy_files = get_mount_import_copy(MOUNT_IMPORT_COPY)
+    return ("copy" if copy_files else "reference"), copy_files
+
+
+def mount_import_refusal() -> Optional[Tuple[str, Optional[str]]]:
+    """Why the configured mount cannot be imported, or ``None`` when it can.
+
+    Reads the module's own config attributes at call time, and both the walk and
+    the report it returns ask here, so a refusal cannot say one thing and skip
+    for another. ``mode`` is ``None`` when the mount does not exist (there is no
+    mode to name) and the resolved mode otherwise.
     """
     root_raw = MOUNT_IMPORT_PATH
     if not root_raw:
         return None
     root = Path(root_raw)
     if not root.exists() or not root.is_dir():
-        reason = f"mount path not found: {root_raw}"
-        import_runs.skip_run(root_raw, None, reason)
-        print(f"[mount-import] Skipping: {reason}")
-        return None
+        return (f"mount path not found: {root_raw}", None)
 
+    mode, copy_files = _import_mode()
     root = root.resolve()
-    allowed_exts = parse_mount_import_exts(MOUNT_IMPORT_EXTS_RAW)
-    copy_files = get_mount_import_copy(MOUNT_IMPORT_COPY)
-    mode = "copy" if copy_files else "reference"
     storage_root = Path(library_scan.STORAGE).resolve()
     overlap = _overlap_kind(root, storage_root)
     if overlap == "same" and not copy_files:
-        reason = "reference mode needs a source outside the storage root"
-        import_runs.skip_run(str(root), mode, reason)
-        print(f"[mount-import] Skipping: {reason}")
-        return None
+        return ("reference mode needs a source outside the storage root", mode)
     if overlap in {"contains", "inside"}:
         relation = "contains" if overlap == "contains" else "is inside"
-        reason = f"the mount {root} {relation} the storage root {storage_root}"
-        import_runs.skip_run(str(root), mode, reason)
+        return (f"the mount {root} {relation} the storage root {storage_root}", mode)
+    return None
+
+
+def run_mount_import() -> MountImportReport:
+    """Register the files of the configured mount and report what happened.
+
+    A mount that is absent, that overlaps the storage root or that has no
+    configured path at all comes back as ``outcome="skipped"`` with the reason,
+    never as an exception. A walk that aborts does raise, and its message
+    carries the counters it reached, because a failed step has nowhere else to
+    put them.
+    """
+    started_at = time.time()
+    root_raw = MOUNT_IMPORT_PATH
+    if not root_raw:
+        return MountImportReport(
+            outcome="skipped",
+            mode=None,
+            root="",
+            started_at=started_at,
+            finished_at=started_at,
+            reason="no mount path is configured",
+        )
+
+    refusal = mount_import_refusal()
+    if refusal is not None:
+        reason, refused_mode = refusal
         print(f"[mount-import] Skipping: {reason}")
-        return None
+        configured = Path(root_raw)
+        return MountImportReport(
+            outcome="skipped",
+            mode=refused_mode,
+            root=str(configured.resolve()) if configured.exists() else root_raw,
+            started_at=started_at,
+            finished_at=time.time(),
+            reason=reason,
+        )
+
+    root = Path(root_raw).resolve()
+    storage_root = Path(library_scan.STORAGE).resolve()
+    allowed_exts = parse_mount_import_exts(MOUNT_IMPORT_EXTS_RAW)
+    mode, copy_files = _import_mode()
 
     rejected: list[str] = []
 
@@ -207,9 +280,7 @@ def scan_mount_imports() -> Optional[ScanState]:
                 note_error(f"{item.rel_path}: {exc}")
                 pending.remove(item)
 
-    state = ScanState(started_at=time.time())
-    run_id = import_runs.begin_run(str(root), mode, state.started_at)
-    import_runs.set_active(run_id, state)
+    state = ScanState(started_at=started_at)
     try:
         plan = TreePlan(
             root=root,
@@ -225,13 +296,12 @@ def scan_mount_imports() -> Optional[ScanState]:
             folders_are_directories=bool(copy_files),
         )
         register_tree(plan, state)
-        import_runs.finish_run(run_id, state, len(rejected))
-    except Exception as exc:  # the startup thread is a daemon: a raise would be invisible
-        import_runs.fail_run(run_id, state, len(rejected), str(exc))
+    except Exception as exc:
         print(f"[mount-import] aborted: {exc}")
-        return None
-    finally:
-        import_runs.clear_active(run_id)
+        raise RuntimeError(
+            f"{exc} (after {state.registered} registered, {state.known} known, "
+            f"{state.ignored} ignored, {state.failed} failed)"
+        ) from exc
 
     print(
         f"[mount-import] Done ({mode}) {root}: registered {state.registered}, "
@@ -243,4 +313,16 @@ def scan_mount_imports() -> Optional[ScanState]:
         print(f"[mount-import] {len(state.errors)} error(s):")
         for error in state.errors[:5]:
             print(f"[mount-import]   {error}")
-    return state
+    return MountImportReport(
+        outcome="registered",
+        mode=mode,
+        root=str(root),
+        started_at=started_at,
+        finished_at=state.finished_at if state.finished_at is not None else time.time(),
+        registered=state.registered,
+        known=state.known,
+        ignored=state.ignored,
+        failed=state.failed,
+        rejected=len(rejected),
+        errors=list(state.errors),
+    )

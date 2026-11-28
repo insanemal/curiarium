@@ -6,7 +6,7 @@ import type { TrashList } from "../../lib/api/trash";
 import type { ReviewQueueKey } from "../views";
 import { needsDecision } from "./bundleRows";
 import type { BundleDetectState } from "./useBundleDetect";
-import type { ImportRunsState } from "./useImportRuns";
+import type { MountImportState } from "./useMountImport";
 
 /** Closed on purpose: every queue the REVIEW group renders has a key here. */
 export type ReviewCounts = {
@@ -37,12 +37,14 @@ export function bundleBadgeCount(report: BundleReport | null): number | null {
 /**
  * How many imports are running: `1` or `0` once a fetch has succeeded, `null`
  * before that. This is the one place the ticket decides what an unknown means,
- * and it cannot be read off the run alone: `run === null` covers both "the first
- * fetch failed" and "no run has ever happened", so `loaded` decides.
+ * and it cannot be read off the newest row alone: `status === null` covers both
+ * "the first fetch failed" and "the ledger holds no mount import", so `loaded`
+ * decides. `status.running` is the derived rule the poll uses too, so the badge
+ * and the poll cannot disagree about what a walk in flight is.
  */
-export function importsBadgeCount(state: ImportRunsState): number | null {
+export function importsBadgeCount(state: MountImportState): number | null {
   if (!state.loaded) return null;
-  return state.run?.status === "running" ? 1 : 0;
+  return state.status !== null && state.status.running ? 1 : 0;
 }
 
 /**
@@ -127,7 +129,7 @@ export function describeQueueCount(key: ReviewQueueKey, count: number | null): s
  */
 export function useReviewCounts(
   bundle: BundleDetectState,
-  imports: ImportRunsState,
+  imports: MountImportState,
   assetCounts: AssetCounts | null,
   trash: TrashList | null,
   operations: number | null,

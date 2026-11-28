@@ -248,8 +248,6 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("POST", "/mfa/step-up"): READ,
     ("DELETE", "/mfa"): READ,
     ("POST", "/mfa/recovery-codes"): READ,
-    ("GET", "/imports/runs"): READ,
-    ("GET", "/imports/runs/{run_id}"): READ,
     # A read of an archive the library already holds; it writes nothing.
     ("GET", "/file/{asset_id}/{name}"): READ,
     ("GET", "/asset/{asset_id}/files"): READ,

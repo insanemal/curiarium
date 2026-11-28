@@ -848,6 +848,33 @@ def _migration_016_move_ledger(conn: Connection) -> None:
     )
 
 
+def _migration_017_drop_import_run_history(conn: Connection) -> None:
+    """Drop the mount-import run history; the operations ledger carries it now.
+
+    008 created `import_run` as mount-import observability: the startup walk wrote
+    one row per attempt and `GET /imports/runs{,/{run_id}}` read them. The mount
+    import is a `mount-import` OPERATION now, and the walk's counters are that
+    operation's step result, so the table has no writer and no reader left -
+    measured by AST, not grep, and pinned by
+    `tests/test_no_import_run_surface.py`, which is where the emptiness of the
+    reference set is written down.
+
+    A DROP cannot be undone and it DESTROYS ROWS, so it is its own ledger entry and
+    never an edit of 008: a database records version AND name for every migration
+    and `run_migrations` refuses a mismatch, and 1-016 are immutable (ADR 0002).
+
+    A row that exists at upgrade time is dropped with the table. There can be one: a
+    deployment whose previous boot died mid-walk leaves a `running` row, and the
+    build that upgrades is the build that no longer reads it. That is the accepted
+    cost, and it is bounded by what such a row said - the counters of a walk that
+    never finished, whose files the next boot's walk reports as `known`.
+
+    `IF EXISTS` on both objects, so re-applying 017 is harmless, like 004-016.
+    """
+    conn.exec_driver_sql("DROP INDEX IF EXISTS idx_import_run_started_at")
+    conn.exec_driver_sql("DROP TABLE IF EXISTS import_run")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial_schema", _migration_001_initial_schema),
     Migration(2, "nested_folders_and_mount_sources", _migration_002_nested_folders_and_mount_sources),
@@ -865,6 +892,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(14, "asset_attribution", _migration_014_asset_attribution),
     Migration(15, "operations_core", _migration_015_operations_core),
     Migration(16, "move_ledger", _migration_016_move_ledger),
+    Migration(17, "drop_import_run_history", _migration_017_drop_import_run_history),
 )
 
 

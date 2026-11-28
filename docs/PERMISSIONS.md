@@ -244,7 +244,7 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 100 routes: 11 public, 37 read,
+Paths are FastAPI templates exactly as declared. 98 routes: 11 public, 35 read,
 22 contribute, 12 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
@@ -280,8 +280,6 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | POST   | `/mfa/step-up`                         | proves a code for the *current* session; the one route an admin who did not come through `/login` needs |
 | DELETE | `/mfa`                                 | disables two-factor for the caller; refused while the admin policy depends on it |
 | POST   | `/mfa/recovery-codes`                  | replaces the caller's ten recovery codes; the plaintext is returned once |
-| GET    | `/imports/runs`                         | mount-import history; same disclosure class as scan errors |
-| GET    | `/imports/runs/{run_id}`                | one run with its bounded per-file errors |
 | GET    | `/file/{asset_id}/{name}`               | download |
 | GET    | `/asset/{asset_id}/files`               | list supporting files |
 | GET    | `/asset/{asset_id}/files/{file_id}`     | download a supporting file |
@@ -412,6 +410,7 @@ and undo handlers enforce.
 | `split-and-create`   | contribute | no: splits one directory into several projects in place |
 | `relocate`           | contribute | no: relocates a directory and re-points its rows |
 | `library-scan`       | contribute | no: it walks the library, registers the files it finds and stamps the ones it cannot as `missing_since`; it removes nothing, and the whole-library walk is bounded below |
+| `mount-import`       | contribute | no: the boot walk registers what the mounted folder holds, copying into storage or referencing in place; it removes nothing, and no client can plan or submit it |
 
 **Undo keeps the level of the operation it acts on (Mf-d588, 2026-11-27).**
 Not the level of the effect it turns out to have: `create-project`'s undo
@@ -438,12 +437,13 @@ levels depending on history.
 
 **Declarations for the record.** `operations_service.WORKFLOWS` is
 `("create-project", "split-and-create", "adopt", "extract-and-create", "extract",
-"library-scan", "import-link", "import-zip")`: those eight have a planner and run.
-Every other row records the level the owner decided for a workflow that does not
-exist yet - `relocate` and `import-folder` are exactly that - so a row
-is a decision, not a claim about today's code. Read a row against `WORKFLOWS`
-before believing it runs; a name reaches `WORKFLOWS` when it has a planner, never
-before. `adopt` left this list when its planner landed (Mf-ytig), `library-scan`
+"library-scan", "import-link", "import-zip", "enrich")`: those nine have a
+planner and run. Every other row records the level the owner decided for a
+workflow a client cannot plan or submit - `relocate`, `import-folder` and
+`mount-import` are exactly that - so a row is a decision, not a claim about what
+a client may start. Read a row against `WORKFLOWS` before believing it runs; a
+name reaches `WORKFLOWS` when it has a planner, never before. `adopt` left this
+list when its planner landed (Mf-ytig), `library-scan`
 when part 1/4 of Mf-y2u3 replaced the deleted `GET`/`POST /library/scan` routes
 with the workflow, `import-link`/`import-zip` when part 2/4 replaced the two
 deleted ingest doors (`POST /import`, `POST /import/zip`) with them, and `extract`
@@ -472,6 +472,21 @@ folder. A restore's or an extract's own re-scan does not come through the
 planner at all, so it is never refused. The level is the workflow's
 (`WORKFLOW_LEVELS`), enforced at submit, cancel and undo, and the two deleted
 routes are gone from the matrix above.
+
+**`mount-import` is a SYSTEM operation, declared for cancel and undo
+(Mf-i9ko).** The server submits it at boot - `submitted_by: "system"`,
+`submitted_by_id` NULL - and the operations runner executes its single step, so
+the walk appears in the one shared operations queue (labelled "Mounted import")
+beside every other workflow. It is deliberately absent from
+`operations_service.WORKFLOWS`: `POST /operations/plan` and `POST /operations`
+refuse it with a 400, so no client can make the server walk an arbitrary path.
+Its `WORKFLOW_LEVELS` row is `contribute` because that row is what
+`level_for_workflow` and `authorize_workflow` resolve for **cancel** and
+**undo** on an existing row; the rubric's answer is contribute because the walk
+removes nothing. Any contributor may cancel it - a `queued` operation becomes
+`cancelled` at once, a `running` one becomes `cancelling` and the walk finishes
+its step - and the next boot submits again. It is never undoable
+(`undo_state: none`), because its undo would be a delete workflow nobody owns.
 
 Everything under `/operations` is a persisted plan with a review, and the plan
 is the server's: `POST /operations/plan` computes it from the library as it is
@@ -506,7 +521,7 @@ Nine workflows run: `create-project`, `split-and-create`, `adopt`,
 `extract-and-create`, `extract`, `library-scan`, `import-link`, `import-zip` and
 `enrich`. The client calls these routes - `curiarium/web/src/lib/api/operations.ts`
 plans, submits, cancels, reads and undoes - and every other name in
-`WORKFLOW_LEVELS` is declared, not runnable.
+`WORKFLOW_LEVELS` is declared, not client-runnable.
 
 The queue is CONSUMED by the browser now, not only written by it: the Review
 group's fifth row (`Operations`, `ui/operations/OperationsQueue.tsx`) lists every
@@ -791,11 +806,12 @@ sessions stay valid.
 * **A scan's step result carries `errors: List[str]`** that may contain storage
   filenames. That is the same disclosure class as `storage_path` on `AssetOut`
   and `FolderOut`, which viewers already receive, so it is not a new leak.
-* **`GET /imports/runs` discloses run telemetry.** A row carries the mount
-  root, per-file relative paths in its error list, and the run mode/counters.
-  That is the same disclosure class as the storage filenames in a scan
-  operation's step result, which viewers already receive; it is read-only and
-  grants no new action.
+* **A `mount-import` operation's step result discloses run telemetry.** It
+  carries the mount root, per-file relative paths in its error list, and the
+  walk's mode/counters. That is the same disclosure class as the storage
+  filenames in a scan operation's step result, which viewers already receive;
+  viewers read it through `GET /operations` (`read`), which grants no new
+  action.
 * **Settings reads are admin**, and the client no longer makes a non-admin pay
   for it: the Storage Structure card is hidden from the settings menu and the
   mount-import card from the Import sources section below `admin`, and the
@@ -867,9 +883,10 @@ sessions stay valid.
   edit/delete/cover/attach/remove-member, the local folder-scan panel (REVIEW →
   Imports running) and the upload-queue panel. A viewer keeps search, sort and
   filters, breadcrumbs, subfolder tiles, downloads (including folder ZIP
-  export), preview, the slicer, project browsing, the read-only mount-import run
-  history (REVIEW → Imports running, from `GET /imports/runs`, which is
-  `read`) and the cookie preferences (client-side settings, not API writes).
+  export), preview, the slicer, project browsing, the read-only mount-import
+  history (REVIEW → Imports running, from the newest `mount-import` operation
+  row via `GET /operations?workflow=mount-import`, which is `read`) and the
+  cookie preferences (client-side settings, not API writes).
   A contributor sits between the two, and the UI shows it: they gain the upload
   bar, drag-and-drop upload (onto the grid in a folder or in the Unfiled scope,
   onto the Unfiled row or a folder row in the sidebar - never onto the All-files
@@ -895,9 +912,10 @@ sessions stay valid.
   sources is configuration only (mount-import settings and the cookie cards),
   so nothing in Settings mixes thresholds any more; the mixed surfaces are
   REVIEW → Imports running, which hides the folder-scan panel below `editor`
-  while the read-only import-run history stays for every role that may read
-  `GET /imports/runs`, and REVIEW → Trash, which is readable by every role that
-  may read `GET /trash` while the purge is available to no one below `admin`
+  while the read-only mount-import history (the newest `mount-import`
+  operation row) stays for every role that may read `GET /operations`, and
+  REVIEW → Trash, which is readable by every role that may read `GET /trash`
+  while the purge is available to no one below `admin`
   (and is MFA-gated as well). The audit and storage `NotPermitted` states from
   Mf-5tyz are unchanged.
 * **The delete confirmations name a destination, not a Settings section.**

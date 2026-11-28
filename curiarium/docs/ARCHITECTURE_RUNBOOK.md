@@ -202,7 +202,7 @@ be made explicit before deployment boundaries are multiplied.
 | T-010 | `VERIFIED` | Metadata is split between SQLite and filesystem content; updates are not one atomic transaction. | API storage and asset services | File mutations require staging, compensation, and reconciliation. |
 | T-011 | `VERIFIED` | Current records are `Folder`, `Asset`, `AssetFile`, and `AppConfig`; several JSON structures are stored as text. | `api/models.py` | Project/revision work must migrate rather than replace data in place. |
 | T-012 | `VERIFIED` | Managed primary files, thumbnails, and bundles use different storage layouts; no-copy records reference external paths. | asset/file services | Backup completeness and storage invariants must be explicit. |
-| T-013 | `VERIFIED` | Mounted imports run through the library scanner's registration path, deduplicate by destination storage path and by absolute source path, and record durable run history (`import_run`: status, mode, counters, bounded errors) readable at `GET /imports/runs`. | `api/mount_import.py`, `api/library_scan.py`, `api/import_runs.py` | Durable mounted-import observability exists; storage scans now log every reported failure (bounded at 100) plus one summary line, and the failure report in REVIEW → Missing files (`ui/review/LibraryScanPanel.tsx`) renders the failed count and the captured texts with a copy action. |
+| T-013 | `VERIFIED` | Mounted imports run through the library scanner's registration path, deduplicate by destination storage path and by absolute source path, and record durable run history as a `mount-import` operation row (status, mode, root, counters, bounded errors and the skip reason in its step result) readable at `GET /operations?workflow=mount-import`; the server submits that operation at boot, so it needs no route and no operator. | `api/mount_import.py`, `api/library_scan.py`, `api/operations_service.py`, `api/operations_runner.py` | Durable mounted-import observability exists; storage scans now log every reported failure (bounded at 100) plus one summary line, and the failure report in REVIEW → Missing files (`ui/review/LibraryScanPanel.tsx`) renders the failed count and the captured texts with a copy action. |
 | T-014 | `VERIFIED` | URL import refuses redirects into private addresses: every redirect hop is validated before its connection is made, and each connection is pinned to the validated IP. Evidence: `api/safe_http.py`, `api/tests/test_import_ssrf.py`. | `api/safe_http.py`, `api/url_utils.py`, `api/tests/test_import_ssrf.py` | SSRF safety is proven by tests at the security gate, not presumed. |
 | T-015 | `VERIFIED` | Prepared payloads and visible supporting files have distinct roles and response behavior. Supporting files carry an explicit per-model `position` (schema 9, backfilled once from `(filename, id)`), uploads append to it, and only a reorder rewrites it. A rename is display-only: `filename` changes, `storage_path` and the bytes never do. Per-model caps on each supporting file, their total size and their count are enforced inside the second write transaction, so a rejected upload leaves no row and no bytes. Inline preview is limited to PDF, raster images and text served as `text/plain` (SVG is never inline), and every inline response carries `X-Content-Type-Options: nosniff`. ZIP members are written primary-then-supporting in list order with duplicate arcnames suffixed ` (2)`, ` (3)`, ... | `AssetFile`, `api/asset_file_service.py`, `api/routers/asset_files.py`, prepared-print and ZIP services, `api/tests/test_asset_files_polish.py` | Visibility/download invariants are pinned by regression tests. |
 | T-016 | `VERIFIED` | The repository owns a unified `make verify` harness and GitHub Actions workflow covering API migrations/routes, web type-check/tests/build, bridge tests/build, Compose validation, and container smoke behavior. | `Makefile`, `.github/workflows/ci.yml`, Gate 0 evidence | Later gates extend the shared harness and cannot substitute undocumented local checks. |
@@ -559,9 +559,10 @@ rename-resistant identity and provenance.
 - Warn on matching content; never auto-merge or delete.
 
 **Exit evidence:** repeated scans are explainable and do not duplicate unchanged
-source paths; failure details are visible through the durable `import_run`
-history at `GET /imports/runs`, without container logs; hashing jobs are bounded
-and restartable; known duplicate fixtures produce suggestions only.
+source paths; failure details are visible through the durable `mount-import`
+operation row at `GET /operations?workflow=mount-import`, without container logs;
+hashing jobs are bounded and restartable; known duplicate fixtures produce
+suggestions only.
 
 **Owner checkpoint:** none for 4A within approved scope. Ask before introducing
 automatic grouping, merging, or a license inference policy.
@@ -1030,7 +1031,7 @@ implementation. Gate 13 closes the roadmap only when the listed proof exists.
 | Fast, resilient v5.1 library | Gates 2 and 5 | Published benchmark and pathological-file results |
 | Easy organization at scale | Gates 3 and 5 | Large-library navigation and bulk-workflow tests |
 | Models with context, visible supporting files, hidden prepared payloads | Gates 3–5 | Visibility, handoff, download/export, and migration tests |
-| Mounted import observability | Gates 4A and 5 | Durable `import_run` history and `GET /imports/runs`, plus repeatable scan reports and no-copy safety tests |
+| Mounted import observability | Gates 4A and 5 | Durable `mount-import` operation history, read at `GET /operations?workflow=mount-import`, plus repeatable scan reports and no-copy safety tests |
 | Secure defaults and trustworthy deployment | Gates 0, 1, and 5 | Revalidated security report, abuse tests, and fresh-production smoke test |
 | Upgrade, backup, and recovery confidence | Gates 0 and 5 | Representative upgrade and matched database/storage restore |
 | Content identity and provenance | Gate 4B, or first subgate of Gate 6 | Bounded hashing, integrity, and duplicate-suggestion evidence |

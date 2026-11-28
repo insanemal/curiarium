@@ -19,7 +19,6 @@ from . import (
   batch,
   bundles,
   folders,
-  import_runs,
   imports,
   mfa,
   operations,
@@ -35,7 +34,6 @@ from .auth_users import *
 from .batch import *
 from .bundles import *
 from .folders import *
-from .import_runs import *
 from .imports import *
 from .mfa import *
 from .operations import *
@@ -44,7 +42,7 @@ from .settings import *
 from .snapshots import *
 from .trash import *
 
-MODULES = (asset_files, assets, audit_log, auth_users, batch, bundles, folders, import_runs, imports, mfa, operations, projects, settings, snapshots, trash)
+MODULES = (asset_files, assets, audit_log, auth_users, batch, bundles, folders, imports, mfa, operations, projects, settings, snapshots, trash)
 
 # Sorted, not raw module-alphabetical concatenation: module order is not class-name order
 # (auth_users' names sit inside assets' range), so the two readings of the pin cannot both
@@ -59,7 +57,6 @@ __all__ = sorted(
     *batch.__all__,
     *bundles.__all__,
     *folders.__all__,
-    *import_runs.__all__,
     *imports.__all__,
     *mfa.__all__,
     *operations.__all__,

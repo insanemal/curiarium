@@ -20,7 +20,6 @@ import asset_service
 import audit
 import auth
 import first_run
-import import_runs
 import login_throttle as login_throttle_module
 import oidc
 import permissions
@@ -45,7 +44,7 @@ from import_service import (
 from library_scan import scan_status, start_scan
 from logging_setup import configure_logging
 from migrations import run_migrations
-from mount_import import mount_import_should_run, scan_mount_imports
+from mount_import import mount_import_should_run
 from request_id import RequestIDMiddleware
 from routers import (
     asset_files,
@@ -68,7 +67,6 @@ from routers import first_run as first_run_routes
 from routers import (
     oidc as oidc_routes,
 )
-from routers.import_runs import router as import_runs_router
 from routers.uploads import delete_asset_row_only
 from url_utils import normalize_import_url
 from version import __version__
@@ -91,7 +89,6 @@ API_ROUTERS = (
     audit_log.router,
     uploads.router,
     imports.router,
-    import_runs_router,
     asset_files.router,
     assets.router,
     folders.router,
@@ -140,8 +137,10 @@ async def lifespan(_app: FastAPI):
         with Session(engine) as session:
             log.info(first_run.startup_notice(session))
     # A row left `running` belongs to a previous process that died before it
-    # could finish. This runs before the mount thread, so it cannot catch ours.
-    import_runs.mark_interrupted()
+    # could finish. The repair is `operations_runner.resume_on_startup()` below,
+    # after `run_migrations` and BEFORE the mount import is submitted: a mount
+    # import caught `running` is failed with `error="interrupted"` there, and
+    # because it runs first it cannot catch this boot's own row.
     # Operations (Mf-5t30): repair rows a previous process left `running`, then
     # start the coordinator thread when the background runner is enabled. Both
     # run after the two boot guards and `run_migrations`, so the operations
@@ -167,7 +166,12 @@ async def lifespan(_app: FastAPI):
     threading.Thread(target=reconcile_thumb_versions, daemon=True).start()
     threading.Thread(target=backfill_prepared_print_metadata, daemon=True).start()
     if mount_import_should_run():
-        threading.Thread(target=scan_mount_imports, daemon=True).start()
+        # After `run_migrations` and after `operations_runner.resume_on_startup()`
+        # above, so the tables exist and a crashed row is repaired before this
+        # boot's row is submitted. A daemon thread because the submit and the walk
+        # must never block the lifespan, the same reason the deleted mount thread
+        # was one.
+        threading.Thread(target=operations_runner.start_mount_import, daemon=True).start()
     # Unconditional, unlike the snapshot scheduler: expired and long-revoked
     # session rows are dead weight that must not accumulate, and there is no
     # deployment that wants them kept. The stop event is ours so the thread

@@ -63,6 +63,20 @@ const namedGroups = (count: number): OperationReview["groups"] =>
     models: 19,
   }));
 
+/** The one step a `mount-import` operation plans, carrying the report the walk
+ *  writes: the fields each done-line case reads are overridden per test. */
+function mountImportStep(result: Record<string, unknown> | null): OperationStep {
+  return {
+    index: 0,
+    op: "mount-import",
+    status: "done",
+    result,
+    error: null,
+    started_at: null,
+    finished_at: null,
+  };
+}
+
 /** One finished operation, with the create step the runner wrote. */
 function doneOperation(status: string, name: string | null): OperationStep[] {
   return [
@@ -352,6 +366,19 @@ describe("operationStatusLine / stepLine", () => {
     expect(operationStatusLine(step("register", "pending"))).toBe(
       "waiting to register the files",
     );
+
+    expect(operationStatusLine(step("mount-import", "done"))).toBe(
+      "walked the mounted folder and registered what it holds",
+    );
+    expect(operationStatusLine(step("mount-import", "running"))).toBe(
+      "walking the mounted folder\u2026",
+    );
+    expect(operationStatusLine(step("mount-import", "failed"))).toBe(
+      "the mounted folder could not be walked",
+    );
+    expect(operationStatusLine(step("mount-import", "pending"))).toBe(
+      "waiting to walk the mounted folder",
+    );
   });
 
   it("shows an unknown op's two tokens verbatim rather than inventing a word", () => {
@@ -449,6 +476,12 @@ describe("actionLabel", () => {
       projects: [{ name: "Tower", root: "import/Tower", members: 20 }],
     });
     expect(actionLabel("extract-and-create", target)).toBe(extractActionLabel(target));
+  });
+
+  it("labels the mount import by the folder it walks, not by a count", () => {
+    expect(actionLabel("mount-import", review({ workflow: "mount-import", target: "/mnt/models" }))).toBe(
+      "Walk the mounted folder",
+    );
   });
 
   it("labels library-scan for the whole library or one folder", () => {
@@ -737,6 +770,56 @@ describe("doneLine per workflow", () => {
     );
   });
 
+  it("reads the walk's own report, including a skip and a walk that counted nothing", () => {
+    const walked = makeOperation({
+      workflow: "mount-import",
+      steps: [mountImportStep({ outcome: "registered", registered: 4, failed: 0 })],
+    });
+    expect(doneLine("mount-import", walked, null)).toBe(
+      "Done: registered 4 files from the mounted folder.",
+    );
+
+    const partly = makeOperation({
+      workflow: "mount-import",
+      steps: [mountImportStep({ outcome: "registered", registered: 1, failed: 2 })],
+    });
+    expect(doneLine("mount-import", partly, null)).toBe(
+      "Done: registered 1 file, 2 files could not be read.",
+    );
+
+    const empty = makeOperation({
+      workflow: "mount-import",
+      steps: [mountImportStep({ outcome: "registered", registered: 0, failed: 0 })],
+    });
+    expect(doneLine("mount-import", empty, null)).toBe(
+      "Done: the walk found nothing to register in the mounted folder.",
+    );
+
+    const skipped = makeOperation({
+      workflow: "mount-import",
+      steps: [mountImportStep({ outcome: "skipped", reason: "Mount path is not configured" })],
+    });
+    // The server's reason is rendered verbatim, so nothing is appended to it.
+    expect(doneLine("mount-import", skipped, null)).toBe(
+      "Done: the walk skipped the mounted folder - Mount path is not configured",
+    );
+
+    const skippedSilently = makeOperation({
+      workflow: "mount-import",
+      steps: [mountImportStep({ outcome: "skipped", reason: "" })],
+    });
+    expect(doneLine("mount-import", skippedSilently, null)).toBe(
+      "Done: the walk skipped the mounted folder.",
+    );
+  });
+
+  it("says the walk finished without a report rather than inventing zeros", () => {
+    const unreported = makeOperation({ workflow: "mount-import" });
+    expect(doneLine("mount-import", unreported, null)).toBe(
+      "Done: the walk finished without a report.",
+    );
+  });
+
   it("says only Done for a workflow it does not know", () => {
     expect(doneLine("future-workflow", makeOperation(), null)).toBe("Done.");
   });
@@ -815,6 +898,7 @@ describe("workflowLabel / statusLabel", () => {
     expect(workflowLabel("import-link")).toBe("Import a link");
     expect(workflowLabel("import-zip")).toBe("Import a zip");
     expect(workflowLabel("enrich")).toBe("Enrich from the source page");
+    expect(workflowLabel("mount-import")).toBe("Mounted import");
   });
 
   it("passes an unknown workflow through verbatim", () => {
@@ -843,6 +927,7 @@ describe("stateLine", () => {
     expect(stateLine("library-scan", "queued")).toBe("The scan is queued.");
     expect(stateLine("import-zip", "queued")).toBe("The import is queued.");
     expect(stateLine("enrich", "queued")).toBe("The enrichment is queued.");
+    expect(stateLine("mount-import", "queued")).toBe("The walk is queued.");
   });
 
   it("passes an unknown status through in the workflow's sentence", () => {

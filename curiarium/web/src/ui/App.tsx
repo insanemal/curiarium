@@ -50,7 +50,7 @@ import MissingFilesReviewView from "./review/MissingFilesReviewView";
 import ScanStorageAction from "./review/ScanStorageAction";
 import TrashQueueView from "./review/TrashQueue";
 import { useBundleDetect } from "./review/useBundleDetect";
-import { useImportRuns } from "./review/useImportRuns";
+import { useMountImport } from "./review/useMountImport";
 import { useLibraryScan } from "./review/useLibraryScan";
 import { useReviewCounts } from "./review/useReviewCounts";
 import { resolveQueue } from "./review/queues";
@@ -306,9 +306,10 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
   // being shown controls whose requests the server refuses.
   const canContribute = roleAtLeast(role, "contributor");
   const canDelete = roleAtLeast(role, "editor");
-  // Read is its own capability because the routes differ: `GET /imports/runs`
-  // is require_read, so the Imports running queue is a viewer surface, while a
-  // bundle decision is a contribute. Fail closed: `role` null has neither.
+  // Read is its own capability because the routes differ:
+  // `GET /operations?workflow=mount-import` is require_read, so the Imports
+  // running queue is a viewer surface, while a bundle decision is a contribute.
+  // Fail closed: `role` null has neither.
   const canRead = roleAtLeast(role, "viewer");
   // `permissions.py` declares `("GET", "/trash"): READ` (line ~278) and
   // `("POST", "/trash/purge"): ADMIN` (line ~373), so reading the queue and
@@ -319,8 +320,8 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
 
   // Each queue owns its own data. `enabled` includes `reviewOpen` and the
   // resolved queue key so a fetch happens per entry, not per app load: the app
-  // does not pay a whole-library walk or an import-run read just to paint a
-  // badge, and entering a queue is still exactly one fetch. Every guard and
+  // does not pay a whole-library walk or a ledger read just to paint a badge,
+  // and entering a queue is still exactly one fetch. Every guard and
   // every fetch reads the same derived key, never the stored one: a viewer's
   // stored `bundles` must neither render the bundle queue nor arm its walk.
   const resolvedQueue = resolveQueue(role, activeQueue);
@@ -329,10 +330,11 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
     enabled: canContribute && reviewOpen && resolvedQueue === "bundles",
     onUnauthorized: handleUnauthorized,
   });
-  // The imports queue is armed by READ, not contribute: `GET /imports/runs` is
-  // require_read, and gating it on a write capability would leave a viewer's
-  // queue on "Loading import runs..." forever.
-  const importsReview = useImportRuns({
+  // The imports queue is armed by READ, not contribute: the newest mount-import
+  // row is one `GET /operations?workflow=mount-import` read, and gating it on a
+  // write capability would leave a viewer's queue on "Loading the mount import..."
+  // forever.
+  const importsReview = useMountImport({
     enabled: canRead && reviewOpen && resolvedQueue === "imports",
     onUnauthorized: handleUnauthorized,
   });

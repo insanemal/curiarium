@@ -53,7 +53,6 @@ import asset_service
 import auth
 import bundle_service
 import db
-import import_runs
 import library_scan
 import login_throttle as login_throttle_module
 import main
@@ -71,7 +70,6 @@ from models import (
     Asset,
     AssetFile,
     Folder,
-    ImportRun,
     MfaRecoveryCode,
     Operation,
     OperationLock,
@@ -189,7 +187,6 @@ class Ids:
     storage_template: str = ""
     mount_enabled: bool = False
     mount_copy: bool = False
-    import_run_id: str = ""
 
 
 # --- harness ----------------------------------------------------------------
@@ -266,7 +263,6 @@ def isolated_storage(tmp_path, monkeypatch: pytest.MonkeyPatch):
         folders_before = {folder.id for folder in session.exec(select(Folder))}
         assets_before = {asset.id for asset in session.exec(select(Asset))}
         projects_before = {project.id for project in session.exec(select(Project))}
-        runs_before = {run.id for run in session.exec(select(ImportRun))}
 
     yield storage
 
@@ -285,9 +281,6 @@ def isolated_storage(tmp_path, monkeypatch: pytest.MonkeyPatch):
                 row.value = value
         session.commit()
     with Session(engine) as session:
-        for run in list(session.exec(select(ImportRun))):
-            if run.id not in runs_before:
-                session.delete(run)
         # Projects first: the tables are new and the name index is case-
         # insensitive, so a leaked row would 409 the next test's seed.
         for membership in list(session.exec(select(ProjectAsset))):
@@ -423,7 +416,6 @@ def ids(client: TestClient) -> Ids:
     editor_session = login(client, EDITOR_USERNAME, EDITOR_PASSWORD)
     viewer_session = login(client, VIEWER_USERNAME, VIEWER_PASSWORD)
     contributor_session = login(client, CONTRIBUTOR_USERNAME, CONTRIBUTOR_PASSWORD)
-    run_id = import_runs.skip_run("/seed-mount", "copy", "seeded for the permission sweep")
     return replace(
         seed_library(client, bearer(admin_session["token"])),
         admin_token=admin_session["token"],
@@ -436,7 +428,6 @@ def ids(client: TestClient) -> Ids:
         editor_id=editor["id"],
         contributor_id=contributor["id"],
         viewer_id=viewer["id"],
-        import_run_id=run_id,
     )
 
 
@@ -547,16 +538,6 @@ def call_first_run_setup(client: TestClient, headers: dict[str, str], ids: Ids, 
         json={"username": "first-admin", "password": "correct horse battery staple", "confirm_password": "correct horse battery staple"},
         headers=headers,
     )
-
-
-def call_list_import_runs(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    return client.get("/imports/runs", headers=headers)
-
-
-def call_import_run_detail(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    # The anonymous/disabled seeds have no run row; their request is refused (or
-    # the placeholder is a 404) before the id is looked up.
-    return client.get(f"/imports/runs/{ids.import_run_id or PLACEHOLDER_USER_ID}", headers=headers)
 
 
 def call_file(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
@@ -1224,8 +1205,6 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/upload"): call_upload,
     ("POST", "/import/inspect"): call_import_inspect,
     ("POST", "/import/zip/entries"): call_import_zip_entries,
-    ("GET", "/imports/runs"): call_list_import_runs,
-    ("GET", "/imports/runs/{run_id}"): call_import_run_detail,
     ("POST", "/asset/{asset_id}/files"): call_upload_supporting_file,
     ("DELETE", "/asset/{asset_id}/files/{file_id}"): call_delete_supporting_file,
     ("PATCH", "/asset/{asset_id}/files/{file_id}"): call_rename_supporting_file,
@@ -1310,8 +1289,6 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     # caller in the sweeps because no spec targets a live session.
     ("GET", "/me/sessions"): 200,
     ("DELETE", "/me/sessions/{session_id}"): 404,
-    ("GET", "/imports/runs"): 200,
-    ("GET", "/imports/runs/{run_id}"): 200,
     # Mf-1zmd: the archive is not in the library, so both doors answer the honest
     # 404 without reading or writing anything.
     ("GET", "/file/{asset_id}/{name}"): 200,
@@ -1532,7 +1509,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 100 routes - 11 public / 37 read / 22 contribute / 12 write / 18 admin.
+    """The matrix is pinned at 98 routes - 11 public / 35 read / 22 contribute / 12 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1553,16 +1530,20 @@ def test_the_matrix_is_the_documented_size() -> None:
     POST /import/project and POST /import/archive (both contribute) and
     GET /import/archive/entries (read), so the total fell 104 -> 101, read
     38 -> 37 and contribute 25 -> 23. Part 4/4 deleted POST /bundles/enrich
-    (contribute), so the total fell 101 -> 100 and contribute 23 -> 22.
+    (contribute), so the total fell 101 -> 100 and contribute 23 -> 22. Mf-i9ko
+    deleted the two `import_run` reads (GET /imports/runs and
+    GET /imports/runs/{run_id}): the mount import is a `mount-import` operation
+    row now, read through GET /operations. So the total fell 100 -> 98 and read
+    37 -> 35.
     """
     counts = {
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 100, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 98, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 37,
+        permissions.READ: 35,
         permissions.CONTRIBUTE: 22,
         permissions.WRITE: 12,
         permissions.ADMIN: 18,

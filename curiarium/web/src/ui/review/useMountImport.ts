@@ -5,7 +5,7 @@ import React from "react";
 // would throw "No export is defined on the mock". `useBundleDetect` sets the
 // same precedent.
 import { UnauthorizedError } from "../../lib/api/http";
-import { getImportRun, getImportRuns, type ImportRunDetail } from "../../lib/api/settings";
+import { getMountImportStatus, type MountImportStatus } from "../../lib/api/settings";
 
 type Props = {
   /** Whether the imports queue is open. Never gates a poll already in flight. */
@@ -13,17 +13,20 @@ type Props = {
   onUnauthorized?: () => void;
 };
 
-export type ImportRunsState = {
-  run: ImportRunDetail | null;
+export type MountImportState = {
+  /** The newest `mount-import` operation, as the ledger words it - or null
+   *  before the first read. A ledger with no such row answers the empty status,
+   *  so null never means "no walk has happened". */
+  status: MountImportStatus | null;
   /** The first fetch of this activation is still pending. */
   loading: boolean;
   /** A refresh the operator asked for is in flight. Background polls do not
-   *  set it: a run that polls every 1.5s must not flicker the Refresh button
+   *  set it: a walk that polls every 1.5s must not flicker the Refresh button
    *  disabled for the whole time it walks the mount. */
   refreshing: boolean;
   /**
-   * At least one successful fetch. `run === null` alone cannot tell "never
-   * fetched / the first fetch failed" from "no run has ever happened", and the
+   * At least one successful fetch. `status === null` alone cannot tell "never
+   * fetched / the first fetch failed" from "the ledger holds no walk", and the
    * sidebar badge needs that difference to decide between `–` and `0`.
    */
   loaded: boolean;
@@ -35,12 +38,12 @@ export type ImportRunsState = {
 const POLL_MS = 1500;
 
 /**
- * The latest mounted-import run, with per-file errors. The list endpoint has no
- * detail payload, so a refresh asks for the newest page and then fetches that
- * run by id.
+ * The newest mounted import, read off the shared operations ledger. One read is
+ * the whole record: the row carries the operation's status and its single
+ * step's report, so there is no detail call to follow the list.
  *
  * The queue owns the hook, so it does nothing until the imports queue is open,
- * fetches once per activation and then polls only while the newest run is
+ * fetches once per activation and then polls only while the newest row is
  * actually walking the mount. Three rules keep that honest:
  *
  * - Two refs with two jobs. `walked` guards the per-activation entry fetch
@@ -51,13 +54,13 @@ const POLL_MS = 1500;
  * - The newest request wins. Every refresh takes a sequence number and only the
  *   one still holding it may write state.
  * - `pollTick` keeps the poll chain alive. The timer effect depends on both the
- *   run's identity and that counter, so a failed poll - which changes no run -
+ *   row's identity and that counter, so a failed poll - which changes no row -
  *   still re-arms the chain instead of dying with a badge stuck at 1.
  *
  * A failure becomes an error string; nothing here throws out of the hook.
  */
-export function useImportRuns({ enabled, onUnauthorized }: Props): ImportRunsState {
-  const [run, setRun] = React.useState<ImportRunDetail | null>(null);
+export function useMountImport({ enabled, onUnauthorized }: Props): MountImportState {
+  const [status, setStatus] = React.useState<MountImportStatus | null>(null);
   const [refreshing, setRefreshing] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -78,20 +81,9 @@ export function useImportRuns({ enabled, onUnauthorized }: Props): ImportRunsSta
     const id = ++seq.current;
     if (!background) setRefreshing(true);
     try {
-      const list = await getImportRuns(1, 0);
+      const next = await getMountImportStatus();
       if (id !== seq.current) return;
-      const latest = list.runs[0];
-      if (!latest) {
-        setRun(null);
-        setLoaded(true);
-        setError(null);
-        setLastRefreshedAt(Date.now());
-        setPollTick(tick => tick + 1);
-        return;
-      }
-      const detail = await getImportRun(latest.id);
-      if (id !== seq.current) return;
-      setRun(detail);
+      setStatus(next);
       setLoaded(true);
       setError(null);
       setLastRefreshedAt(Date.now());
@@ -105,8 +97,8 @@ export function useImportRuns({ enabled, onUnauthorized }: Props): ImportRunsSta
         onUnauthorized?.();
         return;
       }
-      setError("Import run history is unavailable.");
-      // The next poll must survive a failure that changed no run state.
+      setError("The mount import status is unavailable.");
+      // The next poll must survive a failure that changed no row state.
       setPollTick(tick => tick + 1);
     } finally {
       if (id === seq.current && !background) setRefreshing(false);
@@ -134,16 +126,18 @@ export function useImportRuns({ enabled, onUnauthorized }: Props): ImportRunsSta
 
   React.useEffect(() => {
     if (!armed.current) return;
-    // Nothing to poll unless the newest run is still walking the mount.
-    if (run?.status !== "running") return;
+    // Nothing to poll unless the newest row is still walking the mount. The
+    // rule is the derived status's, not this effect's, so the badge and the
+    // poll cannot disagree about what "running" means.
+    if (status?.running !== true) return;
     const timer = window.setTimeout(() => void load(true), POLL_MS);
     return () => window.clearTimeout(timer);
-  }, [run, pollTick, load]);
+  }, [status, pollTick, load]);
 
   return {
-    run,
+    status,
     // Before the first successful fetch there is nothing to show yet, so report
-    // the pending state rather than flashing "no run has ever happened". A
+    // the pending state rather than flashing "no walk has ever happened". A
     // failed first fetch clears it for the retryable error instead.
     loading: enabled && !loaded && error === null,
     refreshing,

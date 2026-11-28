@@ -31,6 +31,12 @@ not accepted:
 * **retention** - 205 old + 3 young terminal rows and 1 queued row: exactly 5 go,
   the queued row survives, and the pruned operation's audit row still answers
   `GET /audit?target=<id>`.
+* **the boot's mount import** - the walk the server submits at boot is ONE
+  operation row in the shared queue, submitted by `system`, offering no undo; its
+  counters, mode, root, errors and skip reason are its step result (what the
+  deleted `/imports/runs` surface used to answer); a client cannot plan it, and a
+  row a crash left `running` is repaired by the ledger's own boot recovery and
+  never re-walked.
 
 Auth is disabled in this file (monkeypatched, the same mode `test_permissions_matrix`
 sweeps) because none of these demonstrations is about *who* may call the route -
@@ -56,7 +62,9 @@ from sqlmodel import Session, delete, select
 import audit
 import auth
 import db
+import library_scan
 import main
+import mount_import
 import operations_runner
 import operations_service
 import permissions
@@ -66,6 +74,7 @@ from models import (
     Asset,
     AssetFile,
     AuditEvent,
+    Folder,
     Operation,
     OperationLock,
     OperationStep,
@@ -1185,6 +1194,444 @@ def _operation_row(operation_id: str, status: str, *, created: str, finished: Op
     )
 
 
+# --- the boot's mount import (Mf-i9ko) ---------------------------------------
+#
+# The startup walk is a `mount-import` OPERATION now, not an `import_run` row: the
+# boot submits it (`submitted_by == "system"`, one row per boot) and the runner is
+# the thread the walk used to be. These demonstrations stand where
+# `tests/test_import_runs.py` stood. The fixture below is a COPY of
+# `test_mount_import.py`'s rather than an import of it: the two modules clean up
+# different rows, and a shared fixture would make one module's teardown
+# responsible for the other's.
+
+
+@pytest.fixture
+def mount_and_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A temp mount and a temp storage root, with every row a walk creates removed.
+
+    The walk writes asset AND folder rows into the shared session database, so
+    both are snapshotted and deleted; `library_scan.STORAGE` is patched because
+    copy mode mirrors the mount into the storage root and reads it back.
+    """
+    mount = tmp_path / "mount"
+    storage = tmp_path / "storage"
+    mount.mkdir()
+    storage.mkdir()
+    monkeypatch.setattr(mount_import, "MOUNT_IMPORT_PATH", str(mount))
+    monkeypatch.setattr(mount_import, "MOUNT_IMPORT_EXTS_RAW", "")
+    monkeypatch.setattr(mount_import, "MOUNT_IMPORT_INCLUDE_HIDDEN", False)
+    monkeypatch.setattr(mount_import, "MOUNT_IMPORT_COPY", True)
+    monkeypatch.setattr(mount_import, "MOUNT_IMPORT_ENABLED", True)
+    # The module globals decide, never a leftover row in the shared settings
+    # table: the suite shares one database, and a `mount_import_enabled` /
+    # `mount_import_copy` row another module wrote would silently decide both
+    # the mode and whether the boot submits at all (which is what
+    # `mount_import_should_run()` asks, and it is consulted by a real lifespan).
+    monkeypatch.setattr(mount_import, "get_mount_import_copy", lambda default: default)
+    monkeypatch.setattr(mount_import, "get_mount_import_enabled", lambda default: default)
+    monkeypatch.setattr(library_scan, "STORAGE", storage)
+
+    with Session(engine) as session:
+        asset_ids_before = {asset.id for asset in session.exec(select(Asset))}
+        folder_ids_before = {folder.id for folder in session.exec(select(Folder))}
+    yield mount, storage
+    with Session(engine) as session:
+        for asset in list(session.exec(select(Asset))):
+            if asset.id not in asset_ids_before:
+                session.delete(asset)
+        for folder in list(session.exec(select(Folder))):
+            if folder.id not in folder_ids_before:
+                session.delete(folder)
+        session.commit()
+
+
+def _write_mount(mount: Path, relative: str, payload: bytes = b"solid part\nendsolid part\n") -> Path:
+    """Put one file under the temp mount."""
+    path = mount / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return path
+
+
+def _mount_import_rows() -> list[Operation]:
+    """Every `mount-import` row in the ledger, oldest first."""
+    with Session(engine) as session:
+        statement = (
+            select(Operation)
+            .where(Operation.workflow == "mount-import")
+            .order_by(Operation.created_at, Operation.id)
+        )
+        return list(session.exec(statement))
+
+
+def _steps_of(operation_id: str) -> list[OperationStep]:
+    """One operation's steps, in step order."""
+    with Session(engine) as session:
+        statement = (
+            select(OperationStep)
+            .where(OperationStep.operation_id == operation_id)
+            .order_by(OperationStep.step_index)
+        )
+        return list(session.exec(statement))
+
+
+def _library_rows() -> tuple[set, set]:
+    """Every asset's (id, storage path) and every folder id: what a walk writes."""
+    with Session(engine) as session:
+        assets = {(asset.id, asset.storage_path) for asset in session.exec(select(Asset))}
+        folders = {folder.id for folder in session.exec(select(Folder))}
+    return assets, folders
+
+
+def _run_mount_import() -> Operation:
+    """Submit the boot's walk and run it inline, the way a boot without a pool does.
+
+    `operations_runner.run_operation` and not `dispatch_once`: the pool is off in
+    the suite, so this is the same inline fallback `start_mount_import` takes.
+    """
+    operation, created = operations_service.submit_mount_import()
+    assert created is True, "the boot's submit answered an existing row instead of making one"
+    operations_runner.run_operation(operation.id)
+    return operation
+
+
+def test_a_mount_import_leaves_one_operation_row_with_its_counters(
+    client: TestClient, mount_and_storage
+) -> None:
+    """The walk's whole answer is ONE operation row, and the queue is where it is read.
+
+    `test_import_runs.py::test_real_run_persists_counters_and_errors`, re-homed:
+    the counters, the mode, the resolved root and the errors used to be an
+    `import_run` row served by `GET /imports/runs`, and they are the
+    `mount-import` operation's step result now. False states caught: a submit that
+    leaves a second row (a boot that walked twice per boot), a row whose
+    submitter reads blank (the walk would be attributable to nobody), a step
+    result missing a counter or the mode (the browser's counts line would be
+    blank), and a `?workflow=` filter that answered the whole page instead of the
+    workflow's rows.
+    """
+    mount, _storage = mount_and_storage
+    _write_mount(mount, "widget/part.stl")
+    # A `.txt` is not in `DEFAULT_MOUNT_IMPORT_EXTS`, so the walk counts it
+    # `ignored`: the numbers below are the walk's own, not a hand-typed guess.
+    _write_mount(mount, "widget/notes.txt", b"prose\n")
+
+    empty = client.get("/operations", params={"workflow": "mount-import"})
+    assert empty.status_code == 200, empty.text
+    assert empty.json() == [], "the queue listed a mount import before any walk submitted one"
+
+    operation = _run_mount_import()
+
+    rows = _mount_import_rows()
+    assert [row.id for row in rows] == [operation.id], "one boot's walk left more than one row"
+    row = rows[0]
+    assert row.status == operations_service.STATUS_DONE
+    assert row.submitted_by == "system"
+    assert row.submitted_by_id is None
+    assert row.undo_state == operations_service.UNDO_NONE
+    assert row.target == str(mount)
+
+    steps = _steps_of(operation.id)
+    assert [(step.step_index, step.op, step.status) for step in steps] == [
+        (0, "mount-import", operations_service.STEP_DONE)
+    ]
+    result = json.loads(steps[0].result_json)
+    assert result["outcome"] == "registered"
+    assert result["mode"] == "copy"
+    assert result["root"] == str(mount.resolve())
+    assert {key: result[key] for key in ("registered", "known", "ignored", "failed")} == {
+        "registered": 1,
+        "known": 0,
+        "ignored": 1,
+        "failed": 0,
+    }
+    assert result["rejected"] == 0
+    assert result["errors"] == []
+    assert result["discovered"] == 2
+
+    # The browser reads the counters off the WIRE, so the row is not the contract
+    # on its own: the list route has to serve the same numbers.
+    listed = client.get("/operations", params={"workflow": "mount-import"})
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert [entry["id"] for entry in body] == [operation.id]
+    wire = body[0]
+    assert wire["workflow"] == "mount-import"
+    assert wire["status"] == "done"
+    assert wire["submitted_by"] == "system"
+    assert wire["undo_state"] == "none"
+    assert wire["steps"][0]["result"]["registered"] == 1
+    assert wire["steps"][0]["result"]["known"] == 0
+    assert wire["steps"][0]["result"]["ignored"] == 1
+    assert wire["steps"][0]["result"]["failed"] == 0
+    assert wire["steps"][0]["result"]["errors"] == []
+
+
+def test_a_skipped_mount_import_is_one_done_row_whose_step_names_the_reason(
+    mount_and_storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mount the server refuses to walk is an ANSWER: done, with the reason on the step.
+
+    `test_import_runs.py::test_skip_paths_are_recorded_with_reasons`, re-homed: the
+    three pre-walk refusals - a mount path that does not exist, reference mode with
+    the mount being the storage root, and a mount that is `inside` the storage root
+    - were three `skipped` run rows with a mandatory reason. They are three `done`
+    operations whose step result says `outcome: "skipped"` and carries the reason
+    verbatim. False states caught: a refusal that FAILS the operation (a
+    configured-but-unusable mount is not a runtime error for the operator to fix),
+    a refusal that leaves the row `running` or `queued` (a queue entry nobody can
+    clear), and a reason lost between the walk and the wire.
+    """
+    mount, storage = mount_and_storage
+    cases = (
+        (str(mount / "missing"), True, None, f"mount path not found: {mount / 'missing'}"),
+        (
+            str(storage),
+            False,
+            "reference",
+            "reference mode needs a source outside the storage root",
+        ),
+        (
+            str(storage.parent),
+            False,
+            "reference",
+            f"the mount {storage.parent.resolve()} is inside the storage root {storage.resolve()}",
+        ),
+    )
+
+    submitted: list[str] = []
+    for path, copy_files, _mode, _reason in cases:
+        monkeypatch.setattr(mount_import, "MOUNT_IMPORT_PATH", path)
+        monkeypatch.setattr(mount_import, "MOUNT_IMPORT_COPY", copy_files)
+        submitted.append(_run_mount_import().id)
+
+    rows = _mount_import_rows()
+    assert [row.id for row in rows] == submitted
+    assert [row.status for row in rows] == [operations_service.STATUS_DONE] * 3, (
+        "a refused walk must be a done operation, never a failed one and never a row left in flight"
+    )
+    assert [row.error for row in rows] == [None, None, None]
+
+    for row, (_path, _copy_files, mode, reason) in zip(rows, cases, strict=True):
+        result = json.loads(_steps_of(row.id)[0].result_json)
+        assert result["outcome"] == "skipped"
+        assert result["reason"] == reason
+        assert result["mode"] == mode
+        assert result["registered"] == 0
+
+
+def test_no_configured_mount_submits_nothing(
+    mount_and_storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Out of the box nothing configures a mount, and then a boot queues no work at all.
+
+    `test_import_runs.py::test_no_mount_path_writes_nothing`, re-homed onto the
+    queue. False state caught: a boot that submits a `mount-import` row whatever
+    the configuration says - every deployment without a mount would grow one row
+    per boot, all of them skips, and the queue would be where that noise lived.
+    """
+    monkeypatch.setattr(mount_import, "MOUNT_IMPORT_PATH", "")
+    assert _mount_import_rows() == []
+
+    assert operations_runner.start_mount_import() is None
+
+    assert _mount_import_rows() == [], "a boot with no configured mount queued a walk"
+
+
+def test_an_aborted_mount_import_fails_the_step_with_the_reason_and_its_counters(
+    mount_and_storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An aborted walk keeps its answer, because a failed step has nowhere else to put it.
+
+    `test_import_runs.py::test_aborted_run_is_failed_with_reason`, re-homed and
+    strengthened: the reason alone is not the answer. A step result is written
+    only on success, so the counters the walk reached before it threw travel in
+    the message (`"<exc> (after N registered, M known, ...)"`) - without them the
+    operator learns that a walk died and nothing about what it already wrote.
+    False state caught: a runner that records `str(exc)` alone and loses every
+    counter the aborted run had reached.
+    """
+    mount, _storage = mount_and_storage
+    _write_mount(mount, "widget/part.stl")
+
+    def explode(plan, state=None):
+        state.registered = 5
+        state.known = 2
+        raise RuntimeError("walk exploded")
+
+    monkeypatch.setattr(mount_import, "register_tree", explode)
+    operation = _run_mount_import()
+
+    row = _mount_import_rows()[0]
+    assert row.status == operations_service.STATUS_FAILED
+    step = _steps_of(operation.id)[0]
+    assert step.status == operations_service.STEP_FAILED
+    assert "walk exploded" in step.error
+    assert "after 5 registered, 2 known" in step.error
+    assert row.error == step.error
+
+
+def test_a_client_cannot_plan_the_mount_import(client: TestClient) -> None:
+    """The walk is the SERVER's, and its absence from `WORKFLOWS` is what makes that true.
+
+    Why this matters: a mount import walks a path read from configuration and
+    registers (and, in copy mode, copies) whatever it finds there. If a client
+    could name the workflow, `POST /operations/plan` would let it choose the
+    target - the one capability this workflow must never become - so `WORKFLOWS`
+    is the gate and `build_plan`/`decode_plan_id` are its two readers. False
+    states caught: the workflow added to `WORKFLOWS` "to make the row first class"
+    (which would hand every contributor a whole-filesystem import), and a planner
+    reachable through the plan route while `WORKFLOWS` still refused it.
+    """
+    refused = client.post("/operations/plan", json={"workflow": "mount-import", "target": "/tmp"})
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"] == "unknown workflow 'mount-import'"
+
+    # The seam the route calls, so the refusal is pinned where it is decided rather
+    # than only where it is published.
+    with Session(engine) as session, pytest.raises(HTTPException) as excinfo:
+        operations_service.build_plan(session, "mount-import", "/tmp")
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "unknown workflow 'mount-import'"
+
+    assert "mount-import" not in operations_service.WORKFLOWS
+    # The nine plan-able workflows, unchanged: the boot's walk is not the tenth.
+    assert set(operations_service.WORKFLOWS) == {
+        "create-project",
+        "split-and-create",
+        "adopt",
+        "extract-and-create",
+        "extract",
+        "library-scan",
+        "import-link",
+        "import-zip",
+        "enrich",
+    }
+
+
+def test_a_service_submitted_operation_is_in_the_one_queue_and_offers_no_undo(
+    client: TestClient, mount_and_storage
+) -> None:
+    """One ledger, one visibility rule, and an Undo the server can actually honour.
+
+    The row is not hidden: `GET /operations` is read, so every role sees the boot's
+    walk next to their own queued work, named by its workflow and its submitter.
+    What is refused is the undo - a mount import's undo would delete the rows AND
+    the copied bytes it wrote, a delete workflow at WRITE that no ticket owns - so
+    `undo_state` stays `none` and the route answers 409. False states caught: a
+    system row hidden behind a second visibility rule on a shared ledger, and a
+    `done` mount import advertising an Undo whose body would have to be invented.
+    """
+    mount, _storage = mount_and_storage
+    _write_mount(mount, "widget/part.stl")
+    operation = _run_mount_import()
+
+    listed = client.get("/operations")
+    assert listed.status_code == 200, listed.text
+    entry = next((row for row in listed.json() if row["id"] == operation.id), None)
+    assert entry is not None, "the boot's walk was hidden from the one queue"
+    assert entry["workflow"] == "mount-import"
+    assert entry["submitted_by"] == "system"
+    assert entry["undo_state"] == "none"
+
+    undone = client.post(f"/operations/{operation.id}/undo")
+    assert undone.status_code == 409, undone.text
+    assert undone.json()["detail"] == "this operation changed nothing that can be undone"
+
+    assert operation_of(client, operation.id)["undo_state"] == "none"
+
+
+def _await_second_mount_import(
+    old_id: str, timeout: float = 15.0
+) -> tuple[Operation, Operation]:
+    """Wait for the boot's own row to reach a terminal status; return (old, new).
+
+    The boot submits on a daemon thread, so the second row arrives after the
+    lifespan has already returned - polling up to `timeout` is what makes the
+    assertion about a state the thread reached rather than about a race it won.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = _mount_import_rows()
+        old = next((row for row in rows if row.id == old_id), None)
+        newer = [row for row in rows if row.id != old_id]
+        if old is not None and len(newer) == 1 and newer[0].status in operations_service.TERMINAL_STATUSES:
+            return old, newer[0]
+        time.sleep(0.02)
+    raise AssertionError(
+        "the boot never submitted its own mount import: "
+        f"{[(row.id, row.status) for row in _mount_import_rows()]}"
+    )
+
+
+def test_the_boot_repair_fails_a_mount_import_caught_running_and_never_repeats_it(
+    client: TestClient, mount_and_storage
+) -> None:
+    """A walk a crash interrupted is REPAIRED, and the next boot's walk is a separate row.
+
+    `test_import_runs.py::test_mark_interrupted_turns_stale_running_rows`, re-homed
+    onto the ledger's own recovery: `main.py` no longer calls
+    `import_runs.mark_interrupted()`, and `operations_runner.resume_on_startup()`
+    runs in the lifespan after `run_migrations` and BEFORE the mount import is
+    submitted, so it repairs the previous process's row and can never catch this
+    boot's own row.
+
+    Four false states caught: a stale `running` row left un-repaired (a queue entry
+    stuck in flight forever), the repaired step RE-RUN (it may have half-written
+    the library, so it is failed, never repeated), this boot's submit ANSWERING the
+    repaired row instead of walking again (a startup import that stops importing),
+    and a second walk that duplicated rows instead of recognising the files it
+    already registered - `registered == 0, known == 2` is the idempotency proof.
+    """
+    mount, _storage = mount_and_storage
+    _write_mount(mount, "widget/part.stl")
+    _write_mount(mount, "widget/other.stl")
+    first = _run_mount_import()
+    assert operation_of(client, first.id)["status"] == "done"
+    library_before = _library_rows()
+
+    # The crash shape: the process died INSIDE the walk, so the step may have run.
+    with Session(engine) as session:
+        stored = session.get(Operation, first.id)
+        stored.status = operations_service.STATUS_RUNNING
+        stored.finished_at = None
+        stored.undo_state = operations_service.UNDO_NONE
+        stored.error = None
+        session.add(stored)
+        step = session.exec(
+            select(OperationStep).where(OperationStep.operation_id == first.id)
+        ).one()
+        step.status = operations_service.STEP_RUNNING
+        step.result_json = None
+        step.started_at = _iso(0)
+        step.finished_at = None
+        session.add(step)
+        session.commit()
+
+    # A FRESH lifespan is the boot: the repair runs inside it, before the submit.
+    with TestClient(main.app):
+        pass
+
+    old, new = _await_second_mount_import(first.id)
+
+    assert old.status == operations_service.STATUS_FAILED
+    assert "interrupted" in old.error
+    repaired = _steps_of(old.id)[0]
+    assert repaired.status == operations_service.STEP_FAILED
+    assert repaired.error == "interrupted"
+    assert repaired.result_json is None, "the repaired walk was re-run"
+    assert _library_rows() == library_before, "the repair re-walked the mount"
+
+    assert new.id != old.id
+    assert new.submitted_by == "system"
+    assert new.status == operations_service.STATUS_DONE
+    walked = json.loads(_steps_of(new.id)[0].result_json)
+    assert walked["registered"] == 0, "the second walk registered files the first one already had"
+    assert walked["known"] == 2
+
+    assert len(audit_rows(audit.OPERATION_FAILED, old.id)) == 1
+
+
 # --- audit and permissions ---------------------------------------------------
 
 
@@ -1311,6 +1758,13 @@ def test_the_workflow_level_table_is_the_owner_rubric() -> None:
         # bounded work in the planner: `LIBRARY_SCAN_COOLDOWN_SECONDS` bounds the
         # whole-root case and a scoped target bounds the folder case.
         "library-scan": permissions.CONTRIBUTE,
+        # The rubric's answer again (Mf-i9ko): the boot's mount import removes
+        # nothing either. The row is not decoration even though the workflow is
+        # deliberately absent from `WORKFLOWS` - it is what
+        # `level_for_workflow`/`authorize_workflow` resolve for CANCEL and UNDO on
+        # an existing row, so a contributor may stop a walk exactly as they may
+        # stop a scan, and undo is `none` (`NO_UNDO_WORKFLOWS`).
+        "mount-import": permissions.CONTRIBUTE,
     }
 
 

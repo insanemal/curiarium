@@ -245,7 +245,7 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 100 routes, 41
+out of scope by construction: they change nothing. The matrix has 98 routes, 39
 of them `GET`; the remaining 59 split into 44 audited keys and 15 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
@@ -333,13 +333,19 @@ commits in its own session.
 
 **Scan and mount import write no per-asset rows.** A scan is now an operation, so
 its own record is the operation row plus the `operation.submit`/`operation.done`
-rows the ledger writes for any workflow; a mounted import is background work with
-no route and no actor - the same reason the scheduler's `snapshot.schedule.skipped`
-and `snapshot.schedule.failed` are actions without a route - and its `import_run`
-row records the batch. Neither writes a row per registered file: a 100k-file scan
-inside one batch would flood an append-only log. What records the individual file
-is the `created_via` column: it reads `scan` or `mount-import` on every row those
-paths write, so the asset itself still says which door it came through.
+rows the ledger writes for any workflow; a mounted import is a `mount-import`
+operation the server submits at boot (`submitted_by: "system"`, `submitted_by_id`
+NULL) and the operations runner executes, so it writes the same ledger rows -
+`operation.submit` under the boot's `system` principal, then `operation.done` or
+`operation.failed` under `operations-runner` - with no request behind them, the
+same way the scheduler's `snapshot.schedule.skipped` and
+`snapshot.schedule.failed` are actions with no request to declare them on - and
+its operation row's step result records the batch: status, mode, root, counters,
+bounded per-file errors and the skip reason.
+Neither writes a row per registered file: a 100k-file scan inside one batch
+would flood an append-only log. What records the individual file is the
+`created_via` column: it reads `scan` or `mount-import` on every row those paths
+write, so the asset itself still says which door it came through.
 
 **A create row records that the insert committed, not that the bytes landed.**
 Creation commits before the bytes are streamed, so a mid-stream 413, or a 409 for a

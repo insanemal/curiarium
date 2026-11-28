@@ -20,7 +20,7 @@ import mount_import
 from db import engine
 from library_scan import scan_storage_root
 from migrations import run_migrations
-from models import AppConfig, Asset, AuditEvent, Folder, ImportRun
+from models import AppConfig, Asset, AuditEvent, Folder, Operation
 from settings_service import set_mount_import_enabled
 
 
@@ -93,13 +93,8 @@ def mount_and_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     folders_before = _folder_ids()
     missing_before = {asset.id: asset.missing_since for asset in _asset_rows()}
-    with Session(engine) as session:
-        runs_before = {run.id for run in session.exec(select(ImportRun))}
     yield mount, storage
     with Session(engine) as session:
-        for run in list(session.exec(select(ImportRun))):
-            if run.id not in runs_before:
-                session.delete(run)
         for folder in list(session.exec(select(Folder))):
             if folder.id not in folders_before:
                 session.delete(folder)
@@ -112,9 +107,9 @@ def mount_and_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         session.commit()
 
 
-def _require(state) -> None:
-    """A run that had to start must not have come back as ``None``."""
-    assert state is not None, "the mount import did not run"
+def _require(report) -> None:
+    """The walk had to register: a report that refused instead is a test setup bug."""
+    assert report.outcome == "registered", f"the mount import did not walk: {report.reason}"
 
 
 def _reference_row(mount: Path, rel_path: str) -> Optional[Asset]:
@@ -134,7 +129,7 @@ def test_mount_rows_are_stamped_as_mount_imports_with_no_actor(
     monkeypatch.setattr(mount_import, "MOUNT_IMPORT_COPY", copy_files)
     _write(mount, "a/part.stl")
 
-    _require(mount_import.scan_mount_imports())
+    _require(mount_import.run_mount_import())
 
     rows = [asset for asset in _asset_rows() if asset.filename == "part.stl"]
     assert len(rows) == 1, [asset.filename for asset in rows]
@@ -158,10 +153,10 @@ def test_copy_mode_mirrors_the_mount_tree(mount_and_storage) -> None:
     _write(mount, "a/other.stl")
     _write(mount, "top.stl")
 
-    state = mount_import.scan_mount_imports()
+    report = mount_import.run_mount_import()
 
-    _require(state)
-    assert state.registered == 3
+    _require(report)
+    assert report.registered == 3
     rows = _row_by_storage_path()
     for rel in ("a/b/part.stl", "a/other.stl", "top.stl"):
         assert rel in rows, f"{rel} was not registered"
@@ -190,10 +185,10 @@ def test_reference_mode_registers_rows_without_copying(mount_and_storage, monkey
     _write(mount, "a/other.stl")
     _write(mount, "top.stl")
 
-    state = mount_import.scan_mount_imports()
+    report = mount_import.run_mount_import()
 
-    _require(state)
-    assert state.registered == 3
+    _require(report)
+    assert report.registered == 3
     for rel in ("a/b/part.stl", "a/other.stl", "top.stl"):
         row = _reference_row(mount, rel)
         assert row is not None, f"{rel} was not registered"
@@ -214,7 +209,7 @@ def test_reference_asset_survives_its_source_disappearing(mount_and_storage, mon
     monkeypatch.setattr(mount_import, "MOUNT_IMPORT_COPY", False)
     source = _write(mount, "a/part.stl")
 
-    _require(mount_import.scan_mount_imports())
+    _require(mount_import.run_mount_import())
     row = _reference_row(mount, "a/part.stl")
     assert row is not None
     assert row.missing_since is None
@@ -244,12 +239,12 @@ def test_reimport_registers_nothing(mount_and_storage) -> None:
     _write(mount, "a/other.stl")
     _write(mount, "top.stl")
 
-    _require(mount_import.scan_mount_imports())
+    _require(mount_import.run_mount_import())
     assets = len(_asset_rows())
     folders = len(_folders())
     tree = _tree(storage)
 
-    again = mount_import.scan_mount_imports()
+    again = mount_import.run_mount_import()
 
     _require(again)
     assert again.registered == 0
@@ -266,11 +261,11 @@ def test_reference_reimport_registers_nothing(mount_and_storage, monkeypatch) ->
     _write(mount, "a/other.stl")
     _write(mount, "top.stl")
 
-    _require(mount_import.scan_mount_imports())
+    _require(mount_import.run_mount_import())
     assets = len(_asset_rows())
     folders = len(_folders())
 
-    again = mount_import.scan_mount_imports()
+    again = mount_import.run_mount_import()
 
     _require(again)
     assert again.registered == 0
@@ -287,11 +282,11 @@ def test_switching_modes_registers_nothing(mount_and_storage, monkeypatch) -> No
 
     # first mode wins: reference rows are not converted by a copy run ...
     monkeypatch.setattr(mount_import, "MOUNT_IMPORT_COPY", False)
-    _require(mount_import.scan_mount_imports())
+    _require(mount_import.run_mount_import())
     assets = len(_asset_rows())
 
     monkeypatch.setattr(mount_import, "MOUNT_IMPORT_COPY", True)
-    switched = mount_import.scan_mount_imports()
+    switched = mount_import.run_mount_import()
 
     _require(switched)
     assert switched.registered == 0
@@ -305,12 +300,12 @@ def test_switching_modes_the_other_way_registers_nothing(mount_and_storage, monk
     _write(mount, "top.stl")
 
     # ... and a copy run is not re-imported as a reference either
-    _require(mount_import.scan_mount_imports())
+    _require(mount_import.run_mount_import())
     assets = len(_asset_rows())
     tree = _tree(storage)
 
     monkeypatch.setattr(mount_import, "MOUNT_IMPORT_COPY", False)
-    switched = mount_import.scan_mount_imports()
+    switched = mount_import.run_mount_import()
 
     _require(switched)
     assert switched.registered == 0
@@ -330,13 +325,13 @@ def test_a_rejected_row_still_fails_only_itself(mount_and_storage, monkeypatch) 
     _forge_name_collision(monkeypatch, "a/part.stl", "a/part.step")
     before = _asset_ids()
 
-    state = mount_import.scan_mount_imports()
+    report = mount_import.run_mount_import()
 
-    _require(state)
-    assert state.registered == 1
-    assert state.failed == 1
-    assert len(state.errors) == 1
-    assert state.errors[0].startswith(("a/part.stl", "a/part.step"))
+    _require(report)
+    assert report.registered == 1
+    assert report.failed == 1
+    assert len(report.errors) == 1
+    assert report.errors[0].startswith(("a/part.stl", "a/part.step"))
     created = [asset for asset in _asset_rows() if asset.id not in before]
     assert len(created) == 1
     assert created[0].storage_path in {"a/part.stl", "a/part.step"}
@@ -349,11 +344,11 @@ def test_hidden_files_and_unlisted_extensions_are_skipped(mount_and_storage) -> 
     _write(mount, "part.stl")
     before = _asset_ids()
 
-    state = mount_import.scan_mount_imports()
+    report = mount_import.run_mount_import()
 
-    _require(state)
-    assert state.registered == 1
-    assert state.ignored == 2
+    _require(report)
+    assert report.registered == 1
+    assert report.ignored == 2
     created = {asset.storage_path for asset in _asset_rows() if asset.id not in before}
     assert created == {"part.stl"}
 
@@ -386,7 +381,9 @@ def test_startup_import_is_opt_in(mount_and_storage, monkeypatch) -> None:
         monkeypatch.setattr(mount_import, "MOUNT_IMPORT_PATH", "")
         assert mount_import.mount_import_should_run() is False
         before = _asset_ids()
-        assert mount_import.scan_mount_imports() is None
+        skipped = mount_import.run_mount_import()
+        assert skipped.outcome == "skipped"
+        assert skipped.mode is None
         assert _asset_ids() == before
 
         # configuring a mount path is the opt-in, and the env default says yes
@@ -410,7 +407,9 @@ def test_reference_mode_refuses_a_mount_inside_storage(mount_and_storage, monkey
     monkeypatch.setattr(mount_import, "MOUNT_IMPORT_PATH", str(inside))
     before = _asset_ids()
 
-    assert mount_import.scan_mount_imports() is None
+    skipped = mount_import.run_mount_import()
+    assert skipped.outcome == "skipped"
+    assert skipped.mode == "reference"
     assert _asset_ids() == before
     assert payload.read_bytes() == b"solid x\n"
 
@@ -425,8 +424,10 @@ def test_copy_mode_refuses_a_mount_that_contains_the_storage_root(mount_and_stor
 
     # copy mode would import the library into itself: storage/foo.stl and a
     # deeper storage/storage/... mirror on every run
-    assert mount_import.scan_mount_imports() is None
+    skipped = mount_import.run_mount_import()
 
+    assert skipped.outcome == "skipped"
+    assert skipped.mode == "copy"
     assert _asset_ids() == before
     assert _tree(storage) == tree
 
@@ -437,10 +438,10 @@ def test_copy_mode_tolerates_the_mount_being_the_storage_root(mount_and_storage,
     monkeypatch.setattr(mount_import, "MOUNT_IMPORT_PATH", str(storage))
     before = _asset_ids()
 
-    state = mount_import.scan_mount_imports()
+    report = mount_import.run_mount_import()
 
-    _require(state)
-    assert state.registered == 1
+    _require(report)
+    assert report.registered == 1
     created = [asset for asset in _asset_rows() if asset.id not in before]
     assert [asset.storage_path for asset in created] == ["part.stl"]
     # the file already lay where it belongs: no copy, no bytes changed
@@ -460,22 +461,22 @@ def test_copy_batch_retry_rematerialises_folders_with_paths(mount_and_storage, m
 
     real_commit = Session.commit
     # a dict, so the closure can count commits without a `nonlocal` declaration;
-    # the first commit is begin_run's run-row transaction, so fail the first
-    # registration batch instead.
+    # the first commit is the first registration batch, because the walk writes no
+    # row of its own before it starts
     calls = {"count": 0}
 
     def flaky_commit(session) -> None:
         calls["count"] += 1
-        if calls["count"] == 2:
+        if calls["count"] == 1:
             raise RuntimeError("database is locked")
         real_commit(session)
 
     monkeypatch.setattr(Session, "commit", flaky_commit)
-    state = mount_import.scan_mount_imports()
+    report = mount_import.run_mount_import()
 
-    _require(state)
-    assert state.registered == 2
-    assert state.failed == 0
+    _require(report)
+    assert report.registered == 2
+    assert report.failed == 0
     rows = _row_by_storage_path()
     for rel in ("a/b/part.stl", "a/other.stl"):
         assert rel in rows, f"{rel} was not registered"
@@ -498,7 +499,7 @@ def test_import_commits_in_batches(mount_and_storage) -> None:
         _write(mount, f"dir-{index // 50:02d}/part-{index:03d}.stl")
 
     with Session(engine) as session:
-        runs_before = {run.id for run in session.exec(select(ImportRun))}
+        operations_before = len(session.exec(select(Operation)).all())
     commits = []
 
     def count_commit(_connection) -> None:
@@ -506,22 +507,22 @@ def test_import_commits_in_batches(mount_and_storage) -> None:
 
     event.listen(engine, "commit", count_commit)
     try:
-        state = mount_import.scan_mount_imports()
+        report = mount_import.run_mount_import()
     finally:
         event.remove(engine, "commit", count_commit)
 
-    _require(state)
-    assert state.registered == total
+    _require(report)
+    assert report.registered == total
     landed = [asset for asset in _asset_rows() if (asset.storage_path or "").startswith("dir-")]
     assert len(landed) == total
-    # one commit per batch, with slack for folder lookups and the two run-row
-    # transactions (begin_run's insert+prune, finish_run's update)
-    assert len(commits) <= ceil(total / library_scan.BATCH_SIZE) + 4
+    # one commit per batch, with slack for folder lookups: the primitive writes no
+    # row of its own, so its only transactions are the batches
+    assert len(commits) <= ceil(total / library_scan.BATCH_SIZE) + 2
+    # The walk's own ledger row is the step's, written by the runner and not by
+    # this primitive, so a walk through the primitive adds no operation row.
     with Session(engine) as session:
-        created_runs = [run for run in session.exec(select(ImportRun)) if run.id not in runs_before]
-    assert len(created_runs) == 1
-    assert created_runs[0].status == "succeeded"
-    assert created_runs[0].registered == total
+        operations_after = len(session.exec(select(Operation)).all())
+    assert operations_after == operations_before
 
 
 def test_counters_do_not_leak_into_library_scan_status(mount_and_storage) -> None:
@@ -532,8 +533,8 @@ def test_counters_do_not_leak_into_library_scan_status(mount_and_storage) -> Non
 
     snapshot = library_scan.scan_status()
 
-    state = mount_import.scan_mount_imports()
+    report = mount_import.run_mount_import()
 
-    _require(state)
-    assert state.registered == 3
+    _require(report)
+    assert report.registered == 3
     assert library_scan.scan_status() == snapshot

@@ -40,6 +40,7 @@ import bundle_service
 import folder_service
 import import_policy
 import library_scan
+import mount_import
 import move_service
 import operations_service
 import project_create_service
@@ -295,9 +296,7 @@ def _finish(session: Session, operation: Operation, status: str) -> None:
     step_count = _count_steps(session, operation_id)
     operation.status = status
     operation.finished_at = operations_service.now()
-    operation.undo_state = (
-        operations_service.UNDO_AVAILABLE if done_count else operations_service.UNDO_NONE
-    )
+    operation.undo_state = operations_service.undo_state_after(workflow, done_count)
     session.exec(delete(OperationLock).where(OperationLock.operation_id == operation_id))
     if status == operations_service.STATUS_DONE:
         operations_service.supersede_overlapping(session, operation)
@@ -341,9 +340,7 @@ def _fail(operation_id: str, step_index: int, exc: Exception) -> None:
         operation.status = operations_service.STATUS_FAILED
         operation.error = error
         operation.finished_at = operations_service.now()
-        operation.undo_state = (
-            operations_service.UNDO_AVAILABLE if earlier_done else operations_service.UNDO_NONE
-        )
+        operation.undo_state = operations_service.undo_state_after(operation.workflow, int(earlier_done))
         session.exec(delete(OperationLock).where(OperationLock.operation_id == operation_id))
         session.add(operation)
         session.commit()
@@ -916,6 +913,23 @@ def _scan(operation_id: str, step_index: int, args: dict) -> dict:
     return state.as_dict()
 
 
+def _mount_import(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `mount-import` step body: `mount_import.run_mount_import`, the walk.
+
+    The mount import is this workflow's whole write, and the runner IS the thread
+    the startup walk used to be: the walk runs inside this step, so the operation
+    row's lifecycle is the walk's lifecycle. It takes no arguments - the config is
+    the input, read at call time by the primitive, because the plan must never
+    touch the disk.
+
+    The result is `MountImportReport.as_dict()` VERBATIM - no extra keys - because
+    that field set is the wire shape the deleted run history published. A skipped
+    mount is a DONE step carrying `outcome: "skipped"` and the reason: the server
+    did what it was asked and refused to walk, which is an answer, not a failure.
+    """
+    return mount_import.run_mount_import().as_dict()
+
+
 def _submitted_by(operation_id: str) -> Optional[str]:
     """The username the operation was submitted by; the human an import belongs to.
 
@@ -1262,6 +1276,9 @@ _STEP_BODIES = {
     # spawned a background thread; the runner IS that thread, so the walk runs
     # inside this step.
     "scan": _scan,
+    # `mount-import` is the boot-submitted workflow's whole write, and the same
+    # fold: the deleted startup thread is this step's body now.
+    "mount-import": _mount_import,
     # `fetch` belongs to `import-link` and `fetch-zip` to `import-zip`: the two
     # deleted ingest doors, whose bodies now run in the runner's thread.
     "fetch": _fetch,
@@ -1284,6 +1301,16 @@ def _execute(operation_id: str, step_index: int, op: str, args: dict) -> dict:
 
 
 # Startup repair ---------------------------------------------------------------
+
+
+def start_mount_import() -> Optional[str]:
+    """Submit the boot's mount import and, without a pool, run it here instead."""
+    if not mount_import.mount_import_should_run():
+        return None
+    operation, created = operations_service.submit_mount_import()
+    if created and not should_run():
+        run_operation(operation.id)
+    return operation.id
 
 
 def resume_on_startup() -> List[str]:
@@ -1356,14 +1383,11 @@ def _fail_interrupted(
         f"{len(pending)} step(s) not started"
     )
     operation.finished_at = operations_service.now()
-    operation.undo_state = (
-        operations_service.UNDO_AVAILABLE
-        if any(
-            step.status == operations_service.STEP_DONE and step.step_index < running.step_index
-            for step in steps
-        )
-        else operations_service.UNDO_NONE
+    earlier_done = any(
+        step.status == operations_service.STEP_DONE and step.step_index < running.step_index
+        for step in steps
     )
+    operation.undo_state = operations_service.undo_state_after(operation.workflow, int(earlier_done))
     session.exec(delete(OperationLock).where(OperationLock.operation_id == operation.id))
     session.add(operation)
     session.commit()
@@ -1383,9 +1407,7 @@ def _repair_terminal(
         operations_service.STATUS_DONE if every_done else operations_service.STATUS_CANCELLED
     )
     operation.finished_at = operations_service.now()
-    operation.undo_state = (
-        operations_service.UNDO_AVAILABLE if any_done else operations_service.UNDO_NONE
-    )
+    operation.undo_state = operations_service.undo_state_after(operation.workflow, int(any_done))
     session.exec(delete(OperationLock).where(OperationLock.operation_id == operation.id))
     session.add(operation)
     session.commit()

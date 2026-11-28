@@ -132,7 +132,7 @@ destination model, the count rule, the role threshold and the fetch policy.
    badge from state the queue already holds - for bundles, the report from
    `useBundleDetect` - and returns a `ReviewCounts` shape that is now closed over
    all four queues: `{ bundles, imports, missing, trash }`, each `number | null`
-   with one source per key - the bundle report, `useImportRuns`, the
+   with one source per key - the bundle report, `useMountImport`, the
    `/assets/counts` read App already performs, and `useTrash`. It is a closed
    type on purpose: a new queue has to be added in one place.
    There is no second fetch for a badge and no per-badge timer. The rule that
@@ -155,7 +155,7 @@ destination model, the count rule, the role threshold and the fetch policy.
 
    The imports count has to decide an unknown of its own. `run === null` cannot
    distinguish "the first fetch failed" from "no run has ever happened", so
-   `useImportRuns` reports a `loaded` flag - at least one **successful** fetch -
+   `useMountImport` reports a `loaded` flag - at least one **successful** fetch -
    and the badge is `null` until then, `1` while the newest run is `running`,
    and `0` once a fetch has succeeded and nothing is running. That is the one
    place this change defines a new meaning for "unknown"; everywhere else the
@@ -200,9 +200,9 @@ destination model, the count rule, the role threshold and the fetch policy.
    The threshold is per row (`minRole` on `QUEUES` in `ui/review/queues.ts`,
    the table `ReviewNav.tsx` used to own), not one gate on the group, because
    the queues' routes differ. `GET
-   /imports/runs` is `require_read`, and a viewer already reads the run history
-   from Settings today; a group-wide contributor gate would have deleted a
-   proven read surface in order to tidy a menu. So "Imports running" is
+   /operations` is `require_read`, and a viewer already read the run history from
+   Settings before this slice; a group-wide contributor gate would have deleted a
+   proven read surface in order to tidy a menu.So "Imports running" is
    `minRole: "viewer"` and "Bundles to confirm" stays `"contributor"`, and a
    role below every row (or an unknown `null` role) renders no group and no
    Review entry at all. Moving the UI broadens no write permission: every
@@ -219,15 +219,15 @@ destination model, the count rule, the role threshold and the fetch policy.
    and the fetch/mutation wiring of its Settings-mounted hook are deleted with the
    new queue in one change, so there is no window in which two survivors poll the
    same report or a dead card lingers behind a menu. The imports slice follows the
-   same rule: the run card, the folder-scan card, `useImportRuns` and
+   same rule: the run card, the folder-scan card, `useMountImport` and
    `useFolderScan` leave `ui/settings/` in the commit that adds the queue, and
    Settings no longer arms either hook (so opening Settings issues no
-   `GET /imports/runs` at all). The API functions stay: they are not Settings
-   code. What remains under the relabelled **Import sources** section is
-   configuration only - the mount-import settings, the remember-cookies
-   preference and the two import-cookie workarounds.
+   `GET /operations?workflow=mount-import` read at all). The API functions stay:
+   they are not Settings code. What remains under the relabelled **Import
+   sources** section is configuration only - the mount-import settings, the
+   remember-cookies preference and the two import-cookie workarounds.
 
-10. **The imports queue polls, and only while a run is walking.** `useImportRuns`
+10. **The imports queue polls, and only while a run is walking.** `useMountImport`
     fetches once per activation of the imports queue - never on app load, and
     never for a queue that is not open - and from then on a 1.5 s timer refetches
     only while the newest run's `status` is `running`; when the run flips to a
@@ -242,7 +242,13 @@ destination model, the count rule, the role threshold and the fetch policy.
     `refresh` early-returns on `!armed` but never on `!enabled`. A request
     sequence makes the newest response win. There is no backoff to tune: the
     mount import is a local read, and a `401` stops the chain and signs the
-    operator out instead of retrying.
+    operator out instead of retrying. The poll reads the ledger's newest
+    `mount-import` operation row, so it carries the walk's status, not its live
+    counters: the ledger writes a step's status and `started_at` before the body
+    and its result after, so while a walk is in flight the row reads `running`
+    and the totals arrive when the step finishes. The panel says exactly that
+    rather than showing a stale zero - the same trade `Mf-gciy` made when
+    `GET /library/scan` was deleted.
 
 11. **Imports states the idle fact and keeps the last run.** When nothing is
     running the queue renders the literal line "No import currently running"
@@ -629,8 +635,9 @@ destination model, the count rule, the role threshold and the fetch policy.
   and the local folder scan are work and live in REVIEW → Imports running.
 - A viewer's REVIEW group has three rows - Imports running, Missing files and
   Trash - because each of those queues is gated at its own READ route. `GET
-  /imports/runs` is `require_read`, so the run history it could already read
-  from Settings moved with the work instead of disappearing; a contributor sees
+  /operations` is `require_read` (the queue reads the newest `mount-import`
+  operation row through it), so the run history it could already read from
+  Settings moved with the work instead of disappearing; a contributor sees
   the same run surface, counters, errors and Refresh, and loses only the folder
   panel, which is hidden below `editor` although both of its calls - create the
   top-level folder (`POST /folders`) and upload the selection (`POST /upload`) -
@@ -738,7 +745,7 @@ destination model, the count rule, the role threshold and the fetch policy.
   pre-update `loadingMore` state and append the same page twice. The StrictMode
   claim this ADR makes is therefore uniform rather than narrower than it sounds:
   the four queue hooks keep their own `walked` refs - `useBundleDetect`,
-  `useImportRuns`, `useLibraryScan` and `useTrash`, each holding its entry read to
+  `useMountImport`, `useLibraryScan` and `useTrash`, each holding its entry read to
   one per activation - and the shared `useAssetList` now does the same. Two
   caveats sit outside that claim: it does not cover the hook's folder-tree read,
   and offset paging is not cursor paging, so a `limit`/`offset` listing can still
@@ -870,21 +877,22 @@ no API, permission, audit, migration or schema change is involved.
   group.
 - `ui/Settings.test.tsx` is the removal proof: for an editor, a contributor and a
   viewer, opening Imports and Import sources renders no bundle surface and no run
-  surface, and makes no request to `GET /bundles/detect` or `GET /imports/runs` -
+  surface, and makes no request to `GET /bundles/detect` or `GET /operations` -
   the call itself, not merely the DOM, because a Settings-mounted hook would
   still fetch behind a card that rendered nothing.
-- `ui/review/useImportRuns.test.tsx` pins the fetch policy the way
+- `ui/review/useMountImport.test.tsx` pins the fetch policy the way
   `useBundleDetect.test.tsx` pins the walk: no poll at all while never enabled
-  (zero calls after ten simulated minutes), one list plus one detail call on
-  entry, exactly one entry fetch under `React.StrictMode`, three 1.5 s ticks
-  while a run is running (three list and three detail calls), no further call
+  (zero calls after ten simulated minutes), one `getMountImportStatus` read on
+  entry (`GET /operations?workflow=mount-import`), exactly one entry fetch under
+  `React.StrictMode`, three 1.5 s ticks while a run is running, no further call
   once the run flips to a finished status, a failed poll that re-arms rather than
   ending the chain, and a superseded response that never paints over a newer one.
-- `ui/review/ImportRunsPanel.test.tsx` covers the states: running counters,
-  succeeded/failed/interrupted/skipped/unknown statuses and their tones, the
-  timing and counts lines, the oversize note, the five-line error cap with
-  "+N more", the idle line above a finished run, the empty history that claims no
-  status, and the retryable error with no run.
+- `ui/review/MountImportPanel.test.tsx` covers the states: running (with the
+  sentence that the counters are reported when the walk finishes), done
+  (succeeded or skipped-with-reason), failed, cancelled and unknown statuses and
+  their tones, the timing and counts lines, the oversize note, the five-line
+  error cap with "+N more", the idle line above a finished run, the empty
+  history that claims no status, and the retryable error with no run.
   `ui/review/FolderScanPanel.test.tsx` (first test the panel has had) pins every
   control, label and status string, and `ui/App.imports.test.tsx` proves an
   upload from the queue creates the folder, fires both change signals and

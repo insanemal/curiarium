@@ -53,8 +53,8 @@ vi.mock("../lib/api/bundles", () => ({
 
 // Domain modules: the real hooks import from these, not the barrel.
 vi.mock("../lib/api/settings", () => ({
-  getImportRuns: vi.fn(),
-  getImportRun: vi.fn(),
+  // App arms `useMountImport`; the walk is one ledger read.
+  getMountImportStatus: vi.fn(),
   // App arms `useLibraryScan`; its pair comes from this domain module.
   getLibraryScanStatus: vi.fn(),
   startLibraryScan: vi.fn(),
@@ -126,31 +126,26 @@ vi.mock("./Login", () => ({ default: () => null }));
 import App from "./App";
 import { createFolder, getMe, uploadAsset } from "../lib/api";
 import { createFolder as createRootFolder } from "../lib/api/folders";
-import {
-  getImportRun,
-  getImportRuns,
-  type ImportRunDetail,
-  type ImportRunList,
-  type ImportRunSummary,
-} from "../lib/api/settings";
+import { getMountImportStatus, type MountImportStatus } from "../lib/api/settings";
 import { storeToken } from "../lib/auth";
 import { MODE_STORAGE_KEY } from "../lib/mode";
 import { describeQueueCount } from "./review/useReviewCounts";
 
-const getImportRunsMock = vi.mocked(getImportRuns);
-const getImportRunMock = vi.mocked(getImportRun);
+const getMountImportStatusMock = vi.mocked(getMountImportStatus);
 const createFolderMock = vi.mocked(createFolder);
 const createRootFolderMock = vi.mocked(createRootFolder);
 const uploadAssetMock = vi.mocked(uploadAsset);
 const getMeMock = vi.mocked(getMe);
 
-function makeSummary(overrides: Partial<ImportRunSummary> = {}): ImportRunSummary {
+function makeStatus(overrides: Partial<MountImportStatus> = {}): MountImportStatus {
   return {
-    id: "run-1",
-    status: "succeeded",
+    status: "done",
+    running: false,
+    outcome: "registered",
     mode: "copy",
     root: "/mnt/models",
     reason: null,
+    error: null,
     started_at: 1_700_000_000,
     finished_at: 1_700_000_042,
     registered: 4,
@@ -160,20 +155,15 @@ function makeSummary(overrides: Partial<ImportRunSummary> = {}): ImportRunSummar
     rejected: 0,
     discovered: 7,
     skipped: 3,
+    errors: [],
     ...overrides,
   };
 }
 
-function makeDetail(overrides: Partial<ImportRunDetail> = {}): ImportRunDetail {
-  return { ...makeSummary(), errors: [], ...overrides };
-}
-
-function makeList(runs: ImportRunSummary[]): ImportRunList {
-  return { runs, total: runs.length, limit: 1, offset: 0 };
-}
-
-const running = makeDetail({
+const running = makeStatus({
   status: "running",
+  running: true,
+  outcome: null,
   finished_at: null,
   registered: 2,
   known: 1,
@@ -182,7 +172,7 @@ const running = makeDetail({
   discovered: 4,
   skipped: 1,
 });
-const finished = makeDetail();
+const finished = makeStatus();
 
 /** A promise whose settlement the test drives, for ordering two responses. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -274,10 +264,8 @@ beforeEach(() => {
     disabled: false,
     kind: "local",
   });
-  getImportRunsMock.mockReset();
-  getImportRunsMock.mockResolvedValue(makeList([makeSummary({ status: "running", finished_at: null })]));
-  getImportRunMock.mockReset();
-  getImportRunMock.mockResolvedValue(running);
+  getMountImportStatusMock.mockReset();
+  getMountImportStatusMock.mockResolvedValue(running);
   createFolderMock.mockReset();
   createFolderMock.mockResolvedValue({ id: "folder-nested", name: "nested", tags: [] });
   createRootFolderMock.mockReset();
@@ -314,32 +302,30 @@ describe("App imports destination (AC-7)", () => {
     await renderApp();
     await openImportsQueue();
 
-    expect(getImportRunsMock).toHaveBeenCalledTimes(1);
-    expect(getImportRunsMock).toHaveBeenCalledWith(1, 0);
-    expect(getImportRunMock).toHaveBeenCalledTimes(1);
+    // One ledger read is the whole record: no detail call follows it.
+    expect(getMountImportStatusMock).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("radio", { name: "Projects" }));
 
     expect(window.localStorage.getItem(MODE_STORAGE_KEY)).toBe("projects");
     expect(screen.getByRole("heading", { name: "Imports running" })).toBeTruthy();
     // The mode switch must not re-enter the queue's hook.
-    expect(getImportRunsMock).toHaveBeenCalledTimes(1);
+    expect(getMountImportStatusMock).toHaveBeenCalledTimes(1);
   });
 
   it("does not fetch before the queue is opened", async () => {
     await renderApp();
     await settle(30);
 
-    // App load reads no run history. Entering Review would first land on the
+    // App load reads no ledger row. Entering Review would first land on the
     // bundle queue - that is why this file mocks the bundle report at all - so
     // nothing here has armed the imports queue yet.
-    expect(getImportRunsMock).not.toHaveBeenCalled();
-    expect(getImportRunMock).not.toHaveBeenCalled();
+    expect(getMountImportStatusMock).not.toHaveBeenCalled();
   });
 });
 
 describe("App imports badge (AC-8)", () => {
-  it("dashes an unfetched count, then says one while running and zero once the run finished", async () => {
+  it("dashes an unfetched count, then says one while running and zero once the walk finished", async () => {
     await renderApp();
 
     // The counts live inside Review, so before entry there is no imports tab to
@@ -358,9 +344,8 @@ describe("App imports badge (AC-8)", () => {
     await screen.findByRole("heading", { name: "Imports running" });
     await waitFor(() => expect(badgeText()).toBe("1"));
 
-    // The run finishes; the operator's refresh is the next honest read.
-    getImportRunsMock.mockResolvedValue(makeList([makeSummary()]));
-    getImportRunMock.mockResolvedValue(finished);
+    // The walk finishes; the operator's refresh is the next honest read.
+    getMountImportStatusMock.mockResolvedValue(finished);
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
     await waitFor(() => expect(badgeText()).toBe("0"));
@@ -378,10 +363,10 @@ describe("App imports coordinator (AC-9)", () => {
     // same number two ways.
     expect(headerCount().getAttribute("title")).toBe(describeQueueCount("imports", 1));
     expect(importsTab().getAttribute("title")).toBe(describeQueueCount("imports", 1));
-    expect(getImportRunsMock).toHaveBeenCalledTimes(1);
+    expect(getMountImportStatusMock).toHaveBeenCalledTimes(1);
   });
 
-  it("fetches the entry pair exactly once under StrictMode", async () => {
+  it("fetches the entry read exactly once under StrictMode", async () => {
     render(
       <React.StrictMode>
         <App />
@@ -391,29 +376,28 @@ describe("App imports coordinator (AC-9)", () => {
 
     await openImportsQueue();
 
-    expect(getImportRunsMock).toHaveBeenCalledTimes(1);
-    expect(getImportRunMock).toHaveBeenCalledTimes(1);
+    expect(getMountImportStatusMock).toHaveBeenCalledTimes(1);
   });
 
   it("never lets a superseded response paint over a newer one", async () => {
-    const older = deferred<ImportRunDetail>();
-    const newer = deferred<ImportRunDetail>();
-    getImportRunMock.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+    const older = deferred<MountImportStatus>();
+    const newer = deferred<MountImportStatus>();
+    getMountImportStatusMock.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
 
     await renderApp();
     await openImportsQueue();
-    // The entry detail is still on the wire; a manual refresh overtakes it.
-    await waitFor(() => expect(getImportRunMock).toHaveBeenCalledTimes(1));
+    // The entry read is still on the wire; a manual refresh overtakes it.
+    await waitFor(() => expect(getMountImportStatusMock).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(getImportRunMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getMountImportStatusMock).toHaveBeenCalledTimes(2));
 
     await act(async () => {
       newer.resolve(finished);
     });
     await waitFor(() => expect(badgeText()).toBe("0"));
 
-    // The entry response lands last and carries the stale running run.
+    // The entry response lands last and carries the stale running row.
     await act(async () => {
       older.resolve(running);
     });
@@ -461,7 +445,7 @@ describe("App imports folder scan (AC-4)", () => {
 });
 
 describe("App imports for a viewer", () => {
-  it("reads the run state, gets no folder panel and never writes", async () => {
+  it("reads the walk state, gets no folder panel and never writes", async () => {
     getMeMock.mockResolvedValue({
       id: "u1",
       username: "viewer",

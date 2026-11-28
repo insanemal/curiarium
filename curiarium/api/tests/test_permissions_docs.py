@@ -159,7 +159,7 @@ def test_the_docs_name_the_four_roles_and_the_capability_table() -> None:
 def test_the_docs_pin_the_matrix_size() -> None:
     """The stated size is computed from the live matrix, not a copied string.
 
-    The total is pinned at 100 the way `test_the_matrix_is_the_documented_size`
+    The total is pinned at 98 the way `test_the_matrix_is_the_documented_size`
     pins it, so a route added to only one side fails both tests with the same
     number. The per-level split is read from `ROUTE_PERMISSIONS` instead of being
     hard-coded here: the matrix test owns that pin, and repeating the numbers in
@@ -168,7 +168,7 @@ def test_the_docs_pin_the_matrix_size() -> None:
     sentence = _route_count_sentence(_lines(PERMISSIONS_PATH))
 
     declared_total = int(ROUTE_COUNT.search(sentence).group(1))
-    assert declared_total == 100, f"docs/PERMISSIONS.md states {declared_total} routes; the matrix is pinned at 100"
+    assert declared_total == 98, f"docs/PERMISSIONS.md states {declared_total} routes; the matrix is pinned at 98"
     assert declared_total == len(permissions.ROUTE_PERMISSIONS), (
         f"docs/PERMISSIONS.md states {declared_total} routes, ROUTE_PERMISSIONS has {len(permissions.ROUTE_PERMISSIONS)}"
     )
@@ -265,3 +265,22 @@ def test_the_documented_levels_are_the_workflow_levels() -> None:
     assert "waiting on Mf-gciy" not in text
     assert "`library-scan` is WRITE" not in text
     assert "Undo keeps the level of the operation it acts on (Mf-d588, 2026-11-27)" in text
+
+
+def test_the_documented_workflow_table_carries_the_boot_walk() -> None:
+    """The boot's mount import is a row in the Operations table, at CONTRIBUTE.
+
+    `test_the_documented_levels_are_the_workflow_levels` compares the two tables
+    for equality, so a missing row already fails there. This names the row and
+    its level anyway, because the false state it catches is the interesting one:
+    a workflow that only the SERVER may submit silently dropped from the table a
+    reader uses to decide which role may cancel it. A row shown at `write` would
+    be the opposite lie - it would tell a contributor they may not stop a walk
+    that `WORKFLOW_LEVELS` lets them cancel.
+    """
+    documented = _workflow_level_rows(_lines(PERMISSIONS_PATH))
+
+    assert "mount-import" in documented, (
+        f"docs/PERMISSIONS.md's workflow table has no `mount-import` row: {sorted(documented)}"
+    )
+    assert documented["mount-import"] == operations_service.WORKFLOW_LEVELS["mount-import"]
