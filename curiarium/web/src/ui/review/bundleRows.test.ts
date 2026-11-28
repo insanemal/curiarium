@@ -9,13 +9,6 @@ import {
   type BundleSuggestion,
 } from "../../lib/api/bundles";
 import {
-  type OperationExcluded,
-  type OperationPlan,
-  type OperationReview,
-  type OperationStep,
-  type OperationUndo,
-} from "../../lib/api/operations";
-import {
   ARCHIVE_ONLY_FOLDER_LABEL,
   AUTO_SHAPES,
   BLOCKED_REASON_LABELS,
@@ -53,16 +46,7 @@ import {
   enrichSelectionLabel,
   enrichUnavailableLine,
   enrichmentLine,
-  excludedLine,
-  extractActionLabel,
-  extractArchiveHomeLine,
-  extractCoverLine,
-  extractDoneLine,
-  extractExistingLine,
-  extractGroupLine,
   extractPathFor,
-  extractSummaryLine,
-  extractUndoLine,
   hasThingSource,
   headline,
   importMatches,
@@ -79,9 +63,6 @@ import {
   needsStorageScan,
   newPartsLine,
   noPayloadDoor,
-  operationActionLabel,
-  operationMoveLine,
-  operationStatusLine,
   payloadOnDisk,
   recommendationEnactable,
   recommendedMatch,
@@ -646,176 +627,6 @@ describe("archiveExtractTitle", () => {
     expect(archiveExtractTitle(makeBundle({ ...zipOnly, existing_project_id: PROJECT_ID }))).toBe(
       "Extract this archive in place (Enter)",
     );
-  });
-});
-
-describe("extract-and-create words", () => {
-  function review(overrides: Partial<OperationReview> = {}): OperationReview {
-    return {
-      workflow: "extract-and-create",
-      target: "import/Tower.zip",
-      moves: 1,
-      creates: 1,
-      adopts: 0,
-      deletes: 0,
-      members: 20,
-      groups: [
-        { name: "01_Wizard", members: 14, models: 12 },
-        { name: "", members: 6, models: 2 },
-      ],
-      cover: { asset_id: null, rel_path: "01_Wizard/tower.stl", reason: "first model" },
-      excluded: [{ path: "01_Wizard/notes.psd", reason: "does not hold a model" }],
-      existing_project_id: null,
-      existing_project_name: null,
-      move_list: [
-        {
-          source: "import/Tower.zip",
-          target: "import/Tower/_source/Tower.zip",
-          kind: "file",
-          action: "file-archive",
-        },
-      ],
-      projects: [{ name: "Tower", root: "import/Tower", members: 20 }],
-      ...overrides,
-    };
-  }
-
-  it("names the action for its outcome, with the plan's own name and count", () => {
-    // Catches a button named for the subsystem, or a count the client estimated:
-    // the plan measured both, so the promise is the review's.
-    expect(extractActionLabel(review())).toBe("Extract and create 'Tower' from 20 files");
-    expect(extractActionLabel(review({ members: 1 }))).toBe(
-      "Extract and create 'Tower' from 1 file",
-    );
-    // A plan that named no project still promises the one project it would make.
-    expect(extractActionLabel(review({ projects: [] }))).toBe(
-      "Extract and create a project from 20 files",
-    );
-  });
-
-  it("says how much the plan would write", () => {
-    expect(extractSummaryLine(review())).toBe("Would write 20 files.");
-    expect(extractSummaryLine(review({ members: 1 }))).toBe("Would write 1 file.");
-  });
-
-  it("renders the server's empty group name as loose files, never as a folder", () => {
-    // The `""` bucket is the archive's own root files: naming it a directory
-    // would point the operator at a folder that does not exist.
-    expect(extractGroupLine({ name: "01_Wizard", members: 14, models: 12 })).toBe(
-      "01_Wizard - 14 files, 12 models",
-    );
-    expect(extractGroupLine({ name: "", members: 6, models: 1 })).toBe(
-      "loose files - 6 files, 1 model",
-    );
-    expect(extractGroupLine({ name: "", members: 1, models: 1 })).toBe(
-      "loose files - 1 file, 1 model",
-    );
-  });
-
-  it("names the archive's new home from the server's own move, and nothing when it has none", () => {
-    // A plan with no move is an archive already in its place: the client must not
-    // assemble a target for it.
-    expect(extractArchiveHomeLine(review())).toBe(
-      'The archive moves to "import/Tower/_source/Tower.zip".',
-    );
-    expect(extractArchiveHomeLine(review({ move_list: [] }))).toBeNull();
-  });
-
-  it("names the planned cover by path, and says nothing when the plan named none", () => {
-    expect(extractCoverLine({ asset_id: null, rel_path: "a/b.stl", reason: "first model" })).toBe(
-      'The project\'s cover is "a/b.stl".',
-    );
-    expect(extractCoverLine({ asset_id: null, rel_path: null, reason: "none" })).toBeNull();
-    expect(extractCoverLine(null)).toBeNull();
-  });
-
-  it("says a zero-step plan already has its project, by the server's name", () => {
-    expect(
-      extractExistingLine(
-        review({ creates: 0, projects: [], existing_project_name: "Old Tower" }),
-      ),
-    ).toBe('The project "Old Tower" already exists, so there is nothing to create.');
-    expect(extractExistingLine(review({ creates: 0, projects: [], existing_project_name: null }))).toBe(
-      "This archive already has a project, so there is nothing to create.",
-    );
-  });
-
-  /** One finished operation with the create step the runner wrote. */
-  function doneOperation(status: string, name: string | null): OperationStep[] {
-    return [
-      {
-        index: 0,
-        op: "create-project",
-        status: "done",
-        result: { project_id: "p1", name, status, created: status === "created" },
-        error: null,
-        started_at: null,
-        finished_at: null,
-      },
-    ];
-  }
-
-  function planWith(projects: OperationPlan["review"]["projects"]): OperationPlan {
-    return {
-      plan_id: "plan-1",
-      workflow: "extract-and-create",
-      target: "import/Tower.zip",
-      steps: [],
-      review: review({ projects }),
-    };
-  }
-
-  it("reads the done line from the create step's own result", () => {
-    // Catches a done line read from the PLAN: the runner can lose the race at run
-    // time, and claiming a create that never happened is the one lie this line
-    // must not tell.
-    const plan = planWith([{ name: "Tower", root: "import/Tower", members: 20 }]);
-    const operation = {
-      id: "op-7",
-      workflow: "extract-and-create",
-      target: "import/Tower.zip",
-      status: "done",
-      submitted_by: "u1",
-      created_at: "2026-01-01T00:00:00Z",
-      started_at: null,
-      finished_at: null,
-      error: null,
-      undo_state: "available",
-      superseded_by: null,
-      steps: doneOperation("created", "Tower"),
-    };
-    expect(extractDoneLine(operation, plan)).toBe("Done: project 'Tower' created");
-
-    // The race: the step's own status is the authority, not the plan's promise.
-    expect(
-      extractDoneLine({ ...operation, steps: doneOperation("already_created", "Tower") }, plan),
-    ).toBe("Done: project 'Tower' already existed - nothing new was created");
-
-    // A step that named no project falls back to the plan's name, so the line
-    // still says which project the dialog is about.
-    expect(extractDoneLine({ ...operation, steps: doneOperation("created", null) }, plan)).toBe(
-      "Done: project 'Tower' created",
-    );
-  });
-
-  it("says an undo leaves the extracted files where they are", () => {
-    // The residue is documented, so the toast must not imply the tree was erased.
-    const answer: OperationUndo = {
-      operation_id: "op-7",
-      undone: true,
-      project_id: null,
-      project_name: null,
-      moves: 1,
-      projects_removed: ["Tower"],
-    };
-    expect(extractUndoLine(answer)).toBe(
-      "Undone: 1 move folded back, removed 1 project. The extracted files stay in the library.",
-    );
-    expect(extractUndoLine({ ...answer, moves: null, projects_removed: null })).toBe(
-      "Undone: 0 moves folded back, no projects removed. The extracted files stay in the library.",
-    );
-    // `undone: false` means the server changed nothing, and the line says so.
-    expect(extractUndoLine({ ...answer, undone: false })).toBe("Nothing was undone.");
   });
 });
 
@@ -2779,7 +2590,7 @@ describe("needsStorageScan", () => {
   });
 });
 
-describe("the split's narration", () => {
+describe("isArrangable", () => {
   /** A served reading the server cannot enact: the dissenting cardinality
    *  shapes, which need the folder's files moved before a create can be sent. */
   const needsArranging: BundleMatch = {
@@ -2823,118 +2634,6 @@ describe("the split's narration", () => {
     // A shape this row does not offer has no match to judge, so the answer is no
     // door rather than a door for a shape nobody can choose.
     expect(isArrangable(row, "compound")).toBe(false);
-  });
-
-  it("quotes both paths of a move, so a path with spaces still reads as two", () => {
-    // Catches dropping either pair of quotes: with the paths bare, `a b/c.stl ->
-    // a b/d/c.stl` has four possible readings of where the source ends.
-    expect(
-      operationMoveLine({
-        source: "Moai statue/a.stl",
-        target: "Moai statue/Fates End/a.stl",
-        kind: "file",
-        action: "move",
-      }),
-    ).toBe('move "Moai statue/a.stl" -> "Moai statue/Fates End/a.stl"');
-  });
-
-  it("reads each known action token as its own word, and an unknown one verbatim", () => {
-    // Catches a formatter that invents words for tokens it does not know, or
-    // renders one as a dash: a newer server's token is still a real move, and a
-    // dash would make it read as an absent one. The four known tokens are the
-    // only ones the client may translate.
-    expect(operationActionLabel("hoist")).toBe("hoist");
-    expect(operationActionLabel("move")).toBe("move");
-    expect(operationActionLabel("file-archive")).toBe("file archive");
-    expect(operationActionLabel("rename")).toBe("rename");
-    expect(operationActionLabel("retire-containerish")).toBe("retire-containerish");
-  });
-
-  it("renders an exclusion as the server's own reason beside its path, verbatim", () => {
-    // Catches a sentence rebuilt or paraphrased here: the reason is the server's
-    // measurement of the folder it walked, and a client that rewrote it would
-    // print a second explanation of one exclusion.
-    const entry: OperationExcluded = {
-      path: "Moai statue/notes.psd",
-      reason: "does not hold a model and is not a part of any group",
-    };
-    expect(excludedLine(entry)).toBe(
-      "Moai statue/notes.psd: does not hold a model and is not a part of any group",
-    );
-  });
-
-  /** One step of a running split, with only the two fields the narration may
-   *  read set to anything interesting. */
-  function step(op: string, status: string): OperationStep {
-    return {
-      index: 0,
-      op,
-      status,
-      result: null,
-      error: null,
-      started_at: null,
-      finished_at: null,
-    };
-  }
-
-  it("narrates each known op from its own words, in every status", () => {
-    // Catches a narration driven by a count, or one whose four statuses collapse:
-    // the popup must say what the runner is DOING, and `waiting`, `doing`,
-    // `done` and `refused` are four different things to the operator.
-    expect(operationStatusLine(step("move", "done"))).toBe("moved the folders");
-    expect(operationStatusLine(step("move", "running"))).toBe("moving the folders\u2026");
-    expect(operationStatusLine(step("move", "failed"))).toBe("the move was refused");
-    expect(operationStatusLine(step("move", "pending"))).toBe("waiting to move the folders");
-
-    expect(operationStatusLine(step("create-project", "done"))).toBe("created a project");
-    expect(operationStatusLine(step("create-project", "running"))).toBe(
-      "creating a project\u2026",
-    );
-    expect(operationStatusLine(step("create-project", "failed"))).toBe("the create was refused");
-    expect(operationStatusLine(step("create-project", "pending"))).toBe(
-      "waiting to create a project",
-    );
-
-    expect(operationStatusLine(step("verify-members", "done"))).toBe("checked the project's files");
-    expect(operationStatusLine(step("verify-members", "running"))).toBe(
-      "checking the project's files\u2026",
-    );
-    expect(operationStatusLine(step("verify-members", "failed"))).toBe(
-      "the project's files did not match",
-    );
-    expect(operationStatusLine(step("verify-members", "pending"))).toBe(
-      "waiting to check the files",
-    );
-
-    expect(operationStatusLine(step("extract", "done"))).toBe("extracted the archive");
-    expect(operationStatusLine(step("extract", "running"))).toBe(
-      "extracting the archive\u2026",
-    );
-    expect(operationStatusLine(step("extract", "failed"))).toBe(
-      "the extraction was refused",
-    );
-    expect(operationStatusLine(step("extract", "pending"))).toBe(
-      "waiting to extract the archive",
-    );
-
-    expect(operationStatusLine(step("register", "done"))).toBe(
-      "registered the extracted files",
-    );
-    expect(operationStatusLine(step("register", "running"))).toBe(
-      "registering the extracted files\u2026",
-    );
-    expect(operationStatusLine(step("register", "failed"))).toBe(
-      "the files could not be registered",
-    );
-    expect(operationStatusLine(step("register", "pending"))).toBe(
-      "waiting to register the files",
-    );
-  });
-
-  it("shows an unknown op's two tokens verbatim rather than inventing a word", () => {
-    // A newer server's step is still a real step, so it is named as the server
-    // named it: the client has no word for an op it does not know.
-    expect(operationStatusLine(step("reindex", "running"))).toBe("reindex running");
   });
 });
 

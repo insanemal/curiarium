@@ -39,6 +39,7 @@ const operationsApi = vi.hoisted(() => ({
   submitOperation: vi.fn(),
   getOperation: vi.fn(),
   undoOperation: vi.fn(),
+  listOperations: vi.fn(),
 }));
 vi.mock("../../lib/api/operations", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/operations")>()),
@@ -46,6 +47,7 @@ vi.mock("../../lib/api/operations", async importOriginal => ({
   submitOperation: operationsApi.submitOperation,
   getOperation: operationsApi.getOperation,
   undoOperation: operationsApi.undoOperation,
+  listOperations: operationsApi.listOperations,
 }));
 
 import type { ArchiveExtractResult } from "../../lib/api/imports";
@@ -61,6 +63,7 @@ import {
 } from "../../lib/api/bundles";
 import {
   getOperation,
+  listOperations,
   planOperation,
   submitOperation,
   undoOperation,
@@ -91,6 +94,7 @@ const planOperationMock = vi.mocked(planOperation);
 const submitOperationMock = vi.mocked(submitOperation);
 const undoOperationMock = vi.mocked(undoOperation);
 const getOperationMock = vi.mocked(getOperation);
+const listOperationsMock = vi.mocked(listOperations);
 
 const EXTRACT_RESULT: ArchiveExtractResult = {
   path: "import/Moai.zip",
@@ -764,6 +768,11 @@ beforeEach(() => {
   submitOperationMock.mockReset();
   getOperationMock.mockReset();
   undoOperationMock.mockReset();
+  // Every shared operation panel issues an in-flight lookup READ on mount; the
+  // answer is "nothing is running for this target" unless a test says otherwise,
+  // so a mounted panel resolves without a network call.
+  listOperationsMock.mockReset();
+  listOperationsMock.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -4081,6 +4090,12 @@ describe("BundleReviewView bulk extract and create", () => {
   it("states the aggregate payload and writes nothing until confirmed", async () => {
     const state = makeState({ report: makeReport([alphaZip, betaZip]) });
     renderView(state);
+    // The shared panels' mount read is the in-flight lookup, and their plan READ
+    // is held until it settles: flushing it here clears the detail pane's own
+    // sunk cost before the bulk door's plans are counted, which is what the
+    // assertion below is about (the bulk door plans once per archive, not the
+    // row's panel a second time).
+    await act(async () => {});
     planOperationMock.mockClear();
 
     fireEvent.click(selectionCheck(ALPHA_KEY));
@@ -4749,7 +4764,7 @@ function makeUndone(overrides: Partial<OperationUndo> = {}): OperationUndo {
 /** The plan as INFORMATION: the moves and the projects the one action would make.
  *  Nothing inside it is a tab stop - the action is. */
 function splitPreview(): HTMLElement {
-  return within(detail()).getByRole("group", { name: "Split preview" });
+  return within(detail()).getByRole("group", { name: "Split into projects review" });
 }
 
 /** The ONE action, found by its data attribute because its label names the

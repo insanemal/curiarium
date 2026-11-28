@@ -299,10 +299,9 @@ describe("ArchiveExtractDialog", () => {
     trigger.focus();
     fireEvent.click(trigger);
 
-    // The accessible name is pinned by the button's `aria-label`, so the busy
-    // stage is found by its visible text, not its role name.
-    const planningControl = await screen.findByRole("button", { name: "Extract Moai.zip" });
-    await waitFor(() => expect(planningControl.textContent).toBe("Planning..."));
+    // The shared door spends the trigger and answers the press with a disabled
+    // "Planning..." control, whose `tabindex="-1"` panel is the stage's home.
+    const planningControl = await screen.findByRole("button", { name: "Planning..." });
     const home = busyHome(planningControl);
     await waitFor(() => expect(document.activeElement).toBe(home));
 
@@ -325,8 +324,7 @@ describe("ArchiveExtractDialog", () => {
     trigger.focus();
     fireEvent.click(trigger);
 
-    const planningControl = await screen.findByRole("button", { name: "Extract Moai.zip" });
-    await waitFor(() => expect(planningControl.textContent).toBe("Planning..."));
+    const planningControl = await screen.findByRole("button", { name: "Planning..." });
     const home = busyHome(planningControl);
     await waitFor(() => expect(document.activeElement).toBe(home));
 
@@ -351,9 +349,10 @@ describe("ArchiveExtractDialog", () => {
     confirm.focus();
     fireEvent.click(confirm);
 
-    const extractingControl = await screen.findByRole("button", { name: "Extracting..." });
-    expect((extractingControl as HTMLButtonElement).disabled).toBe(true);
-    const home = busyHome(extractingControl);
+    // A submit in flight keeps the review's container as the stage's home: its
+    // action is disabled and the door states the request it heard.
+    const submittingNote = await screen.findByText("Submitting...");
+    const home = busyHome(submittingNote);
     await waitFor(() => expect(document.activeElement).toBe(home));
 
     const dialog = screen.getByRole("dialog");

@@ -27,7 +27,7 @@ describe("ReviewQueueTabs role gating", () => {
     ["admin", true],
     ["viewer", false],
   ])("renders the bundle queue only from contributor up (%s)", (role, visible) => {
-    render(<ReviewQueueTabs role={role} counts={{ bundles: 3, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role={role} counts={{ bundles: 3, imports: null, missing: null, trash: null, operations: null }} />);
 
     expect(!!screen.queryByRole("tab", { name: /^Bundles to confirm/ })).toBe(visible);
   });
@@ -40,38 +40,38 @@ describe("ReviewQueueTabs role gating", () => {
     ["editor", true],
     ["admin", true],
   ])("renders the imports queue from viewer up (%s)", (role, visible) => {
-    render(<ReviewQueueTabs role={role} counts={{ bundles: 3, imports: 1 , missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role={role} counts={{ bundles: 3, imports: 1 , missing: null, trash: null, operations: null }} />);
 
     expect(!!screen.queryByRole("tab", { name: /^Imports running/ })).toBe(visible);
   });
 
   it("gives a viewer the read-only imports row and not the bundle row", () => {
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: 3, imports: 1 , missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: 3, imports: 1 , missing: null, trash: null, operations: null }} />);
 
     expect(screen.getByRole("tab", { name: /^Imports running/ })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: /^Bundles to confirm/ })).toBeNull();
   });
 
   it("gives a contributor both rows", () => {
-    render(<ReviewQueueTabs role="contributor" counts={{ bundles: 3, imports: 1 , missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="contributor" counts={{ bundles: 3, imports: 1 , missing: null, trash: null, operations: null }} />);
 
     expect(screen.getByRole("tab", { name: /^Bundles to confirm/ })).toBeTruthy();
     expect(screen.getByRole("tab", { name: /^Imports running/ })).toBeTruthy();
   });
 
   it("renders nothing while the session's role is unknown", () => {
-    const unknown = render(<ReviewQueueTabs role={null} counts={{ bundles: 3, imports: null, missing: null, trash: null }} />);
+    const unknown = render(<ReviewQueueTabs role={null} counts={{ bundles: 3, imports: null, missing: null, trash: null, operations: null }} />);
     expect(unknown.container.innerHTML).toBe("");
     cleanup();
 
-    const absent = render(<ReviewQueueTabs role={undefined} counts={{ bundles: 3, imports: null, missing: null, trash: null }} />);
+    const absent = render(<ReviewQueueTabs role={undefined} counts={{ bundles: 3, imports: null, missing: null, trash: null, operations: null }} />);
     expect(absent.container.innerHTML).toBe("");
   });
 });
 
 describe("ReviewQueueTabs counts", () => {
   it("shows a dash, not a zero, while the count is unknown", () => {
-    render(<ReviewQueueTabs role="editor" counts={{ bundles: null, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="editor" counts={{ bundles: null, imports: null, missing: null, trash: null, operations: null }} />);
 
     const count = screen.getByTestId("review-count-bundles");
     expect(badgeOf(count).textContent).toBe("\u2013");
@@ -79,7 +79,7 @@ describe("ReviewQueueTabs counts", () => {
   });
 
   it("shows a genuine zero for an empty section", () => {
-    render(<ReviewQueueTabs role="editor" counts={{ bundles: 0, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="editor" counts={{ bundles: 0, imports: null, missing: null, trash: null, operations: null }} />);
 
     const count = screen.getByTestId("review-count-bundles");
     expect(badgeOf(count).textContent).toBe("0");
@@ -87,7 +87,7 @@ describe("ReviewQueueTabs counts", () => {
   });
 
   it("shows the count once it is known, with a different title", () => {
-    render(<ReviewQueueTabs role="editor" counts={{ bundles: 128, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="editor" counts={{ bundles: 128, imports: null, missing: null, trash: null, operations: null }} />);
 
     const count = screen.getByTestId("review-count-bundles");
     expect(badgeOf(count).textContent).toBe("128");
@@ -95,7 +95,7 @@ describe("ReviewQueueTabs counts", () => {
   });
 
   it("uses the singular noun for exactly one row", () => {
-    render(<ReviewQueueTabs role="editor" counts={{ bundles: 1, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="editor" counts={{ bundles: 1, imports: null, missing: null, trash: null, operations: null }} />);
 
     expect(screen.getByTestId("review-count-bundles").getAttribute("title")).toBe(
       "1 bundle awaiting a decision",
@@ -110,7 +110,7 @@ describe("ReviewQueueTabs counts", () => {
   });
 
   it("announces the count in the button's name, not only in the badge", () => {
-    const { unmount } = render(<ReviewQueueTabs role="editor" counts={{ bundles: 7, imports: null, missing: null, trash: null }} />);
+    const { unmount } = render(<ReviewQueueTabs role="editor" counts={{ bundles: 7, imports: null, missing: null, trash: null, operations: null }} />);
 
     const known = screen.getByRole("tab", {
       name: /^Bundles to confirm: 7 bundles awaiting a decision$/,
@@ -119,7 +119,7 @@ describe("ReviewQueueTabs counts", () => {
     expect(known.getAttribute("aria-label")).toContain("awaiting a decision");
     unmount();
 
-    render(<ReviewQueueTabs role="editor" counts={{ bundles: null, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="editor" counts={{ bundles: null, imports: null, missing: null, trash: null, operations: null }} />);
 
     expect(
       screen.getByRole("tab", { name: /^Bundles to confirm: Count unavailable$/ }),
@@ -129,7 +129,7 @@ describe("ReviewQueueTabs counts", () => {
 
 describe("ReviewQueueTabs imports count (AC-8)", () => {
   it("shows an en dash for an unknown imports count, never a zero", () => {
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: null, trash: null, operations: null }} />);
 
     const count = screen.getByTestId("review-count-imports");
     expect(badgeOf(count).textContent).toBe("\u2013");
@@ -137,7 +137,7 @@ describe("ReviewQueueTabs imports count (AC-8)", () => {
   });
 
   it("says one import is running", () => {
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: 1 , missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: 1 , missing: null, trash: null, operations: null }} />);
 
     const count = screen.getByTestId("review-count-imports");
     expect(badgeOf(count).textContent).toBe("1");
@@ -145,7 +145,7 @@ describe("ReviewQueueTabs imports count (AC-8)", () => {
   });
 
   it("treats a zero as a known idle queue", () => {
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: 0 , missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: 0 , missing: null, trash: null, operations: null }} />);
 
     const count = screen.getByTestId("review-count-imports");
     expect(badgeOf(count).textContent).toBe("0");
@@ -153,7 +153,7 @@ describe("ReviewQueueTabs imports count (AC-8)", () => {
   });
 
   it("announces the imports count in the button's name", () => {
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: 1 , missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: 1 , missing: null, trash: null, operations: null }} />);
 
     expect(
       screen.getByRole("tab", { name: "Imports running: 1 import running" }),
@@ -163,7 +163,7 @@ describe("ReviewQueueTabs imports count (AC-8)", () => {
 
 describe("ReviewQueueTabs selection", () => {
   it("marks the row as the current page only for the open queue", () => {
-    render(<ReviewQueueTabs role="editor" activeQueue="bundles" counts={{ bundles: 2, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="editor" activeQueue="bundles" counts={{ bundles: 2, imports: null, missing: null, trash: null, operations: null }} />);
 
     expect(
       screen.getByRole("tab", { name: /^Bundles to confirm/ }).getAttribute("aria-selected"),
@@ -173,7 +173,7 @@ describe("ReviewQueueTabs selection", () => {
   // The row only renders inside Review, so there is no `activeView` to check:
   // with no queue resolved yet nothing is selected, and the group stays usable.
   it("leaves every row unselected when no queue is open", () => {
-    render(<ReviewQueueTabs role="viewer" activeQueue={null} counts={{ bundles: null, imports: 1, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" activeQueue={null} counts={{ bundles: null, imports: 1, missing: null, trash: null, operations: null }} />);
 
     for (const tab of screen.getAllByRole("tab")) {
       expect(tab.getAttribute("aria-selected")).toBe("false");
@@ -185,7 +185,7 @@ describe("ReviewQueueTabs selection", () => {
       <ReviewQueueTabs
         role="editor"
         activeQueue="imports"
-        counts={{ bundles: 2, imports: 1 , missing: null, trash: null }}
+        counts={{ bundles: 2, imports: 1 , missing: null, trash: null, operations: null }}
       />,
     );
 
@@ -198,7 +198,7 @@ describe("ReviewQueueTabs selection", () => {
   });
 
   it("leaves the row unmarked when no queue is open", () => {
-    render(<ReviewQueueTabs role="editor" activeQueue={null} counts={{ bundles: 2, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="editor" activeQueue={null} counts={{ bundles: 2, imports: null, missing: null, trash: null, operations: null }} />);
 
     expect(
       screen.getByRole("tab", { name: /^Bundles to confirm/ }).getAttribute("aria-selected"),
@@ -210,7 +210,7 @@ describe("ReviewQueueTabs navigation", () => {
   it("opens the bundle queue once on click", () => {
     const onSelect = vi.fn();
     render(
-      <ReviewQueueTabs role="editor" counts={{ bundles: 5, imports: 0 , missing: null, trash: null }} onSelect={onSelect} />,
+      <ReviewQueueTabs role="editor" counts={{ bundles: 5, imports: 0 , missing: null, trash: null, operations: null }} onSelect={onSelect} />,
     );
 
     fireEvent.click(screen.getByRole("tab", { name: /^Bundles to confirm/ }));
@@ -222,7 +222,7 @@ describe("ReviewQueueTabs navigation", () => {
   it("opens the imports queue once on click", () => {
     const onSelect = vi.fn();
     render(
-      <ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: 1 , missing: null, trash: null }} onSelect={onSelect} />,
+      <ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: 1 , missing: null, trash: null, operations: null }} onSelect={onSelect} />,
     );
 
     fireEvent.click(screen.getByRole("tab", { name: /^Imports running/ }));
@@ -232,7 +232,7 @@ describe("ReviewQueueTabs navigation", () => {
   });
 
   it("heads the group with the word Review", () => {
-    const { container } = render(<ReviewQueueTabs role="editor" counts={{ bundles: 5, imports: 0 , missing: null, trash: null }} />);
+    const { container } = render(<ReviewQueueTabs role="editor" counts={{ bundles: 5, imports: 0 , missing: null, trash: null, operations: null }} />);
 
     const group = screen.getByRole("tablist", { name: "Review" });
     expect(group.classList.contains("review-tabs")).toBe(true);
@@ -246,14 +246,14 @@ describe("ReviewQueueTabs missing queue (Mf-1tx3)", () => {
   it.each<Role>(["viewer", "contributor", "editor", "admin"])(
     "shows the missing row from viewer up (%s)",
     role => {
-      render(<ReviewQueueTabs role={role} counts={{ bundles: null, imports: null, missing: 2, trash: null }} />);
+      render(<ReviewQueueTabs role={role} counts={{ bundles: null, imports: null, missing: 2, trash: null, operations: null }} />);
 
       expect(screen.getByRole("tab", { name: /^Missing files/ })).toBeTruthy();
     },
   );
 
   it("gives a viewer the missing row", () => {
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: 3, imports: null, missing: 2, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: 3, imports: null, missing: 2, trash: null, operations: null }} />);
 
     expect(screen.getByRole("tab", { name: /^Missing files/ })).toBeTruthy();
     // The row gate is per queue: the bundle queue still needs CONTRIBUTE.
@@ -261,7 +261,7 @@ describe("ReviewQueueTabs missing queue (Mf-1tx3)", () => {
   });
 
   it("dashes an unknown missing count, never a zero", () => {
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: null, trash: null, operations: null }} />);
 
     const count = screen.getByTestId("review-count-missing");
     expect(badgeOf(count).textContent).toBe("\u2013");
@@ -270,7 +270,7 @@ describe("ReviewQueueTabs missing queue (Mf-1tx3)", () => {
 
   it("says how many missing files await a decision", () => {
     const { unmount } = render(
-      <ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: 4, trash: null }} />,
+      <ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: 4, trash: null, operations: null }} />,
     );
 
     const count = screen.getByTestId("review-count-missing");
@@ -278,7 +278,7 @@ describe("ReviewQueueTabs missing queue (Mf-1tx3)", () => {
     expect(count.getAttribute("title")).toBe("4 missing files awaiting a decision");
     unmount();
 
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: 1, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: 1, trash: null, operations: null }} />);
 
     expect(screen.getByTestId("review-count-missing").getAttribute("title")).toBe(
       "1 missing file awaiting a decision",
@@ -290,7 +290,7 @@ describe("ReviewQueueTabs missing queue (Mf-1tx3)", () => {
       <ReviewQueueTabs
         role="editor"
         activeQueue="missing"
-        counts={{ bundles: 2, imports: 1, missing: 4, trash: null }}
+        counts={{ bundles: 2, imports: 1, missing: 4, trash: null, operations: null }}
       />,
     );
 
@@ -310,7 +310,7 @@ describe("ReviewQueueTabs missing queue (Mf-1tx3)", () => {
     render(
       <ReviewQueueTabs
         role="viewer"
-        counts={{ bundles: null, imports: null, missing: 4, trash: null }}
+        counts={{ bundles: null, imports: null, missing: 4, trash: null, operations: null }}
         onSelect={onSelect}
       />,
     );
@@ -329,14 +329,14 @@ describe("ReviewQueueTabs trash queue (slice 4)", () => {
   it.each<Role>(["admin", "editor", "contributor", "viewer"])(
     "shows the trash row from viewer up (%s)",
     role => {
-      render(<ReviewQueueTabs role={role} counts={{ bundles: null, imports: null, missing: null, trash: 2 }} />);
+      render(<ReviewQueueTabs role={role} counts={{ bundles: null, imports: null, missing: null, trash: 2, operations: null }} />);
 
       expect(screen.getByRole("tab", { name: /^Trash/ })).toBeTruthy();
     },
   );
 
   it("dashes an unknown trash count, never a zero", () => {
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: null, trash: null }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: null, trash: null, operations: null }} />);
 
     const count = screen.getByTestId("review-count-trash");
     expect(badgeOf(count).textContent).toBe("\u2013");
@@ -345,7 +345,7 @@ describe("ReviewQueueTabs trash queue (slice 4)", () => {
 
   it("shows the entry count with the trash wording in its title", () => {
     const { unmount } = render(
-      <ReviewQueueTabs role="editor" counts={{ bundles: null, imports: null, missing: null, trash: 12 }} />,
+      <ReviewQueueTabs role="editor" counts={{ bundles: null, imports: null, missing: null, trash: 12, operations: null }} />,
     );
 
     const count = screen.getByTestId("review-count-trash");
@@ -354,7 +354,7 @@ describe("ReviewQueueTabs trash queue (slice 4)", () => {
     expect(count.getAttribute("title")).toBe("12 entries in the trash");
     unmount();
 
-    render(<ReviewQueueTabs role="editor" counts={{ bundles: null, imports: null, missing: null, trash: 1 }} />);
+    render(<ReviewQueueTabs role="editor" counts={{ bundles: null, imports: null, missing: null, trash: 1, operations: null }} />);
 
     expect(screen.getByTestId("review-count-trash").getAttribute("title")).toBe(
       "1 entry in the trash",
@@ -362,7 +362,7 @@ describe("ReviewQueueTabs trash queue (slice 4)", () => {
   });
 
   it("announces the trash count in the button's name", () => {
-    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: null, trash: 3 }} />);
+    render(<ReviewQueueTabs role="viewer" counts={{ bundles: null, imports: null, missing: null, trash: 3, operations: null }} />);
 
     expect(
       screen.getByRole("tab", { name: "Trash: 3 entries in the trash" }),
@@ -374,7 +374,7 @@ describe("ReviewQueueTabs trash queue (slice 4)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="trash"
-        counts={{ bundles: null, imports: null, missing: null, trash: 2 }}
+        counts={{ bundles: null, imports: null, missing: null, trash: 2, operations: null }}
       />,
     );
 
@@ -393,7 +393,7 @@ describe("ReviewQueueTabs trash queue (slice 4)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="imports"
-        counts={{ bundles: null, imports: null, missing: null, trash: 2 }}
+        counts={{ bundles: null, imports: null, missing: null, trash: 2, operations: null }}
       />,
     );
 
@@ -407,7 +407,7 @@ describe("ReviewQueueTabs trash queue (slice 4)", () => {
     render(
       <ReviewQueueTabs
         role="viewer"
-        counts={{ bundles: null, imports: null, missing: null, trash: 2 }}
+        counts={{ bundles: null, imports: null, missing: null, trash: 2, operations: null }}
         onSelect={onSelect}
       />,
     );
@@ -416,6 +416,64 @@ describe("ReviewQueueTabs trash queue (slice 4)", () => {
 
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledWith("trash");
+  });
+});
+
+// `GET /operations` is require_read, so the ledger's history is a viewer
+// surface; only Cancel and Undo inside the queue are contribute.
+describe("ReviewQueueTabs operations queue", () => {
+  it("gives a viewer an Operations tab", () => {
+    // A row below the viewer threshold would delete a read surface the session
+    // already holds; a missing row would leave the operations queue unreachable.
+    render(
+      <ReviewQueueTabs
+        role="viewer"
+        counts={{ bundles: null, imports: null, missing: null, trash: null, operations: null }}
+      />,
+    );
+
+    expect(screen.getByRole("tab", { name: /^Operations/ })).toBeTruthy();
+  });
+
+  it("opens the operations queue once on click", () => {
+    const onSelect = vi.fn();
+    render(
+      <ReviewQueueTabs
+        role="viewer"
+        counts={{ bundles: null, imports: null, missing: null, trash: null, operations: null }}
+        onSelect={onSelect}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: /^Operations/ }));
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith("operations");
+  });
+
+  it("announces the operations count in its title, dash and in-flight included", () => {
+    const { unmount } = render(
+      <ReviewQueueTabs
+        role="viewer"
+        counts={{ bundles: null, imports: null, missing: null, trash: null, operations: 2 }}
+      />,
+    );
+
+    expect(screen.getByTestId("review-count-operations").getAttribute("title")).toBe(
+      "2 operations in flight",
+    );
+    unmount();
+
+    // Never opened: a dash, not a fabricated zero.
+    render(
+      <ReviewQueueTabs
+        role="viewer"
+        counts={{ bundles: null, imports: null, missing: null, trash: null, operations: null }}
+      />,
+    );
+    expect(screen.getByTestId("review-count-operations").getAttribute("title")).toBe(
+      "Count unavailable",
+    );
   });
 });
 
@@ -429,7 +487,7 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="imports"
-        counts={{ bundles: null, imports: 1, missing: null, trash: null }}
+        counts={{ bundles: null, imports: 1, missing: null, trash: null, operations: null }}
         onSelect={onSelect}
       />,
     );
@@ -437,6 +495,7 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
     const imports = screen.getByRole("tab", { name: /^Imports running/ });
     const missing = screen.getByRole("tab", { name: /^Missing files/ });
     const trash = screen.getByRole("tab", { name: /^Trash/ });
+    const operations = screen.getByRole("tab", { name: /^Operations/ });
 
     imports.focus();
     fireEvent.keyDown(imports, { key: "ArrowRight" });
@@ -445,12 +504,18 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
     fireEvent.keyDown(missing, { key: "ArrowDown" });
     expect(document.activeElement).toBe(trash);
 
-    // Past the last row wraps to the first.
     fireEvent.keyDown(trash, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(operations);
+
+    // Past the last row wraps to the first.
+    fireEvent.keyDown(operations, { key: "ArrowRight" });
     expect(document.activeElement).toBe(imports);
 
     // And before the first row wraps to the last.
     fireEvent.keyDown(imports, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(operations);
+
+    fireEvent.keyDown(operations, { key: "ArrowLeft" });
     expect(document.activeElement).toBe(trash);
 
     fireEvent.keyDown(trash, { key: "ArrowUp" });
@@ -465,20 +530,20 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="missing"
-        counts={{ bundles: null, imports: 1, missing: null, trash: null }}
+        counts={{ bundles: null, imports: 1, missing: null, trash: null, operations: null }}
         onSelect={onSelect}
       />,
     );
 
     const imports = screen.getByRole("tab", { name: /^Imports running/ });
     const missing = screen.getByRole("tab", { name: /^Missing files/ });
-    const trash = screen.getByRole("tab", { name: /^Trash/ });
+    const operations = screen.getByRole("tab", { name: /^Operations/ });
 
     missing.focus();
     fireEvent.keyDown(missing, { key: "End" });
-    expect(document.activeElement).toBe(trash);
+    expect(document.activeElement).toBe(operations);
 
-    fireEvent.keyDown(trash, { key: "Home" });
+    fireEvent.keyDown(operations, { key: "Home" });
     expect(document.activeElement).toBe(imports);
 
     expect(onSelect).not.toHaveBeenCalled();
@@ -490,7 +555,7 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="imports"
-        counts={{ bundles: null, imports: 1, missing: null, trash: null }}
+        counts={{ bundles: null, imports: 1, missing: null, trash: null, operations: null }}
         onSelect={onSelect}
       />,
     );
@@ -509,7 +574,7 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="imports"
-        counts={{ bundles: null, imports: 1, missing: null, trash: null }}
+        counts={{ bundles: null, imports: 1, missing: null, trash: null, operations: null }}
         onSelect={onSelect}
       />,
     );
@@ -528,7 +593,7 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="missing"
-        counts={{ bundles: null, imports: 1, missing: null, trash: null }}
+        counts={{ bundles: null, imports: 1, missing: null, trash: null, operations: null }}
         onSelect={onSelect}
       />,
     );
@@ -544,13 +609,13 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="missing"
-        counts={{ bundles: null, imports: 1, missing: null, trash: null }}
+        counts={{ bundles: null, imports: 1, missing: null, trash: null, operations: null }}
       />,
     );
 
-    // Table order is imports, missing, trash for a viewer.
+    // Table order is imports, missing, trash, operations for a viewer.
     expect(screen.getAllByRole("tab").map(tab => (tab as HTMLButtonElement).tabIndex)).toEqual([
-      -1, 0, -1,
+      -1, 0, -1, -1,
     ]);
   });
 
@@ -561,12 +626,12 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="bundles"
-        counts={{ bundles: null, imports: 1, missing: null, trash: null }}
+        counts={{ bundles: null, imports: 1, missing: null, trash: null, operations: null }}
       />,
     );
 
     expect(screen.getAllByRole("tab").map(tab => (tab as HTMLButtonElement).tabIndex)).toEqual([
-      0, -1, -1,
+      0, -1, -1, -1,
     ]);
   });
 
@@ -575,7 +640,7 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
       <ReviewQueueTabs
         role="viewer"
         activeQueue="trash"
-        counts={{ bundles: null, imports: 1, missing: null, trash: 2 }}
+        counts={{ bundles: null, imports: 1, missing: null, trash: 2, operations: null }}
       />,
     );
 
@@ -590,7 +655,7 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
   it.each<[Role | null | undefined]>([[null], [undefined]])(
     "renders no tablist at all while the role is unknown (%s)",
     role => {
-      render(<ReviewQueueTabs role={role} counts={{ bundles: null, imports: null, missing: null, trash: null }} />);
+      render(<ReviewQueueTabs role={role} counts={{ bundles: null, imports: null, missing: null, trash: null, operations: null }} />);
 
       expect(screen.queryByRole("tablist")).toBeNull();
     },
@@ -602,7 +667,7 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
         <ReviewQueueTabs
           role="viewer"
           activeQueue="missing"
-          counts={{ bundles: null, imports: 1, missing: 2, trash: null }}
+          counts={{ bundles: null, imports: 1, missing: 2, trash: null, operations: null }}
         />
         <div
           role="tabpanel"
@@ -631,7 +696,7 @@ describe("ReviewQueueTabs keyboard (AC-6)", () => {
     render(
       <ReviewQueueTabs
         role="viewer"
-        counts={{ bundles: null, imports: 1, missing: null, trash: 0 }}
+        counts={{ bundles: null, imports: 1, missing: null, trash: 0, operations: null }}
       />,
     );
 

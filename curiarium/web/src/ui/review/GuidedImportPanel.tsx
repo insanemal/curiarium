@@ -6,14 +6,15 @@ import React from "react";
 // rule).
 import {
   createBundles,
-  enrichBundles,
   type BundleCoverCandidate,
   type BundleCreateItem,
   type BundleDetectItem,
   type BundleSuggestion,
 } from "../../lib/api/bundles";
 import { UnauthorizedError } from "../../lib/api/http";
+import { loadSettings } from "../../lib/settings";
 import { notifyInfo } from "../../lib/toast";
+import OperationPanel from "../operations/OperationPanel";
 import SplitAndCreatePanel from "./SplitAndCreatePanel";
 import {
   METADATA_FIELDS,
@@ -53,6 +54,19 @@ function failureDetail(err: unknown, fallback: string): string {
 }
 
 /**
+ * The vendor cookie saved in Settings, read at CALL time.
+ *
+ * Exactly `ui/review/useBundleDetect.ts`'s `savedThingiverseCookie` rule and for
+ * the same reason: `App` holds settings in React state, `saveSettings` is the
+ * only origin, and this panel threads no settings prop through `App` - so the
+ * one honest read is the store, at the moment the operation is offered. A value
+ * captured at mount would miss a paste made since.
+ */
+function savedThingiverseCookie(): string | undefined {
+  return loadSettings().thingiverse.cookie || undefined;
+}
+
+/**
  * The guided import door: everything the engine parsed for one row, in the
  * operator's hands before anything is written. Self-contained on purpose - it
  * owns its own write, so the host only supplies the row, the gate and its
@@ -84,7 +98,11 @@ export default function GuidedImportPanel({
   const [editing, setEditing] = React.useState<string | null>(null);
   const [editingValue, setEditingValue] = React.useState("");
   const [shape, setShape] = React.useState(row.matches?.[0]?.shape ?? row.metadata_shape);
-  const [enrichLine, setEnrichLine] = React.useState<string | null>(null);
+  // Whether the enrichment door has been revealed. Mounting the shared panel is
+  // deliberate lazily: it issues an in-flight lookup READ on mount, and a report
+  // of a hundred rows must not cost a hundred reads. The click is the only thing
+  // that opens it.
+  const [enrichOpen, setEnrichOpen] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [failure, setFailure] = React.useState<string | null>(null);
   const [already, setAlready] = React.useState<string | null>(null);
@@ -226,36 +244,6 @@ export default function GuidedImportPanel({
     setSources(prev => (prev.length === 0 ? ["", ""] : [...prev, ""]));
   }
 
-  async function enrich(): Promise<void> {
-    setBusy(true);
-    setFailure(null);
-    try {
-      const response = await enrichBundles([row.key]);
-      const result = response.results[0];
-      if (result === undefined) {
-        setEnrichLine("The source page answered nothing for this bundle.");
-      } else if (result.reason !== null) {
-        // The server's own sentence: it decided the refusal, so it says why.
-        setEnrichLine(result.reason);
-      } else if (result.filled.length === 0) {
-        setEnrichLine(`Filled nothing from ${result.source_url ?? "the source page"}`);
-      } else {
-        setEnrichLine(
-          `Filled ${result.filled.join(", ")} from ${result.source_url ?? "the source page"}`,
-        );
-      }
-      onChanged?.();
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        onUnauthorized?.();
-        return;
-      }
-      setFailure(failureDetail(err, "Failed to read the source page."));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function apply(): Promise<void> {
     setBusy(true);
     setFailure(null);
@@ -293,6 +281,16 @@ export default function GuidedImportPanel({
       setBusy(false);
     }
   }
+
+  // The enrichment door's params, built at render so the cookie is read at CALL
+  // time (see `savedThingiverseCookie`): an empty cookie is omitted rather than
+  // sent blank, because a blank Cookie header is not "no cookie" to every
+  // vendor.
+  const cookie = savedThingiverseCookie();
+  const enrichParams: Record<string, unknown> = {
+    keys: [row.key],
+    ...(cookie ? { thingiverse_cookie: cookie } : {}),
+  };
 
   return (
     <div className="flex flex-col gap-3">
@@ -410,17 +408,30 @@ export default function GuidedImportPanel({
           <button type="button" className={SECONDARY_BUTTON} data-guided-add-source="true" onClick={addSource}>
             Add another source
           </button>
+          {/* This button REVEALS the enrichment door; it writes nothing itself.
+              The old handler hid a blocking plan+submit+poll inside
+              `lib/api/bundles`, so it had no review, no narration and no undo.
+              The operation door has all three. */}
           <button
             type="button"
             className={SECONDARY_BUTTON}
             data-guided-enrich="true"
-            disabled={busy}
-            onClick={() => void enrich()}
+            onClick={() => setEnrichOpen(true)}
           >
             Read the source page
           </button>
         </div>
-        {enrichLine !== null && <span data-guided-enrich-line="true">{enrichLine}</span>}
+        {enrichOpen && (
+          <OperationPanel
+            workflow="enrich"
+            target=""
+            params={enrichParams}
+            canContribute={canContribute}
+            onChanged={onChanged}
+            onUnauthorized={onUnauthorized}
+            dataPrefix="guided-enrich"
+          />
+        )}
       </div>
 
       <div className="flex flex-col gap-2">

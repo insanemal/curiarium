@@ -437,8 +437,12 @@ describe("AssetPreviewModal archive extraction", () => {
     trigger.focus();
     fireEvent.click(trigger);
 
-    // `planning` disables the only control: the action's container is the home.
-    const actionContainer = trigger.parentElement;
+    // The trigger is spent and the plan is still pending: the shared door's
+    // container (`tabindex="-1"`) is the stage's focus home, so the caret the
+    // removed trigger orphaned does not land on <body>.
+    const planningControl = await screen.findByRole("button", { name: "Planning..." });
+    expect((planningControl as HTMLButtonElement).disabled).toBe(true);
+    const actionContainer = planningControl.parentElement as HTMLElement;
     await waitFor(() => expect(document.activeElement).toBe(actionContainer));
     expect(panel.contains(document.activeElement)).toBe(true);
     expect(document.activeElement).not.toBe(document.body);
@@ -458,17 +462,8 @@ describe("AssetPreviewModal archive extraction", () => {
     confirmButton.focus();
     fireEvent.click(confirmButton);
 
-    // `extracting` disables both controls: the panel itself is the home again.
-    const stagePanel = screen.getByText(/extract into a new folder beside the archive\?$/)
-      .parentElement as HTMLElement;
-    const extractingButton = within(stagePanel).getByRole("button", {
-      name: "Extracting...",
-    }) as HTMLButtonElement;
-    const cancelButton = within(stagePanel).getByRole("button", {
-      name: "Cancel",
-    }) as HTMLButtonElement;
-    expect(extractingButton.disabled).toBe(true);
-    expect(cancelButton.disabled).toBe(true);
+    // The submit is in flight: the door says so, and focus stays in the panel.
+    await screen.findByText("Submitting...");
     await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true));
     expect(document.activeElement).not.toBe(document.body);
 
@@ -476,15 +471,16 @@ describe("AssetPreviewModal archive extraction", () => {
       submitting.resolve(queuedRow());
     });
 
-    // Back on the action's own trigger once the poll has read the finished row;
-    // its accessible name is still the label.
-    const archiveButton = await waitFor(() => {
-      const button = screen.getByRole("button", { name: "Extract Moai.zip" });
-      expect(button.textContent).toBe("Extract archive");
-      return button;
+    // The row the runner queued replaces the review with its own narration, and
+    // the panel still holds focus - nothing at any stage landed on <body>.
+    const narration = await waitFor(() => {
+      const dialog = document.querySelector<HTMLElement>("[data-extract-dialog]");
+      expect(dialog).not.toBeNull();
+      return dialog as HTMLElement;
     });
-    await waitFor(() => expect(document.activeElement).toBe(archiveButton));
-    expect(panel.contains(document.activeElement)).toBe(true);
+    expect(panel.contains(narration)).toBe(true);
+    await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true));
+    expect(document.activeElement).not.toBe(document.body);
   });
 });
 

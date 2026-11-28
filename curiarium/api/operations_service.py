@@ -96,6 +96,7 @@ import schemas
 import seams
 import settings_service
 import trash_service
+import zip_service
 from auth import AuthContext
 from db import engine
 from file_utils import is_model_path
@@ -886,6 +887,11 @@ def _plan_extract_and_create(
     and the run is a rescan's job, never this operation's, and that rescan is the
     `library-scan` workflow over `library_scan.scan_subtree`, so the walk stays one
     primitive behind one route.
+
+    The review also carries the archive's own listing (`entries`), which is the
+    deleted `GET /import/archive/entries` restored onto the plan, sizes included,
+    so the entry picker has a source; it is the listing the plan actually read,
+    never a second and differently-filtered read.
     """
     archive = (target or "").strip().strip("/")
     if not archive:
@@ -1066,6 +1072,11 @@ def _plan_extract_and_create(
         }
     )
 
+    # The archive's own listing, restored onto the review: this is what the
+    # deleted `GET /import/archive/entries` served, sizes included. It is read from
+    # the archive the plan actually opened - the filed copy under `_source` for a
+    # re-plan - from the same central directory, and it writes nothing.
+    listing = zip_service.list_zip_entries(archive_service.source_archive(selection.path))
     review = {
         "workflow": "extract-and-create",
         "target": archive,
@@ -1095,6 +1106,7 @@ def _plan_extract_and_create(
         "existing_project_name": None,
         "move_list": moves,
         "projects": [{"name": name, "root": selection.twin, "members": len(planned)}],
+        "entries": listing,
     }
     return steps, review, [archive, selection.twin]
 
@@ -1141,6 +1153,7 @@ def _extract_already_created_review(
         "existing_project_name": existing.project.name,
         "move_list": [],
         "projects": [],
+        "entries": [],
     }
 
 
@@ -1345,6 +1358,13 @@ def _plan_extract(session: Session, target: str, params: dict) -> Tuple[list, di
     and is the one source of both the planned list and the junk verdict, so the
     review's `excluded` is exactly the listing the deleted GET served.
 
+    That deleted listing is restored ONTO this review, sizes included: `entries`
+    is the archive's whole member list (`zip_service.list_zip_entries`, the same
+    central directory and the same `junk` verdict, sorted by path), so the entry
+    picker a client restores has a source without a second route. The listing is
+    deliberately NOT narrowed by the selection: an operator who planned a narrow
+    review must still be able to widen it.
+
     The extract step writes the CALLER'S SELECTION - `params["entries"]` when it
     is a list, else the whole archive - which is the write set the deleted door
     had, so no member it would have written is lost: a hidden member the review
@@ -1441,6 +1461,11 @@ def _plan_extract(session: Session, target: str, params: dict) -> Tuple[list, di
             },
         },
     ]
+    # The archive's own listing, restored onto the review: this is what the
+    # deleted `GET /import/archive/entries` served, sizes included. It is read from
+    # the same archive the planner just opened - the filed copy under `_source` for
+    # a re-plan - from the same central directory, and it writes nothing.
+    listing = zip_service.list_zip_entries(archive_service.source_archive(selection.path))
     review = {
         "workflow": "extract",
         "target": archive,
@@ -1469,6 +1494,7 @@ def _plan_extract(session: Session, target: str, params: dict) -> Tuple[list, di
         "existing_project_name": None,
         "move_list": [],
         "projects": [],
+        "entries": listing,
     }
     return steps, review, [archive, selection.twin]
 
@@ -2246,7 +2272,23 @@ def list_operations(
     limit: int = 50,
     offset: int = 0,
     workflow: Optional[str] = None,
+    target: Optional[str] = None,
+    submitted_by: Optional[str] = None,
 ) -> Tuple[List[Operation], int]:
+    """One newest-first page of the queue, narrowed by the filters the UI asks with.
+
+    `state` and `workflow` are vocabulary and are therefore validated: an unknown
+    value is a client bug, refused with the list it should have used.
+
+    `target` and `submitted_by` are exact-match and deliberately NOT validated.
+    They exist because two questions are properties of the whole ledger, not of a
+    page: "is there an operation for THIS target I can resume" must be one exact
+    question rather than a client-side scan of a truncated page, and "only mine"
+    must be a server filter rather than a lie about a page. An unknown target or
+    submitter answers `[]`, the honest answer, and neither can become an existence
+    oracle: this route is READ and `GET /operations/{operation_id}` already
+    answers the same question to the same caller.
+    """
     if state is not None and state not in STATUSES:
         raise HTTPException(status_code=400, detail="unknown state")
     if workflow is not None and workflow not in WORKFLOWS:
@@ -2256,6 +2298,11 @@ def list_operations(
         filters.append(Operation.status == state)
     if workflow:
         filters.append(Operation.workflow == workflow)
+    # `is not None`, never truthiness: `""` is the library root, a legal target.
+    if target is not None:
+        filters.append(Operation.target == target)
+    if submitted_by is not None:
+        filters.append(Operation.submitted_by == submitted_by)
     total = session.exec(select(func.count()).select_from(Operation).where(*filters)).one()
     statement = (
         select(Operation)

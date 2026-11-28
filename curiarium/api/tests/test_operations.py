@@ -953,6 +953,160 @@ def test_undo_is_refused_before_the_operation_finishes(client: TestClient, seede
     assert response.json()["detail"] == "the operation has not finished"
 
 
+# --- the queue's filters ------------------------------------------------------
+
+
+def _queue_row(
+    operation_id: str,
+    *,
+    workflow: str,
+    target: str,
+    submitted_by: str,
+    status: str = "done",
+    created: Optional[str] = None,
+) -> str:
+    """Insert one queue row and return its id with the workflow, target and submitter named.
+
+    `_operation_row` hardcodes all three, so a test about a filter OVER them cannot
+    use it: every row it builds would answer the same question whatever the filter
+    did.
+    """
+    stamp = created or _iso(1)
+    with Session(engine) as session:
+        session.add(
+            Operation(
+                id=operation_id,
+                workflow=workflow,
+                target=target,
+                plan_json=json.dumps({"paths": [], "steps": [], "review": {}}),
+                plan_digest="d" * 64,
+                idempotency_key=f"key-{operation_id}",
+                status=status,
+                submitted_by=submitted_by,
+                request_id="-",
+                created_at=stamp,
+                finished_at=stamp if status in operations_service.TERMINAL_STATUSES else None,
+            )
+        )
+        session.commit()
+    return operation_id
+
+
+def test_the_queue_filters_by_target(client: TestClient) -> None:
+    """A same-workflow row on ANOTHER target must not answer a target filter.
+
+    False state caught: a queue that ignored `target` and returned the whole page,
+    so a client's "resume the operation for THIS target" would pick the Beta row
+    for an Alpha question - the one answer that cannot be discovered to be wrong.
+    """
+    alpha_create = _queue_row(
+        str(uuid4()), workflow="create-project", target="Alpha", submitted_by="alice"
+    )
+    beta_create = _queue_row(
+        str(uuid4()), workflow="create-project", target="Beta", submitted_by="alice"
+    )
+    alpha_adopt = _queue_row(str(uuid4()), workflow="adopt", target="Alpha", submitted_by="bob")
+
+    response = client.get("/operations", params={"target": "Alpha"})
+
+    assert response.status_code == 200, response.text
+    ids = {row["id"] for row in response.json()}
+    assert ids == {alpha_create, alpha_adopt}
+    assert beta_create not in ids, "a same-workflow row on another target answered the filter"
+
+    narrowed = client.get("/operations", params={"target": "Alpha", "workflow": "adopt"})
+    assert [row["id"] for row in narrowed.json()] == [alpha_adopt]
+
+
+def test_the_queue_filters_by_submitter(client: TestClient) -> None:
+    """Two users, one target: "only mine" must not be a claim about a page.
+
+    False state caught: a submitter filter that is really a client-side scan of a
+    truncated page, which would either miss the caller's own row or show another
+    user's row for the same target.
+    """
+    alice_row = _queue_row(str(uuid4()), workflow="adopt", target="Alpha", submitted_by="alice")
+    bob_row = _queue_row(str(uuid4()), workflow="adopt", target="Alpha", submitted_by="bob")
+
+    mine = client.get("/operations", params={"submitted_by": "bob"})
+
+    assert mine.status_code == 200, mine.text
+    assert {row["id"] for row in mine.json()} == {bob_row}
+    assert alice_row not in {row["id"] for row in mine.json()}, (
+        "another user's row for the same target answered the submitter filter"
+    )
+
+    both = client.get("/operations", params={"submitted_by": "bob", "target": "Alpha"})
+    assert [row["id"] for row in both.json()] == [bob_row]
+
+    nobody = client.get("/operations", params={"submitted_by": "nobody"})
+    assert nobody.status_code == 200 and nobody.json() == [], (
+        "an unknown submitter must answer the empty page, not the whole one"
+    )
+
+
+def test_the_new_filters_compose_with_state_and_the_page(client: TestClient) -> None:
+    """Filters narrow BEFORE the page, and the empty string is the library root.
+
+    False state caught: a filter applied to the rows after `offset`/`limit` sliced
+    the unfiltered table, which answers a shorter page (or another row entirely)
+    while still looking filtered. The old guards are measured beside it because a
+    new parameter must not weaken the validation the route already had.
+    """
+    newest = _queue_row(
+        str(uuid4()), workflow="create-project", target="Alpha", submitted_by="a", created=_iso(5)
+    )
+    queued = _queue_row(
+        str(uuid4()),
+        workflow="create-project",
+        target="Alpha",
+        submitted_by="a",
+        status="queued",
+        created=_iso(4),
+    )
+    second = _queue_row(
+        str(uuid4()), workflow="adopt", target="Alpha", submitted_by="a", created=_iso(3)
+    )
+    failed = _queue_row(
+        str(uuid4()),
+        workflow="adopt",
+        target="Alpha",
+        submitted_by="a",
+        status="failed",
+        created=_iso(2),
+    )
+    third = _queue_row(
+        str(uuid4()), workflow="adopt", target="Alpha", submitted_by="a", created=_iso(1)
+    )
+
+    page = client.get(
+        "/operations", params={"target": "Alpha", "state": "done", "limit": 1, "offset": 1}
+    )
+
+    assert page.status_code == 200, page.text
+    assert [row["id"] for row in page.json()] == [second], (
+        "the second DONE row under this target is what page 2 of the filtered set holds"
+    )
+    assert {newest, queued, failed, third}.isdisjoint({row["id"] for row in page.json()})
+
+    unknown_workflow = client.get("/operations", params={"workflow": "nope"})
+    assert unknown_workflow.status_code == 400
+    assert unknown_workflow.json()["detail"] == "unknown workflow"
+    unknown_state = client.get("/operations", params={"state": "nope"})
+    assert unknown_state.status_code == 400
+    assert unknown_state.json()["detail"] == "unknown state"
+
+    # `""` is a legal target - the library root - so it must be a filter, not an
+    # absent one: a truthiness check here would answer BOTH rows below.
+    root_row = _queue_row(str(uuid4()), workflow="library-scan", target="", submitted_by="a")
+    _queue_row(str(uuid4()), workflow="library-scan", target="Alpha", submitted_by="a")
+
+    root = client.get("/operations?target=")
+
+    assert root.status_code == 200, root.text
+    assert [row["id"] for row in root.json()] == [root_row]
+
+
 # --- retention ---------------------------------------------------------------
 
 

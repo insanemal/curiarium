@@ -14,6 +14,7 @@ export type ReviewCounts = {
   imports: number | null;
   missing: number | null;
   trash: number | null;
+  operations: number | null;
 };
 
 /**
@@ -101,6 +102,14 @@ export function describeQueueCount(key: ReviewQueueKey, count: number | null): s
     if (count === 1) return "1 entry in the trash";
     return `${count} entries in the trash`;
   }
+  // Operations counts work in flight, not decisions: nothing is awaiting a
+  // decision here, so the zero states the fact instead of counting anything.
+  if (key === "operations") {
+    if (count === null) return "Count unavailable";
+    if (count === 0) return "No operation in flight";
+    if (count === 1) return "1 operation in flight";
+    return `${count} operations in flight`;
+  }
   if (count === null) return "Count unavailable";
   if (count === 0) return "No import currently running";
   if (count === 1) return "1 import running";
@@ -108,15 +117,20 @@ export function describeQueueCount(key: ReviewQueueKey, count: number | null): s
 }
 
 /**
- * The nav's four counts, from four independent sources. `trash` is required
- * because the trash queue closes the set: a caller that has not opened it yet
- * passes `null`, which renders as a dash rather than a fake zero.
+ * The nav's five counts, from five independent sources. `trash` and
+ * `operations` are required because those two queues close the set: a caller
+ * that has not opened one yet passes `null`, which renders as a dash rather than
+ * a fake zero. Both are fetch-on-entry (`GET /trash` walks every entry;
+ * `GET /operations` is a ledger read), so the app must not pay either read on
+ * load - the badge is a dash until the queue has been opened once, the same
+ * `–`-until-known rule the trash badge documents.
  */
 export function useReviewCounts(
   bundle: BundleDetectState,
   imports: ImportRunsState,
   assetCounts: AssetCounts | null,
   trash: TrashList | null,
+  operations: number | null,
 ): ReviewCounts {
   const bundles = React.useMemo(() => bundleBadgeCount(bundle.report), [bundle.report]);
   const importsCount = importsBadgeCount(imports);
@@ -127,7 +141,7 @@ export function useReviewCounts(
   // A fresh object on every render would churn the nav even when no count
   // changed, so memoise the shape on the primitives.
   return React.useMemo(
-    () => ({ bundles, imports: importsCount, missing, trash: trashCount }),
-    [bundles, importsCount, missing, trashCount],
+    () => ({ bundles, imports: importsCount, missing, trash: trashCount, operations }),
+    [bundles, importsCount, missing, trashCount, operations],
   );
 }

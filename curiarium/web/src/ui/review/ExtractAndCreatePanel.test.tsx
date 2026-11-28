@@ -10,6 +10,7 @@ const operationsApi = vi.hoisted(() => ({
   submitOperation: vi.fn(),
   getOperation: vi.fn(),
   undoOperation: vi.fn(),
+  listOperations: vi.fn(),
 }));
 vi.mock("../../lib/api/operations", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/operations")>()),
@@ -17,10 +18,12 @@ vi.mock("../../lib/api/operations", async importOriginal => ({
   submitOperation: operationsApi.submitOperation,
   getOperation: operationsApi.getOperation,
   undoOperation: operationsApi.undoOperation,
+  listOperations: operationsApi.listOperations,
 }));
 
 import {
   getOperation,
+  listOperations,
   planOperation,
   submitOperation,
   undoOperation,
@@ -39,6 +42,7 @@ const planOperationMock = vi.mocked(planOperation);
 const submitOperationMock = vi.mocked(submitOperation);
 const getOperationMock = vi.mocked(getOperation);
 const undoOperationMock = vi.mocked(undoOperation);
+const listOperationsMock = vi.mocked(listOperations);
 
 const ARCHIVE = "import/01_Fates End - Wizard Tower.zip";
 const TWIN = "import/01_Fates End - Wizard Tower";
@@ -178,8 +182,10 @@ function renderPanel(
   );
 }
 
+/** The shared review surface, named by the ONE vocabulary: the group's name is
+ *  the workflow's label plus "review", not a door-private "preview". */
 function planPreview(): HTMLElement {
-  return screen.getByRole("group", { name: "Extract preview" });
+  return screen.getByRole("group", { name: "Extract and create review" });
 }
 
 function actionButton(): HTMLButtonElement | null {
@@ -201,6 +207,9 @@ async function settlePlan(): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   resetToasts();
+  // The panel's in-flight lookup is a READ on mount; nothing is running for this
+  // target unless a test says so.
+  listOperationsMock.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -235,7 +244,10 @@ describe("ExtractAndCreatePanel", () => {
     });
 
     const panel = planPreview();
-    expect(panel.querySelector("[data-extract-summary]")?.textContent).toBe("Would write 20 files.");
+    // The count sentence is the shared facts line now: one `<span>` per count the
+    // plan carries, tagged with the count's own machine name. The "files" fact is
+    // the sentence the confirm stage used to spell out.
+    expect(panel.querySelector('[data-extract-fact="files"]')?.textContent).toBe("20 files");
 
     const groups = Array.from(panel.querySelectorAll("[data-extract-group]"));
     expect(groups.map(node => node.getAttribute("data-extract-group-name"))).toEqual([
@@ -245,15 +257,15 @@ describe("ExtractAndCreatePanel", () => {
     expect(groups[0].textContent).toBe("01_Wizard - 14 files, 12 models");
     expect(groups[1].textContent).toBe("loose files - 6 files, 2 models");
 
-    // The archive's new home comes from the server's own move, never a path the
-    // client assembled from the archive and its twin.
-    expect(panel.querySelector("[data-extract-home]")?.textContent).toBe(
-      `The archive moves to "${FILED}".`,
-    );
+    // The archive's new home is the server's own MOVE row now: the target path
+    // is on the wire once, in `move_list`, so the review does not restate it in a
+    // second sentence. A path the client assembled from the archive and its twin
+    // would not appear here at all.
+    expect(panel.querySelector("[data-extract-move]")?.textContent).toContain(`"${FILED}"`);
     // The planned cover, by path: its asset id is resolved later by the server.
-    expect(panel.querySelector("[data-extract-cover]")?.textContent).toBe(
-      'The project\'s cover is "01_Wizard/tower.stl".',
-    );
+    // The shared surface flags no attribute for it (the cover is one line among
+    // the facts), so this asserts the sentence itself.
+    expect(panel.textContent).toContain('The project\'s cover is "01_Wizard/tower.stl".');
     // The server's refusal of one file, verbatim.
     expect(panel.querySelector("[data-extract-excluded]")?.textContent).toBe(
       "01_Wizard/notes.psd: does not hold a model",
@@ -283,9 +295,13 @@ describe("ExtractAndCreatePanel", () => {
     renderPanel();
     await settlePlan();
 
+    // The ONE submit control: the entry picker's button is a selection control,
+    // not a second way to approve the plan, so the rule is about the action.
     const buttons = screen.getAllByRole("button");
-    expect(buttons).toHaveLength(1);
-    expect(buttons[0].textContent).toBe(`Extract and create '${PROJECT}' from 20 files`);
+    expect(buttons.map(button => button.textContent)).toEqual([
+      "Choose files",
+      `Extract and create '${PROJECT}' from 20 files`,
+    ]);
     expect(screen.queryByRole("button", { name: /preview/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /apply/i })).toBeNull();
 
@@ -322,7 +338,9 @@ describe("ExtractAndCreatePanel", () => {
       fireEvent.click(actionButton() as HTMLButtonElement);
     });
 
-    expect(screen.getByRole("dialog", { name: "Extract progress" })).toBeTruthy();
+    // The progress dialog is the SHARED one, named from the ONE vocabulary: the
+    // workflow's label plus "progress".
+    expect(screen.getByRole("dialog", { name: "Extract and create progress" })).toBeTruthy();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(250);
@@ -429,7 +447,9 @@ describe("ExtractAndCreatePanel", () => {
     renderPanel();
 
     const alert = await screen.findByRole("alert");
-    expect(alert.getAttribute("data-extract-failure")).toBe("true");
+    // The failure handle is the shared panel's own: one plan-read failure tag for
+    // every door (`data-<prefix>-plan-failure`), not a door-private one.
+    expect(alert.getAttribute("data-extract-plan-failure")).toBe("true");
     expect(alert.textContent).toBe(REFUSAL);
     expect(actionButton()).toBeNull();
   });
@@ -441,6 +461,75 @@ describe("ExtractAndCreatePanel", () => {
 
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("offers the plan's own listing in a picker, re-plans for the confirmed subset and submits THAT plan", async () => {
+    // Catches a selection lost between the picker and the plan (the submit would
+    // name the WHOLE archive's plan), and a picker listing built from anything
+    // but the plan's own `review.entries`: a member the review excludes must be
+    // refused here with the same array, not a second, drifting list.
+    const MEMBER_A = "01_Wizard/tower.stl";
+    const MEMBER_B = "01_Wizard/base.stl";
+    planOperationMock
+      .mockResolvedValueOnce(
+        makePlan({
+          plan_id: "plan-whole",
+          review: makeReview({
+            entries: [
+              { path: MEMBER_A, size: 1024, junk: false },
+              { path: MEMBER_B, size: 512, junk: false },
+              { path: "01_Wizard/notes.psd", size: 64, junk: true },
+            ],
+          }),
+        }),
+      )
+      .mockResolvedValueOnce(makePlan({ plan_id: "plan-subset" }));
+    submitOperationMock.mockReturnValue(new Promise<Operation>(() => {}));
+
+    renderPanel();
+    await settlePlan();
+
+    const choose = document.querySelector<HTMLButtonElement>("[data-extract-choose-entries]");
+    expect(choose?.textContent).toBe("Choose files");
+    fireEvent.click(choose as HTMLButtonElement);
+
+    const dialog = screen.getByRole("dialog");
+    // The listing is the plan's, path for path, and the excluded member is
+    // refused with the plan's own sentence.
+    const rows = Array.from(dialog.querySelectorAll('[role="option"]'));
+    expect(rows.map(row => row.textContent)).toEqual([
+      expect.stringContaining(MEMBER_A),
+      expect.stringContaining(MEMBER_B),
+      expect.stringContaining("01_Wizard/notes.psd"),
+    ]);
+    expect(rows[2].getAttribute("aria-disabled")).toBe("true");
+    expect(rows[2].textContent).toContain("does not hold a model");
+
+    fireEvent.click(rows[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Use these files" }));
+
+    // A confirmed selection is a new plan READ: the params name the subset, and
+    // the confirm then submits the plan that review showed.
+    await waitFor(() => expect(planOperationMock).toHaveBeenCalledTimes(2));
+    expect(planOperationMock.mock.calls[1][0]).toEqual({
+      workflow: "extract-and-create",
+      target: ARCHIVE,
+      params: { name: PROJECT, entries: [MEMBER_A] },
+    });
+
+    await waitFor(() =>
+      expect(document.querySelector("[data-extract-action-button]")).toBeTruthy(),
+    );
+    act(() => {
+      fireEvent.click(document.querySelector("[data-extract-action-button]") as HTMLButtonElement);
+    });
+
+    await waitFor(() =>
+      expect(submitOperationMock).toHaveBeenCalledWith({
+        planId: "plan-subset",
+        idempotencyKey: expect.any(String),
+      }),
+    );
   });
 
   it("sends no name param when the operator typed nothing", async () => {

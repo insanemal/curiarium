@@ -6,20 +6,9 @@ import React from "react";
 // rule).
 import type { OperationUndo } from "../../lib/api/operations";
 import { notifyInfo } from "../../lib/toast";
-import OperationProgress from "../operations/OperationProgress";
-import { useOperationRun } from "../operations/useOperationRun";
-import {
-  excludedLine,
-  extractActionLabel,
-  extractArchiveHomeLine,
-  extractCoverLine,
-  extractDoneLine,
-  extractExistingLine,
-  extractGroupLine,
-  extractSummaryLine,
-  extractUndoLine,
-  operationStatusLine,
-} from "./bundleRows";
+import { ArchiveEntryPicker } from "../operations/ImportEntriesDialog";
+import OperationPanel from "../operations/OperationPanel";
+import { extractUndoLine } from "../operations/operationView";
 
 type Props = {
   /** The archive's library-relative path; the operation is keyed on it. */
@@ -35,24 +24,6 @@ type Props = {
   onUnauthorized?: () => void;
 };
 
-const PRIMARY_BUTTON = "text-xs px-2.5 py-1.5 rounded-md bg-accent disabled:opacity-60";
-
-/** The dialog's line about where the runner is, for the statuses that are not an
- *  outcome. The server's own token is the only thing that says this, so the
- *  sentence names it rather than inventing a stage the client cannot see. */
-function stateLine(status: string): string {
-  switch (status) {
-    case "queued":
-      return "The extraction is queued.";
-    case "running":
-      return "The extraction is running.";
-    case "cancelling":
-      return "The extraction is being cancelled.";
-    default:
-      return `The extraction is ${status}.`;
-  }
-}
-
 /** The news an undo answers with, in the host's toast. The extracted files
  *  deliberately stay after an undo (the server documents the residue), so the
  *  sentence says so instead of implying the tree was erased. */
@@ -61,147 +32,60 @@ function announceUndo(answer: OperationUndo): void {
 }
 
 /**
- * The extract-and-create door, whole: the plan the server computed, ONE action
- * labelled with its outcome, and a popup that narrates the operation it queued.
+ * The extract-and-create door: the plan the server computed, ONE action labelled
+ * with its outcome, the archive's entry picker, and a popup that narrates the
+ * operation it queued.
  *
- * The state machine lives in `ui/operations/useOperationRun` and the dialog in
- * `ui/operations/OperationProgress`, so this file is the door's PREVIEW and its
- * strings, not a third implementation. The server computes every step: this panel
- * asks for a plan on mount and can only send that plan's `plan_id` back.
- *
- * A zero-step plan is the server saying a project already exists. It is rendered
- * as a finished sentence and gets NO action at all, because there is nothing to
+ * The review, the state machine and the dialog live in
+ * `ui/operations/OperationPanel`, so this file is the door's target, its params,
+ * its picker and its undo news - not a third implementation. The server computes
+ * every step: this panel asks for a plan and can only send that plan's `plan_id`
+ * back. A zero-step plan (the server found a project already) is rendered as a
+ * finished sentence and gets NO action at all, because there is nothing to
  * approve.
+ *
+ * The ENTRY PICKER is the plan's own listing: a confirmed selection changes
+ * `params.entries`, which makes the panel re-PLAN (a READ) and re-render the
+ * review for the narrowed set, so the confirm then submits the plan the operator
+ * actually saw. The default is NO selection - the whole archive - so a plain
+ * extract stays one click and sends no `entries` key at all.
  *
  * A viewer renders nothing at all: no wrapper, no layout track, no request.
  */
 export default function ExtractAndCreatePanel(props: Props): React.ReactElement | null {
   const { archivePath, canContribute, name, onChanged, onUnauthorized } = props;
   const trimmedName = (name ?? "").trim();
-
-  const run = useOperationRun({
-    workflow: "extract-and-create",
-    target: archivePath,
-    params: trimmedName ? { name: trimmedName } : {},
-    enabled: canContribute,
-    onChanged,
-    onUnauthorized,
-    planFailureFallback: "Failed to plan the extraction.",
-    submitFailureFallback: "Failed to submit the extraction.",
-    pollFailureFallback: "Failed to read the operation.",
-    undoFailureFallback: "Failed to undo the extraction.",
-  });
-  const { plan, planFailure, submitFailure, operation, busy, orderedSteps, pollFailure, undoFailure } =
-    run;
-
-  // Every hook runs before this gate, so the early return breaks no hook order;
-  // the hook checks the gate itself because its effects are still armed.
-  if (!canContribute) return null;
-
-  async function undo(): Promise<void> {
-    const answer = await run.undo();
-    if (answer !== null) announceUndo(answer);
-  }
-
-  const review = plan?.review ?? null;
-  const alreadyCreated = review !== null && review.creates === 0;
-  const homeLine = review === null ? null : extractArchiveHomeLine(review);
-  const coverLine = review === null ? null : extractCoverLine(review.cover);
+  // An empty list means "the whole archive": the plan is then asked with no
+  // `entries` key, so the default extract is byte-identical to the pre-picker
+  // one.
+  const [entries, setEntries] = React.useState<string[] | null>(null);
 
   return (
-    <div className="flex flex-col gap-2">
-      {planFailure !== null && (
-        <span className="review-detail-reason text-red-500" role="alert" data-extract-failure="true">
-          {planFailure}
-        </span>
-      )}
-      {plan !== null && review !== null && operation === null && (
-        // The plan as INFORMATION: what the one action would do, not a step the
-        // operator has to take. Nothing here is a tab stop except the action.
-        <div
-          className="review-detail-facts"
-          role="group"
-          aria-label="Extract preview"
-          data-extract-plan="true"
-        >
-          {alreadyCreated ? (
-            <span data-extract-existing="true">{extractExistingLine(review)}</span>
-          ) : (
-            <>
-              <span data-extract-summary="true">{extractSummaryLine(review)}</span>
-              {/* The groups come from the WIRE ARRAY, never from a prose
-                  rendering of it: a real list, so a screen reader reads one group
-                  per item. The `""` bucket is the root's loose files. */}
-              <ul className="flex flex-col gap-1">
-                {review.groups.map(group => (
-                  <li
-                    key={group.name}
-                    data-extract-group="true"
-                    data-extract-group-name={group.name}
-                  >
-                    {extractGroupLine(group)}
-                  </li>
-                ))}
-              </ul>
-              {homeLine !== null && (
-                <span data-extract-home="true" className="font-mono">
-                  {homeLine}
-                </span>
-              )}
-              {coverLine !== null && <span data-extract-cover="true">{coverLine}</span>}
-            </>
-          )}
-          {/* The server's refusal of one file, verbatim: the client decided none
-              of these and writes no words for one. */}
-          {review.excluded.map(entry => (
-            <span key={entry.path} className="review-detail-reason" data-extract-excluded="true">
-              {excludedLine(entry)}
-            </span>
-          ))}
-        </div>
-      )}
-      {submitFailure !== null && (
-        <span
-          className="review-detail-reason text-red-500"
-          role="alert"
-          data-extract-submit-failure="true"
-        >
-          {submitFailure}
-        </span>
-      )}
-      {/* The ONE action, labelled with the outcome the plan promises. A zero-step
-          plan has nothing to do, so it gets no button at all. */}
-      {plan !== null && review !== null && operation === null && !alreadyCreated && (
-        <div className="review-detail-actions">
-          <button
-            type="button"
-            className={PRIMARY_BUTTON}
-            data-extract-action-button="true"
-            disabled={busy}
-            onClick={() => void run.submit()}
-          >
-            {extractActionLabel(review)}
-          </button>
-        </div>
-      )}
-      {operation !== null && plan !== null && (
-        <OperationProgress
-          operation={operation}
-          plan={plan}
-          orderedSteps={orderedSteps}
-          pollFailure={pollFailure}
-          undoFailure={undoFailure}
-          busy={busy}
-          onUndo={undo}
-          dataPrefix="extract"
-          ariaLabel="Extract progress"
-          stateLine={stateLine}
-          stepLine={operationStatusLine}
-          doneLine={extractDoneLine}
-          cancelledLine="The extraction was cancelled."
-          undoLabel="Undo this extraction"
-        />
-      )}
-    </div>
+    <OperationPanel
+      workflow="extract-and-create"
+      target={archivePath}
+      params={{
+        ...(trimmedName ? { name: trimmedName } : {}),
+        ...(entries ? { entries } : {}),
+      }}
+      canContribute={canContribute}
+      onChanged={onChanged}
+      onUnauthorized={onUnauthorized}
+      dataPrefix="extract"
+      onUndo={announceUndo}
+      render={run =>
+        run.plan ? (
+          <ArchiveEntryPicker
+            label={archivePath}
+            entries={run.plan.review.entries ?? []}
+            excluded={run.plan.review.excluded}
+            selected={entries ?? []}
+            onConfirm={setEntries}
+            disabled={run.busy}
+            dataPrefix="extract"
+          />
+        ) : null
+      }
+    />
   );
 }

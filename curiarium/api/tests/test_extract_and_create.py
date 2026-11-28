@@ -662,6 +662,34 @@ def test_the_plan_is_the_entries_door_listing(client: TestClient, storage: Path)
     assert plan["review"]["excluded"] == published["excluded"]
 
 
+def test_the_review_entries_are_the_deleted_entries_listing(
+    client: TestClient, storage: Path
+) -> None:
+    """The composing workflow publishes the deleted entries listing on its review.
+
+    `GET /import/archive/entries` is gone, and `extract-and-create` is the second
+    workflow that opens an archive, so its review must carry the same rows: every
+    member of the archive, sorted by path, with the bytes it would write and
+    `entry_policy.is_junk_entry`'s verdict. False state caught: a server listing
+    through a second, disagreeing rule - one that dropped a junk or hidden member,
+    or sized members from something other than the central directory.
+    """
+    register_archive()
+
+    plan = plan_extract(client)
+
+    entries = plan["review"]["entries"]
+    members = archive_members()
+    assert [entry["path"] for entry in entries] == sorted(members), (
+        "every member of the archive, in `list_zip_entries` order"
+    )
+    sizes = {entry["path"]: entry["size"] for entry in entries}
+    assert sizes == {name: len(body) for name, body in members.items()}
+    assert sizes[FIRST_MODEL] == len(STL_BYTES)
+    assert sizes[HIDDEN] == len(STL_BYTES)
+    assert {entry["path"] for entry in entries if entry["junk"]} == set(JUNK)
+
+
 def test_a_subset_selection_writes_and_attaches_only_the_subset(client: TestClient, storage: Path) -> None:
     """AC-2. Mutation: an extract step that ignores `params.entries`.
 

@@ -10,6 +10,7 @@ const operationsApi = vi.hoisted(() => ({
   submitOperation: vi.fn(),
   getOperation: vi.fn(),
   undoOperation: vi.fn(),
+  listOperations: vi.fn(),
 }));
 vi.mock("../../lib/api/operations", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/operations")>()),
@@ -17,10 +18,12 @@ vi.mock("../../lib/api/operations", async importOriginal => ({
   submitOperation: operationsApi.submitOperation,
   getOperation: operationsApi.getOperation,
   undoOperation: operationsApi.undoOperation,
+  listOperations: operationsApi.listOperations,
 }));
 
 import {
   getOperation,
+  listOperations,
   planOperation,
   submitOperation,
   undoOperation,
@@ -39,6 +42,7 @@ const planOperationMock = vi.mocked(planOperation);
 const submitOperationMock = vi.mocked(submitOperation);
 const getOperationMock = vi.mocked(getOperation);
 const undoOperationMock = vi.mocked(undoOperation);
+const listOperationsMock = vi.mocked(listOperations);
 
 /** The server's refusal, whole: a sentence naming the shape and the folder, so a
  *  test that paraphrased it would be caught by the byte comparison. */
@@ -152,8 +156,10 @@ function renderPanel(
   );
 }
 
+/** The shared review surface, named by the ONE vocabulary: the group's name is
+ *  the workflow's label plus "review", not a door-private "preview". */
 function planPanel(): HTMLElement {
-  return screen.getByRole("group", { name: "Split preview" });
+  return screen.getByRole("group", { name: "Split into projects review" });
 }
 
 function actionButton(): HTMLButtonElement {
@@ -176,6 +182,9 @@ async function settlePlan(): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   resetToasts();
+  // The panel's in-flight lookup is a READ on mount; nothing is running for this
+  // target unless a test says so.
+  listOperationsMock.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -355,7 +364,9 @@ describe("SplitAndCreatePanel", () => {
     renderPanel();
 
     const alert = await screen.findByRole("alert");
-    expect(alert.getAttribute("data-split-failure")).toBe("true");
+    // The failure handle is now the shared panel's own: one plan-read failure
+    // tag for every door (`data-<prefix>-plan-failure`), not a door-private one.
+    expect(alert.getAttribute("data-split-plan-failure")).toBe("true");
     expect(alert.textContent).toBe(REFUSAL);
     expect(document.querySelector("[data-split-action-button]")).toBeNull();
   });

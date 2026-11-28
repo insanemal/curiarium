@@ -293,6 +293,64 @@ def test_the_extract_plan_is_the_deleted_entries_listing(
     assert [step["op"] for step in plan["steps"]] == ["extract", "register"]
 
 
+def test_the_review_entries_are_the_deleted_entries_listing(
+    client: TestClient, storage: Path
+) -> None:
+    """The deleted `GET /import/archive/entries` is back as `review["entries"]`.
+
+    The rows are that route's listing restored on the review - every member the
+    archive holds, junk and hidden ones included, sorted by path, with the bytes
+    each member would write and the same `junk` verdict. False state caught: a
+    server listing through a SECOND, disagreeing rule (one that dropped the junk
+    or the dotfile, or reported different sizes) leaves the picker unable to name
+    a member the extract would still write.
+    """
+    nasty_archive(storage)
+
+    plan = plan_of(client, "Nasty.zip")
+
+    entries = plan["review"]["entries"]
+    members = {
+        "part.stl": STL_BYTES,
+        "a/b/nested.stl": b"nested",
+        **{junk: b"junk" for junk in JUNK},
+        HIDDEN: b"hidden",
+    }
+    assert [entry["path"] for entry in entries] == sorted(members), (
+        "every member of the archive, in `list_zip_entries` order"
+    )
+    sizes = {entry["path"]: entry["size"] for entry in entries}
+    assert sizes["part.stl"] == len(STL_BYTES)
+    assert sizes["a/b/nested.stl"] == len(b"nested")
+    assert sizes == {name: len(body) for name, body in members.items()}
+    assert {entry["path"] for entry in entries if entry["junk"]} == set(JUNK), (
+        "the junk verdict is `entry_policy.is_junk_entry`'s, not a second rule"
+    )
+
+
+def test_a_narrow_selection_narrows_the_write_set_but_not_the_listing(
+    client: TestClient, storage: Path
+) -> None:
+    """The listing is the ARCHIVE's, not the selection's: it can always be widened.
+
+    False state caught: a server that narrowed `entries` along with the selection,
+    leaving the operator unable to re-select a member a narrow review left out -
+    the picker would have no row to tick.
+    """
+    nasty_archive(storage)
+
+    plan = plan_of(client, "Nasty.zip", entries=["part.stl"])
+    review = plan["review"]
+
+    assert review["members"] == 1, "only the selection is planned"
+    replay = operations_service.recompute_plan(plan["plan_id"])
+    extract_step = next(step for step in replay.steps if step["op"] == "extract")
+    assert extract_step["args"]["entries"] == ["part.stl"], "the write set is the pick"
+    assert len(review["entries"]) == len(JUNK) + 3, (
+        "the listing is still every member of the archive: 2 payload, 2 junk, 1 hidden"
+    )
+
+
 # --- 2: the run writes and registers ---------------------------------------
 
 

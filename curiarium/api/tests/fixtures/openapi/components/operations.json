@@ -35,6 +35,30 @@
     "title": "OperationCoverOut",
     "type": "object"
   },
+  "OperationEntryOut": {
+    "description": "One member of an archive the plan read: its path, its bytes, its verdict.\n\nThe rows are the ones the deleted `GET /import/archive/entries` served, in the\nsame order and with the same `junk` verdict (`entry_policy.is_junk_entry`), so\nthe entry picker a client restores can tick members by size and can disable the\nones the extractor will not register.",
+    "properties": {
+      "junk": {
+        "title": "Junk",
+        "type": "boolean"
+      },
+      "path": {
+        "title": "Path",
+        "type": "string"
+      },
+      "size": {
+        "title": "Size",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "path",
+      "size",
+      "junk"
+    ],
+    "title": "OperationEntryOut",
+    "type": "object"
+  },
   "OperationExcludedOut": {
     "description": "One file or directory the plan leaves out, with a human reason.",
     "properties": {
@@ -345,6 +369,14 @@
       "deletes": {
         "title": "Deletes",
         "type": "integer"
+      },
+      "entries": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/OperationEntryOut"
+        },
+        "title": "Entries",
+        "type": "array"
       },
       "excluded": {
         "default": [],

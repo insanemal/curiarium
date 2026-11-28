@@ -516,3 +516,87 @@ describe("useOperationRun undo", () => {
     expect(result.current.undoFailure).toBeNull();
   });
 });
+
+describe("useOperationRun adopt", () => {
+  it("seeds the adopted row and polls it without planning or submitting", async () => {
+    // Catches a resume that re-plans and re-submits: the row already exists, so a
+    // plan READ would describe work the server is doing and a submit would queue a
+    // second operation over the same paths.
+    vi.useFakeTimers();
+    const adopted = makeOperation({ id: "op-9", status: "running" });
+    getOperationMock.mockResolvedValue(makeOperation({ id: "op-9", status: "done" }));
+    const { result } = renderRun({ adopt: adopted });
+    await flush();
+
+    expect(planOperationMock).not.toHaveBeenCalled();
+    expect(submitOperationMock).not.toHaveBeenCalled();
+    expect(result.current.operation?.id).toBe("op-9");
+    expect(result.current.plan).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+    });
+
+    expect(getOperationMock).toHaveBeenCalledTimes(1);
+    expect(getOperationMock).toHaveBeenCalledWith("op-9");
+    expect(result.current.operation?.status).toBe("done");
+    expect(result.current.terminal).toBe(true);
+  });
+
+  it("does not tell the host about a row that was already done when it was adopted", async () => {
+    // Catches a resume that reports a completion the host's data already reflects:
+    // the panel opening is not a change, so it refetches nothing.
+    vi.useFakeTimers();
+    const onChanged = vi.fn();
+    const { result } = renderRun({
+      adopt: makeOperation({ id: "op-9", status: "done" }),
+      onChanged,
+    });
+    await flush();
+
+    expect(result.current.operation?.status).toBe("done");
+    expect(onChanged).not.toHaveBeenCalled();
+
+    // A terminal row arms no timer either.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(getOperationMock).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("reports an adopted row that finishes later exactly once, and submits nothing", async () => {
+    // Catches both halves of the resume rule: a completion the host never hears
+    // about, and a submit that queues a second operation over the adopted row's
+    // paths even though a plan was already in hand.
+    vi.useFakeTimers();
+    const onChanged = vi.fn();
+    getOperationMock.mockResolvedValue(makeOperation({ id: "op-9", status: "done" }));
+    const { result, rerender } = renderRun({ onChanged });
+    await flush();
+    expect(result.current.plan).not.toBeNull();
+
+    // The lookup answers after the plan landed, so the plan is non-null here: the
+    // only thing that may stop a submit is the adopted row itself.
+    rerender(makeOptions({ onChanged, adopt: makeOperation({ id: "op-9", status: "running" }) }));
+    await flush();
+    expect(result.current.operation?.id).toBe("op-9");
+    expect(onChanged).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+    });
+    expect(onChanged).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await result.current.submit();
+    });
+    expect(submitOperationMock).not.toHaveBeenCalled();
+
+    // A re-poll of the same terminal row is not a second completion.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+});

@@ -19,7 +19,7 @@ vi.mock("../lib/api", () => ({
   refreshToken: vi.fn(),
 }));
 
-// The four queue hooks read their own endpoints from these domain modules; the
+// The five queue hooks read their own endpoints from these domain modules; the
 // shapes are the real ones so a hook may render its count without throwing.
 vi.mock("../lib/api/bundles", () => ({
   getBundleReport: vi.fn(),
@@ -84,7 +84,7 @@ vi.mock("./UploadBar", () => ({ default: () => null }));
 vi.mock("./UploadQueuePanel", () => ({ default: () => null }));
 vi.mock("./Login", () => ({ default: () => null }));
 
-// The four queue views are markers only: a cell proves which queue the App
+// The five queue views are markers only: a cell proves which queue the App
 // mounted, and the hooks that fetch stay App-owned and real.
 vi.mock("./review/BundleReviewView", async () => {
   const react = await import("react");
@@ -111,6 +111,13 @@ vi.mock("./review/TrashQueue", async () => {
   const react = await import("react");
   return {
     default: () => react.createElement("div", { "data-testid": "trash-review-view" }, "Trash queue"),
+  };
+});
+vi.mock("./operations/OperationsQueue", async () => {
+  const react = await import("react");
+  return {
+    default: () =>
+      react.createElement("div", { "data-testid": "operations-review-view" }, "Operations queue"),
   };
 });
 
@@ -156,13 +163,20 @@ const DESTINATIONS: readonly Destination[] = [
   { name: "Audit", kind: "audit" },
 ];
 
-const QUEUE_ORDER: readonly ReviewQueueKey[] = ["bundles", "imports", "missing", "trash"];
+const QUEUE_ORDER: readonly ReviewQueueKey[] = [
+  "bundles",
+  "imports",
+  "missing",
+  "trash",
+  "operations",
+];
 
 const QUEUE_LABELS: Record<ReviewQueueKey, string> = {
   bundles: "Bundles to confirm",
   imports: "Imports running",
   missing: "Missing files",
   trash: "Trash",
+  operations: "Operations",
 };
 
 const QUEUE_MARKERS: Record<ReviewQueueKey, string> = {
@@ -170,15 +184,16 @@ const QUEUE_MARKERS: Record<ReviewQueueKey, string> = {
   imports: "imports-review-view",
   missing: "missing-review-view",
   trash: "trash-review-view",
+  operations: "operations-review-view",
 };
 
 // Written out literally rather than derived from `visibleQueues`, so the test
 // states the threshold table instead of echoing the implementation of it.
 const VISIBLE_QUEUES: Record<Role, readonly ReviewQueueKey[]> = {
-  viewer: ["imports", "missing", "trash"],
-  contributor: ["bundles", "imports", "missing", "trash"],
-  editor: ["bundles", "imports", "missing", "trash"],
-  admin: ["bundles", "imports", "missing", "trash"],
+  viewer: ["imports", "missing", "trash", "operations"],
+  contributor: ["bundles", "imports", "missing", "trash", "operations"],
+  editor: ["bundles", "imports", "missing", "trash", "operations"],
+  admin: ["bundles", "imports", "missing", "trash", "operations"],
 };
 
 // The stored queue key defaults to `bundles`, and App resolves it against the
@@ -644,7 +659,7 @@ describe("App review destination lifecycle (AC-3, AC-6)", () => {
     );
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "End" });
     expect(document.activeElement, `${context}: End moves focus to the last tab`).toBe(
-      screen.getByRole("tab", { name: /^Trash/ }),
+      screen.getByRole("tab", { name: /^Operations/ }),
     );
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Home" });
     expect(document.activeElement, `${context}: Home moves focus to the first tab`).toBe(bundlesTab);

@@ -332,6 +332,18 @@ describe("describeQueueCount", () => {
     expect(describeQueueCount("missing", 0)).toBe("0 missing files awaiting a decision");
     expect(describeQueueCount("missing", 0)).not.toBe("No import currently running");
   });
+
+  // Operations counts work in flight, not decisions and not entries: borrowing
+  // any other queue's wording would describe a different surface.
+  it("words the operations count as work in flight", () => {
+    // A branch that falls through to the imports wording reads "No import
+    // currently running" for a genuinely idle operations queue.
+    expect(describeQueueCount("operations", null)).toBe("Count unavailable");
+    expect(describeQueueCount("operations", 0)).toBe("No operation in flight");
+    expect(describeQueueCount("operations", 1)).toBe("1 operation in flight");
+    expect(describeQueueCount("operations", 3)).toBe("3 operations in flight");
+    expect(describeQueueCount("operations", 3)).not.toBe("3 imports running");
+  });
 });
 
 describe("missingBadgeCount (Mf-1tx3)", () => {
@@ -374,7 +386,7 @@ describe("useReviewCounts", () => {
     };
     const { result, rerender } = renderHook(
       ({ bundle, imports, counts, trash }: Args) =>
-        useReviewCounts(bundle, imports, counts, trash),
+        useReviewCounts(bundle, imports, counts, trash, null),
       {
         initialProps: {
           bundle: makeState(report),
@@ -387,7 +399,7 @@ describe("useReviewCounts", () => {
 
     const initial = result.current;
     // Every count is exercised: the memo must depend on all four primitives.
-    expect(initial).toEqual({ bundles: 1, imports: 0, missing: 2, trash: 2 });
+    expect(initial).toEqual({ bundles: 1, imports: 0, missing: 2, trash: 2, operations: null });
 
     // Fresh state objects with the same numbers must not churn the nav.
     rerender({
@@ -405,7 +417,7 @@ describe("useReviewCounts", () => {
     const report = makeReport([makeBundle()]);
     type Args = { imports: ImportRunsState };
     const { result, rerender } = renderHook(
-      ({ imports }: Args) => useReviewCounts(makeState(report), imports, null, null),
+      ({ imports }: Args) => useReviewCounts(makeState(report), imports, null, null, null),
       { initialProps: { imports: importsState({ loaded: true }) } },
     );
 
@@ -422,7 +434,7 @@ describe("useReviewCounts", () => {
   it("recomputes the missing count when the asset counts change", () => {
     type Args = { counts: AssetCounts | null };
     const { result, rerender } = renderHook(
-      ({ counts }: Args) => useReviewCounts(makeState(null), importsState(), counts, null),
+      ({ counts }: Args) => useReviewCounts(makeState(null), importsState(), counts, null, null),
       { initialProps: { counts: null as AssetCounts | null } },
     );
 
@@ -439,7 +451,7 @@ describe("useReviewCounts", () => {
   it("recomputes the trash count once the listing arrives", () => {
     type Args = { trash: TrashList | null };
     const { result, rerender } = renderHook(
-      ({ trash }: Args) => useReviewCounts(makeState(null), importsState(), null, trash),
+      ({ trash }: Args) => useReviewCounts(makeState(null), importsState(), null, trash, null),
       { initialProps: { trash: null as TrashList | null } },
     );
 
@@ -451,5 +463,25 @@ describe("useReviewCounts", () => {
 
     rerender({ trash: makeTrash([makeTrashEntry("a.ply")]) });
     expect(result.current.trash).toBe(1);
+  });
+
+  it("returns the operations count the queue reports", () => {
+    // The fifth input IS the queue's own `activeCount`; a hook that dropped it
+    // would leave the badge permanently dashed even with work in flight.
+    const { result } = renderHook(() =>
+      useReviewCounts(makeState(null), importsState(), null, null, 2),
+    );
+
+    expect(result.current.operations).toBe(2);
+  });
+
+  it("returns a null operations count until the queue has been opened", () => {
+    // The queue is fetch-on-entry, so `activeCount` is null before the first
+    // read: the badge must render a dash, never a fabricated zero.
+    const { result } = renderHook(() =>
+      useReviewCounts(makeState(null), importsState(), null, null, null),
+    );
+
+    expect(result.current.operations).toBeNull();
   });
 });

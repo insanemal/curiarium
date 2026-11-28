@@ -79,13 +79,21 @@ def list_operations_route(
     _: Optional[AuthContext] = Depends(require_read),
     state: Optional[str] = Query(default=None),
     workflow: Optional[str] = Query(default=None),
+    target: Optional[str] = Query(default=None),
+    submitted_by: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    """Newest-first page of the queue, optionally filtered by status and by workflow."""
+    """Newest-first page of the queue, filtered by status, workflow, target and submitter."""
     with Session(engine) as session:
         rows, _total = operations_service.list_operations(
-            session, state=state, limit=limit, offset=offset, workflow=workflow
+            session,
+            state=state,
+            limit=limit,
+            offset=offset,
+            workflow=workflow,
+            target=target,
+            submitted_by=submitted_by,
         )
         return [operations_service.operation_payload(session, operation) for operation in rows]
 

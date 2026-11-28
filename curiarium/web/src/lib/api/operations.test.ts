@@ -6,14 +6,13 @@ import {
   getApiBase,
   getOperation,
   planOperation,
-  splitActionLabel,
   submitOperation,
   type OperationReview,
   undoOperation,
 } from "./index";
-// `index.ts` is outside this ticket's surface, so the new symbol is read from
-// its domain module - the same module every other production import uses.
-import { adoptActionLabel } from "./operations";
+// `index.ts` is outside this ticket's surface, so the new symbols are read from
+// their domain module - the same module every other production import uses.
+import { cancelOperation, listOperations } from "./operations";
 
 type MockResponse = {
   ok: boolean;
@@ -205,74 +204,64 @@ describe("operations API client", () => {
     expect((error as Error).message).toBe("the operation has already been undone");
   });
 
-  it("labels the split action from the plan's own project count", () => {
-    // Catches a hard-coded count, a singular drawn from the plural string, and a
-    // review with no projects promising nothing at all.
-    expect(splitActionLabel({ ...review, projects: [] })).toBe("Split into 1 project");
-    expect(splitActionLabel({ ...review, projects: [{ name: "a", root: "a", members: 1 }] })).toBe(
-      "Split into 1 project",
-    );
-    expect(splitActionLabel(review)).toBe("Split into 2 projects");
-    expect(
-      splitActionLabel({
-        ...review,
-        projects: [
-          { name: "a", root: "a", members: 1 },
-          { name: "b", root: "b", members: 1 },
-          { name: "c", root: "c", members: 1 },
-        ],
-      }),
-    ).toBe("Split into 3 projects");
+  it("posts the cancel with no body and no Content-Type", async () => {
+    // A cancel names its operation in the path, so a body would be a claim the
+    // route did not ask for.
+    const cancelling = { ...operation, status: "cancelling" };
+    const fetchMock = installFetch(respond(cancelling));
+
+    await expect(cancelOperation("op-1")).resolves.toEqual(cancelling);
+
+    const { url, init } = onlyCall(fetchMock);
+    expect(url).toBe(`${getApiBase()}/operations/op-1/cancel`);
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeUndefined();
+    const headers = new Headers(init.headers);
+    expect(headers.get("Content-Type")).toBeNull();
   });
 
-  it("labels the adopt action from the plan's own file and group counts", () => {
-    // Catches a label named for the subsystem rather than the outcome, a
-    // singular drawn from the plural string, and the `""` root bucket counted
-    // as a group: that bucket is the folder's own files, and printing it would
-    // promise a group the operator cannot see.
-    const namedGroups = (count: number): OperationReview["groups"] =>
-      Array.from({ length: count }, (_, index) => ({
-        name: `Group ${index + 1}`,
-        members: 19,
-        models: 19,
-      }));
+  it("throws UnauthorizedError on a 401 from cancel", async () => {
+    installFetch(respond(null, { ok: false, status: 401, body: "" }));
 
-    expect(
-      adoptActionLabel({
-        ...review,
-        members: 171,
-        groups: namedGroups(9),
-        by_role: { model: 171, image: 0, text: 0, archive: 0, other: 0 },
+    await expect(cancelOperation("op-1")).rejects.toBeInstanceOf(UnauthorizedError);
+  });
+
+  it("surfaces the server's detail on a 409 from cancel", async () => {
+    // The server refuses a finished or never-queued operation for a reason the
+    // operator has to read, so its sentence is shown verbatim.
+    installFetch(
+      respond(null, {
+        ok: false,
+        status: 409,
+        body: JSON.stringify({ detail: "the operation has already finished" }),
       }),
-    ).toBe("Add 171 files in 9 groups");
-    expect(
-      adoptActionLabel({
-        ...review,
-        members: 1,
-        groups: [{ name: "Hydra", members: 1, models: 1 }],
-        by_role: { model: 1, image: 0, text: 0, archive: 0, other: 0 },
-      }),
-    ).toBe("Add 1 file in 1 group");
-    expect(
-      adoptActionLabel({
-        ...review,
-        members: 171,
-        groups: [],
-        by_role: { model: 171, image: 0, text: 0, archive: 0, other: 0 },
-      }),
-    ).toBe("Add 171 files");
-    // The `""` bucket rides with a real group here, so the test proves it is
-    // skipped rather than proving an empty list stays empty.
-    expect(
-      adoptActionLabel({
-        ...review,
-        members: 3,
-        groups: [
-          { name: "", members: 2, models: 2 },
-          { name: "Core", members: 1, models: 1 },
-        ],
-        by_role: { model: 3, image: 0, text: 0, archive: 0, other: 0 },
-      }),
-    ).toBe("Add 3 files in 1 group");
+    );
+
+    const error = await cancelOperation("op-1").catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("the operation has already finished");
+  });
+
+  it("passes target and submitted_by to the query, including an empty target", async () => {
+    // `""` is the library root, a legal target: `!= null` keeps it in the query
+    // rather than dropping it and widening the read to every target.
+    const fetchMock = installFetch(respond([]));
+
+    await listOperations({ target: "", submitted_by: "u1" });
+
+    const { url } = onlyCall(fetchMock);
+    const query = new URLSearchParams(url.split("?")[1] ?? "");
+    expect(query.has("target")).toBe(true);
+    expect(query.get("target")).toBe("");
+    expect(query.get("submitted_by")).toBe("u1");
+  });
+
+  it("omits target and submitted_by when they are undefined", async () => {
+    const fetchMock = installFetch(respond([]));
+
+    await listOperations({ workflow: "scan" });
+
+    const { url } = onlyCall(fetchMock);
+    expect(url).toBe(`${getApiBase()}/operations?workflow=scan`);
   });
 });

@@ -306,7 +306,7 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | GET    | `/bundles/detect`                       | dry-run report computed from disk on every read: which directories are vendor bundles and what a create would make of each; writes nothing, resolves nothing, heals nothing |
 | GET    | `/snapshots`                           | lists the snapshots this volume has; reads the provider view, creates nothing |
 | GET    | `/snapshots/{name}/browse`             | browses one snapshot read-only; creates nothing |
-| GET    | `/operations`                          | the queue, newest first, with each operation's steps, status and undo state; a viewer may read what is running |
+| GET    | `/operations`                          | the queue, newest first, with each operation's steps, status and undo state; the server-side filters are `state`, `workflow`, `target` and `submitted_by` (plus a `limit`/`offset` page), so "the running operation for THIS archive" is one query rather than a client scan. A viewer may read what is running |
 | GET    | `/operations/{operation_id}`           | one operation and its step ledger |
 
 ### contribute (contributor, editor or admin)
@@ -487,10 +487,32 @@ the permanent record.
 Nine workflows run: `create-project`, `split-and-create`, `adopt`,
 `extract-and-create`, `extract`, `library-scan`, `import-link`, `import-zip` and
 `enrich`. The client calls these routes - `curiarium/web/src/lib/api/operations.ts`
-plans, submits and undoes for the review queue, the guided import panel
-(`SplitAndCreatePanel`), the project page's drift notice (`AdoptGrownParts`), the
-two ingest flows and the bundle enrichment panel - and every other name in
+plans, submits, cancels, reads and undoes - and every other name in
 `WORKFLOW_LEVELS` is declared, not runnable.
+
+The queue is CONSUMED by the browser now, not only written by it: the Review
+group's fifth row (`Operations`, `ui/operations/OperationsQueue.tsx`) lists every
+workflow's history from `GET /operations`, says each row's status and undo state,
+attributes it to its submitter (with a "only mine" filter that is the server's
+`submitted_by`, not a client-side drop), and can resume an operation already in
+flight for a target. A resumed row is shown INSTEAD of a fresh review, because a
+second submit over the same paths would queue a second run. `GET
+/operations/{operation_id}` is the single-row read the resume and the progress
+popup poll, one read per 250 ms until the row is terminal.
+
+The two ingest doors are back in the browser as their operations (`UrlImportPanel`
+in `ui/operations/`, mounted by `UploadBar`): a link or a zip is inspected, given
+a place to land, and planned as `import-link`/`import-zip`, so the deleted
+`POST /import` and `POST /import/zip` routes have a review, a narration and an
+undo where they had none.
+
+The archive entry picker's listing is the PLAN's own `review.entries` - the
+path, the bytes and the server's `junk` verdict, exactly the rows the deleted
+`GET /import/archive/entries` route served, byte sizes included. No route was
+added for it: the plan is one request that answers both the review and the
+picker, so a member the review excludes is refused by the picker with the same
+sentence, from the same array, and the two cannot disagree about what is
+selectable.
 
 The two ingest workflows are the deleted `POST /import` and `POST /import/zip`
 doors as operations: one `fetch`/`fetch-zip` step whose args are the request the
@@ -519,7 +541,12 @@ cache write and the per-bundle refusal are still the primitive's. Planning fetch
 nothing, and its target is deliberately empty: the workflow's target is the
 working set of `params.keys`, not one page. Its undo removes only the cache
 records that run itself fetched, and only while a later enrich has not replaced
-them; it edits no bundle row or project, because the step writes none.
+them; it edits no bundle row or project, because the step writes none. The guided
+import panel's "Read the source page" button now REVEALS that door
+(`ui/operations/OperationPanel`) instead of blocking on a plan+submit+poll inside
+`lib/api/bundles`: the operator reads the plan, the run is narrated step by step,
+and the fold is offered while the server says it is still meaningful. The
+create half of that panel is untouched.
 
 The level split follows the owner's rule: viewers read the queue, and a
 contributor may plan, submit, cancel and undo any workflow that removes nothing

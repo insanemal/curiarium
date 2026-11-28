@@ -1,4 +1,11 @@
-import { FileWarning, FolderUp, PackageSearch, Trash2, type LucideIcon } from "lucide-react";
+import {
+  FileWarning,
+  FolderUp,
+  ListChecks,
+  PackageSearch,
+  Trash2,
+  type LucideIcon,
+} from "lucide-react";
 
 import { roleAtLeast, type Role } from "../../lib/auth";
 import type { ReviewQueueKey } from "../views";
@@ -24,12 +31,17 @@ export type ReviewQueue = {
  * Trash follows the same split: `GET /trash` is require_read, so a viewer reads
  * the queue, while `POST /trash/purge` is require_admin - so the queue hides its
  * Empty trash control below admin rather than disabling it.
+ *
+ * Operations is the same split once more: `GET /operations` is READ, so a viewer
+ * reads every workflow's history; only Cancel and Undo are CONTRIBUTE, and the
+ * queue hides those two from a viewer rather than disabling them.
  */
 export const QUEUES: readonly ReviewQueue[] = [
   { key: "bundles", label: "Bundles to confirm", minRole: "contributor", icon: PackageSearch },
   { key: "imports", label: "Imports running", minRole: "viewer", icon: FolderUp },
   { key: "missing", label: "Missing files", minRole: "viewer", icon: FileWarning },
   { key: "trash", label: "Trash", minRole: "viewer", icon: Trash2 },
+  { key: "operations", label: "Operations", minRole: "viewer", icon: ListChecks },
 ];
 
 /**

@@ -3005,7 +3005,7 @@
   },
   "/operations": {
     "get": {
-      "description": "Newest-first page of the queue, optionally filtered by status and by workflow.",
+      "description": "Newest-first page of the queue, filtered by status, workflow, target and submitter.",
       "operationId": "list_operations_route_operations_get",
       "parameters": [
         {
@@ -3038,6 +3038,38 @@
               }
             ],
             "title": "Workflow"
+          }
+        },
+        {
+          "in": "query",
+          "name": "target",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target"
+          }
+        },
+        {
+          "in": "query",
+          "name": "submitted_by",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted By"
           }
         },
         {

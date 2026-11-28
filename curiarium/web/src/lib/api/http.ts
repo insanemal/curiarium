@@ -25,7 +25,10 @@ export function assertOk(res: Response, message: string) {
   }
 }
 
-/** Parses an error body: JSON `detail` wins, otherwise the raw text (nginx HTML). */
+/** Parses an error body: JSON `detail` wins, otherwise the raw text (nginx HTML).
+ *  A `detail` that is an OBJECT may carry a `reason` string - the superseded-undo
+ *  refusal is a dict detail (`{reason, superseded_by, undo_state}`), and showing
+ *  the operator raw JSON would hide the one sentence the server wrote. */
 export function errorMessageFromBody(body: string, fallback: string): string {
   const trimmed = body.trim();
   if (!trimmed) return fallback;
@@ -33,6 +36,12 @@ export function errorMessageFromBody(body: string, fallback: string): string {
     const data = JSON.parse(trimmed);
     if (typeof data?.detail === "string" && data.detail.trim()) {
       return data.detail.trim();
+    }
+    if (data?.detail !== null && typeof data?.detail === "object") {
+      const reason = data.detail.reason;
+      if (typeof reason === "string" && reason.trim()) {
+        return reason.trim();
+      }
     }
   } catch {
     // ignore JSON parse errors

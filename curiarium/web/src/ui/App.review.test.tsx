@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 // App's own imports from the barrel, as a fixed object: the review queue
 // reaches the API through `useBundleDetect`'s domain module instead.
@@ -40,6 +40,17 @@ vi.mock("../lib/api/bundles", () => ({
   getBundleReport: vi.fn(),
   createBundles: vi.fn(),
   setBundleDismissed: vi.fn(),
+}));
+
+// The operations queue reads its ledger from the domain module, never the barrel
+// mocked above, so the read lives here. `listOperations` is a hoisted spy for the
+// reason `listProjects` is: the read count, and the page it asks for, are what
+// these witnesses measure. The original is spread back so Cancel, Undo and the
+// shared progress dialog keep their real behaviour.
+const operationsApi = vi.hoisted(() => ({ listOperations: vi.fn() }));
+vi.mock("../lib/api/operations", async importOriginal => ({
+  ...(await importOriginal<typeof import("../lib/api/operations")>()),
+  listOperations: operationsApi.listOperations,
 }));
 
 // A viewer's Review entry resolves to the imports queue, so its run read has to
@@ -173,11 +184,13 @@ import {
 } from "../lib/api/bundles";
 import { storeToken } from "../lib/auth";
 import { MODE_STORAGE_KEY, type LibraryMode } from "../lib/mode";
+import { listOperations, type Operation } from "../lib/api/operations";
 import { BACK_TO_MODE_LABEL } from "./views";
 
 const getBundleReportMock = vi.mocked(getBundleReport);
 const createBundlesMock = vi.mocked(createBundles);
 const setBundleDismissedMock = vi.mocked(setBundleDismissed);
+const listOperationsMock = vi.mocked(listOperations);
 
 /** jsdom may resolve `window.localStorage` to undefined; install a real one. */
 function installMemoryStorage(): void {
@@ -819,5 +832,168 @@ describe("App project list hand-off", () => {
       expect(label.toLowerCase()).toContain(mode);
       expect(label.toLowerCase()).not.toContain("library");
     }
+  });
+});
+
+/**
+ * One ledger row, shaped the way `GET /operations` answers it. The default is the
+ * state the resume witness needs: one operation still RUNNING, submitted by the
+ * signed-in viewer, with the step the queue's dialog narrates.
+ */
+function makeOperation(overrides: Partial<Operation> = {}): Operation {
+  return {
+    id: "op-resume",
+    workflow: "extract",
+    target: "Archive.zip",
+    status: "running",
+    submitted_by: "viewer",
+    created_at: "2026-01-01T00:00:00Z",
+    started_at: "2026-01-01T00:00:01Z",
+    finished_at: null,
+    error: null,
+    undo_state: "none",
+    superseded_by: null,
+    steps: [
+      {
+        index: 0,
+        op: "extract",
+        status: "running",
+        result: null,
+        error: null,
+        started_at: "2026-01-01T00:00:01Z",
+        finished_at: null,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/** A viewer session: the first queue such a role may read is imports, so the
+ *  Review destination opens there without walking the library. */
+async function renderAppAsViewer(): Promise<void> {
+  vi.mocked(getMe).mockResolvedValue({
+    id: "u1",
+    username: "viewer",
+    email: null,
+    role: "viewer",
+    disabled: false,
+    kind: "local",
+  });
+  await renderApp();
+  fireEvent.click(openQueueButton());
+  await waitFor(() => expect(screen.getByRole("tabpanel").id).toBe("review-tabpanel-imports"));
+}
+
+/** The count span inside one queue tab; the tab's text also carries its label. */
+function queueBadgeText(queue: string): string {
+  return (
+    screen.getByTestId(`review-count-${queue}`).querySelector(".sidebar-count")?.textContent ?? ""
+  );
+}
+
+/** The Operations tab, matched on the label PREFIX because its accessible name
+ *  carries the count too ("Operations: Count unavailable"). */
+function operationsTab(): HTMLElement {
+  return screen.getByRole("tab", { name: /^Operations/ });
+}
+
+describe("App operations queue (B3)", () => {
+  it("gives a viewer an Operations row inside the Review destination", async () => {
+    // `GET /operations` is require_read: withholding the row from a viewer would
+    // make the queue unreachable, and adding a second tablist would mean the
+    // queue got a destination of its own instead of a fifth row.
+    await renderAppAsViewer();
+
+    expect(operationsTab()).toBeTruthy();
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+  });
+
+  it("reads the ledger exactly once when the queue is opened, page 0, and never on load", async () => {
+    listOperationsMock.mockResolvedValue([]);
+    await renderAppAsViewer();
+    // A read on app load - or one issued by opening the destination on imports -
+    // would show up here before the tab is chosen.
+    await settle(30);
+    expect(listOperationsMock).not.toHaveBeenCalled();
+
+    fireEvent.click(operationsTab());
+
+    await waitFor(() => expect(listOperationsMock).toHaveBeenCalledTimes(1));
+    // Page 0 of the full filter set: a second read on entry fails here, and so
+    // does a page that starts anywhere but the top.
+    expect(listOperationsMock.mock.calls[0][0]).toMatchObject({
+      state: "",
+      workflow: "",
+      submitted_by: "",
+      limit: 50,
+      offset: 0,
+    });
+    await settle(30);
+    expect(listOperationsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes the same running row on a fresh mount, because the queue is the server's", async () => {
+    listOperationsMock.mockResolvedValue([makeOperation()]);
+
+    const first = render(<App />);
+    await screen.findByRole("button", { name: "Review" });
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    await waitFor(() => expect(screen.getByRole("tabpanel").id).toBe("review-tabpanel-imports"));
+    fireEvent.click(operationsTab());
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-operations-row="op-resume"]')).not.toBeNull(),
+    );
+    const firstRow = document.querySelector('[data-operations-row="op-resume"]') as HTMLElement;
+    // The server's own fields: the workflow as a sentence, who queued it, and the
+    // status - none of which this client may derive.
+    expect(within(firstRow).getByText("Extract an archive")).toBeTruthy();
+    expect(within(firstRow).getByText("by viewer")).toBeTruthy();
+    expect(within(firstRow).getByText("Running")).toBeTruthy();
+
+    fireEvent.click(within(firstRow).getByRole("button", { name: "Resume" }));
+    expect(within(firstRow).getByRole("dialog")).toBeTruthy();
+    expect(within(firstRow).getByText("The extraction is running.")).toBeTruthy();
+    expect(within(firstRow).getByText("extracting the archive\u2026")).toBeTruthy();
+
+    first.unmount();
+
+    // A reload: a brand-new tree with no state carried over. The row and its
+    // narration can only come back from the server, so a queue that kept its
+    // rows in component state would show an empty ledger here.
+    render(<App />);
+    await screen.findByRole("button", { name: "Review" });
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    await waitFor(() => expect(screen.getByRole("tabpanel").id).toBe("review-tabpanel-imports"));
+    fireEvent.click(operationsTab());
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-operations-row="op-resume"]')).not.toBeNull(),
+    );
+    const secondRow = document.querySelector('[data-operations-row="op-resume"]') as HTMLElement;
+    expect(within(secondRow).getByText("Extract an archive")).toBeTruthy();
+    expect(within(secondRow).getByText("by viewer")).toBeTruthy();
+
+    fireEvent.click(within(secondRow).getByRole("button", { name: "Resume" }));
+    expect(within(secondRow).getByRole("dialog")).toBeTruthy();
+    expect(within(secondRow).getByText("The extraction is running.")).toBeTruthy();
+    expect(within(secondRow).getByText("extracting the archive\u2026")).toBeTruthy();
+  });
+
+  it("dashes the Operations badge until the queue is opened, then counts what is in flight", async () => {
+    listOperationsMock.mockResolvedValue([makeOperation()]);
+    await renderAppAsViewer();
+
+    // Fetch-on-entry: before the queue is opened the app has paid no ledger read,
+    // so the badge must be the `–`-until-known dash, never a fabricated zero.
+    expect(queueBadgeText("operations")).toBe("\u2013");
+    expect(listOperationsMock).not.toHaveBeenCalled();
+
+    fireEvent.click(operationsTab());
+
+    await waitFor(() => expect(queueBadgeText("operations")).toBe("1"));
+    expect(screen.getByTestId("review-count-operations").getAttribute("title")).toBe(
+      "1 operation in flight",
+    );
   });
 });

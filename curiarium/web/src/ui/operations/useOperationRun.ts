@@ -56,6 +56,13 @@ export type OperationRunOptions = {
   onChanged?: () => void;
   /** Session expiry is the host's news, not this hook's. */
   onUnauthorized?: () => void;
+  /**
+   * A row the server says is already in flight for this exact (workflow,
+   * target). Non-null means: do not plan, do not submit - seed `operation` from
+   * it and poll it, so the popup the operator sees is the run they started
+   * before the reload.
+   */
+  adopt?: Operation | null;
   /** The four fallback sentences, so each door keeps its own words. */
   planFailureFallback: string;
   submitFailureFallback: string;
@@ -77,6 +84,11 @@ export type OperationRun = {
   submit: () => Promise<void>;
   /** Folds the run back; answers the server's body, or null when it refused/401. */
   undo: () => Promise<OperationUndo | null>;
+  /** Puts the door back on its review after a finished run, so a trigger door can
+   *  offer its control again. The plan stays in hand (a submit re-computes it and
+   *  refuses a stale one with 409) and the mount's ONE idempotency key makes a
+   *  replay answer the operation this mount already queued, never a second one. */
+  reset: () => void;
 };
 
 export function useOperationRun(options: OperationRunOptions): OperationRun {
@@ -85,6 +97,7 @@ export function useOperationRun(options: OperationRunOptions): OperationRun {
     target,
     params,
     enabled,
+    adopt,
     onChanged,
     onUnauthorized,
     planFailureFallback,
@@ -138,10 +151,51 @@ export function useOperationRun(options: OperationRunOptions): OperationRun {
   paramsRef.current = params ?? {};
   const paramsKey = JSON.stringify(params ?? {});
 
+  // The host hears about a finished operation exactly once PER RUN: a re-poll of
+  // the same terminal row must not refetch the host's report a second time, and a
+  // second run submitted from this mount (the adopt door's undo-then-adopt) is a
+  // new completion the host does have to hear about. Declared up here because
+  // adopting a row primes it below.
+  const changedReported = React.useRef(false);
+
+  // The adopted row, read through a ref so the seeding effect is keyed on its ID
+  // alone: a host that hands a fresh row object every render must not re-seed an
+  // operation the operator is already watching.
+  const adoptRef = React.useRef<Operation | null>(adopt ?? null);
+  adoptRef.current = adopt ?? null;
+  const adoptId = adoptRef.current?.id ?? null;
+
+  // ONE seeding per adopted id. The effect is declared BEFORE the plan effect so
+  // that a row handed over on mount marks itself adopted before the plan READ
+  // can fire, and `submit` can see it. `changedReported` is primed to the row's
+  // own terminality: a row that was already finished when this panel opened is
+  // not news for the host, while one that finishes later reports exactly once.
+  const adoptedId = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    const next = adoptRef.current;
+    if (next === null) {
+      // A host that withdrew the row (a new target's lookup found nothing) takes
+      // the adoption with it; otherwise the next target would inherit this one's
+      // submit block and never plan.
+      if (adoptedId.current !== null) {
+        adoptedId.current = null;
+        setOperation(null);
+      }
+      return;
+    }
+    if (adoptedId.current === next.id) return;
+    adoptedId.current = next.id;
+    changedReported.current = isTerminal(next.status);
+    setOperation(next);
+  }, [adoptId]);
+
   // A plan is a READ: fetch it for the workflow and target on offer, and again
-  // whenever the params change. A viewer issues no request at all.
+  // whenever the params change. A viewer issues no request at all, and neither
+  // does a resumed panel: the consumed row already says what is running, so a
+  // re-plan would only ask the server to describe work it is already doing.
   React.useEffect(() => {
     if (!enabled) return;
+    if (adoptedId.current !== null) return;
     let live = true;
     setPlan(null);
     setPlanFailure(null);
@@ -193,7 +247,6 @@ export function useOperationRun(options: OperationRunOptions): OperationRun {
   // the same terminal row must not refetch the host's report a second time, and a
   // second run submitted from this mount (the adopt door's undo-then-adopt) is a
   // new completion the host does have to hear about.
-  const changedReported = React.useRef(false);
   const terminal = operation !== null && isTerminal(operation.status);
   React.useEffect(() => {
     if (!terminal || changedReported.current) return;
@@ -202,6 +255,9 @@ export function useOperationRun(options: OperationRunOptions): OperationRun {
   }, [terminal]);
 
   async function submit(): Promise<void> {
+    // A resumed row is not re-submitted: the operation exists, and a second
+    // submit would queue another one over the same paths.
+    if (adoptedId.current !== null) return;
     if (plan === null) return;
     setBusy(true);
     setSubmitFailure(null);
@@ -255,6 +311,17 @@ export function useOperationRun(options: OperationRunOptions): OperationRun {
     }
   }
 
+  function reset(): void {
+    // The ADOPTION is deliberately kept: a resumed row is the server's record, and
+    // dropping it would let the door offer a confirm over a live operation.
+    if (adoptedId.current !== null) return;
+    changedReported.current = false;
+    setOperation(null);
+    setSubmitFailure(null);
+    setPollFailure(null);
+    setUndoFailure(null);
+  }
+
   // The steps read in the order the runner indexed them, whatever order the
   // payload happened to arrive in.
   const orderedSteps =
@@ -272,5 +339,6 @@ export function useOperationRun(options: OperationRunOptions): OperationRun {
     terminal,
     submit,
     undo,
+    reset,
   };
 }

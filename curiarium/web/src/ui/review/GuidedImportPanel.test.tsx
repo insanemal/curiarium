@@ -23,6 +23,7 @@ const operationsApi = vi.hoisted(() => ({
   submitOperation: vi.fn(),
   getOperation: vi.fn(),
   undoOperation: vi.fn(),
+  listOperations: vi.fn(),
 }));
 vi.mock("../../lib/api/operations", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/operations")>()),
@@ -30,17 +31,18 @@ vi.mock("../../lib/api/operations", async importOriginal => ({
   submitOperation: operationsApi.submitOperation,
   getOperation: operationsApi.getOperation,
   undoOperation: operationsApi.undoOperation,
+  listOperations: operationsApi.listOperations,
 }));
 
 import {
   createBundles,
   type BundleCreateResponse,
   type BundleDetectItem,
-  type BundleEnrichResponse,
   type BundleMatch,
 } from "../../lib/api/bundles";
 import {
   getOperation,
+  listOperations,
   planOperation,
   submitOperation,
   type Operation,
@@ -55,6 +57,7 @@ const createBundlesMock = vi.mocked(createBundles);
 const planOperationMock = vi.mocked(planOperation);
 const submitOperationMock = vi.mocked(submitOperation);
 const getOperationMock = vi.mocked(getOperation);
+const listOperationsMock = vi.mocked(listOperations);
 
 const LARGE_IMAGE = {
   asset_id: "img-large",
@@ -321,8 +324,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   resetToasts();
   // The split door plans on mount when it is offered, so every test's read must
-  // resolve.
+  // resolve; the shared panels' in-flight lookup is a read too, and nothing is
+  // running for a fresh target.
   planOperationMock.mockResolvedValue(makePlan());
+  listOperationsMock.mockReset();
+  listOperationsMock.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -541,72 +547,62 @@ describe("GuidedImportPanel", () => {
     expect(document.querySelector("[data-guided-failure]")).toBeNull();
   });
 
-  it("enrich runs the operations walk and shows what the page filled", async () => {
+  it("reveals the enrichment operation's review instead of writing, then submits that plan", async () => {
+    // The old door hid a blocking plan+submit+poll inside `lib/api/bundles`: one
+    // click wrote and there was nothing to read, nothing narrating the run and
+    // nothing to undo. The operation door reveals the server's plan first, and the
+    // ONE action submits it.
     const onChanged = vi.fn();
-    const response: BundleEnrichResponse = {
-      fetched: 1,
-      cached: 0,
-      refused: 0,
-      unavailable: 0,
-      unknown: 0,
-      results: [
-        {
-          key: "import/Renamed Moai",
-          status: "fetched",
-          source_url: "https://www.thingiverse.com/thing:2493386",
-          creator: "moai_maker",
-          licence: "CC BY-NC",
-          licence_url: "https://creativecommons.org/licenses/by-nc/4.0/",
-          filled: ["creator", "licence"],
-          fetched_at: "2026-11-26T00:00:00Z",
-          reason: null,
-        },
-      ],
-    };
     planOperationMock.mockResolvedValue(makeEnrichPlan());
-    // Queued, then done: the panel's one leg is the whole plan/submit/poll walk
-    // now, and a submit that answers a terminal row would leave it unproven.
     submitOperationMock.mockResolvedValue(makeEnrichOperation({ status: "queued" }));
-    const finished = makeEnrichOperation({
-      steps: [
-        {
-          index: 0,
-          op: "enrich",
-          status: "done",
-          result: response as unknown as Record<string, unknown>,
-          error: null,
-          started_at: "2026-11-26T00:00:00Z",
-          finished_at: "2026-11-26T00:00:01Z",
-        },
-      ],
-    });
-    getOperationMock.mockResolvedValue(finished);
+    getOperationMock.mockResolvedValue(makeEnrichOperation());
     renderPanel(makeRow(), { onChanged });
+
+    // Nothing is planned before the click: mounting the shared panel is what
+    // issues its in-flight lookup, so a report of a hundred rows must not cost a
+    // hundred reads.
+    expect(planOperationMock).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-guided-enrich-plan]")).toBeNull();
 
     fireEvent.click(document.querySelector("[data-guided-enrich]") as HTMLElement);
 
+    // The review is the server's plan for THIS row's key, with an empty target:
+    // enrichment names its subjects in `params`, and this leg carries no cookie
+    // (the settings store is empty here) and no `refresh` key of its own.
     await waitFor(() =>
-      expect(document.querySelector("[data-guided-enrich-line]")?.textContent).toBe(
-        "Filled creator, licence from https://www.thingiverse.com/thing:2493386",
+      expect(planOperationMock).toHaveBeenCalledWith({
+        workflow: "enrich",
+        target: "",
+        params: { keys: ["import/Renamed Moai"] },
+      }),
+    );
+    await waitFor(() => expect(document.querySelector("[data-guided-enrich-plan]")).toBeTruthy());
+    expect(screen.getByRole("button", { name: "Read 1 vendor page" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Read 1 vendor page" }));
+
+    await waitFor(() =>
+      expect(submitOperationMock).toHaveBeenCalledWith({
+        planId: "plan-enrich",
+        idempotencyKey: expect.any(String),
+      }),
+    );
+    // Progress is the SHARED dialog, named from the ONE vocabulary, and the done
+    // line is the enrich workflow's own sentence.
+    const dialog = await screen.findByRole("dialog", { name: "Enrichment progress" });
+    await waitFor(() =>
+      expect(dialog.querySelector("[data-guided-enrich-result]")?.textContent).toBe(
+        "Done: the source page was read.",
       ),
     );
-    // The row's key is the plan's PARAM, with an empty target: enrichment names
-    // its subjects in `params`, and this leg carries no cookie and no refresh.
-    expect(planOperationMock).toHaveBeenCalledWith({
-      workflow: "enrich",
-      target: "",
-      params: { keys: ["import/Renamed Moai"], refresh: false },
-    });
-    expect(submitOperationMock).toHaveBeenCalledWith({
-      planId: "plan-enrich",
-      idempotencyKey: expect.any(String),
-    });
-    expect(getOperationMock).toHaveBeenCalledWith("op-enrich");
     // The host hears about the run once, after it finished - not at submit time.
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
 
-  it("enrich reports a failed run's sentence as a failure", async () => {
+  it("reports a failed enrichment run's sentence in the shared dialog", async () => {
+    // A run that produced no report is a FAILURE, not a quiet "filled nothing":
+    // the server's own sentence goes where every other failed run goes, and the
+    // CREATE door's own failure line stays untouched.
     planOperationMock.mockResolvedValue(makeEnrichPlan());
     submitOperationMock.mockResolvedValue(
       makeEnrichOperation({
@@ -628,15 +624,35 @@ describe("GuidedImportPanel", () => {
     renderPanel();
 
     fireEvent.click(document.querySelector("[data-guided-enrich]") as HTMLElement);
+    fireEvent.click(await screen.findByRole("button", { name: "Read 1 vendor page" }));
 
-    // A run that produced no report is a FAILURE, not a quiet "filled nothing":
-    // the sentence goes where every other failed write goes.
+    const dialog = await screen.findByRole("dialog", { name: "Enrichment progress" });
     await waitFor(() =>
-      expect(document.querySelector("[data-guided-failure]")?.textContent).toBe(
+      expect(dialog.querySelector("[data-guided-enrich-error]")?.textContent).toBe(
         "The source page refused to be read.",
       ),
     );
-    expect(document.querySelector("[data-guided-enrich-line]")).toBeNull();
+    expect(document.querySelector("[data-guided-failure]")).toBeNull();
+  });
+
+  it("offers the enrichment's undo while the server says it is available", async () => {
+    // The third thing the old door lacked: the run can be folded back, and the
+    // button is the server's own `undo_state`, not a client guess.
+    planOperationMock.mockResolvedValue(makeEnrichPlan());
+    submitOperationMock.mockResolvedValue(
+      makeEnrichOperation({ undo_state: "available", status: "done" }),
+    );
+    renderPanel();
+
+    fireEvent.click(document.querySelector("[data-guided-enrich]") as HTMLElement);
+    fireEvent.click(await screen.findByRole("button", { name: "Read 1 vendor page" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Enrichment progress" });
+    await waitFor(() =>
+      expect(dialog.querySelector("[data-guided-enrich-undo]")?.textContent).toBe(
+        "Undo this enrichment",
+      ),
+    );
   });
 
   it("runs on the key it was handed, for both twins", async () => {

@@ -5,8 +5,10 @@ import type { LibraryMode } from "../lib/mode";
 export type ActiveView = "library" | "settings" | "audit" | "review";
 
 /** Which review queue is open in the main pane. Every key here has a queue
- *  view; nothing may be added without one. */
-export type ReviewQueueKey = "bundles" | "imports" | "missing" | "trash";
+ *  view; nothing may be added without one. The operations queue is LAST because
+ *  `resolveQueue` falls back to the first visible row: a key inserted earlier
+ *  would move every role's default destination. */
+export type ReviewQueueKey = "bundles" | "imports" | "missing" | "trash" | "operations";
 
 /**
  * What the header's one "back" control is called, per mode it returns to.

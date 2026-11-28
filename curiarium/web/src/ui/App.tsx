@@ -56,6 +56,8 @@ import { useReviewCounts } from "./review/useReviewCounts";
 import { resolveQueue } from "./review/queues";
 import ReviewQueueTabs from "./review/ReviewQueueTabs";
 import { useTrash } from "./review/useTrash";
+import OperationsQueue from "./operations/OperationsQueue";
+import { useOperationsQueue } from "./operations/useOperationsQueue";
 import { useNarrowLayout } from "./useNarrowLayout";
 
 const DEFAULT_REFRESH_SECONDS = 900; // 15 minutes: the access token lifetime
@@ -342,9 +344,26 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
     enabled: canRead && reviewOpen && resolvedQueue === "trash",
     onUnauthorized: handleUnauthorized,
   });
+  // The operations queue is a READ too, so a viewer reads every workflow's
+  // history; only Cancel and Undo are contribute, and the queue hides them. The
+  // badge is its own `activeCount`, so the badge is a dash until the queue is
+  // opened once. `enabled` names both `reviewOpen` and the resolved key: a fetch
+  // happens per entry and never on app load, and an INVISIBLE stored key (say
+  // "operations" held by a role that cannot see it) arms nothing, because the
+  // resolved key - never the stored one - is what arms it.
+  const operationsReview = useOperationsQueue({
+    enabled: canRead && reviewOpen && resolvedQueue === "operations",
+    onUnauthorized: handleUnauthorized,
+  });
   // The missing badge costs no extra request: it reads the `/assets/counts`
   // number App already fetches for the sidebar.
-  const reviewCounts = useReviewCounts(bundleReview, importsReview, counts, trashReview.trash);
+  const reviewCounts = useReviewCounts(
+    bundleReview,
+    importsReview,
+    counts,
+    trashReview.trash,
+    operationsReview.activeCount,
+  );
 
   const handleOpenReview = React.useCallback((key: ReviewQueueKey) => {
     setActiveQueue(key);
@@ -951,6 +970,18 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                     )}
                     {resolvedQueue === "trash" && (
                       <TrashQueueView state={trashReview} canPurge={canPurgeTrash} />
+                    )}
+                    {resolvedQueue === "operations" && (
+                      <OperationsQueue
+                        state={operationsReview}
+                        // An auth-disabled session answers no `/me`, so it has no
+                        // username: "Only mine" then names nobody, and the queue
+                        // still reads the shared ledger.
+                        me={identity.username ?? ""}
+                        canContribute={canContribute}
+                        onChanged={handleAssetsChanged}
+                        onUnauthorized={handleUnauthorized}
+                      />
                     )}
                   </div>
                 )}

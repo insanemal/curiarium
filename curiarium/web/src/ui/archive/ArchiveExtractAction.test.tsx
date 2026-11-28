@@ -2,15 +2,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-// The action drives the operations ledger through `useOperationRun`, which
-// imports the domain module directly (`ui/review/ExtractAndCreatePanel.test.tsx`
-// mocks it the same way). The original is spread back so every other export -
-// the real types, `splitActionLabel` - keeps working.
+// The action drives the operations ledger through the shared panel, which imports
+// the domain module directly (`ui/review/ExtractAndCreatePanel.test.tsx` mocks it
+// the same way). The original is spread back so every other export keeps working.
 const operationsApi = vi.hoisted(() => ({
   planOperation: vi.fn(),
   submitOperation: vi.fn(),
   getOperation: vi.fn(),
   undoOperation: vi.fn(),
+  listOperations: vi.fn(),
 }));
 vi.mock("../../lib/api/operations", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/operations")>()),
@@ -18,11 +18,13 @@ vi.mock("../../lib/api/operations", async importOriginal => ({
   submitOperation: operationsApi.submitOperation,
   getOperation: operationsApi.getOperation,
   undoOperation: operationsApi.undoOperation,
+  listOperations: operationsApi.listOperations,
 }));
 
 import type { ArchiveExtractResult } from "../../lib/api/imports";
 import {
   getOperation,
+  listOperations,
   planOperation,
   submitOperation,
   undoOperation,
@@ -30,13 +32,17 @@ import {
   type OperationPlan,
   type OperationReview,
   type OperationStep,
+  type OperationUndo,
 } from "../../lib/api/operations";
 import { getToasts, resetToasts } from "../../lib/toast";
+import Toaster from "../Toaster";
 import ArchiveExtractAction from "./ArchiveExtractAction";
 
 const planOperationMock = vi.mocked(planOperation);
 const submitOperationMock = vi.mocked(submitOperation);
 const getOperationMock = vi.mocked(getOperation);
+const undoOperationMock = vi.mocked(undoOperation);
+const listOperationsMock = vi.mocked(listOperations);
 
 const ARCHIVE = "Moai.zip";
 
@@ -138,6 +144,28 @@ function finished(result: Partial<ArchiveExtractResult> = {}): Operation {
   });
 }
 
+function makeUndone(overrides: Partial<OperationUndo> = {}): OperationUndo {
+  return {
+    operation_id: "op-7",
+    undone: true,
+    project_id: null,
+    project_name: null,
+    moves: 0,
+    projects_removed: [],
+    ...overrides,
+  };
+}
+
+/** The trigger: the only control before the operator asks for the review. */
+function trigger(): HTMLButtonElement {
+  return screen.getByRole("button", { name: "Extract Moai.zip" }) as HTMLButtonElement;
+}
+
+/** The ONE action in the review. */
+function actionButton(): HTMLButtonElement {
+  return document.querySelector("[data-extract-action-button]") as HTMLButtonElement;
+}
+
 /** The finished operation's own words, which only exist once the poll has read a
  *  terminal row. */
 async function resultLine(): Promise<HTMLElement> {
@@ -148,9 +176,9 @@ async function resultLine(): Promise<HTMLElement> {
   });
 }
 
-/** Plan, confirm and submit: the whole happy path through the control. */
+/** Reveal the review and submit it: the whole happy path through the control. */
 async function extractOnce(): Promise<void> {
-  fireEvent.click(screen.getByRole("button", { name: "Extract Moai.zip" }));
+  fireEvent.click(trigger());
   fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
 }
 
@@ -162,7 +190,11 @@ beforeEach(() => {
   submitOperationMock.mockResolvedValue(makeOperation());
   getOperationMock.mockReset();
   getOperationMock.mockResolvedValue(finished());
-  vi.mocked(undoOperation).mockReset();
+  undoOperationMock.mockReset();
+  // The shared panel's in-flight lookup is a READ on mount; nothing is running
+  // for this target unless a test says so.
+  listOperationsMock.mockReset();
+  listOperationsMock.mockResolvedValue([]);
 });
 
 afterEach(cleanup);
@@ -176,8 +208,9 @@ describe("ArchiveExtractAction", () => {
     expect(container.innerHTML).toBe("");
     expect(screen.queryByRole("button")).toBeNull();
     // A viewer issues no request at all: the plan is a READ and the gate is the
-    // hook's, not a disabled button's.
+    // shape of the component, not a disabled button's.
     expect(planOperationMock).not.toHaveBeenCalled();
+    expect(listOperationsMock).not.toHaveBeenCalled();
   });
 
   it("plans the archive, shows the census and submits that plan", async () => {
@@ -186,18 +219,19 @@ describe("ArchiveExtractAction", () => {
       <ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} onExtracted={onExtracted} />,
     );
 
-    const button = screen.getByRole("button", { name: "Extract Moai.zip" });
-    fireEvent.click(button);
+    fireEvent.click(trigger());
 
     await waitFor(() =>
       expect(planOperationMock).toHaveBeenCalledWith({
         workflow: "extract",
         target: ARCHIVE,
-        params: expect.any(Object),
+        params: {},
       }),
     );
+    // The count sentence is the shared facts line now: one `<span>` per count the
+    // plan carries, tagged with the count's own machine name.
     expect(
-      await screen.findByText("2 files — extract into a new folder beside the archive?"),
+      await screen.findByText("2 files", { selector: '[data-extract-fact="files"]' }),
     ).toBeTruthy();
     // Planning alone writes nothing.
     expect(submitOperationMock).not.toHaveBeenCalled();
@@ -214,8 +248,9 @@ describe("ArchiveExtractAction", () => {
     expect((await resultLine()).textContent).toBe(
       "Extracted 2 files. The files are registered.",
     );
-    // Progress is announced, not just painted.
-    expect(screen.getByRole("status").getAttribute("aria-live")).toBe("polite");
+    // Progress is announced, not just painted: the shared dialog is the same
+    // `role="dialog"` every door mounts.
+    expect(screen.getByRole("dialog", { name: "Extract progress" })).toBeTruthy();
     expect(onExtracted).toHaveBeenCalledWith(RESULT);
   });
 
@@ -253,12 +288,12 @@ describe("ArchiveExtractAction", () => {
     await extractOnce();
 
     await resultLine();
-    const status = screen.getByRole("status");
-    expect(status.textContent).not.toMatch(/library scan/i);
-    expect(status.textContent).toContain("The files are registered.");
+    const dialog = screen.getByRole("dialog", { name: "Extract progress" });
+    expect(dialog.textContent).not.toMatch(/library scan/i);
+    expect(dialog.textContent).toContain("The files are registered.");
     // The register step is narrated as its own step, in index order.
     expect(
-      Array.from(status.querySelectorAll("[data-extract-step]")).map(node =>
+      Array.from(dialog.querySelectorAll("[data-extract-step]")).map(node =>
         node.getAttribute("data-extract-op"),
       ),
     ).toEqual(["extract", "register"]);
@@ -278,7 +313,28 @@ describe("ArchiveExtractAction", () => {
     expect(getToasts()).toHaveLength(0);
   });
 
-  it("surfaces a refused submit as the error text", async () => {
+  it("reports a completed run once per operation id on a route that never passes null", async () => {
+    // The host's contract is `extractResult(operation)` and null is never a
+    // report: a done row whose extract step reported nothing means nothing landed
+    // to report, so no call is made at all.
+    getOperationMock.mockResolvedValue(
+      makeOperation({
+        status: "done",
+        steps: [makeStep({ index: 0, op: "extract", status: "done", result: null })],
+      }),
+    );
+    const onExtracted = vi.fn();
+    render(
+      <ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} onExtracted={onExtracted} />,
+    );
+
+    await extractOnce();
+    await resultLine();
+
+    expect(onExtracted).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a refused submit as the shared failure line", async () => {
     // The server refuses the plan (a destination that already holds files, or a
     // plan that went stale): nothing is queued, so the sentence is the report.
     const message = "Refusing to overwrite: Moai.stl, readme.txt";
@@ -306,260 +362,138 @@ describe("ArchiveExtractAction", () => {
     planOperationMock.mockRejectedValue(new Error(message));
     render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Extract Moai.zip" }));
+    fireEvent.click(trigger());
 
     expect(await screen.findByText(message)).toBeTruthy();
     expect(submitOperationMock).not.toHaveBeenCalled();
   });
 
-  it("cancelling the confirmation leaves the archive untouched", async () => {
-    render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
+  it("disables the trigger when the caller has another write in flight", async () => {
+    // The caller says a second extract would race its own run: every control is
+    // refused, and the shared panel is told so rather than re-deriving it.
+    render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} disabled />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Extract Moai.zip" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
-
-    expect(screen.getByRole("button", { name: "Extract Moai.zip" })).toBeTruthy();
+    await waitFor(() => expect(trigger().disabled).toBe(true));
+    fireEvent.click(trigger());
+    expect(screen.queryByRole("button", { name: "Extract 2 files" })).toBeNull();
     expect(submitOperationMock).not.toHaveBeenCalled();
+  });
+
+  it("offers the undo while the server says it is available, and toasts the fold", async () => {
+    // The news is the undo's own answer, and it comes from the shared panel's
+    // `onUndo` - the door keeps the wording, the panel keeps the state.
+    submitOperationMock.mockResolvedValue(
+      makeOperation({ status: "done", steps: [], undo_state: "available" }),
+    );
+    undoOperationMock.mockResolvedValue(makeUndone());
+    render(
+      <>
+        <ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />
+        <Toaster />
+      </>,
+    );
+
+    fireEvent.click(trigger());
+    fireEvent.click(await screen.findByRole("button", { name: "Extract 2 files" }));
+
+    const undo = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>("[data-extract-undo]");
+      expect(button).toBeTruthy();
+      return button as HTMLButtonElement;
+    });
+    expect(undo.textContent).toBe("Undo this extraction");
+
+    await act(async () => {
+      fireEvent.click(undo);
+    });
+
+    expect(undoOperationMock).toHaveBeenCalledWith("op-7");
+    expect(document.querySelector("[data-extract-undo]")).toBeNull();
+    const toast = getToasts().find(entry => entry.message === "Extract undone");
+    expect(toast).toBeTruthy();
+    expect(toast?.details?.join(" ")).toContain("The extracted files stay in the library.");
   });
 });
 
-describe("keyboard focus across stages", () => {
-  /** A promise the test settles itself, to observe a stage that lasts one request. */
-  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-    let resolve!: (value: T) => void;
-    const promise = new Promise<T>(res => {
-      resolve = res;
-    });
-    return { promise, resolve };
-  }
-
-  function trigger(): HTMLElement {
-    return screen.getByRole("button", { name: "Extract Moai.zip" });
-  }
-
-  /** The idle/done/error primary control: visible label "Extract archive". */
-  function archiveButton(): HTMLElement {
-    const button = trigger();
-    expect(button.textContent).toBe("Extract archive");
-    return button;
-  }
-
-  /** The idle/planning/done/error root, found through the trigger it holds. */
-  function idleContainer(): HTMLElement {
-    const parent = trigger().parentElement;
-    if (!parent) throw new Error("the trigger has no container");
-    return parent;
-  }
-
-  /** The confirm/extracting root, found through the prompt it holds. */
-  function confirmContainer(): HTMLElement {
-    const parent = screen.getByText(/extract into a new folder beside the archive\?$/)
-      .parentElement;
-    if (!parent) throw new Error("the prompt has no container");
-    return parent;
-  }
-
-  it("keeps focus on each stage's own control from idle through done", async () => {
-    const planning = deferred<OperationPlan>();
-    planOperationMock.mockReturnValue(planning.promise);
-    const submitting = deferred<Operation>();
-    submitOperationMock.mockReturnValue(submitting.promise);
+describe("ArchiveExtractAction picker", () => {
+  it("offers the plan's own listing in a picker, re-plans for the confirmed subset and submits THAT plan", async () => {
+    // Catches a selection lost between the picker and the plan (the submit would
+    // name the whole archive's plan, extracting everything the operator narrowed
+    // away) and a picker whose listing disagrees with the review: the entries are
+    // the SAME array `review.entries`, and an excluded member is refused with the
+    // plan's own sentence.
+    const MEMBER_A = "01_Wizard/tower.stl";
+    const MEMBER_B = "01_Wizard/base.stl";
+    planOperationMock
+      .mockResolvedValueOnce(
+        makePlan({
+          plan_id: "plan-whole",
+          review: makeReview({
+            entries: [
+              { path: MEMBER_A, size: 1024, junk: false },
+              { path: MEMBER_B, size: 512, junk: false },
+            ],
+          }),
+        }),
+      )
+      .mockResolvedValueOnce(makePlan({ plan_id: "plan-subset" }));
+    submitOperationMock.mockReturnValue(new Promise<Operation>(() => {}));
 
     render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-
-    const idle = idleContainer();
-    trigger().focus();
     fireEvent.click(trigger());
+    await screen.findByRole("button", { name: "Extract 2 files" });
 
-    // `planning` disables the only control: its container is the focus home.
-    await waitFor(() => expect(document.activeElement).toBe(idle));
-    expect(document.activeElement).not.toBe(trigger());
-    expect(document.activeElement).not.toBe(document.body);
-    expect((trigger() as HTMLButtonElement).disabled).toBe(true);
-    expect(trigger().textContent).toBe("Planning...");
+    const choose = document.querySelector<HTMLButtonElement>("[data-extract-choose-entries]");
+    expect(choose?.textContent).toBe("Choose files");
+    fireEvent.click(choose as HTMLButtonElement);
 
-    await act(async () => {
-      planning.resolve(makePlan());
+    const dialog = screen.getByRole("dialog", { name: /Choose files/ });
+    const rows = Array.from(dialog.querySelectorAll('[role="option"]'));
+    expect(rows.map(row => row.textContent)).toEqual([
+      expect.stringContaining(MEMBER_A),
+      expect.stringContaining(MEMBER_B),
+    ]);
+
+    fireEvent.click(rows[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Use these files" }));
+
+    // A confirmed selection is a new plan READ: the params name the subset, and
+    // the confirm then submits the plan that review showed.
+    await waitFor(() => expect(planOperationMock).toHaveBeenCalledTimes(2));
+    expect(planOperationMock.mock.calls[1][0]).toEqual({
+      workflow: "extract",
+      target: ARCHIVE,
+      params: { entries: [MEMBER_B] },
     });
 
-    const confirmButton = await screen.findByRole("button", { name: "Extract 2 files" });
-    await waitFor(() => expect(document.activeElement).toBe(confirmButton));
-
-    confirmButton.focus();
-    fireEvent.click(confirmButton);
-
-    // `extracting` disables every control: the panel itself is the home again.
-    const extractingButton = screen.getByRole("button", {
-      name: "Extracting...",
-    }) as HTMLButtonElement;
-    const cancelButton = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
-    expect(extractingButton.disabled).toBe(true);
-    expect(cancelButton.disabled).toBe(true);
-    const panel = confirmContainer();
-    await waitFor(() => expect(document.activeElement).toBe(panel));
-    expect(document.activeElement).not.toBe(extractingButton);
-    expect(document.activeElement).not.toBe(document.body);
-
-    await act(async () => {
-      submitting.resolve(makeOperation());
+    await waitFor(() => expect(actionButton()).toBeTruthy());
+    act(() => {
+      fireEvent.click(actionButton());
     });
 
-    expect((await resultLine()).textContent).toBe(
-      "Extracted 2 files. The files are registered.",
+    await waitFor(() =>
+      expect(submitOperationMock).toHaveBeenCalledWith({
+        planId: "plan-subset",
+        idempotencyKey: expect.any(String),
+      }),
     );
-    await waitFor(() => expect(document.activeElement).toBe(archiveButton()));
   });
 
-  it("re-homes onto the trigger when the extraction finishes", async () => {
-    // `extracting -> done` unmounts the confirmation panel under the caret, so
-    // this pins that transition on its own rather than behind the planning one.
-    const submitting = deferred<Operation>();
-    submitOperationMock.mockReturnValue(submitting.promise);
+  it("disables the picker when the plan listed no members", async () => {
+    // An empty listing has nothing to pick, so the button says so rather than
+    // opening a dialog over nothing.
+    planOperationMock.mockResolvedValue(makePlan({ review: makeReview({ entries: [] }) }));
     render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
 
-    trigger().focus();
     fireEvent.click(trigger());
-    const confirmButton = await screen.findByRole("button", { name: "Extract 2 files" });
-    confirmButton.focus();
-    fireEvent.click(confirmButton);
 
-    await waitFor(() => expect(document.activeElement).toBe(confirmContainer()));
-    expect(document.activeElement).not.toBe(document.body);
-
-    await act(async () => {
-      submitting.resolve(makeOperation());
+    const choose = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>("[data-extract-choose-entries]");
+      expect(button).toBeTruthy();
+      return button as HTMLButtonElement;
     });
-
-    expect((await resultLine()).textContent).toBe(
-      "Extracted 2 files. The files are registered.",
-    );
-    await waitFor(() => expect(document.activeElement).toBe(archiveButton()));
-    expect(document.activeElement).not.toBe(document.body);
-  });
-
-  it("returns focus to the trigger when the confirmation is cancelled", async () => {
-    render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-
-    trigger().focus();
-    fireEvent.click(trigger());
-
-    const cancelButton = await screen.findByRole("button", { name: "Cancel" });
-    cancelButton.focus();
-    fireEvent.click(cancelButton);
-
-    await waitFor(() => expect(document.activeElement).toBe(trigger()));
-  });
-
-  it("re-homes after a planning error", async () => {
-    // The container survives `planning -> error`, so a container-only guard
-    // would leave focus on it; the new stage's control has to win.
-    planOperationMock.mockRejectedValue(new Error("boom"));
-    render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-
-    trigger().focus();
-    fireEvent.click(trigger());
-
-    expect(await screen.findByText("boom")).toBeTruthy();
-    await waitFor(() => expect(document.activeElement).toBe(archiveButton()));
-  });
-
-  it("re-homes after an extraction error", async () => {
-    submitOperationMock.mockRejectedValue(new Error("Refusing to overwrite"));
-    render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-
-    trigger().focus();
-    fireEvent.click(trigger());
-    const confirmButton = await screen.findByRole("button", { name: "Extract 2 files" });
-    confirmButton.focus();
-    fireEvent.click(confirmButton);
-
-    expect(await screen.findByText("Refusing to overwrite")).toBeTruthy();
-    await waitFor(() => expect(document.activeElement).toBe(archiveButton()));
-  });
-
-  it("does not steal focus on mount", () => {
-    // A bulk-dialog batch remount or an aside mounts this action with no focus
-    // of its own; grabbing it would yank a caret the user never lost.
-    const outside = document.createElement("button");
-    outside.textContent = "Elsewhere";
-    document.body.appendChild(outside);
-    outside.focus();
-
-    render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-
-    expect(document.activeElement).toBe(outside);
-    outside.remove();
-  });
-
-  it("does not take focus on mount when nothing else holds it", () => {
-    // `<body>` means no one owns the caret: this mount is an aside or a batch
-    // remount and must still not grab it.
-    expect(document.activeElement).toBe(document.body);
-
-    render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-
-    expect(document.activeElement).toBe(document.body);
-  });
-
-  it("leaves a focus move made elsewhere during the round-trip alone", async () => {
-    const planning = deferred<OperationPlan>();
-    planOperationMock.mockReturnValue(planning.promise);
-    render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-
-    trigger().focus();
-    fireEvent.click(trigger());
-
-    const outside = document.createElement("button");
-    outside.textContent = "Elsewhere";
-    document.body.appendChild(outside);
-    outside.focus();
-
-    await act(async () => {
-      planning.resolve(makePlan());
-    });
-
-    // Anywhere in the document counts, not just this panel.
-    expect(document.activeElement).toBe(outside);
-    outside.remove();
-  });
-
-  it("leaves focus alone when a re-render does not change the stage", async () => {
-    const { rerender } = render(
-      <ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />,
-    );
-
-    trigger().focus();
-    fireEvent.click(trigger());
-    const confirmButton = await screen.findByRole("button", { name: "Extract 2 files" });
-    confirmButton.focus();
-    fireEvent.click(confirmButton);
-    await waitFor(() => expect(screen.getByRole("status")).toBeTruthy());
-
-    const outside = document.createElement("button");
-    outside.textContent = "Elsewhere";
-    document.body.appendChild(outside);
-    outside.focus();
-
-    rerender(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-
-    expect(document.activeElement).toBe(outside);
-    outside.remove();
-  });
-
-  it("adds no key handling of its own", async () => {
-    render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-
-    trigger().focus();
-    fireEvent.click(trigger());
-
-    const confirmButton = await screen.findByRole("button", { name: "Extract 2 files" });
-    confirmButton.focus();
-    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
-
-    // The enclosing dialog owns Escape; this action neither closes nor restarts.
-    expect(screen.getByRole("button", { name: "Extract 2 files" })).toBeTruthy();
-    expect(submitOperationMock).not.toHaveBeenCalled();
-    expect(planOperationMock).toHaveBeenCalledTimes(1);
+    expect(choose.disabled).toBe(true);
+    expect(choose.getAttribute("data-extract-choose-entries-empty")).toBe("true");
   });
 });
 
@@ -589,8 +523,8 @@ describe("ArchiveExtractAction confirm review", () => {
   async function openConfirm(review: OperationReview): Promise<void> {
     planOperationMock.mockResolvedValue(makePlan({ review }));
     render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
-    fireEvent.click(screen.getByRole("button", { name: "Extract Moai.zip" }));
-    await screen.findByText(/extract into a new folder beside the archive\?$/);
+    fireEvent.click(trigger());
+    await screen.findByRole("button", { name: "Extract 5 files" });
   }
 
   function groupLines(): HTMLElement[] {
@@ -601,13 +535,13 @@ describe("ArchiveExtractAction confirm review", () => {
     return Array.from(document.querySelectorAll<HTMLElement>("[data-extract-excluded]"));
   }
 
-  it("keeps the count sentence as the panel's first line, and counts the plan's members", async () => {
+  it("states the member count as the plan's own fact", async () => {
     await openConfirm(towerReview());
 
-    const summary = document.querySelector<HTMLElement>("[data-extract-summary]");
-    expect(summary?.textContent).toBe(
-      "5 files — extract into a new folder beside the archive?",
-    );
+    // The count sentence is the shared facts line: the plan's `members`, tagged
+    // with the count's own machine name.
+    const summary = document.querySelector<HTMLElement>('[data-extract-fact="files"]');
+    expect(summary?.textContent).toBe("5 files");
   });
 
   it("says which groups the plan would write, one item per group", async () => {
@@ -636,27 +570,35 @@ describe("ArchiveExtractAction confirm review", () => {
     ]);
   });
 
-  it("offers the same two controls whatever the review says", async () => {
+  it("offers the same one action whatever the review says", async () => {
     await openConfirm(towerReview());
 
     const extract = screen.getByRole("button", { name: "Extract 5 files" }) as HTMLButtonElement;
     expect(extract.disabled).toBe(false);
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+    // One action, not a preview/apply pair: the review is information.
+    expect(screen.queryByRole("button", { name: /preview/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /apply/i })).toBeNull();
   });
 
   it("says nothing about the archive before the plan has been read", async () => {
+    // The review is offered only once the plan is in hand: a door that painted an
+    // empty census over a pending request would invite a confirm of nothing.
     planOperationMock.mockReturnValue(new Promise<OperationPlan>(() => {}));
     render(<ArchiveExtractAction canContribute path={ARCHIVE} label={ARCHIVE} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Extract Moai.zip" }));
+    expect(trigger().getAttribute("data-extract-trigger")).toBe("true");
+    fireEvent.click(trigger());
 
+    // The trigger is spent and the review has nothing to show yet: the panel
+    // holds a pending READ (a disabled "Planning..." control, so the press is not
+    // silent) rather than painting an empty census over it.
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Extract Moai.zip" }).textContent).toBe(
-        "Planning...",
-      ),
+      expect(screen.getByRole("button").getAttribute("data-extract-planning")).toBe("true"),
     );
+    expect(screen.getByRole("button")).toHaveProperty("disabled", true);
     expect(document.querySelector("[data-extract-group]")).toBeNull();
     expect(document.querySelector("[data-extract-excluded]")).toBeNull();
+    expect(document.querySelector("[data-extract-action-button]")).toBeNull();
     expect(submitOperationMock).not.toHaveBeenCalled();
   });
 });

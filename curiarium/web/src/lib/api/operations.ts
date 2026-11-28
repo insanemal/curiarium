@@ -58,6 +58,17 @@ export type OperationExcluded = {
   reason: string;
 };
 
+/** One member of an archive the plan read: its path, its bytes, and the
+ *  server's `junk` verdict. These are the rows the deleted
+ *  `GET /import/archive/entries` listing served, in the same order, so an entry
+ *  picker can tick members by size and disable the ones the extractor will not
+ *  register. */
+export type OperationEntry = {
+  path: string;
+  size: number;
+  junk: boolean;
+};
+
 /** Everything the operator approves in one action. The counts are the plan's;
  *  `move_list` is the moves half and `projects` the creates half, so a
  *  split-and-create review is one payload naming both. */
@@ -77,6 +88,11 @@ export type OperationReview = {
    *  built against an older API must still be able to read a review: a missing
    *  census reads as no census, never as five fabricated zeros. */
   by_role?: Record<string, number>;
+  /** The archive's own listing, for the two extract workflows only. Optional
+   *  for the same reason as `by_role`: a client built against an older API must
+   *  still read a review, and a missing listing reads as no listing, never as
+   *  an empty archive. */
+  entries?: OperationEntry[];
   cover: OperationCover | null;
   excluded: OperationExcluded[];
   existing_project_id: string | null;
@@ -151,6 +167,22 @@ export type OperationUndo = {
    *  it took back; the other workflows leave it null, and an older server omits
    *  the key entirely - both read as "not measured", never as zero. */
   members_removed?: number | null;
+  /** The asset rows an `import-link` or `import-zip` undo removed. */
+  assets_removed?: number | null;
+  /** The mirrored folder rows an `import-zip` undo removed. */
+  folders_removed?: number | null;
+  /** The entries an `import-zip` run itself could not write, echoed back so the
+   *  operator's retry list survives the undo. */
+  entries_failed?: string[] | null;
+  /** Whether an `attach-project` undo left or removed the project it targeted. */
+  project_removed?: boolean | null;
+  /** The `extract` undo's sentence saying the extracted files stay. */
+  payload_residue?: string | null;
+  /** The enrichment-cache records an `enrich` undo dropped. */
+  records_dropped?: number | null;
+  /** The enrichment-cache records an `enrich` undo kept because a later enrich
+   *  had replaced them. */
+  records_kept?: number | null;
 };
 
 /** What the workflow WOULD do: a dry run the server computes and writes nothing
@@ -210,16 +242,28 @@ export async function getOperation(operationId: string): Promise<Operation> {
 }
 
 /** Pages the ledger, newest first. Every filter is the server's own (`workflow`,
- *  `state`, and a `limit`/`offset` page), so "the latest scan operation" is one
- *  query instead of a client-side scan of the whole history. A READ like
- *  `getOperation`, and the same rule applies: the rows are what the runner
- *  wrote, so a caller reads a status off them rather than inventing one. */
+ *  `state`, `target`, `submitted_by`, and a `limit`/`offset` page), so "the
+ *  latest scan operation" or "the operation for THIS target" is one query
+ *  rather than a client scan of a truncated page. A READ like `getOperation`,
+ *  and the same rule applies: the rows are what the runner wrote, so a caller
+ *  reads a status off them rather than inventing one. */
 export async function listOperations(
-  input: { workflow?: string; state?: string; limit?: number; offset?: number } = {},
+  input: {
+    workflow?: string;
+    state?: string;
+    target?: string;
+    submitted_by?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
 ): Promise<Operation[]> {
   const qs = new URLSearchParams();
   if (input.workflow) qs.set("workflow", input.workflow);
   if (input.state) qs.set("state", input.state);
+  // `!= null`, never truthiness: `""` is a legal target (the library root), and
+  // dropping it would widen the query to every target instead of narrowing it.
+  if (input.target != null) qs.set("target", input.target);
+  if (input.submitted_by != null) qs.set("submitted_by", input.submitted_by);
   if (input.limit != null) qs.set("limit", String(input.limit));
   if (input.offset != null) qs.set("offset", String(input.offset));
   const query = qs.toString();
@@ -246,32 +290,18 @@ export async function undoOperation(operationId: string): Promise<OperationUndo>
   return res.json();
 }
 
-/** The one action's label, named for the OUTCOME and never for the subsystem:
- *  "Split into 3 projects". Counts come from the plan the server issued.
- *
- *  The label is the SPLIT's: the panel only mounts it for that shape, so a
- *  workflow that is not split-and-create never asks for it. A review that names
- *  no project still promises the one project a split always creates. */
-export function splitActionLabel(review: OperationReview): string {
-  const projects = review.projects.length;
-  if (projects <= 1) return "Split into 1 project";
-  return `Split into ${projects} projects`;
-}
-
-/** The adopt action's label, named for the OUTCOME and never for the subsystem.
- *
- *  Three shapes, said the way the operator would say them: "Add 171 files in
- *  9 groups" for a folder that grew in several groups, "Add 1 file in 1 group"
- *  for the smallest group-bearing delta, and "Add 171 files" for a root-only
- *  delta that names no group at all. Counts come from the plan the server
- *  issued, so the button promises exactly what the review measured. */
-export function adoptActionLabel(review: OperationReview): string {
-  // The `""` bucket is the folder's own root files, not a group: the server
-  // keeps it so `sum(groups) === members` holds structurally, and counting it
-  // would promise a group the operator cannot see.
-  const groups = review.groups.filter(group => group.name !== "").length;
-  const files = review.members === 1 ? "1 file" : `${review.members} files`;
-  if (groups === 0) return `Add ${files}`;
-  if (groups === 1) return `Add ${files} in 1 group`;
-  return `Add ${files} in ${groups} groups`;
+/** Asks a queued operation to stop now and a running one to stop after the step
+ *  it is in. The server's 409 sentence is shown verbatim: it refused for a reason
+ *  the operator needs to read (an operation that already finished, or one that
+ *  was never queued). */
+export async function cancelOperation(operationId: string): Promise<Operation> {
+  const res = await fetch(`${apiBase()}/operations/${encodeURIComponent(operationId)}/cancel`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, "Failed to cancel the operation"));
+  }
+  return res.json();
 }

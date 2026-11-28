@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import { entriesFromFileList } from "../lib/uploadTree";
+import UrlImportPanel from "./operations/UrlImportPanel";
 import { useUpload } from "./useUpload";
 
 type Props = {
@@ -12,12 +13,14 @@ type Props = {
 };
 
 /**
- * The header's contribute bar: file upload and directory upload, both through
- * `useUpload`. The link-import family that used to live beside them - the URL
- * input, the inspect preflight, the per-entry tick list and the project-target
- * picker - is gone with `POST /import`, `POST /import/zip` and
- * `POST /import/project`: a link import is the `import-link`/`import-zip`
- * operation now, and the panel for it is Mf-x65b.
+ * The header's contribute bar: file upload and directory upload through
+ * `useUpload`, and the URL import door beside them.
+ *
+ * The link-import family that used to live here was gone with `POST /import`,
+ * `POST /import/zip` and `POST /import/project` (three routes); it is back as the
+ * `import-link` and `import-zip` OPERATIONS, driven by `UrlImportPanel`
+ * (Mf-x65b), which owns its own preflight, its own entry picker and its own
+ * plan. This bar only places it in the row.
  */
 export default function UploadBar({
   canContribute,
@@ -91,6 +94,12 @@ export default function UploadBar({
       >
         {uploader.busy ? "Uploading..." : "Upload folder"}
       </button>
+      <UrlImportPanel
+        canContribute={canContribute}
+        folderId={folderId}
+        onChanged={onUploaded}
+        onUnauthorized={onUnauthorized}
+      />
     </div>
     {uploader.modal}
     </>

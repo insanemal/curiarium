@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict
 
 __all__ = [
   "OperationCoverOut",
+  "OperationEntryOut",
   "OperationExcludedOut",
   "OperationGroupOut",
   "OperationMoveOut",
@@ -49,6 +50,20 @@ class OperationExcludedOut(BaseModel):
 
   path: str
   reason: str
+
+
+class OperationEntryOut(BaseModel):
+  """One member of an archive the plan read: its path, its bytes, its verdict.
+
+  The rows are the ones the deleted `GET /import/archive/entries` served, in the
+  same order and with the same `junk` verdict (`entry_policy.is_junk_entry`), so
+  the entry picker a client restores can tick members by size and can disable the
+  ones the extractor will not register.
+  """
+
+  path: str
+  size: int
+  junk: bool
 
 
 class OperationMoveOut(BaseModel):
@@ -104,6 +119,12 @@ class OperationReviewOut(BaseModel):
   # keys a client may read unconditionally.
   move_list: List[OperationMoveOut] = []
   projects: List[OperationProjectOut] = []
+  # The archive's own listing, for the two extract workflows only; defaulted so
+  # every other workflow's review stays byte-identical. `excluded` still means
+  # what it always did (the members the extractor will not register, with the
+  # server's reason), so a picker ticks these and disables the ones `excluded`
+  # names - the review and the picker cannot disagree about selectability.
+  entries: List[OperationEntryOut] = []
   # The census of the members the plan would add, one key per role the scan can
   # assign (model/image/text/archive/other, zeros included), so
   # `sum(by_role.values()) == members` and the client can render the mix without
