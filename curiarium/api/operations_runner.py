@@ -24,7 +24,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, NamedTuple, Optional, Set
 from zipfile import BadZipFile
 
 from fastapi import HTTPException
@@ -1202,6 +1202,53 @@ def _attach_project(operation_id: str, step_index: int, args: dict) -> dict:
     }
 
 
+class _CookieBody(NamedTuple):
+    """The one attribute `resolve_thingiverse_cookie` reads off a request body.
+
+    The resolver's Protocol names exactly `thingiverse_cookie`, and the deleted
+    enrich route handed it the pydantic request body. A step's args are a dict,
+    and a dict would be a type lie (it has no attribute), so this tiny structural
+    stand-in is the body the resolver already expects.
+    """
+
+    thingiverse_cookie: Optional[str]
+
+
+def _cookie_body(request: dict) -> _CookieBody:
+    """The resolver's body from a step's `request` mapping."""
+    return _CookieBody(request.get("thingiverse_cookie"))
+
+
+def _enrich(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `enrich` step body: the deleted enrichment door's one call, unchanged.
+
+    `bundle_service.enrich_bundles` is not reimplemented here: the per-key
+    vocabulary, the ONE cache write per call, the partial-success rule (a refusal
+    is a per-bundle result, never a failed step) and the `bundle.enrich` rows it
+    writes under the context it is given are all the primitive's. The result is
+    returned VERBATIM - `{fetched, cached, refused, unavailable, unknown,
+    results}` - because that is the wire shape the deleted route published and
+    the undo reads the same `fetched_at` stamps out of it.
+
+    `_scrub_cookies` runs before the resolver and the fetch: the in-memory args
+    still have the cookie, but the persisted step args and plan lose it first, so
+    no failure after this point can leave a session cookie at rest.
+    """
+    _scrub_cookies(operation_id, step_index, args)
+    # Function-local, like the primitive's own: the resolver is a socket module and
+    # this body is the only place the runner needs it.
+    from import_resolvers import resolve_thingiverse_cookie
+
+    request = args.get("request") or {}
+    cookie = resolve_thingiverse_cookie(_cookie_body(request))
+    return bundle_service.enrich_bundles(
+        args["keys"],
+        cookie=cookie,
+        refresh=bool(args.get("refresh")),
+        ctx=audit.runner_context(),
+    )
+
+
 _STEP_BODIES = {
     "extract": _extract,
     "move": _move,
@@ -1223,6 +1270,9 @@ _STEP_BODIES = {
     # workflow of its own: one step, because the primitive's gated decision is
     # the fetch and its page together.
     "attach-project": _attach_project,
+    # `enrich` is the `enrich` workflow's whole write: one call to the unchanged
+    # `bundle_service.enrich_bundles`.
+    "enrich": _enrich,
 }
 
 

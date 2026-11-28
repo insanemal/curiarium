@@ -1186,16 +1186,19 @@ def test_the_deleted_route_is_reconciled_in_every_count() -> None:
     EXEMPT 15, WORKFLOWS 7. Part 3/4 deleted POST /import/project and
     POST /import/archive (both contribute) and GET /import/archive/entries (read)
     and added the `extract` workflow, so 101 (11/37/23/12/18), GET 41, ACTIONS 58,
-    ROUTE_ACTIONS 45, EXEMPT 15, WORKFLOWS 8.
+    ROUTE_ACTIONS 45, EXEMPT 15, WORKFLOWS 8. Part 4/4 deleted POST
+    /bundles/enrich (contribute) and added the `enrich` workflow, so 100
+    (11/37/22/12/18), GET 41, ACTIONS 58, ROUTE_ACTIONS 44, EXEMPT 15,
+    WORKFLOWS 9.
     """
-    assert len(permissions.ROUTE_PERMISSIONS) == 101
+    assert len(permissions.ROUTE_PERMISSIONS) == 100
     by_level: dict[str, int] = {}
     for level in permissions.ROUTE_PERMISSIONS.values():
         by_level[level] = by_level.get(level, 0) + 1
-    assert by_level == {"public": 11, "read": 37, "contribute": 23, "write": 12, "admin": 18}
+    assert by_level == {"public": 11, "read": 37, "contribute": 22, "write": 12, "admin": 18}
     assert sum(1 for method, _path in permissions.ROUTE_PERMISSIONS if method == "GET") == 41
     assert len(audit.ACTIONS) == 58
-    assert len(audit.ROUTE_ACTIONS) == 45
+    assert len(audit.ROUTE_ACTIONS) == 44
     assert len(audit.EXEMPT_ROUTES) == 15
     assert operations_service.WORKFLOWS == (
         "create-project",
@@ -1206,6 +1209,7 @@ def test_the_deleted_route_is_reconciled_in_every_count() -> None:
         "library-scan",
         "import-link",
         "import-zip",
+        "enrich",
     )
     assert operations_service.WORKFLOW_LEVELS["extract-and-create"] == permissions.CONTRIBUTE
 

@@ -519,7 +519,7 @@
     "type": "object"
   },
   "OperationUndoOut": {
-    "description": "The result of undoing a finished operation, shaped by its workflow.\n\nA `create-project` undo answers the project it deleted and leaves every\nworkflow-specific key null; a `split-and-create` undo answers ``moves`` (how\nmany landed moves were folded back) and ``projects_removed`` (the projects it\ncreated and then deleted), and leaves the project pair null. An `adopt` undo\nanswers the project it RESTORED plus how many memberships it took back\n(``members_removed``); `create-project` and `split-and-create` leave it null.\nAn `import-link` undo answers the asset it retired (``asset_id`` and\n``filename``) and how many asset rows it removed (``assets_removed``); an\n`import-zip` undo answers how many assets and mirrored folder rows it removed\n(``assets_removed``/``folders_removed``) and echoes the entries the run itself\ncould not write (``entries_failed``), so the operator's retry list survives.\nAn `extract` undo answers the folder rows it pruned and ``payload_residue``,\nthe sentence that says the extracted files stay; an `attach-project` undo\nanswers the project it left or removed (``project_removed``) and how many\nmemberships it took back.\nOptional on both sides so neither body gains a fabricated zero: a leg says only\nwhat its own run wrote, and everything it has nothing to say about stays null.",
+    "description": "The result of undoing a finished operation, shaped by its workflow.\n\nA `create-project` undo answers the project it deleted and leaves every\nworkflow-specific key null; a `split-and-create` undo answers ``moves`` (how\nmany landed moves were folded back) and ``projects_removed`` (the projects it\ncreated and then deleted), and leaves the project pair null. An `adopt` undo\nanswers the project it RESTORED plus how many memberships it took back\n(``members_removed``); `create-project` and `split-and-create` leave it null.\nAn `import-link` undo answers the asset it retired (``asset_id`` and\n``filename``) and how many asset rows it removed (``assets_removed``); an\n`import-zip` undo answers how many assets and mirrored folder rows it removed\n(``assets_removed``/``folders_removed``) and echoes the entries the run itself\ncould not write (``entries_failed``), so the operator's retry list survives.\nAn `extract` undo answers the folder rows it pruned and ``payload_residue``,\nthe sentence that says the extracted files stay; an `attach-project` undo\nanswers the project it left or removed (``project_removed``) and how many\nmemberships it took back. An `enrich` undo answers the enrichment-cache\nrecords it dropped and the ones it kept because a later enrich had replaced\nthem (``records_dropped``/``records_kept``); it edits no row, because that\nstep wrote none.\nOptional on both sides so neither body gains a fabricated zero: a leg says only\nwhat its own run wrote, and everything it has nothing to say about stays null.",
     "properties": {
       "asset_id": {
         "anyOf": [
@@ -662,6 +662,28 @@
           }
         ],
         "title": "Projects Removed"
+      },
+      "records_dropped": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Records Dropped"
+      },
+      "records_kept": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Records Kept"
       },
       "undone": {
         "title": "Undone",

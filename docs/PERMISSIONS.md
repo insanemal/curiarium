@@ -244,8 +244,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 101 routes: 11 public, 37 read,
-23 contribute, 12 write, 18 admin.
+Paths are FastAPI templates exactly as declared. 100 routes: 11 public, 37 read,
+22 contribute, 12 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -339,7 +339,6 @@ data; an operation row is not library content.
 | DELETE | `/project/{project_id}/assets`              | removes a membership row, not an asset; the bytes stay (the one DELETE with a JSON body) |
 | POST   | `/bundles/create`                           | creates one project per confirmed bundle from that report; idempotent, and a blocked bundle creates nothing |
 | POST   | `/bundles/dismiss`                          | hides bundles from the report, or undoes a dismissal: one appconfig value, and it removes nothing from the library |
-| POST   | `/bundles/enrich`                           | asks the vendor page a bundle already names for its missing creator/licence, filling **only empty fields**: an outbound fetch, but the report itself never fetches and a page that states no licence leaves it null |
 | POST   | `/operations/plan`                          | computes a plan and writes nothing: the step list, the counts and every exclusion with its reason. The `plan_id` it returns is the only thing a submit may name |
 | POST   | `/operations`                               | queues a plan this server issued, under an idempotency key; writes a row and answers 202, the in-process runner does the work. The request body has no steps field, so a client cannot invent a step list, and the plan is recomputed at submit so a stale one is a 409. Contributing is enough because the handler refuses a data-removing workflow to a contributor (`operations_service.WORKFLOW_LEVELS`) |
 | POST   | `/operations/{operation_id}/cancel`         | a queued operation stops now; a running one is asked to stop after the step it is in completes, and its remaining steps are skipped. Cancelling removes nothing, so the row's workflow decides the level and the handler enforces it |
@@ -440,14 +439,15 @@ levels depending on history.
 `("create-project", "split-and-create", "adopt", "extract-and-create", "extract",
 "library-scan", "import-link", "import-zip")`: those eight have a planner and run.
 Every other row records the level the owner decided for a workflow that does not
-exist yet - `relocate`, `import-folder` and `enrich` are exactly that - so a row
+exist yet - `relocate` and `import-folder` are exactly that - so a row
 is a decision, not a claim about today's code. Read a row against `WORKFLOWS`
 before believing it runs; a name reaches `WORKFLOWS` when it has a planner, never
 before. `adopt` left this list when its planner landed (Mf-ytig), `library-scan`
 when part 1/4 of Mf-y2u3 replaced the deleted `GET`/`POST /library/scan` routes
 with the workflow, `import-link`/`import-zip` when part 2/4 replaced the two
 deleted ingest doors (`POST /import`, `POST /import/zip`) with them, and `extract`
-when part 3/4 replaced `POST /import/archive` and `GET /import/archive/entries`.
+when part 3/4 replaced `POST /import/archive` and `GET /import/archive/entries`,
+and `enrich` when part 4/4 replaced `POST /bundles/enrich`.
 
 **`library-scan` is WRITE, waiting on Mf-gciy.** The rubric reads contribute - a
 scan removes nothing - but its capacity consequence is still with the owner, so
@@ -484,12 +484,13 @@ silently re-run, because its side effects are unknown. Finished operations are
 pruned to the newest 200 plus everything from the last 30 days; the audit log is
 the permanent record.
 
-Seven workflows run: `create-project`, `split-and-create`, `adopt`,
-`extract-and-create`, `library-scan`, `import-link` and `import-zip`. The client
-calls these routes - `curiarium/web/src/lib/api/operations.ts` plans, submits and
-undoes for the review queue, the guided import panel (`SplitAndCreatePanel`), the
-project page's drift notice (`AdoptGrownParts`) and the two ingest flows - and
-every other name in `WORKFLOW_LEVELS` is declared, not runnable.
+Nine workflows run: `create-project`, `split-and-create`, `adopt`,
+`extract-and-create`, `extract`, `library-scan`, `import-link`, `import-zip` and
+`enrich`. The client calls these routes - `curiarium/web/src/lib/api/operations.ts`
+plans, submits and undoes for the review queue, the guided import panel
+(`SplitAndCreatePanel`), the project page's drift notice (`AdoptGrownParts`), the
+two ingest flows and the bundle enrichment panel - and every other name in
+`WORKFLOW_LEVELS` is declared, not runnable.
 
 The two ingest workflows are the deleted `POST /import` and `POST /import/zip`
 doors as operations: one `fetch`/`fetch-zip` step whose args are the request the
@@ -509,6 +510,16 @@ and the run is two steps, `extract` then `register`. It is not
 extract answers `already_present` rather than a zero-step plan. Its undo removes
 only the empty folder rows the register step measured creating; the extracted
 files stay, and the response says so.
+
+`enrich` is the deleted `POST /bundles/enrich` door without its door: the
+plan's review names the enrichment rules (fill only empty fields, the
+licence-and-URL pair, no licence but the page's), and its one step calls
+`bundle_service.enrich_bundles` unchanged, so the per-key vocabulary, the single
+cache write and the per-bundle refusal are still the primitive's. Planning fetches
+nothing, and its target is deliberately empty: the workflow's target is the
+working set of `params.keys`, not one page. Its undo removes only the cache
+records that run itself fetched, and only while a later enrich has not replaced
+them; it edits no bundle row or project, because the step writes none.
 
 The level split follows the owner's rule: viewers read the queue, and a
 contributor may plan, submit, cancel and undo any workflow that removes nothing

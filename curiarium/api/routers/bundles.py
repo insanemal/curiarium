@@ -17,9 +17,11 @@ creation happens from *registered* assets, so the extraction door is
 into its twin directory - and a scan then registers it, never a create from an
 archive.
 
-Enrichment is the ONLY route in this module that reaches the network. It is run
-on demand by a human and is never part of the report: ``GET /bundles/detect`` is a
-disk walk and must stay offline and deterministic.
+Enrichment is an OPERATIONS workflow (``enrich``), not a route in this module:
+``POST /bundles/enrich`` was the one door here that reached the network, and it
+is now a plan whose review names the rules and a run whose one step calls the
+same primitive. ``GET /bundles/detect`` stays a disk walk and must remain
+offline and deterministic; nothing here fetches.
 """
 
 from typing import Optional
@@ -28,7 +30,6 @@ from fastapi import APIRouter, Depends, Query, Request
 
 import audit
 import bundle_service
-import import_resolvers
 from auth import AuthContext
 from permissions import require_contribute, require_read
 from schemas import (
@@ -36,8 +37,6 @@ from schemas import (
     BundleCreateResponse,
     BundleDismissRequest,
     BundleDismissResponse,
-    BundleEnrichRequest,
-    BundleEnrichResponse,
     BundleReportOut,
 )
 
@@ -45,11 +44,10 @@ router = APIRouter()
 
 
 # Bundle endpoints ----------------------------------------------
-# Four routes over one detector: read the report, create the confirmed bundles,
-# hide a bundle that is not a project, and ask the vendor for a bundle's missing
-# metadata. The keys are storage-root-relative paths, so a request names what the
-# report named and nothing is guessed. Enrichment is the only route here that
-# networks; the report above it never does.
+# Three routes over one detector: read the report, create the confirmed bundles,
+# and hide a bundle that is not a project. The keys are storage-root-relative
+# paths, so a request names what the report named and nothing is guessed. None of
+# them networks: enrichment is the `enrich` operations workflow.
 
 
 @router.get("/bundles/detect", response_model=BundleReportOut)
@@ -111,27 +109,3 @@ def dismiss_bundles(
 ):
     """Hide or un-hide bundles in the report; a toggle, so dismiss has an undo."""
     return bundle_service.set_dismissals(body.keys, body.dismissed, audit.context_for(request, context))
-
-
-@router.post("/bundles/enrich", response_model=BundleEnrichResponse)
-def enrich_bundles(
-    request: Request,
-    body: BundleEnrichRequest,
-    context: Optional[AuthContext] = Depends(require_contribute),
-):
-    """Read the vendor pages these bundles name and cache what the pages say.
-
-    On demand by a human, never part of `GET /bundles/detect`: that report is a
-    disk walk and must stay offline and deterministic. It fills only empty fields
-    and never invents a licence. A per-item `refused` is the bulk partial-success
-    contract, so one rate-limited thing does not discard the pages that answered.
-    A 429 detail reuses `THINGIVERSE_COOKIE_REMEDY`, so it names the Settings
-    paste and the environment variable alike.
-    """
-    cookie = import_resolvers.resolve_thingiverse_cookie(body)
-    return bundle_service.enrich_bundles(
-        body.keys,
-        cookie=cookie,
-        refresh=body.refresh,
-        ctx=audit.context_for(request, context),
-    )

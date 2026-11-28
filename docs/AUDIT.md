@@ -88,7 +88,7 @@ could honestly reconstruct.
 | `project.rename` | `PATCH /project/{project_id}` (only when the name changes) | project id | `{"from", "to"}` names | fail-closed |
 | `bundle.create` | `POST /bundles/create` (one row per created bundle) | the bundle key: the storage-root-relative directory, or the zip's relative path | `{"project_id", "created", "assets_added", "assets_failed", "detector", "confidence", "name_only", "shape", "auto", "cover", "accepted_fields"}` - which rule matched and how sure it was, and the last four record WHICH shape was created, whether a single-click auto ran, which cover decision the operator made (`engine`/`asset`/`none`) and which metadata fields they accepted, never the parsed documents | fail-loud: the project and its memberships are committed by shared services that own their sessions |
 | `bundle.dismiss` | `POST /bundles/dismiss` (one row per key that actually changed) | the bundle key | `{"dismissed"}` - `true` for a dismissal, `false` for its undo | fail-loud: the map lives in the appconfig store, which commits in its own session |
-| `bundle.enrich` | `POST /bundles/enrich` (one row per bundle whose page answered) | the bundle key | `{"thing_id", "source_url", "fields"}` - which fields the page supplied, never the page body or the cookie | fail-loud: the record lives in the appconfig store, which commits in its own session; a refusal writes no row |
+| `bundle.enrich` | the `enrich` operations workflow (one row per bundle whose page answered) | the bundle key | `{"thing_id", "source_url", "fields"}` - which fields the page supplied, never the page body or the cookie | fail-loud: the record lives in the appconfig store, which commits in its own session; a refusal writes no row |
 | `trash.purge` | `POST /trash/purge` | `"trash"` | `{"purged", "bytes", "failed"}` from `trash_service.purge()` | fail-loud |
 | `settings.storage.update` | `POST /settings/storage` | `"storage_path_template"` | `{"from", "to"}` templates | fail-closed |
 | `settings.mount_import.update` | `POST /settings/mount-import` | `"mount_import"` | `{"enabled", "copy_files"}` | fail-closed |
@@ -245,8 +245,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 101 routes, 41
-of them `GET`; the remaining 60 split into 45 audited keys and 15 exempt keys.
+out of scope by construction: they change nothing. The matrix has 100 routes, 41
+of them `GET`; the remaining 59 split into 44 audited keys and 15 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without
@@ -314,6 +314,11 @@ re-run reports `already_created` and never duplicates, so a crash between them
 leaves a project that is visible and repairable rather than one that is missing.
 
 **A bundle enrich is audited even though it mutates only a cache key (Mf-nivh).**
+The emitting surface is the `enrich` operations workflow now: `POST /bundles/enrich`
+is deleted, and the workflow's one step calls the same primitive under the
+runner's context, so the action keeps its name and its row while the route key
+leaves `ROUTE_ACTIONS` (`bundle.enrich` stays in `ACTIONS` with no route, as
+`operation.done` does).
 The map it writes (`bundle.enrichments`) is a working set, and losing an entry
 costs one extra fetch; on that reading it would be exempt like a thumbnail. It is
 audited for two other reasons. First, the act is an outbound fetch plus a stored

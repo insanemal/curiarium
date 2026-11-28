@@ -4,15 +4,16 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import type { ComponentProps } from "react";
 
 // The panel imports the domain module directly, so the mock lives there. The
-// original is spread back so every other export keeps working.
+// original is spread back so every other export keeps working - `enrichBundles`
+// included: enrichment is one `enrich` OPERATION now, and the adapter that plans,
+// submits and polls it is the code under test here, so its own reads are the
+// operations mock below rather than a stubbed function.
 const bundleApi = vi.hoisted(() => ({
   createBundles: vi.fn(),
-  enrichBundles: vi.fn(),
 }));
 vi.mock("../../lib/api/bundles", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/bundles")>()),
   createBundles: bundleApi.createBundles,
-  enrichBundles: bundleApi.enrichBundles,
 }));
 
 // The split door the panel mounts reads its own domain module, so its calls are
@@ -33,21 +34,27 @@ vi.mock("../../lib/api/operations", async importOriginal => ({
 
 import {
   createBundles,
-  enrichBundles,
   type BundleCreateResponse,
   type BundleDetectItem,
   type BundleEnrichResponse,
   type BundleMatch,
 } from "../../lib/api/bundles";
-import { planOperation, type OperationPlan } from "../../lib/api/operations";
+import {
+  getOperation,
+  planOperation,
+  submitOperation,
+  type Operation,
+  type OperationPlan,
+} from "../../lib/api/operations";
 import { UnauthorizedError } from "../../lib/api/http";
 import { getToasts, resetToasts } from "../../lib/toast";
 import Toaster from "../Toaster";
 import GuidedImportPanel from "./GuidedImportPanel";
 
 const createBundlesMock = vi.mocked(createBundles);
-const enrichBundlesMock = vi.mocked(enrichBundles);
 const planOperationMock = vi.mocked(planOperation);
+const submitOperationMock = vi.mocked(submitOperation);
+const getOperationMock = vi.mocked(getOperation);
 
 const LARGE_IMAGE = {
   asset_id: "img-large",
@@ -207,6 +214,58 @@ function makePlan(overrides: Partial<OperationPlan> = {}): OperationPlan {
         { name: "Beta", root: "Beta", members: 2 },
       ],
     },
+    ...overrides,
+  };
+}
+
+/** The plan the server issues for one bundle's enrichment: one `enrich` step, no
+ *  moves and no creates, because enrichment writes no files. */
+function makeEnrichPlan(): OperationPlan {
+  const base = makePlan();
+  return {
+    ...base,
+    plan_id: "plan-enrich",
+    workflow: "enrich",
+    target: "",
+    steps: [{ index: 0, op: "enrich", summary: "Read the source page for 1 bundle" }],
+    review: {
+      ...base.review,
+      workflow: "enrich",
+      target: "",
+      moves: 0,
+      creates: 0,
+      members: 0,
+      move_list: [],
+      projects: [],
+    },
+  };
+}
+
+/** One `enrich` operation row on the ledger, for the status under test. */
+function makeEnrichOperation(overrides: Partial<Operation> = {}): Operation {
+  return {
+    id: "op-enrich",
+    workflow: "enrich",
+    target: "",
+    status: "done",
+    submitted_by: "operator",
+    created_at: "2026-11-26T00:00:00Z",
+    started_at: "2026-11-26T00:00:00Z",
+    finished_at: "2026-11-26T00:00:01Z",
+    error: null,
+    undo_state: "none",
+    superseded_by: null,
+    steps: [
+      {
+        index: 0,
+        op: "enrich",
+        status: "done",
+        result: null,
+        error: null,
+        started_at: "2026-11-26T00:00:00Z",
+        finished_at: "2026-11-26T00:00:01Z",
+      },
+    ],
     ...overrides,
   };
 }
@@ -482,7 +541,7 @@ describe("GuidedImportPanel", () => {
     expect(document.querySelector("[data-guided-failure]")).toBeNull();
   });
 
-  it("enrich shows what the page filled", async () => {
+  it("enrich runs the operations walk and shows what the page filled", async () => {
     const onChanged = vi.fn();
     const response: BundleEnrichResponse = {
       fetched: 1,
@@ -504,7 +563,24 @@ describe("GuidedImportPanel", () => {
         },
       ],
     };
-    enrichBundlesMock.mockResolvedValue(response);
+    planOperationMock.mockResolvedValue(makeEnrichPlan());
+    // Queued, then done: the panel's one leg is the whole plan/submit/poll walk
+    // now, and a submit that answers a terminal row would leave it unproven.
+    submitOperationMock.mockResolvedValue(makeEnrichOperation({ status: "queued" }));
+    const finished = makeEnrichOperation({
+      steps: [
+        {
+          index: 0,
+          op: "enrich",
+          status: "done",
+          result: response as unknown as Record<string, unknown>,
+          error: null,
+          started_at: "2026-11-26T00:00:00Z",
+          finished_at: "2026-11-26T00:00:01Z",
+        },
+      ],
+    });
+    getOperationMock.mockResolvedValue(finished);
     renderPanel(makeRow(), { onChanged });
 
     fireEvent.click(document.querySelector("[data-guided-enrich]") as HTMLElement);
@@ -514,8 +590,53 @@ describe("GuidedImportPanel", () => {
         "Filled creator, licence from https://www.thingiverse.com/thing:2493386",
       ),
     );
-    expect(enrichBundlesMock).toHaveBeenCalledWith(["import/Renamed Moai"]);
+    // The row's key is the plan's PARAM, with an empty target: enrichment names
+    // its subjects in `params`, and this leg carries no cookie and no refresh.
+    expect(planOperationMock).toHaveBeenCalledWith({
+      workflow: "enrich",
+      target: "",
+      params: { keys: ["import/Renamed Moai"], refresh: false },
+    });
+    expect(submitOperationMock).toHaveBeenCalledWith({
+      planId: "plan-enrich",
+      idempotencyKey: expect.any(String),
+    });
+    expect(getOperationMock).toHaveBeenCalledWith("op-enrich");
+    // The host hears about the run once, after it finished - not at submit time.
     expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("enrich reports a failed run's sentence as a failure", async () => {
+    planOperationMock.mockResolvedValue(makeEnrichPlan());
+    submitOperationMock.mockResolvedValue(
+      makeEnrichOperation({
+        status: "failed",
+        error: "The source page refused to be read.",
+        steps: [
+          {
+            index: 0,
+            op: "enrich",
+            status: "failed",
+            result: null,
+            error: "The source page refused to be read.",
+            started_at: "2026-11-26T00:00:00Z",
+            finished_at: "2026-11-26T00:00:01Z",
+          },
+        ],
+      }),
+    );
+    renderPanel();
+
+    fireEvent.click(document.querySelector("[data-guided-enrich]") as HTMLElement);
+
+    // A run that produced no report is a FAILURE, not a quiet "filled nothing":
+    // the sentence goes where every other failed write goes.
+    await waitFor(() =>
+      expect(document.querySelector("[data-guided-failure]")?.textContent).toBe(
+        "The source page refused to be read.",
+      ),
+    );
+    expect(document.querySelector("[data-guided-enrich-line]")).toBeNull();
   });
 
   it("runs on the key it was handed, for both twins", async () => {

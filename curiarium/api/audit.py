@@ -445,7 +445,6 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     # keeps the history free of duplicates (Mf-vwqf).
     ("POST", "/bundles/create"): (BUNDLE_CREATE,),
     ("POST", "/bundles/dismiss"): (BUNDLE_DISMISS,),
-    ("POST", "/bundles/enrich"): (BUNDLE_ENRICH,),
     ("POST", "/trash/purge"): (TRASH_PURGE, DESTRUCTIVE_SNAPSHOT_TAKEN, DESTRUCTIVE_SNAPSHOT_MISSED),
     ("POST", "/settings/storage"): (SETTINGS_STORAGE_UPDATE,),
     ("POST", "/settings/mount-import"): (SETTINGS_MOUNT_IMPORT_UPDATE,),

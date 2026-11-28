@@ -849,7 +849,8 @@ def test_the_create_project_undo_body_gains_only_the_two_additive_null_keys(
     `members_removed` (an adopt's) and `asset_id`/`filename`/`assets_removed`/
     `folders_removed`/`entries_failed` (the two import legs') and
     `project_removed`/`payload_residue` (the attach-project and in-place extract
-    legs'). The key set below is
+    legs') and `records_dropped`/`records_kept` (the enrich leg's). The key set
+    below is
     EXACT, not a subset: a body that dropped `project_id`, or one that invented a
     zero for `moves`, `members_removed` or `assets_removed`, reds here with the
     whole shape in front of the reviewer.
@@ -876,6 +877,8 @@ def test_the_create_project_undo_body_gains_only_the_two_additive_null_keys(
         "entries_failed",
         "project_removed",
         "payload_residue",
+        "records_dropped",
+        "records_kept",
     }
     assert body["undone"] is True
     assert body["project_id"] is not None and body["project_name"] is not None
@@ -889,6 +892,8 @@ def test_the_create_project_undo_body_gains_only_the_two_additive_null_keys(
     assert body["entries_failed"] is None
     assert body["project_removed"] is None
     assert body["payload_residue"] is None
+    assert body["records_dropped"] is None
+    assert body["records_kept"] is None
 
 
 def test_a_later_operation_over_the_same_paths_supersedes_the_earlier_undo(
@@ -1169,18 +1174,19 @@ def test_a_workflow_with_no_table_entry_is_refused_rather_than_defaulted_to_cont
 def test_a_declared_workflow_without_a_planner_yet_resolves_to_contribute() -> None:
     """The owner rubric, table-levelled: organising and relocating are contribute.
 
-    Honest scope, in two halves. `relocate`, `import-folder` and `enrich` are still
+    Honest scope, in two halves. `relocate` and `import-folder` are still
     DECLARATIONS FOR THE RECORD - they are not in `operations_service.WORKFLOWS`, so
     their level is a table-level assertion and nothing more. `adopt`,
     `split-and-create`, `extract-and-create`, `extract`, `library-scan`,
-    `import-link` and `import-zip` left that set when their planners landed
-    (`adopt` in Mf-ytig, `split-and-create` in Mf-g759, `extract-and-create` in
-    Mf-hebx, `extract` in Mf-y2u3 3/4, `library-scan` and the two ingest doors in
-    Mf-y2u3 otherwise): they are real workflows now and are asserted end to end,
-    roles included, in `tests/test_adopt_workflow.py`,
-    `tests/test_split_and_create.py`, `tests/test_extract_and_create.py`,
-    `tests/test_extract_workflow.py`, `tests/test_scan_workflow.py` and
-    `tests/test_import_workflows.py`. Both halves fail the moment somebody changes
+    `import-link`, `import-zip` and `enrich` left that set when their planners
+    landed (`adopt` in Mf-ytig, `split-and-create` in Mf-g759,
+    `extract-and-create` in Mf-hebx, `extract` in Mf-y2u3 3/4, `library-scan` and
+    the two ingest doors in Mf-y2u3 otherwise, `enrich` in Mf-y2u3 4/4): they are
+    real workflows now and are asserted end to end, roles included, in
+    `tests/test_adopt_workflow.py`, `tests/test_split_and_create.py`,
+    `tests/test_extract_and_create.py`, `tests/test_extract_workflow.py`,
+    `tests/test_scan_workflow.py`, `tests/test_import_workflows.py` and
+    `tests/test_enrich_workflow.py`. Both halves fail the moment somebody changes
     a level, and the first fails the moment a declaration starts claiming to run.
     """
     assert set(operations_service.WORKFLOWS) == {
@@ -1192,8 +1198,9 @@ def test_a_declared_workflow_without_a_planner_yet_resolves_to_contribute() -> N
         "library-scan",
         "import-link",
         "import-zip",
+        "enrich",
     }
-    for workflow in ("relocate", "import-folder", "enrich"):
+    for workflow in ("relocate", "import-folder"):
         assert workflow not in operations_service.WORKFLOWS, (
             f"{workflow} has a planner now; move it out of the declaration-only list"
         )

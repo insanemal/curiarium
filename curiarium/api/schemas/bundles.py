@@ -26,9 +26,6 @@ __all__ = [
   "BundleDismissRequest",
   "BundleDismissResponse",
   "BundleDuplicateGroupOut",
-  "BundleEnrichItemOut",
-  "BundleEnrichRequest",
-  "BundleEnrichResponse",
   "BundleEnrichmentOut",
   "BundleGroupOut",
   "BundleImageOut",
@@ -420,42 +417,3 @@ class BundleDismissResponse(BaseModel):
 
   dismissed: List[str] = []
   stale_dismissals: List[str] = []
-
-
-class BundleEnrichRequest(BaseModel):
-  """The bundles whose vendor pages to read.
-
-  `refresh` re-reads a page the cache already answered. The cookie is the same
-  plumbing the import door uses and is never stored or audited.
-  """
-
-  model_config = ConfigDict(extra="forbid")
-  keys: List[str] = []
-  thingiverse_cookie: Optional[str] = None
-  refresh: bool = False
-
-
-class BundleEnrichItemOut(BaseModel):
-  """What happened to one bundle: its status, its values and the reason for any refusal."""
-
-  key: str
-  # fetched | cached | refused | unavailable | unknown
-  status: str
-  source_url: Optional[str] = None
-  creator: Optional[str] = None
-  licence: Optional[str] = None
-  licence_url: Optional[str] = None
-  filled: List[str] = []
-  fetched_at: Optional[str] = None
-  reason: Optional[str] = None
-
-
-class BundleEnrichResponse(BaseModel):
-  """Per-status counters plus one result per requested bundle."""
-
-  fetched: int = 0
-  cached: int = 0
-  refused: int = 0
-  unavailable: int = 0
-  unknown: int = 0
-  results: List[BundleEnrichItemOut] = []

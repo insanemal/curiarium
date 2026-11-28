@@ -2,10 +2,21 @@
 // create and dismiss actions that follow it. Field names are the server's
 // snake_case verbatim - the report is served straight from the API.
 
+// The one definition of "the runner has left this status", read from the module
+// that owns it rather than copied: a second list of terminal statuses would be a
+// second opinion about when to stop polling.
+import { isTerminal } from "../../ui/operations/useOperationRun";
 import { authHeaders } from "../auth";
 import type { BatchFailure } from "./assets";
 import { apiBase } from "./baseUrl";
 import { UnauthorizedError, assertOk, readErrorMessage } from "./http";
+import {
+  getOperation,
+  planOperation,
+  submitOperation,
+  type Operation,
+  type OperationStep,
+} from "./operations";
 
 /** The cover a created project would get, and why that one was chosen.
  *  `reason` is `largest-image | largest-image-unregistered | model-preview | none`.
@@ -425,9 +436,75 @@ export async function setBundleDismissed(
   return res.json();
 }
 
+/** How often the adapter re-reads the operation row: the interval the shared
+ *  runner hook polls at, so one click reads the ledger the same way whichever
+ *  door opened it. Kept local because `lib/` must not import the hook's state. */
+const ENRICH_POLL_MS = 250;
+
+/** The `enrich` step on a finished operation: the step the runner wrote this
+ *  request's report against, or undefined when the row carries none. */
+function enrichStep(operation: Operation): OperationStep | undefined {
+  return operation.steps.find(step => step.op === "enrich");
+}
+
+/** What a finished operation says about the vendor pages.
+ *
+ *  Enrichment is one `enrich` step now, and the step's `result` IS the body the
+ *  deleted `POST /bundles/enrich` route used to serve - counters and per-item
+ *  rows alike - so a `done` operation hands it back untouched rather than
+ *  rebuilding it here. Nothing about the shape is re-derived client-side: two
+ *  builders of one report would drift, and the server decided every field.
+ *
+ *  A `failed` (or `cancelled`) operation THROWS the server's own sentence. The
+ *  old route's non-2xx answer was an exception too, and it was an exception for
+ *  exactly these cases: a failed step is one that raised, not one whose pages
+ *  were refused - a refusal is a per-item `refused` result inside a `done`
+ *  report, which is the bulk partial-success contract this function must keep.
+ *  So there is no response to synthesise: a synthetic `refused: 1` row would
+ *  claim the site refused when the run never got that far, and it would hide a
+ *  real failure behind the panel's neutral "what the page filled" line.
+ */
+function enrichResponse(operation: Operation): BundleEnrichResponse {
+  if (operation.status === "done") {
+    const result = enrichStep(operation)?.result ?? null;
+    if (result !== null) return result as unknown as BundleEnrichResponse;
+    // A done run with no step result answered no pages: there is nothing to
+    // report as fetched, cached or refused, so saying so beats inventing zeros.
+    throw new Error("The source page answered nothing for this bundle.");
+  }
+  if (operation.status === "cancelled") {
+    throw new Error("The enrichment was cancelled before it read any source page.");
+  }
+  throw new Error(
+    operation.error ?? enrichStep(operation)?.error ?? "Failed to read the source page.",
+  );
+}
+
+/** Reads the row until the runner leaves a terminal status. */
+async function readUntilTerminal(submitted: Operation): Promise<Operation> {
+  let current = submitted;
+  while (!isTerminal(current.status)) {
+    await new Promise<void>(resolve => setTimeout(resolve, ENRICH_POLL_MS));
+    current = await getOperation(submitted.id);
+  }
+  return current;
+}
+
 /** Fills the gaps from each bundle's vendor page. The report is still the
  *  truth: this refetches after the call, and the response only says what
- *  happened, so the caller can tell an answered page from a refused one. */
+ *  happened, so the caller can tell an answered page from a refused one.
+ *
+ *  Enrichment is ONE operation now - `enrich`, planned, submitted and polled to
+ *  a terminal status - because the server no longer serves `POST
+ *  /bundles/enrich`. The function keeps its name, its signature and its return
+ *  type anyway: every caller wants exactly the old answer ("what did the pages
+ *  say, per key"), the step's result IS that answer verbatim, and the doors that
+ *  read it (`useBundleDetect.ts`, `GuidedImportPanel.tsx`) must not each learn
+ *  the plan/submit/poll dance for one line of text. Waiting here rather than
+ *  handing back an operation id is deliberate: the click is one command with one
+ *  answer, so the caller's `busy` covers the whole run - which is honest, and
+ *  cheaper than a second state machine that would only delay the same sentence.
+ */
 export async function enrichBundles(
   keys: string[],
   options: { refresh?: boolean; thingiverseCookie?: string } = {},
@@ -438,18 +515,23 @@ export async function enrichBundles(
   // over `THINGIVERSE_COOKIE`, so shipping `"   "` would mask a server-side
   // cookie with one that can never authenticate.
   const thingiverseCookie = (options.thingiverseCookie ?? "").trim();
-  const res = await fetch(`${apiBase()}/bundles/enrich`, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({
+  // The cookie rides in the plan's params, which the server redacts from the
+  // rows it persists: the plan body is the only place it is ever written.
+  const plan = await planOperation({
+    workflow: "enrich",
+    target: "",
+    params: {
       keys,
       refresh: options.refresh ?? false,
       ...(thingiverseCookie ? { thingiverse_cookie: thingiverseCookie } : {}),
-    }),
+    },
   });
-  if (res.status === 401) throw new UnauthorizedError();
-  if (!res.ok) {
-    throw new Error(await readErrorMessage(res, "Failed to read the source page"));
-  }
-  return res.json();
+  const submitted = await submitOperation({
+    planId: plan.plan_id,
+    // One key per click, minted here because this function IS the intent: two
+    // clicks enqueue two runs, while a retry of this one replays its row.
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const finished = isTerminal(submitted.status) ? submitted : await readUntilTerminal(submitted);
+  return enrichResponse(finished);
 }

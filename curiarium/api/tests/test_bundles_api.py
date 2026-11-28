@@ -20,6 +20,7 @@ import socket
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 from zipfile import ZipFile
 
 import pytest
@@ -39,6 +40,7 @@ import import_resolvers
 import library_scan
 import login_throttle as login_throttle_module
 import main
+import operations_runner
 import permissions
 import proposal_engine
 import settings_service
@@ -597,8 +599,60 @@ def stub_thing_page(monkeypatch: pytest.MonkeyPatch, html: str) -> list[tuple[st
     return calls
 
 
-def enrich(client: TestClient, actor: Actor, keys: list[str], **body) -> Response:
-    return client.post("/bundles/enrich", json={"keys": keys, **body}, headers=bearer(actor.token))
+def plan_of(
+    client: TestClient, keys: list[str], *, headers: dict[str, str] | None = None, **body
+) -> dict:
+    """The `enrich` plan for one working set; its review is the route's old contract."""
+    response = client.post(
+        "/operations/plan",
+        json={"workflow": "enrich", "target": "", "params": {"keys": keys, **body}},
+        headers=headers or {},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def refused_plan(
+    client: TestClient, *, headers: dict[str, str] | None = None, **body
+) -> tuple[int, str]:
+    response = client.post(
+        "/operations/plan",
+        json={"workflow": "enrich", "target": "", "params": body},
+        headers=headers or {},
+    )
+    detail = response.json().get("detail")
+    assert isinstance(detail, str), response.text
+    return response.status_code, detail
+
+
+def run_to_completion() -> None:
+    """One dispatcher pass and a join: the suite's background runner is off."""
+    operations_runner.dispatch_once()
+    operations_runner.wait_idle(timeout=30)
+
+
+def run_enrich(
+    client: TestClient,
+    keys: list[str],
+    *,
+    headers: dict[str, str] | None = None,
+    key: str | None = None,
+    **body,
+) -> dict:
+    """Plan, submit, run and read the step result; the workflow's wire answer is the step's."""
+    plan = plan_of(client, keys, headers=headers, **body)
+    submitted = client.post(
+        "/operations",
+        json={"plan_id": plan["plan_id"], "idempotency_key": key or uuid4().hex},
+        headers=headers or {},
+    )
+    assert submitted.status_code == 202, submitted.text
+    run_to_completion()
+    response = client.get(f"/operations/{submitted.json()['id']}", headers=headers or {})
+    assert response.status_code == 200, response.text
+    operation = response.json()
+    assert operation["status"] == "done", operation
+    return next(step for step in operation["steps"] if step["op"] == "enrich")["result"]
 
 
 def row_for(report: dict, key: str) -> dict:
@@ -625,10 +679,8 @@ def test_the_owners_ice_dragon_gains_creator_and_licence(
     assert before["enrichment"] is None, "nothing on this row came from a page yet"
 
     calls = stub_thing_page(monkeypatch, fixture_html("thing-5390184.json"))
-    response = enrich(client, contributor, [DRAGON_KEY])
+    body = run_enrich(client, [DRAGON_KEY], headers=bearer(contributor.token))
 
-    assert response.status_code == 200, response.text
-    body = response.json()
     assert body["fetched"] == 1
     assert calls == [("5390184", None)]
 
@@ -653,7 +705,7 @@ def test_the_owners_ice_dragon_gains_creator_and_licence(
 def test_enrich_reports_a_429_as_a_readable_refusal(
     client: TestClient, contributor: Actor, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A rate limit is one refused item, not a thrown request, and writes nothing.
+    """A rate limit is one refused item, not a failed operation, and writes nothing.
 
     Mutation: retry the fetch and the call count becomes two; cache a refusal and
     the empty-map assertion reds; put the cookie (or its absence) in the audit
@@ -676,10 +728,8 @@ def test_enrich_reports_a_429_as_a_readable_refusal(
     monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", rate_limited)
     headers = {**bearer(contributor.token), "X-Request-ID": "enrich-429"}
 
-    response = client.post("/bundles/enrich", json={"keys": [DRAGON_KEY], "thingiverse_cookie": "session=secret"}, headers=headers)
+    body = run_enrich(client, [DRAGON_KEY], headers=headers, thingiverse_cookie="session=secret")
 
-    assert response.status_code == 200, response.text
-    body = response.json()
     assert body["refused"] == 1 and body["fetched"] == 0
     result = body["results"][0]
     assert result["status"] == "refused"
@@ -690,7 +740,7 @@ def test_enrich_reports_a_429_as_a_readable_refusal(
     with Session(engine) as session:
         rows = list(session.exec(select(AuditEvent).where(AuditEvent.request_id == "enrich-429")))
         details = [row.detail_json or "" for row in session.exec(select(AuditEvent).where(AuditEvent.action == audit.BUNDLE_ENRICH))]
-    assert rows == [], "a refusal changed nothing, so it writes no audit row"
+    assert [row.action for row in rows] == [audit.OPERATION_SUBMIT], "only the submit wrote under this request id"
     assert not any("secret" in detail for detail in details), "no enrich row ever carries the cookie"
 
 
@@ -702,10 +752,8 @@ def test_a_missing_thing_stays_untouched_and_says_so(
     scan()
     stub_thing_page(monkeypatch, fixture_html("thing-missing.json"))
 
-    response = enrich(client, contributor, [DRAGON_KEY])
+    result = run_enrich(client, [DRAGON_KEY], headers=bearer(contributor.token))["results"][0]
 
-    assert response.status_code == 200, response.text
-    result = response.json()["results"][0]
     assert result["status"] == "refused"
     assert "5390184" in result["reason"]
     assert bundle_service.get_enrichments() == {}
@@ -727,10 +775,8 @@ def test_a_page_with_no_licence_leaves_the_row_licence_null(
     )
     stub_thing_page(monkeypatch, page)
 
-    response = enrich(client, contributor, [DRAGON_KEY])
+    result = run_enrich(client, [DRAGON_KEY], headers=bearer(contributor.token))["results"][0]
 
-    assert response.status_code == 200, response.text
-    result = response.json()["results"][0]
     assert result["status"] == "fetched"
     assert result["creator"] == "Someone"
     assert result["licence"] is None
@@ -767,21 +813,41 @@ def test_a_report_with_an_enrichable_row_makes_no_outbound_call(
 
 def test_enrich_refuses_more_than_twenty_five_keys(client: TestClient, contributor: Actor) -> None:
     """The bulk bound is a readable 400, before any walk or fetch."""
-    response = enrich(client, contributor, [f"no/such/{index}" for index in range(26)])
+    status, detail = refused_plan(
+        client, keys=[f"no/such/{index}" for index in range(26)], headers=bearer(contributor.token)
+    )
 
-    assert response.status_code == 400, response.text
-    assert response.json()["detail"] == "enrich at most 25 bundles at a time"
+    assert status == 400, detail
+    assert detail == "enrich at most 25 bundles at a time"
 
 
-def test_a_viewer_may_not_enrich(client: TestClient, viewer: Actor, isolated_storage: Path) -> None:
-    """Enrichment is an outbound fetch plus a stored claim, so it needs contribute."""
+def test_a_viewer_may_not_enrich(
+    client: TestClient, viewer: Actor, contributor: Actor, isolated_storage: Path
+) -> None:
+    """Enrichment is an outbound fetch plus a stored claim, so it needs contribute.
+
+    The level lives on the workflow now, so the viewer is refused at the plan and
+    again at the submit, exactly as on every other operations workflow.
+    """
     dragon_bundle(isolated_storage)
     scan()
 
-    response = enrich(client, viewer, [DRAGON_KEY])
+    planned = client.post(
+        "/operations/plan",
+        json={"workflow": "enrich", "target": "", "params": {"keys": [DRAGON_KEY]}},
+        headers=bearer(viewer.token),
+    )
+    assert planned.status_code == 403, planned.text
+    assert planned.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
 
-    assert response.status_code == 403, response.text
-    assert response.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
+    plan = plan_of(client, [DRAGON_KEY], headers=bearer(contributor.token))
+    refused = client.post(
+        "/operations",
+        json={"plan_id": plan["plan_id"], "idempotency_key": "viewer-enrich"},
+        headers=bearer(viewer.token),
+    )
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"] == permissions.DENY_DETAIL[permissions.CONTRIBUTE]
     assert bundle_service.get_enrichments() == {}
 
 
@@ -798,18 +864,19 @@ def test_enrich_carries_the_cookie_through_the_same_plumbing(
     calls = stub_thing_page(monkeypatch, fixture_html("thing-5390184.json"))
     headers = {**bearer(contributor.token), "X-Request-ID": "enrich-cookie"}
 
-    response = client.post(
-        "/bundles/enrich",
-        json={"keys": [DRAGON_KEY], "thingiverse_cookie": "Cookie: session=super-secret\nother=1"},
+    run_enrich(
+        client,
+        [DRAGON_KEY],
         headers=headers,
+        thingiverse_cookie="Cookie: session=super-secret\nother=1",
     )
 
-    assert response.status_code == 200, response.text
     assert calls == [("5390184", "session=super-secret")]
     with Session(engine) as session:
         rows = list(session.exec(select(AuditEvent).where(AuditEvent.request_id == "enrich-cookie")))
-    assert len(rows) == 1
-    assert "super-secret" not in (rows[0].detail_json or "")
+        details = [row.detail_json or "" for row in session.exec(select(AuditEvent).where(AuditEvent.action == audit.BUNDLE_ENRICH))]
+    assert len(rows) == 1, "the submit is the only row this request id wrote"
+    assert not any("super-secret" in detail for detail in details)
 
 
 def test_an_enriched_project_is_never_edited_by_a_later_enrich(
@@ -819,7 +886,7 @@ def test_an_enriched_project_is_never_edited_by_a_later_enrich(
     dragon_bundle(isolated_storage)
     scan()
     stub_thing_page(monkeypatch, fixture_html("thing-5390184.json"))
-    assert enrich(client, contributor, [DRAGON_KEY]).json()["fetched"] == 1
+    assert run_enrich(client, [DRAGON_KEY], headers=bearer(contributor.token))["fetched"] == 1
 
     created = client.post("/bundles/create", json={"items": [{"key": DRAGON_KEY}]}, headers=bearer(contributor.token))
     project_id = created.json()["results"][0]["project_id"]
@@ -835,10 +902,8 @@ def test_an_enriched_project_is_never_edited_by_a_later_enrich(
 
     monkeypatch.setattr(import_resolvers, "fetch_thingiverse_thing_page", refuse)
 
-    response = enrich(client, contributor, [DRAGON_KEY])
+    body = run_enrich(client, [DRAGON_KEY], headers=bearer(contributor.token))
 
-    assert response.status_code == 200, response.text
-    body = response.json()
     assert body["cached"] == 1 and body["fetched"] == 0
     project = project_by_id(client, contributor, project_id)
     assert project["creator"] == "A Human", "the project row is the human's, not the page's"

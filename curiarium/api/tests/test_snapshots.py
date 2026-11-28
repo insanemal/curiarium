@@ -963,9 +963,12 @@ def test_audit_the_snapshot_actions_are_declared_and_carried_by_their_routes() -
     # routes: both carried `asset.create`, which stays (the upload and project
     # doors still emit it), so only the two route keys go, 47 = 49 - 2. Part 3/4
     # deletes POST /import/project and POST /import/archive (both audited) and the
-    # entries read (never audited), so 45 = 47 - 2.
+    # entries read (never audited), so 45 = 47 - 2. Part 4/4 deletes
+    # POST /bundles/enrich but keeps `bundle.enrich` in ACTIONS: the enrich step
+    # still emits it under the runner's context, so only the route key goes,
+    # 44 = 45 - 1.
     assert len(audit.ACTIONS) == 58
-    assert len(audit.ROUTE_ACTIONS) == 45
+    assert len(audit.ROUTE_ACTIONS) == 44
     assert audit.assert_audit_coverage() == audit.ROUTE_ACTIONS
 
 
@@ -1006,7 +1009,7 @@ def test_audit_docs_describe_the_snapshot_actions() -> None:
     # The prose is hard-wrapped, so the sentence is pinned with its whitespace
     # normalised: the words are byte-for-byte, the wrap points are not.
     assert (
-        "The matrix has 101 routes, 41 of them `GET`; the remaining 60 split into 45 audited keys and 15 exempt keys."
+        "The matrix has 100 routes, 41 of them `GET`; the remaining 59 split into 44 audited keys and 15 exempt keys."
         in " ".join(text.split())
     )
     assert "fail-loud" in text

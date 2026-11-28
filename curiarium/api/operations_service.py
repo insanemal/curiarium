@@ -15,9 +15,9 @@ operations over the same paths serialise instead of racing.
 
 This module owns the plan codec, the workflow planners (`create-project`,
 `split-and-create`, `adopt`, `extract-and-create`, `extract`, `library-scan`,
-`import-link` and `import-zip`), submit, the reads, cancel, undo, supersede and
-prune. It never executes a workflow: the runner does, and the routes only ever
-write a row.
+`import-link`, `import-zip` and `enrich`), submit, the reads, cancel, undo,
+supersede and prune. It never executes a workflow: the runner does, and the
+routes only ever write a row.
 
 `import-link` and `import-zip` are the two ingest doors without their doors: the
 same primitives (`import_service.import_asset_from_url`,
@@ -41,6 +41,13 @@ plans `move_service.preflight_refusals` over the hoists `proposal_engine` implie
 and then one `create-project` per hoisted folder, using the same member rule and
 the same create verb `create-project` uses. Its undo folds the move ledger back
 and deletes only the projects its own create steps reported creating.
+
+`enrich` is the deleted `POST /bundles/enrich` door without its door: one step
+calls `bundle_service.enrich_bundles` unchanged, so the per-key vocabulary, the
+ONE cache write per call and the partial-success rule are still the primitive's.
+Its target is deliberately empty - the workflow's target is a WORKING SET named
+by `params["keys"]`, not one page - and its undo removes only the cache records
+that run itself wrote.
 
 `extract-and-create` is the same kind of composition, and it is what replaced the
 deleted one-call `POST /import/archive/project`: `archive_service.plan_extraction`
@@ -75,6 +82,7 @@ import adopt_service
 import archive_service
 import audit
 import bundle_drift
+import bundle_enrich
 import bundle_service
 import folder_service
 import import_policy
@@ -86,6 +94,7 @@ import project_service
 import proposal_engine
 import schemas
 import seams
+import settings_service
 import trash_service
 from auth import AuthContext
 from db import engine
@@ -102,6 +111,7 @@ WORKFLOWS = (
     "library-scan",
     "import-link",
     "import-zip",
+    "enrich",
 )
 
 # The two shapes a split can enact, and the one it defaults to.
@@ -274,6 +284,11 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
         # a leading space is part of the file name, so nothing is trimmed here.
         # `archive_service` normalises the path itself, containment included.
         normalized = target or ""
+    if workflow == "enrich":
+        # An enrich's target is a WORKING SET, not one page: `params["keys"]`
+        # names it, so a page-shaped target is not part of the plan and two
+        # spellings of the same request digest alike.
+        normalized = ""
     intent = {"v": PLAN_VERSION, "workflow": workflow, "target": normalized, "params": params or {}}
     if workflow == "create-project":
         steps, review, declared = _plan_create_project(session, normalized, params or {})
@@ -291,6 +306,8 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
         steps, review, declared = _plan_import_link(session, normalized, params or {})
     elif workflow == "import-zip":
         steps, review, declared = _plan_import_zip(session, normalized, params or {})
+    elif workflow == "enrich":
+        steps, review, declared = _plan_enrich(session, normalized, params or {})
     else:  # pragma: no cover - decode/`WORKFLOWS` refuse this before it can be built
         raise HTTPException(status_code=400, detail=f"unknown workflow {workflow!r}")
     digest = plan_digest(intent, steps, review)
@@ -1894,6 +1911,174 @@ def _plan_import_zip(session: Session, target: str, params: dict) -> Tuple[list,
     return steps, review, declared
 
 
+# --- enrich -------------------------------------------------------------------
+
+# The fields the deleted enrich door read off `BundleEnrichRequest`. `keys` is
+# the workflow's working set and travels in `params`; `refresh` and the cookie
+# ride beside it into the one step's args.
+ENRICH_PARAM_FIELDS = ("keys", "refresh", "thingiverse_cookie")
+
+
+def _enrich_keys(params: dict) -> List[str]:
+    """The bundle keys a plan names, checked before a step exists.
+
+    A key is a storage-root-relative bundle path, so the list is refused unless
+    it is a non-empty list of non-blank strings: a bare string would be iterated
+    character by character, a blank key would declare the whole library with
+    nothing to read, and an empty list is the zeroness the deleted door answered
+    with an empty result - a plan with nothing to do is a 400, never a no-op.
+
+    The cap is `bundle_service.ENRICH_MAX_KEYS` and its refusal is the
+    primitive's own sentence, so the plan and a direct call refuse alike.
+    """
+    unknown = sorted(set(params) - set(ENRICH_PARAM_FIELDS))
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown enrich parameter(s) {', '.join(unknown)}: an enrich takes "
+                f"{', '.join(ENRICH_PARAM_FIELDS)}"
+            ),
+        )
+    keys = params.get("keys")
+    if (
+        not isinstance(keys, list)
+        or not keys
+        or any(not isinstance(key, str) or not key.strip() for key in keys)
+    ):
+        raise HTTPException(status_code=400, detail="keys must be a list of bundle keys")
+    if len(keys) > bundle_service.ENRICH_MAX_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"enrich at most {bundle_service.ENRICH_MAX_KEYS} bundles at a time",
+        )
+    if not isinstance(params.get("refresh", False), bool):
+        raise HTTPException(status_code=400, detail="params.refresh must be true or false")
+    cookie = params.get("thingiverse_cookie")
+    if cookie is not None and not isinstance(cookie, str):
+        raise HTTPException(
+            status_code=400, detail="params.thingiverse_cookie must be a Cookie header string"
+        )
+    return [key.strip() for key in keys]
+
+
+def _enrich_exclusions() -> List[dict]:
+    """What an enrich will and will not do, as review prose with a reason per rule.
+
+    The door is gone but its contract is not: the plan cannot read a page without
+    fetching it, so the review has to name the rules the step will apply instead
+    of leaving the operator to discover them in the results.
+    """
+    return [
+        {
+            "path": "",
+            "reason": (
+                "only an EMPTY provenance field is filled: a truthy creator, licence or "
+                "licence URL the row already holds is never overwritten"
+            ),
+        },
+        {
+            "path": "",
+            "reason": (
+                "the licence and its URL are ONE pair, taken together or not at all, so a "
+                "row with a licence token and no link keeps both"
+            ),
+        },
+        {
+            "path": "",
+            "reason": (
+                "the licence only ever comes from the page: there is no default and no "
+                "guess, and a page that states none leaves the licence null"
+            ),
+        },
+        {
+            "path": "",
+            "reason": (
+                "a refusal (401/403/404 or a page with no metadata) is a per-bundle RESULT "
+                "with the vendor's remedy sentence, never a failed step, so one rate-limited "
+                "page does not fail the others"
+            ),
+        },
+        {
+            "path": "",
+            "reason": (
+                "a fresh cache record answers without a request, and the report reads the "
+                "same cache and never fetches"
+            ),
+        },
+        {
+            "path": "",
+            "reason": "`refresh` re-reads a page the cache already answered, and caches the newer record",
+        },
+        {
+            "path": "",
+            "reason": (
+                f"at most {bundle_service.ENRICH_MAX_KEYS} bundles per operation, refused at "
+                "plan time above that"
+            ),
+        },
+    ]
+
+
+def _plan_enrich(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
+    """The `enrich` planner: the deleted enrichment door as ONE step.
+
+    The primitive (`bundle_service.enrich_bundles`) is unchanged and is the only
+    thing that fetches. Planning is therefore NETWORK-FREE for the import
+    planner's reason: a plan may not fetch, because it would read every page
+    twice - once to grade the review, once to write the cache - and its digest
+    would depend on the network rather than on the request.
+
+    The whole working set is ONE operation, not one step per key, because the
+    primitive writes the cache ONCE per call: a step per bundle would be a
+    settings write per bundle and a lost entry under concurrency.
+
+    The target is deliberately `""`: the workflow's target is a WORKING SET, not
+    one page, and `params["keys"]` names it. The keys are also the
+    `declared_paths`, so the prefix lock serialises an enrich with any operation
+    touching the same folder, and an empty selection is refused rather than
+    planned as nothing to do.
+    """
+    keys = _enrich_keys(params)
+    refresh = bool(params.get("refresh", False))
+    cookie = params.get("thingiverse_cookie")
+    summary = f"read the source page(s) for {len(keys)} bundle(s)"
+    if refresh:
+        summary += " again, ignoring the cache"
+    steps = [
+        {
+            "index": 0,
+            "op": "enrich",
+            "summary": summary,
+            # The cookie goes INSIDE `request` so `operations_runner._scrub_cookies`
+            # redacts it in the persisted step args and plan, exactly as it does
+            # for an import; the body reads it from the in-memory args first.
+            "args": {
+                "keys": keys,
+                "refresh": refresh,
+                "request": ({"thingiverse_cookie": cookie} if cookie is not None else {}),
+            },
+        }
+    ]
+    review = {
+        "workflow": "enrich",
+        "target": "",
+        "moves": 0,
+        "creates": 0,
+        "adopts": 0,
+        "deletes": 0,
+        "members": 0,
+        "groups": [],
+        "cover": None,
+        "excluded": _enrich_exclusions(),
+        "existing_project_id": None,
+        "existing_project_name": None,
+        "move_list": [],
+        "projects": [],
+    }
+    return steps, review, keys
+
+
 # Submit -----------------------------------------------------------------------
 
 
@@ -2172,6 +2357,10 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
     `extract` removes only the empty folder rows its register step measured
     creating, and never the bytes: the extracted files are library content now,
     and its response says so.
+
+    `enrich` drops only the cache records its own run fetched, and only while
+    they are still its own; it edits no bundle row and no project, because this
+    step never wrote one.
     """
     operation = get_operation(session, operation_id)
     if operation.undo_state == UNDO_SUPERSEDED:
@@ -2206,6 +2395,8 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
         return _undo_import_link(session, operation, ctx)
     if operation.workflow == "import-zip":
         return _undo_import_zip(session, operation, ctx)
+    if operation.workflow == "enrich":
+        return _undo_enrich(session, operation, ctx)
     raise HTTPException(
         status_code=409, detail=f"undo is not implemented for workflow {operation.workflow!r}"
     )
@@ -2652,6 +2843,8 @@ def _undo_payload(operation: Operation, **own) -> dict:
         "entries_failed": None,
         "project_removed": None,
         "payload_residue": None,
+        "records_dropped": None,
+        "records_kept": None,
     }
     payload.update(own)
     return payload
@@ -2969,6 +3162,64 @@ def _undo_import_zip(
         folders_removed=len(folders_removed),
         entries_failed=failed,
     )
+
+
+def _undo_enrich(
+    session: Session, operation: Operation, ctx: Optional[audit.AuditContext]
+) -> dict:
+    """Drop only the cache records this run fetched, and only while they are still its own.
+
+    MEASURED: this step writes NO library row. `bundle_service.enrich_bundles`
+    fills the REPORT (computed from disk and the cache) and writes the enrichment
+    cache plus one `bundle.enrich` audit row per page that answered. A project's
+    marker copies those fields only when a LATER create runs, and that copy is
+    that operation's own record. So the truthful inverse is to remove what this
+    run cached - and only what it cached: a `cached`, `refused`, `unavailable` or
+    `unknown` result wrote nothing here. This undo never edits a bundle row or a
+    project.
+
+    The stamp is the ownership check: a record is dropped only while its
+    `fetched_at` still equals the `fetched_at` this step reported, because a
+    later enrich's newer record belongs to that operation and not to this one. A
+    record that is already gone (a resumed undo) is a no-op and is counted
+    neither way, and the cache write, the one `operation.undo` row and the
+    `undo_state` flip commit together.
+    """
+    result = _result_of(_step_of(session, operation.id, "enrich"))
+    records = bundle_service.get_enrichments()
+    dropped: List[str] = []
+    kept = 0
+    for entry in result.get("results") or []:
+        if not isinstance(entry, dict) or entry.get("status") != bundle_enrich.STATUS_FETCHED:
+            continue
+        cache_key = bundle_enrich.cache_key(entry.get("source_url"))
+        record = records.get(cache_key) if cache_key is not None else None
+        if record is None:
+            continue
+        if record.get("fetched_at") != entry.get("fetched_at"):
+            kept += 1
+            continue
+        del records[cache_key]
+        dropped.append(cache_key)
+    if dropped:
+        settings_service.set_setting(
+            settings_service.BUNDLE_ENRICHMENTS_KEY,
+            json.dumps(records, sort_keys=True),
+            session=session,
+        )
+    audit.stage(
+        session,
+        ctx,
+        audit.Event(
+            audit.OPERATION_UNDO,
+            operation.id,
+            {"records_dropped": dropped, "records_kept": kept},
+        ),
+    )
+    operation.undo_state = UNDO_UNDONE
+    session.add(operation)
+    session.commit()
+    return _undo_payload(operation, records_dropped=len(dropped), records_kept=kept)
 
 
 def declared_paths(operation: Operation) -> List[str]:

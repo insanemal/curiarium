@@ -332,6 +332,8 @@ UNDO_WIRE_KEYS = {
     "entries_failed",
     "project_removed",
     "payload_residue",
+    "records_dropped",
+    "records_kept",
 }
 
 

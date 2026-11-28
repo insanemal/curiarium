@@ -474,9 +474,9 @@ def test_adopt_is_a_registry_workflow_whose_steps_a_client_cannot_author(
     """
     project_id = seed_stagetop(storage)
 
-    # Eight, since Mf-y2u3 landed `library-scan`, the two ingest doors and the
-    # in-place `extract`: `WORKFLOWS` is the set that RUNS, and a workflow added
-    # here without a planner is caught by its own suite.
+    # Nine, since Mf-y2u3 landed `library-scan`, the two ingest doors, the
+    # in-place `extract` and `enrich`: `WORKFLOWS` is the set that RUNS, and a
+    # workflow added here without a planner is caught by its own suite.
     assert set(operations_service.WORKFLOWS) == {
         "create-project",
         "split-and-create",
@@ -486,6 +486,7 @@ def test_adopt_is_a_registry_workflow_whose_steps_a_client_cannot_author(
         "library-scan",
         "import-link",
         "import-zip",
+        "enrich",
     }
 
     plan = plan_adopt(client, project_id)

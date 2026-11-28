@@ -196,7 +196,10 @@ class OperationUndoOut(BaseModel):
   An `extract` undo answers the folder rows it pruned and ``payload_residue``,
   the sentence that says the extracted files stay; an `attach-project` undo
   answers the project it left or removed (``project_removed``) and how many
-  memberships it took back.
+  memberships it took back. An `enrich` undo answers the enrichment-cache
+  records it dropped and the ones it kept because a later enrich had replaced
+  them (``records_dropped``/``records_kept``); it edits no row, because that
+  step wrote none.
   Optional on both sides so neither body gains a fabricated zero: a leg says only
   what its own run wrote, and everything it has nothing to say about stays null.
   """
@@ -215,3 +218,5 @@ class OperationUndoOut(BaseModel):
   entries_failed: Optional[List[str]] = None
   project_removed: Optional[bool] = None
   payload_residue: Optional[str] = None
+  records_dropped: Optional[int] = None
+  records_kept: Optional[int] = None
