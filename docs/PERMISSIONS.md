@@ -244,8 +244,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 106 routes: 11 public, 38 read,
-27 contribute, 12 write, 18 admin.
+Paths are FastAPI templates exactly as declared. 104 routes: 11 public, 38 read,
+25 contribute, 12 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -323,11 +323,9 @@ data; an operation row is not library content.
 | Method | Path                                        | Why |
 |--------|---------------------------------------------|-----|
 | POST   | `/upload`                                   | creates an asset: new bytes in, nothing existing touched |
-| POST   | `/import`                                   | creates an asset from a URL |
 | POST   | `/import/project`                           | import a URL into a new or existing project (one step) |
-| POST   | `/import/inspect`                           | no mutation, but an outbound-fetch oracle (URL in, remote response out). Contribute rather than read because the client's link-import flow calls it immediately before `/import`: whoever may start an import needs it, and nobody below contributor starts one |
-| POST   | `/import/zip/entries`                       | same: outbound fetch, no mutation, and the zip-import dialog calls it to list entries before `/import/zip` |
-| POST   | `/import/zip`                               | creates assets from a zip |
+| POST   | `/import/inspect`                           | no mutation, but an outbound-fetch oracle (URL in, remote response out). Contribute rather than read because the client's link-import flow calls it immediately before it plans `import-link`: whoever may start an import needs it, and nobody below contributor starts one |
+| POST   | `/import/zip/entries`                       | same: outbound fetch, no mutation, and the zip-import dialog calls it to list entries before it plans `import-zip` |
 | POST   | `/import/archive`                           | extracts an archive already in the library into its twin directory; a collision is a 409 before a byte is written, so nothing existing is overwritten |
 | POST   | `/asset/{asset_id}/files`                   | uploads a supporting file next to an asset; removes nothing |
 | PATCH  | `/asset/{asset_id}/files/{file_id}`         | renames a supporting file (display only; the bytes never move) |
@@ -348,7 +346,7 @@ data; an operation row is not library content.
 | POST   | `/operations/plan`                          | computes a plan and writes nothing: the step list, the counts and every exclusion with its reason. The `plan_id` it returns is the only thing a submit may name |
 | POST   | `/operations`                               | queues a plan this server issued, under an idempotency key; writes a row and answers 202, the in-process runner does the work. The request body has no steps field, so a client cannot invent a step list, and the plan is recomputed at submit so a stale one is a 409. Contributing is enough because the handler refuses a data-removing workflow to a contributor (`operations_service.WORKFLOW_LEVELS`) |
 | POST   | `/operations/{operation_id}/cancel`         | a queued operation stops now; a running one is asked to stop after the step it is in completes, and its remaining steps are skipped. Cancelling removes nothing, so the row's workflow decides the level and the handler enforces it |
-| POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by putting its own writes back and never deleting the files: a `create-project` deletes the project row it created, a `split-and-create` folds its moves back, deletes the projects it created and restores the retired container row, and an `adopt` takes back exactly the memberships it added and restores the marker's group snapshot. What it may remove is the workflow's question, enforced per workflow. Refused with 409 once a later operation over the same paths has superseded it |
+| POST   | `/operations/{operation_id}/undo`           | undoes a finished operation by putting its own writes back and never deleting the files: a `create-project` deletes the project row it created, a `split-and-create` folds its moves back, deletes the projects it created and restores the retired container row, and an `adopt` takes back exactly the memberships it added and restores the marker's group snapshot. An `import-link`/`import-zip` undo removes the asset rows (and their bytes) its fetch step created, and the zip leg also deletes the folder rows the mirrored tree created - never a folder that predated the run. What it may remove is the workflow's question, enforced per workflow. Refused with 409 once a later operation over the same paths has superseded it |
 
 ### write (editor or admin)
 
@@ -442,13 +440,15 @@ levels depending on history.
 
 **Declarations for the record.** `operations_service.WORKFLOWS` is
 `("create-project", "split-and-create", "adopt", "extract-and-create",
-"library-scan")`: those five have a planner and run. Every other row records the
-level the owner decided for a workflow that does not exist yet - `relocate`, the
-import doors and `enrich` are exactly that - so a row is a decision, not a claim
-about today's code. Read a row against `WORKFLOWS` before believing it runs; a
-name reaches `WORKFLOWS` when it has a planner, never before. `adopt` left this
-list when its planner landed (Mf-ytig), and `library-scan` when part 1/4 of
-Mf-y2u3 replaced the deleted `GET`/`POST /library/scan` routes with the workflow.
+"library-scan", "import-link", "import-zip")`: those seven have a planner and run.
+Every other row records the level the owner decided for a workflow that does not
+exist yet - `relocate`, `import-folder` and `enrich` are exactly that - so a row
+is a decision, not a claim about today's code. Read a row against `WORKFLOWS`
+before believing it runs; a name reaches `WORKFLOWS` when it has a planner, never
+before. `adopt` left this list when its planner landed (Mf-ytig), `library-scan`
+when part 1/4 of Mf-y2u3 replaced the deleted `GET`/`POST /library/scan` routes
+with the workflow, and `import-link`/`import-zip` when part 2/4 replaced the two
+deleted ingest doors (`POST /import`, `POST /import/zip`) with them.
 
 **`library-scan` is WRITE, waiting on Mf-gciy.** The rubric reads contribute - a
 scan removes nothing - but its capacity consequence is still with the owner, so
@@ -485,12 +485,19 @@ silently re-run, because its side effects are unknown. Finished operations are
 pruned to the newest 200 plus everything from the last 30 days; the audit log is
 the permanent record.
 
-Three workflows run: `create-project`, `split-and-create` and `adopt`. The
-client calls these routes - `curiarium/web/src/lib/api/operations.ts` plans,
-submits and undoes for the review queue and the guided import panel
-(`SplitAndCreatePanel`) and for the project page's drift notice
-(`AdoptGrownParts`) - and every other name in `WORKFLOW_LEVELS` is declared, not
-runnable.
+Seven workflows run: `create-project`, `split-and-create`, `adopt`,
+`extract-and-create`, `library-scan`, `import-link` and `import-zip`. The client
+calls these routes - `curiarium/web/src/lib/api/operations.ts` plans, submits and
+undoes for the review queue, the guided import panel (`SplitAndCreatePanel`), the
+project page's drift notice (`AdoptGrownParts`) and the two ingest flows - and
+every other name in `WORKFLOW_LEVELS` is declared, not runnable.
+
+The two ingest workflows are the deleted `POST /import` and `POST /import/zip`
+doors as operations: one `fetch`/`fetch-zip` step whose args are the request the
+door read off `ImportRequest`, so the file is fetched once, at run time, and the
+plan is the review the door never had. Planning an import fetches nothing:
+`normalize_import_url` resolves DNS, so the planner keeps to string checks and
+the paid/gated table, and the review names what the run will refuse.
 
 The level split follows the owner's rule: viewers read the queue, and a
 contributor may plan, submit, cancel and undo any workflow that removes nothing

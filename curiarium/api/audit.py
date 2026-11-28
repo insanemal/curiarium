@@ -421,9 +421,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     # Creation is audited too (Mf-0u1y): the event's target IS the new asset id,
     # so `GET /audit?target=<id>` cross-links an asset to the request that made it.
     ("POST", "/upload"): (ASSET_CREATE,),
-    ("POST", "/import"): (ASSET_CREATE,),
     ("POST", "/import/project"): (ASSET_CREATE,),
-    ("POST", "/import/zip"): (ASSET_CREATE,),
     # An in-library extract writes files but no asset rows: the next scan is what
     # registers them, so this is the operator's record of the extraction itself.
     ("POST", "/import/archive"): (ARCHIVE_EXTRACT,),

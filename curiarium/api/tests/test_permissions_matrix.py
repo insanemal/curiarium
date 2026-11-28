@@ -20,13 +20,14 @@ routes have their outbound fetch stubbed - and every row a request needs comes
 from `ids`, which is seeded per test and deleted at teardown, so no sweep depends
 on test ordering or on leftovers from another file.
 
-Five routes are pinned at "not 403" instead of a concrete 2xx: the `/import*`
-routes. `authorize()` runs before their handlers, so 403 is the only permission
-outcome they can have; what happens after the guard depends on an outbound HTTP
-fetch, which these tests refuse to perform. Their stubs answer 400, and their
-declared level is pinned by `test_every_api_route_has_a_level` and by the editor
-sweep below (which asserts 400-with-stub rather than 403 for an editor, i.e. the
-guard let an editor through).
+Three routes are pinned at "not 403" instead of a concrete 2xx: the three
+surviving `/import*` routes. `authorize()` runs before their handlers, so 403 is
+the only permission outcome they can have; what happens after the guard depends
+on an outbound HTTP fetch, which these tests refuse to perform. Their stubs
+answer 400, and their declared level is pinned by
+`test_every_api_route_has_a_level` and by the editor sweep below (which asserts
+400-with-stub rather than 403 for an editor, i.e. the guard let an editor
+through).
 """
 
 from dataclasses import dataclass, replace
@@ -635,12 +636,6 @@ def call_upload(client: TestClient, headers: dict[str, str], ids: Ids, monkeypat
     return client.post("/upload", files={"file": ("probe.stl", STL_BYTES, "model/stl")}, headers=headers)
 
 
-def call_import(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    monkeypatch.setattr(main, "normalize_import_url", stub_normalize)
-    monkeypatch.setattr(main, "import_asset_from_url", stub_outbound)
-    return client.post("/import", json={"url": IMPORT_URL}, headers=headers)
-
-
 def call_import_project(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     monkeypatch.setattr(main, "normalize_import_url", stub_normalize)
     # Both attempt seams: the route picks one from `entries`, so neither may reach
@@ -660,12 +655,6 @@ def call_import_zip_entries(client: TestClient, headers: dict[str, str], ids: Id
     monkeypatch.setattr(main, "normalize_import_url", stub_normalize)
     monkeypatch.setattr(main, "download_import_to_temp", stub_outbound)
     return client.post("/import/zip/entries", json={"url": IMPORT_URL}, headers=headers)
-
-
-def call_import_zip(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    monkeypatch.setattr(main, "normalize_import_url", stub_normalize)
-    monkeypatch.setattr(main, "download_import_to_temp", stub_outbound)
-    return client.post("/import/zip", json={"url": IMPORT_URL, "entries": ["cube.stl"]}, headers=headers)
 
 
 def call_import_archive_entries(
@@ -1279,11 +1268,9 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("GET", "/folder/{folder_id}/download"): call_folder_download,
     ("GET", "/trash"): call_trash,
     ("POST", "/upload"): call_upload,
-    ("POST", "/import"): call_import,
     ("POST", "/import/project"): call_import_project,
     ("POST", "/import/inspect"): call_import_inspect,
     ("POST", "/import/zip/entries"): call_import_zip_entries,
-    ("POST", "/import/zip"): call_import_zip,
     ("GET", "/import/archive/entries"): call_import_archive_entries,
     ("POST", "/import/archive"): call_import_archive,
     ("GET", "/imports/runs"): call_list_import_runs,
@@ -1348,9 +1335,9 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/operations/{operation_id}/undo"): call_undo_operation,
 }
 
-# What a permitted caller must get back. The five `/import*` routes are absent on
-# purpose: their handlers reach the network, which the stubs above refuse, so
-# they are pinned at "not 403" instead (see the module docstring).
+# What a permitted caller must get back. The three surviving `/import*` routes are
+# absent on purpose: their handlers reach the network, which the stubs above
+# refuse, so they are pinned at "not 403" instead (see the module docstring).
 EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("GET", "/health"): 200,
     # SSO is not configured in these tests, so everything but `status` is a 503.
@@ -1598,7 +1585,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 106 routes - 11 public / 38 read / 27 contribute / 12 write / 18 admin.
+    """The matrix is pinned at 104 routes - 11 public / 38 read / 25 contribute / 12 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1614,16 +1601,18 @@ def test_the_matrix_is_the_documented_size() -> None:
     (the extract-and-create workflow replaced it), so the total fell 109 -> 108
     and contribute 28 -> 27. Part 1/4 of Mf-y2u3 deleted GET and POST
     /library/scan, so the total fell 108 -> 106, read 39 -> 38 and write 13 -> 12.
+    Part 2/4 deleted POST /import and POST /import/zip (both contribute), so the
+    total fell 106 -> 104 and contribute 27 -> 25.
     """
     counts = {
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 106, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 104, counts
     assert counts == {
         permissions.PUBLIC: 11,
         permissions.READ: 38,
-        permissions.CONTRIBUTE: 27,
+        permissions.CONTRIBUTE: 25,
         permissions.WRITE: 12,
         permissions.ADMIN: 18,
     }, counts
@@ -1767,11 +1756,11 @@ def test_viewer_is_allowed_every_read_route(client, ids, viewer_headers, key, mo
 def test_contributor_is_allowed_every_contribute_route(client, ids, contributor_headers, key, monkeypatch) -> None:
     """A contributor holds every contribute power, not just the routes a test names.
 
-    The five `/import*` keys have no pinned status on purpose (their handlers
-    reach the network, which the stubs refuse), so the shape is "never 403, and
-    the pinned status when there is one" - the same tolerant shape as the editor
-    sweep. `test_every_route_has_an_expectation_or_a_documented_reason` still
-    pins that those five are the only keys allowed to be absent.
+    The three surviving `/import*` keys have no pinned status on purpose (their
+    handlers reach the network, which the stubs refuse), so the shape is "never
+    403, and the pinned status when there is one" - the same tolerant shape as the
+    editor sweep. `test_every_route_has_an_expectation_or_a_documented_reason`
+    still pins that those three are the only keys allowed to be absent.
     """
     response = call(key, client, contributor_headers, ids, monkeypatch)
 
@@ -1915,14 +1904,12 @@ def test_a_contributor_is_refused_a_data_removing_action(client, ids, contributo
 
 
 def test_every_route_has_an_expectation_or_a_documented_reason() -> None:
-    """Keeps `EXPECTED_STATUS` honest: only the five import routes may be absent."""
+    """Keeps `EXPECTED_STATUS` honest: only the three surviving import routes may be absent."""
     unpinned = set(CALLS) - set(EXPECTED_STATUS)
     assert unpinned == {
-        ("POST", "/import"),
         ("POST", "/import/project"),
         ("POST", "/import/inspect"),
         ("POST", "/import/zip/entries"),
-        ("POST", "/import/zip"),
     }, sorted(unpinned)
 
 

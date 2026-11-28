@@ -10,8 +10,8 @@ It also pins the docstring itself, because that docstring is the fix for symptom
 4 of Mf-znu1: two code comments used to claim that junk "can never become an
 asset" and that both doors were "all-or-nothing", and both claims were wrong in
 one direction. The comments are gone; what they overclaimed now lives in one
-place that names exactly which routes and which failure model it governs, and
-the first test here fails if that naming rots away.
+place that names exactly which doors and which failure model it governs, and the
+first test here fails if that naming rots away.
 """
 
 import ast
@@ -24,6 +24,7 @@ from fastapi import HTTPException
 
 import asset_service
 import entry_policy
+import operations_service
 
 API_ROOT = Path(__file__).resolve().parents[1]
 VOCABULARY_NAMES = {"JUNK_SEGMENTS", "JUNK_BASENAMES", "JUNK_PREFIXES"}
@@ -45,15 +46,22 @@ def test_the_policy_docstring_names_every_door_it_governs() -> None:
     The comments said junk "can never become an asset" and that both doors
     "fail a whole request", and each was true of one route and false of another.
     Rather than delete the claims, they moved here as a docstring that names the
-    five routes it governs, the two caps it owns, the single classification it
-    exposes, its mirror, and the one overclaim it corrects - the storage scan
-    registers an ordinary upload or an on-disk file, so "junk can never be an
-    asset" holds of the archive-member route, not of the library.
+    doors it governs, the two caps it owns, the single classification it exposes,
+    its mirror, and the one overclaim it corrects - the storage scan registers an
+    ordinary upload or an on-disk file, so "junk can never be an asset" holds of
+    the archive-member route, not of the library.
+
+    `POST /import/zip` is the `import-zip` operation now (Mf-y2u3 part 2/4), and
+    `entry_policy`'s docstring still names that door: the module is outside this
+    part's touch set, so the drift is pinned honestly here - the workflow is
+    asserted to exist - and reported rather than papered over by a docstring edit
+    this ticket may not make.
     """
     docstring = entry_policy.__doc__ or ""
 
-    for route in ("/import/zip", "/import/zip/entries", "/import/archive", "/import/archive/entries", "/import/project"):
+    for route in ("/import/zip/entries", "/import/archive", "/import/archive/entries", "/import/project"):
         assert route in docstring, f"the policy docstring no longer names the route {route}"
+    assert "import-zip" in operations_service.WORKFLOWS, "the door that left is an operation now"
     assert "IMPORT_MAX_BYTES" in docstring, "the docstring no longer says which per-file cap it owns"
     assert "IMPORT_ZIP_MAX_BYTES" in docstring, "the docstring no longer says which cumulative cap it owns"
     assert "is_entry_failure" in docstring, "the docstring no longer names the one failure classification"

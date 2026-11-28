@@ -18,7 +18,6 @@ __all__ = [
   "ImportZipEntriesOut",
   "ImportZipEntriesRequest",
   "ImportZipExtractRequest",
-  "ImportZipResult",
   "ZipEntryOut",
 ]
 
@@ -117,11 +116,6 @@ class ImportProjectRequest(ImportRequest):
   project_id: Optional[str] = None
   project_name: Optional[str] = None
   entries: Optional[List[str]] = None
-
-
-class ImportZipResult(BaseModel):
-  assets: List[AssetOut]
-  failed: List[str] = []
 
 
 class ImportProjectOut(BaseModel):

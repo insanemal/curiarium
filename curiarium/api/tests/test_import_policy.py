@@ -12,8 +12,13 @@ Each test pins one half of the policy:
   "paid_note" stay free while "cart" does not.
 * ``test_paid_import_issues_no_request_and_no_cookie`` and
   ``test_open_import_response_refuses_purchase_state_at_any_depth`` - the guard
-  runs before any connection exists, in every import route and inside the fetch
-  helper that HTML-discovered download URLs re-enter.
+  runs before any connection exists, in every surviving import route and inside
+  the fetch helper that HTML-discovered download URLs re-enter.
+* ``test_a_paid_import_is_refused_when_it_is_planned`` and
+  ``test_a_paid_import_is_refused_again_when_the_step_runs`` - the two doors that
+  became the `import-link`/`import-zip` operations (Mf-y2u3 part 2/4) refuse at
+  plan time with the same sentence, and again as a failed step when the resolved
+  URL is the paid one.
 * ``test_import_request_has_no_purchase_or_payment_fields`` - the app has no
   purchase state to store, request or replay.
 * ``test_import_path_never_logs_the_cookie`` - the modules holding the cookie
@@ -28,10 +33,16 @@ from urllib.error import HTTPError
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlmodel import Session, delete
 
 import import_policy
 import import_service
 import main
+import operations_runner
+import url_utils
+from db import engine
+from migrations import run_migrations
+from models import Operation, OperationLock, OperationStep
 from schemas import ImportProjectRequest, ImportRequest, ImportZipEntriesRequest, ImportZipExtractRequest
 
 IMPORT_FIELDS = {"url", "title", "notes", "tags", "folder_id", "filename", "makerworld_cookie", "thingiverse_cookie"}
@@ -47,6 +58,28 @@ COOKIE_PATH_MODULES = (
     "import_policy.py",
     "safe_http.py",
 )
+
+
+def _truncate_ledger() -> None:
+    with Session(engine) as session:
+        for model in (OperationStep, OperationLock, Operation):
+            session.exec(delete(model))
+        session.commit()
+
+
+@pytest.fixture(autouse=True)
+def empty_ledger():
+    """Leave no operation behind: another module's `dispatch_once` would run it.
+
+    The two plan/submit tests below write real rows into the suite's shared
+    database, and a queued row nobody finished would be picked up by the next
+    module that drives the runner - against a URL this module only ever refused.
+    """
+    run_migrations(engine)
+    _truncate_ledger()
+    yield
+    operations_runner.wait_idle(timeout=20)
+    _truncate_ledger()
 
 
 def auth_header(client: TestClient) -> dict:
@@ -143,11 +176,9 @@ def test_free_public_urls_are_not_refused(url):
 @pytest.mark.parametrize(
     "path,payload",
     [
-        ("/import", PAID_PAYLOAD),
         ("/import/inspect", PAID_PAYLOAD),
         ("/import/project", PAID_PAYLOAD),
         ("/import/zip/entries", PAID_PAYLOAD),
-        ("/import/zip", {**PAID_PAYLOAD, "entries": ["cube.stl"]}),
     ],
 )
 def test_paid_import_issues_no_request_and_no_cookie(monkeypatch, path, payload):
@@ -161,6 +192,76 @@ def test_paid_import_issues_no_request_and_no_cookie(monkeypatch, path, payload)
     assert res.status_code == 403
     assert import_policy.PAID_IMPORT_DETAIL in res.text
     assert "SECRET" not in res.text
+
+
+@pytest.mark.parametrize(
+    "workflow,params",
+    [("import-link", {}), ("import-zip", {"entries": ["cube.stl"]})],
+)
+def test_a_paid_import_is_refused_when_it_is_planned(monkeypatch, workflow, params):
+    """The door's sentence at plan time: a plan is the first thing a client asks for."""
+
+    def refuse_to_open(*args, **kwargs):
+        raise AssertionError("a paid import must not open a connection")
+
+    monkeypatch.setattr(import_service, "safe_urlopen", refuse_to_open)
+    monkeypatch.setattr(url_utils, "resolve_remote_url", refuse_to_open)
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        res = client.post(
+            "/operations/plan",
+            json={
+                "workflow": workflow,
+                "target": PAID_PAYLOAD["url"],
+                "params": {**params, "makerworld_cookie": PAID_PAYLOAD["makerworld_cookie"]},
+            },
+            headers=auth_header(client),
+        )
+    assert res.status_code == 403
+    assert import_policy.PAID_IMPORT_DETAIL in res.text
+    assert "SECRET" not in res.text
+
+
+@pytest.mark.parametrize(
+    "workflow,params",
+    [("import-link", {}), ("import-zip", {"entries": ["cube.stl"]})],
+)
+def test_a_paid_import_is_refused_again_when_the_step_runs(monkeypatch, workflow, params):
+    """The run-time half: the plan's URL is free, the resolved one is not.
+
+    The hop is only visible after resolution, so the resolver applies the same
+    table - and the step carries the refusal as its own sentence, without a status
+    prefix and without a connection.
+    """
+
+    def refuse_to_open(*args, **kwargs):
+        raise AssertionError("a paid import must not open a connection")
+
+    monkeypatch.setattr(main, "normalize_import_url", lambda url: PAID_PAYLOAD["url"])
+    monkeypatch.setattr(import_service, "safe_urlopen", refuse_to_open)
+    monkeypatch.setattr(url_utils, "resolve_remote_url", refuse_to_open)
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        planned = client.post(
+            "/operations/plan",
+            json={
+                "workflow": workflow,
+                "target": "https://example.com/cube.stl",
+                "params": {**params, "makerworld_cookie": "S"},
+            },
+            headers=auth_header(client),
+        )
+        assert planned.status_code == 200, planned.text
+        submitted = client.post(
+            "/operations",
+            json={"plan_id": planned.json()["plan_id"], "idempotency_key": f"paid-step-{workflow}"},
+            headers=auth_header(client),
+        )
+        assert submitted.status_code == 202, submitted.text
+        operations_runner.dispatch_once()
+        operations_runner.wait_idle(timeout=30)
+        row = client.get(f"/operations/{submitted.json()['id']}", headers=auth_header(client)).json()
+
+    assert row["status"] == "failed", row
+    assert row["steps"][0]["error"] == import_policy.PAID_IMPORT_DETAIL
 
 
 def test_open_import_response_refuses_purchase_state_at_any_depth(monkeypatch):
@@ -250,8 +351,8 @@ def test_import_path_never_logs_the_cookie(caplog):
 
 def test_failed_paid_free_import_never_echoes_the_cookie(monkeypatch, caplog):
     # A failed credentialed fetch must neither log nor echo the credential: the
-    # router turns HTTPError.reason into the response detail, which is the
-    # realistic way a value from the request could reach the body.
+    # resolver turns HTTPError.reason into the refusal detail, which is the
+    # realistic way a value from the request could reach the record.
     caplog.set_level(logging.DEBUG)
 
     def skip_url_validation(url: str) -> str:
@@ -270,9 +371,30 @@ def test_failed_paid_free_import_never_echoes_the_cookie(monkeypatch, caplog):
         "thingiverse_cookie": "cf_clearance=SECRET123",
     }
     with TestClient(main.app, raise_server_exceptions=False) as client:
-        res = client.post("/import", json=payload, headers=auth_header(client))
-    assert res.status_code >= 400
-    # The upstream reason still reaches the caller, so the assertions above
+        planned = client.post(
+            "/operations/plan",
+            json={
+                "workflow": "import-link",
+                "target": payload["url"],
+                "params": {
+                    "makerworld_cookie": payload["makerworld_cookie"],
+                    "thingiverse_cookie": payload["thingiverse_cookie"],
+                },
+            },
+            headers=auth_header(client),
+        )
+        assert planned.status_code == 200, planned.text
+        submitted = client.post(
+            "/operations",
+            json={"plan_id": planned.json()["plan_id"], "idempotency_key": "cookie-echo"},
+            headers=auth_header(client),
+        )
+        assert submitted.status_code == 202, submitted.text
+        operations_runner.dispatch_once()
+        operations_runner.wait_idle(timeout=30)
+        res = client.get(f"/operations/{submitted.json()['id']}", headers=auth_header(client))
+    assert res.status_code == 200
+    # The upstream reason still reaches the operator, so the assertions above
     # cannot pass because the failure happened somewhere else entirely.
     assert "Failed to fetch URL: Forbidden" in res.text
     assert "SECRET123" not in res.text

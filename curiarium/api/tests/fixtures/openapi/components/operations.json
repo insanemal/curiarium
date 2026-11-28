@@ -519,8 +519,66 @@
     "type": "object"
   },
   "OperationUndoOut": {
-    "description": "The result of undoing a finished operation, shaped by its workflow.\n\nA `create-project` undo answers the project it deleted and leaves the two\nworkflow-specific keys null; a `split-and-create` undo answers ``moves`` (how\nmany landed moves were folded back) and ``projects_removed`` (the projects it\ncreated and then deleted), and leaves the project pair null. An `adopt` undo\nanswers the project it RESTORED plus how many memberships it took back\n(``members_removed``); `create-project` and `split-and-create` leave it null.\nOptional on both sides so neither body gains a fabricated zero.",
+    "description": "The result of undoing a finished operation, shaped by its workflow.\n\nA `create-project` undo answers the project it deleted and leaves every\nworkflow-specific key null; a `split-and-create` undo answers ``moves`` (how\nmany landed moves were folded back) and ``projects_removed`` (the projects it\ncreated and then deleted), and leaves the project pair null. An `adopt` undo\nanswers the project it RESTORED plus how many memberships it took back\n(``members_removed``); `create-project` and `split-and-create` leave it null.\nAn `import-link` undo answers the asset it retired (``asset_id`` and\n``filename``) and how many asset rows it removed (``assets_removed``); an\n`import-zip` undo answers how many assets and mirrored folder rows it removed\n(``assets_removed``/``folders_removed``) and echoes the entries the run itself\ncould not write (``entries_failed``), so the operator's retry list survives.\nOptional on both sides so neither body gains a fabricated zero: a leg says only\nwhat its own run wrote, and everything it has nothing to say about stays null.",
     "properties": {
+      "asset_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Asset Id"
+      },
+      "assets_removed": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Assets Removed"
+      },
+      "entries_failed": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Entries Failed"
+      },
+      "filename": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Filename"
+      },
+      "folders_removed": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Folders Removed"
+      },
       "members_removed": {
         "anyOf": [
           {

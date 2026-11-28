@@ -476,8 +476,10 @@ def test_a_contributor_action_is_audited_with_the_contributor_role(client: TestC
     # audited keys are gone, so the 53 this counter once read is 51. Mf-hebx
     # deleted the archive project create route and its action with the door, so
     # the 51 is 50. Part 1/4 of Mf-y2u3 deleted the library scan route and its
-    # action, so the 50 is 49.
+    # action, so the 50 is 49. Part 2/4 deleted the link and zip import routes,
+    # whose `asset.create` action stays (the upload and project doors carry it),
+    # so only their two keys go: the 49 is 47.
     assert audit.ROUTE_ACTIONS[("POST", "/upload")] == (audit.ASSET_CREATE,)
     assert audit.assert_audit_coverage() is audit.ROUTE_ACTIONS
-    assert len(audit.ROUTE_ACTIONS) == 49
+    assert len(audit.ROUTE_ACTIONS) == 47
     assert len(audit.EXEMPT_ROUTES) == 15

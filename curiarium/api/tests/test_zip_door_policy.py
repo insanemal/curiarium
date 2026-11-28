@@ -1,4 +1,4 @@
-"""The two-door acceptance for Mf-cdrq / Mf-znu1: one archive, four doors.
+"""The two-door acceptance for Mf-cdrq / Mf-znu1: one archive, three doors.
 
 Every test here is measured against the same `DOOR_ARCHIVE` (see
 `tests/zip_door_fixtures.py`): a payload at two depths plus the five pieces of OS
@@ -8,8 +8,10 @@ lands on disk" measurable instead of assumed.
 
 There are two extract doors and two entries doors:
 
-* ``POST /import/zip`` - bytes the server just fetched, extracted into managed
-  assets (the upload door);
+* the ``import-zip`` OPERATION - bytes the server just fetched, extracted into
+  managed assets (the upload door; `POST /import/zip` is gone as of Mf-y2u3
+  part 2/4, so this half is driven through plan -> submit -> run and its step
+  result is the response the route used to answer);
 * ``POST /import/archive`` - an archive already in the library, extracted in
   place into its twin directory (the archive door);
 * ``POST /import/zip/entries`` and ``GET /import/archive/entries`` - the two
@@ -51,6 +53,7 @@ import db
 import entry_policy
 import library_scan
 import main
+import operations_runner
 import settings_service
 from db import engine
 from migrations import run_migrations
@@ -188,6 +191,32 @@ def extract_archive(client: TestClient, headers: dict, path: str = "Nasty.zip") 
     return response.json()
 
 
+def run_import_zip(client: TestClient, headers: dict, entries: list[str]) -> dict:
+    """Plan, submit and run one `import-zip`; the step result is the deleted route's body.
+
+    The upload door is the same primitive (`extract_zip_entries_to_assets`) behind
+    a plan the operator reviewed, so every assertion below reads the step's own
+    `created`/`assets`/`failed` instead of a 200 body.
+    """
+    planned = client.post(
+        "/operations/plan",
+        json={"workflow": "import-zip", "target": "https://example.com/models.zip", "params": {"entries": entries}},
+        headers=headers,
+    )
+    assert planned.status_code == 200, planned.text
+    submitted = client.post(
+        "/operations",
+        json={"plan_id": planned.json()["plan_id"], "idempotency_key": f"zip-door-{uuid4().hex}"},
+        headers=headers,
+    )
+    assert submitted.status_code == 202, submitted.text
+    operations_runner.dispatch_once()
+    operations_runner.wait_idle(timeout=30)
+    operation = client.get(f"/operations/{submitted.json()['id']}", headers=headers).json()
+    assert operation["status"] == "done", operation
+    return operation["steps"][0]["result"]
+
+
 # --- the extract doors write the payload and nothing else ------------------
 
 
@@ -204,14 +233,8 @@ def test_the_zip_extract_door_writes_only_the_payload(
     install_zip_download(monkeypatch, tmp_path / "models.zip")
     headers = auth_header(client)
 
-    response = client.post(
-        "/import/zip",
-        json={"url": "https://example.com/models.zip", "entries": sorted(DOOR_ARCHIVE)},
-        headers=headers,
-    )
+    body = run_import_zip(client, headers, sorted(DOOR_ARCHIVE))
 
-    assert response.status_code == 200, response.text
-    body = response.json()
     assert sorted(asset["filename"] for asset in body["assets"]) == ["nested.stl", "part.stl"]
     assert sorted(body["failed"]) == sorted(DOOR_JUNK)
     assert_no_junk_under(storage)
@@ -370,20 +393,14 @@ def test_a_junk_member_spends_no_budget_on_either_door(
     write_door_archive(storage / "Nasty.zip")
     selection = sorted(DOOR_ARCHIVE)
 
-    zip_response = client.post(
-        "/import/zip",
-        json={"url": "https://example.com/models.zip", "entries": selection},
-        headers=headers,
-    )
+    zip_body = run_import_zip(client, headers, selection)
     archive_response = client.post(
         "/import/archive",
         json={"path": "Nasty.zip", "entries": selection},
         headers=headers,
     )
-    zip_body = zip_response.json()
     archive_body = archive_response.json()
 
-    assert zip_response.status_code == 200, f"zip door {zip_response.status_code}: {zip_body}"
     assert archive_response.status_code == 200, f"archive door {archive_response.status_code}: {archive_body}"
     assert archive_body["bytes"] == DOOR_PAYLOAD_BYTES, archive_body
     # Both doors agree on what the junk member cost: nothing. The zip door's own
@@ -520,14 +537,8 @@ def test_the_sentinel_predicate_reaches_both_extract_doors(
     headers = auth_header(client)
     stub_scan(monkeypatch)
 
-    upload = client.post(
-        "/import/zip",
-        json={"url": "https://example.com/models.zip", "entries": sorted(DOOR_ARCHIVE)},
-        headers=headers,
-    )
+    upload_body = run_import_zip(client, headers, sorted(DOOR_ARCHIVE))
 
-    assert upload.status_code == 200, upload.text
-    upload_body = upload.json()
     assert [asset["filename"] for asset in upload_body["assets"]] == ["nested.stl"]
     assert "part.stl" in upload_body["failed"]
 

@@ -36,6 +36,7 @@ import import_service
 import library_scan
 import login_throttle as login_throttle_module
 import main
+import operations_runner
 import settings_service
 from db import engine
 from migrations import run_migrations
@@ -256,6 +257,27 @@ def install_project_zip_stub(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(main, "download_zip_attempt", stub)
 
 
+def run_workflow(client: TestClient, workflow: str, target: str, *, headers: dict, **params) -> dict:
+    """Plan, submit and run one import operation; the finished row is the response."""
+    planned = client.post(
+        "/operations/plan",
+        json={"workflow": workflow, "target": target, "params": params},
+        headers=headers,
+    )
+    assert planned.status_code == 200, planned.text
+    submitted = client.post(
+        "/operations",
+        json={"plan_id": planned.json()["plan_id"], "idempotency_key": f"{workflow}-{uuid4().hex}"},
+        headers=headers,
+    )
+    assert submitted.status_code == 202, submitted.text
+    operations_runner.dispatch_once()
+    operations_runner.wait_idle(timeout=30)
+    operation = client.get(f"/operations/{submitted.json()['id']}", headers=headers).json()
+    assert operation["status"] == "done", operation
+    return operation
+
+
 def stored_row(asset_id: str) -> Asset:
     """The row straight from the database, not the response."""
     with Session(engine) as session:
@@ -306,6 +328,41 @@ def assert_attributed(
     assert [item["id"] for item in linked.json()["events"]] == [event.id]
 
 
+def assert_workflow_attributed(
+    client: TestClient,
+    admin_token: str,
+    *,
+    asset_id: str,
+    submitted_by: str,
+    created_via: str,
+) -> None:
+    """The row, the one audit row and the audit link all agree, and cross-link.
+
+    The step runs in the runner's thread, so the `asset.create` row's actor is the
+    runner while the COLUMN that answers "who added this" is the submitter - the
+    same pair `AssetOrigin.for_principal` gave the request path, with the
+    submission standing in for the request.
+    """
+    assert stored_attribution(asset_id) == (submitted_by, created_via)
+    name = stored_row(asset_id).name
+
+    rows = creation_events(asset_id)
+    assert len(rows) == 1, [row.action for row in rows]
+    event = rows[0]
+    assert event.actor == audit.ACTOR_RUNNER_USERNAME
+    assert event.target == asset_id
+    assert json.loads(event.detail_json) == {"via": created_via, "name": name}
+
+    linked = client.get("/audit", params={"target": asset_id}, headers=bearer(admin_token))
+    assert linked.status_code == 200, linked.text
+    assert [item["id"] for item in linked.json()["events"]] == [event.id]
+
+    listed = client.get("/assets", params={"limit": 1000}, headers=bearer(admin_token))
+    assert listed.status_code == 200, listed.text
+    row = next(item for item in listed.json() if item["id"] == asset_id)
+    assert (row["created_by"], row["created_via"]) == (submitted_by, created_via)
+
+
 def test_an_upload_is_stamped_with_its_contributor(client: TestClient, contributor: Principal) -> None:
     response = client.post(
         "/upload",
@@ -327,21 +384,24 @@ def test_an_upload_is_stamped_with_its_contributor(client: TestClient, contribut
 def test_a_link_import_is_stamped_with_its_contributor(
     client: TestClient, contributor: Principal, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """`POST /import` is the `import-link` operation now; the attribution is the same."""
     install_link_import_stub(monkeypatch)
 
-    response = client.post(
-        "/import",
-        json={"url": "https://example.com/model.stl"},
+    operation = run_workflow(
+        client,
+        "import-link",
+        "https://example.com/model.stl",
         headers=bearer(contributor.token),
     )
 
-    assert response.status_code == 200, response.text
-    assert_attributed(
+    assert operation["submitted_by"] == contributor.username
+    result = operation["steps"][0]["result"]
+    assert result["filename"] == "model.stl"
+    assert_workflow_attributed(
         client,
         contributor.admin_token,
-        response.json(),
-        actor=contributor.username,
-        created_by=contributor.username,
+        asset_id=result["asset_id"],
+        submitted_by=contributor.username,
         created_via="link-import",
     )
 
@@ -349,24 +409,26 @@ def test_a_link_import_is_stamped_with_its_contributor(
 def test_a_zip_import_is_stamped_with_its_contributor(
     client: TestClient, contributor: Principal, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
+    """`POST /import/zip` is the `import-zip` operation now; the attribution is the same."""
     install_zip_download_stub(monkeypatch, tmp_path)
 
-    response = client.post(
-        "/import/zip",
-        json={"url": "https://example.com/models.zip", "entries": ["a.stl"]},
+    operation = run_workflow(
+        client,
+        "import-zip",
+        "https://example.com/models.zip",
         headers=bearer(contributor.token),
+        entries=["a.stl"],
     )
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["failed"] == []
-    assert len(body["assets"]) == 1
-    assert_attributed(
+    assert operation["submitted_by"] == contributor.username
+    result = operation["steps"][0]["result"]
+    assert result["failed"] == []
+    assert len(result["assets"]) == 1
+    assert_workflow_attributed(
         client,
         contributor.admin_token,
-        body["assets"][0],
-        actor=contributor.username,
-        created_by=contributor.username,
+        asset_id=result["assets"][0]["asset_id"],
+        submitted_by=contributor.username,
         created_via="zip-import",
     )
 

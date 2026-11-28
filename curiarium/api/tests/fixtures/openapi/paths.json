@@ -2424,49 +2424,6 @@
       "summary": "Health"
     }
   },
-  "/import": {
-    "post": {
-      "operationId": "import_from_link_import_post",
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/ImportRequest"
-            }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AssetOut"
-              }
-            }
-          },
-          "description": "Successful Response"
-        },
-        "422": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/HTTPValidationError"
-              }
-            }
-          },
-          "description": "Validation Error"
-        }
-      },
-      "security": [
-        {
-          "HTTPBearer": []
-        }
-      ],
-      "summary": "Import From Link"
-    }
-  },
   "/import/archive": {
     "post": {
       "description": "Extract an archive already in the library into its twin directory.\n\nThin on purpose: the containment, budget, no-clobber and audit decisions live\nin ``archive_service``, which maps a ``SnapshotPathError`` with\n``snapshot_guard.status_for`` itself.",
@@ -2640,49 +2597,6 @@
         }
       ],
       "summary": "Import Link Into Project"
-    }
-  },
-  "/import/zip": {
-    "post": {
-      "operationId": "import_zip_entries_import_zip_post",
-      "requestBody": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/ImportZipExtractRequest"
-            }
-          }
-        },
-        "required": true
-      },
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ImportZipResult"
-              }
-            }
-          },
-          "description": "Successful Response"
-        },
-        "422": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/HTTPValidationError"
-              }
-            }
-          },
-          "description": "Validation Error"
-        }
-      },
-      "security": [
-        {
-          "HTTPBearer": []
-        }
-      ],
-      "summary": "Import Zip Entries"
     }
   },
   "/import/zip/entries": {

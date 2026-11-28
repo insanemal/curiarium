@@ -1161,16 +1161,19 @@ def test_the_deleted_route_is_reconciled_in_every_count() -> None:
     route (one permission row, one audit route row, one action) and the workflow
     set gains its fourth entry. Part 1/4 of Mf-y2u3 then deleted the two
     /library/scan routes, so 106 (11/38/27/12/18), GET 42, ACTIONS 58,
-    ROUTE_ACTIONS 49, WORKFLOWS 5.
+    ROUTE_ACTIONS 49, WORKFLOWS 5. Part 2/4 deleted POST /import and POST
+    /import/zip (both contribute, both ASSET_CREATE rows) and added their two
+    workflows, so 104 (11/38/25/12/18), GET 42, ACTIONS 58, ROUTE_ACTIONS 47,
+    EXEMPT 15, WORKFLOWS 7.
     """
-    assert len(permissions.ROUTE_PERMISSIONS) == 106
+    assert len(permissions.ROUTE_PERMISSIONS) == 104
     by_level: dict[str, int] = {}
     for level in permissions.ROUTE_PERMISSIONS.values():
         by_level[level] = by_level.get(level, 0) + 1
-    assert by_level == {"public": 11, "read": 38, "contribute": 27, "write": 12, "admin": 18}
+    assert by_level == {"public": 11, "read": 38, "contribute": 25, "write": 12, "admin": 18}
     assert sum(1 for method, _path in permissions.ROUTE_PERMISSIONS if method == "GET") == 42
     assert len(audit.ACTIONS) == 58
-    assert len(audit.ROUTE_ACTIONS) == 49
+    assert len(audit.ROUTE_ACTIONS) == 47
     assert len(audit.EXEMPT_ROUTES) == 15
     assert operations_service.WORKFLOWS == (
         "create-project",
@@ -1178,6 +1181,8 @@ def test_the_deleted_route_is_reconciled_in_every_count() -> None:
         "adopt",
         "extract-and-create",
         "library-scan",
+        "import-link",
+        "import-zip",
     )
     assert operations_service.WORKFLOW_LEVELS["extract-and-create"] == permissions.CONTRIBUTE
 

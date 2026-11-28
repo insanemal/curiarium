@@ -290,15 +290,13 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     # contribute: upload, import, organise and edit metadata - everything that
     # does not destroy or rename library content on disk.
     ("POST", "/upload"): CONTRIBUTE,
-    ("POST", "/import"): CONTRIBUTE,
     # Also an outbound-fetch oracle, like /import/inspect, and it mutates a project.
     ("POST", "/import/project"): CONTRIBUTE,
     # No mutation and no library bytes, but both are outbound-fetch oracles
     # (arbitrary URL in, remote response out), so a viewer must not have them;
-    # a contributor needs them for link and zip import in the client.
+    # a contributor needs them to plan a link or zip import in the client.
     ("POST", "/import/inspect"): CONTRIBUTE,
     ("POST", "/import/zip/entries"): CONTRIBUTE,
-    ("POST", "/import/zip"): CONTRIBUTE,
     # Extraction writes files into the library; nothing existing is overwritten
     # (a collision is a 409 before a byte is written), so it is not a WRITE.
     ("POST", "/import/archive"): CONTRIBUTE,

@@ -23,7 +23,9 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
+from zipfile import BadZipFile
 
 from fastapi import HTTPException
 from sqlalchemy import func, update
@@ -32,14 +34,19 @@ from sqlmodel import Session, delete, select
 
 import adopt_service
 import archive_service
+import asset_service
 import audit
 import bundle_service
 import folder_service
+import import_policy
 import library_scan
 import move_service
 import operations_service
 import project_create_service
 import project_service
+import schemas
+import seams
+import zip_service
 from db import engine
 from file_utils import is_model_path
 from models import Folder, Operation, OperationLock, OperationStep, Project, ProjectAsset
@@ -367,7 +374,8 @@ def _complete_step(operation_id: str, step_index: int, result: dict) -> None:
 # the marker's group list the plan measured. `extract`/`register` are
 # extract-and-create's: the extractor's own write, then the registration that
 # turns the plan's named files into rows, refused while any planned file is
-# missing.
+# missing. `fetch`/`fetch-zip` are the two ingest doors' own calls: one link, one
+# archive, each the primitive the deleted route used with the plan as its review.
 
 
 def _refusal_detail(error: HTTPException) -> str:
@@ -888,6 +896,233 @@ def _scan(operation_id: str, step_index: int, args: dict) -> dict:
     return state.as_dict()
 
 
+def _submitted_by(operation_id: str) -> Optional[str]:
+    """The username the operation was submitted by; the human an import belongs to.
+
+    `AssetOrigin.for_principal` read the principal off the request; the runner has
+    no request, so it reads the submission instead. A row that is gone answers
+    `None`, which `AssetOrigin` records honestly as (NULL, created_via).
+    """
+    with Session(engine) as session:
+        operation = session.get(Operation, operation_id)
+        return None if operation is None else operation.submitted_by
+
+
+def _import_origin(operation_id: str, created_via: str) -> asset_service.AssetOrigin:
+    """Where a step-created asset came from: the submitter, the door, the runner."""
+    return asset_service.AssetOrigin(
+        created_by=_submitted_by(operation_id),
+        created_via=created_via,
+        audit_ctx=audit.runner_context(),
+    )
+
+
+# The two session cookies an import request can carry, and the value a persisted
+# ledger row keeps in their place. Nothing but a dash, so a reader of the row can
+# tell "this plan had a cookie" from "this plan had none".
+COOKIE_ARG_NAMES = ("makerworld_cookie", "thingiverse_cookie")
+COOKIE_REDACTION = "-"
+
+
+def _redact_request_cookies(request) -> bool:
+    """Replace every session cookie in ONE parsed import request with `"-"`.
+
+    The dict is mutated in place and is always one this module just parsed out of a
+    persisted row - never the dict a step body is using, which is why the caller
+    hands in the JSON it is about to write back rather than the args it was given.
+    Returns whether anything changed, so a plan that carried no cookie does not
+    write its rows back for nothing.
+    """
+    if not isinstance(request, dict):
+        return False
+    redacted = False
+    for name in COOKIE_ARG_NAMES:
+        if name in request:
+            request[name] = COOKIE_REDACTION
+            redacted = True
+    return redacted
+
+
+def _redact_plan_cookies(plan) -> bool:
+    """Redact the cookies a persisted `plan_json` holds: intent params and step args.
+
+    The plan persists the intent (`intent["params"]` IS the request params the plan
+    was built from) and the step list with its args, so the same credential is in a
+    second place in the ledger. Both are redacted; the digest and `paths` are
+    untouched, and nothing reads a persisted step's args back.
+    """
+    if not isinstance(plan, dict):
+        return False
+    intent = plan.get("intent")
+    redacted = _redact_request_cookies(intent.get("params") if isinstance(intent, dict) else None)
+    for step in plan.get("steps") or []:
+        if isinstance(step, dict):
+            args = step.get("args")
+            if isinstance(args, dict):
+                redacted = _redact_request_cookies(args.get("request")) or redacted
+    return redacted
+
+
+def _scrub_cookies(operation_id: str, step_index: int, args: dict) -> None:
+    """Take the import's session cookies out of the ledger, now that the step has them.
+
+    THE rule, from `docs/AUDIT.md` and `tests/test_import_policy.py`: a site session
+    cookie never comes to rest in a record a human can read back. The deleted import
+    doors kept theirs in memory only. An import is a PLAN now, and the plan is
+    persisted - `operation_step.args_json` holds the step's args verbatim, and
+    `operation.plan_json` holds the intent's params and the step list (which is the
+    same args) - so the plan shape is exactly where this rule would have been lost.
+
+    So the credential rides in the plan until the step TAKES it: the body builds its
+    request object from the in-memory `args` (which this function never touches), and
+    the step then redacts its own persisted rows the moment it has the value - before
+    the network call it exists for, so a failure later cannot put it back. From the
+    first instant the step runs, the credential is nowhere in the ledger; the
+    runner's own audit rows never carried it in the first place (`operation.submit`
+    and `operation.done` name the workflow, the target and the counts).
+
+    Best-effort by construction: a row that is missing, unparseable or unwritable is
+    a logged no-op, because a read the scrub could not make must never be able to
+    fail the import. The in-memory `args` are read only to see whether there is
+    anything to redact.
+    """
+    request = args.get("request")
+    if not isinstance(request, dict) or not any(name in request for name in COOKIE_ARG_NAMES):
+        return
+    try:
+        with Session(engine) as session:
+            step = session.exec(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation_id,
+                    OperationStep.step_index == step_index,
+                )
+            ).first()
+            if step is not None:
+                persisted = json.loads(step.args_json or "{}")
+                if _redact_request_cookies(
+                    persisted.get("request") if isinstance(persisted, dict) else None
+                ):
+                    step.args_json = json.dumps(persisted, sort_keys=True)
+                    session.add(step)
+            operation = session.get(Operation, operation_id)
+            if operation is not None:
+                plan = json.loads(operation.plan_json or "{}")
+                if _redact_plan_cookies(plan):
+                    operation.plan_json = json.dumps(plan, sort_keys=True)
+                    session.add(operation)
+            session.commit()
+    except Exception:  # a redaction must never be the reason an import fails
+        log.warning("could not redact the import cookie on step %s of %s", step_index, operation_id)
+
+
+def _fetch(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `fetch` step body: the deleted link door's call, in the runner's thread.
+
+    The door's order is the contract: `refuse_paid_or_gated` first (URL-only, no
+    DNS), then `normalize_import_url`, then the fetch itself. The calls go through
+    `seams.` - the documented patch surface - and never to the service functions
+    directly: the whole suite stubs `main.import_asset_from_url`,
+    `main.normalize_import_url` and `main.download_import_to_temp`, so calling the
+    service would silently stop honouring those stubs and open a real socket in
+    every test that patches them.
+
+    A door refusal becomes the step's own sentence, without its status prefix, so
+    the row reads the way the operator used to see the response.
+
+    `_scrub_cookies` sits between the request object and the call on purpose: the
+    body has the cookie from the instant it is built, and the persisted rows lose
+    it before the fetch that needs it - so no failure after this point can leave a
+    session cookie at rest (see that function for the whole rule).
+    """
+    origin = _import_origin(operation_id, "link-import")
+    try:
+        import_policy.refuse_paid_or_gated(args["url"])
+        url = seams.normalize_import_url(args["url"])
+        body = schemas.ImportRequest(url=url, **args["request"])
+        # The request object has the cookie now, so the ledger row lets it go before
+        # the one call it is for: a failed fetch cannot leave it behind.
+        _scrub_cookies(operation_id, step_index, args)
+        asset = seams.import_asset_from_url(url, body, origin=origin)
+    except HTTPException as error:
+        raise RuntimeError(_refusal_detail(error)) from error
+    return {
+        "created": True,
+        "asset_id": asset.id,
+        "path": asset.storage_path,
+        "filename": asset.filename,
+        "size": asset.size,
+        "url": url,
+    }
+
+
+def _folder_ids() -> Set[str]:
+    """Every folder row id, read in its own session: the before/after measurement."""
+    with Session(engine) as session:
+        return set(session.exec(select(Folder.id)))
+
+
+def _fetch_zip(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `fetch-zip` step body: the deleted zip door's sequence, sentence for sentence.
+
+    One body, not a fetch and an extract, because the door's guarantee is that the
+    temp file is ALWAYS deleted: the `finally` that unlinks it lives here, so a
+    cancelled or failed operation cannot leak the file across a step boundary.
+
+    The `seams.` accessors are the patch surface (`main.download_import_to_temp`
+    and `main.normalize_import_url` are what the suite stubs), while
+    `extract_zip_entries_to_assets` has no seam and is the same function the
+    archive and project doors call - the policy it executes is `entry_policy`'s,
+    not a copy.
+
+    `created_folders` is measured with two id sets around the extract, so the undo
+    knows exactly which mirror rows this run created and never touches a folder
+    that already existed.
+
+    `_scrub_cookies` runs once the request object is built and before the download,
+    the same order as `fetch`: the credential is redacted from the ledger before
+    any byte is requested.
+    """
+    origin = _import_origin(operation_id, "zip-import")
+    body = schemas.ImportZipExtractRequest(url=args["url"], **args["request"], entries=args["entries"])
+    try:
+        import_policy.refuse_paid_or_gated(args["url"])
+        url = seams.normalize_import_url(args["url"])
+        # Same order as `fetch`: the body has the cookie, the ledger is redacted, and
+        # only then does the download happen.
+        _scrub_cookies(operation_id, step_index, args)
+        tmp_path, filename, _mime = seams.download_import_to_temp(url, body)
+        try:
+            if Path(filename).suffix.lower() != ".zip":
+                raise HTTPException(status_code=415, detail="Imported file is not a zip")
+            folders_before = _folder_ids()
+            try:
+                assets, failed = zip_service.extract_zip_entries_to_assets(
+                    tmp_path, body.entries, body, origin=origin
+                )
+            except BadZipFile:
+                raise HTTPException(status_code=400, detail="Invalid zip file") from None
+            created_folders = sorted(_folder_ids() - folders_before)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    except HTTPException as error:
+        raise RuntimeError(_refusal_detail(error)) from error
+    return {
+        "created": [asset.id for asset in assets],
+        "assets": [
+            {
+                "asset_id": asset.id,
+                "path": asset.storage_path,
+                "filename": asset.filename,
+                "size": asset.size,
+            }
+            for asset in assets
+        ],
+        "failed": failed,
+        "filename": filename,
+        "created_folders": created_folders,
+    }
+
+
 _STEP_BODIES = {
     "extract": _extract,
     "move": _move,
@@ -901,6 +1136,10 @@ _STEP_BODIES = {
     # spawned a background thread; the runner IS that thread, so the walk runs
     # inside this step.
     "scan": _scan,
+    # `fetch` belongs to `import-link` and `fetch-zip` to `import-zip`: the two
+    # deleted ingest doors, whose bodies now run in the runner's thread.
+    "fetch": _fetch,
+    "fetch-zip": _fetch_zip,
 }
 
 

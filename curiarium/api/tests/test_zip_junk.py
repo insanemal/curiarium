@@ -12,11 +12,14 @@ folder, an asset row or an audit row.
 The tests here are the backend half of AC-1..AC-4 and AC-6; AC-5 (the modal's
 default ticks) lives with the web tests. Storage and the database are shared for
 the whole session, so every test works in a temporary storage root and removes
-the rows it created.
+the rows it created. The two request-driven tests drive the `import-zip`
+OPERATION now (Mf-y2u3 part 2/4 deleted `POST /import/zip`): the selection is the
+plan's `entries`, and the step result carries the same `assets`/`failed` pair.
 """
 
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
@@ -31,6 +34,7 @@ import db
 import entry_policy
 import library_scan
 import main
+import operations_runner
 import schemas
 import settings_service
 import zip_service
@@ -161,6 +165,26 @@ def files_under(root: Path) -> set[str]:
     return {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()}
 
 
+def run_import_zip(client: TestClient, headers: dict, entries: List[str]) -> dict:
+    """Plan, submit and run one `import-zip`; the step result is the old 200 body."""
+    planned = client.post(
+        "/operations/plan",
+        json={"workflow": "import-zip", "target": "https://example.com/models.zip", "params": {"entries": entries}},
+        headers=headers,
+    )
+    assert planned.status_code == 200, planned.text
+    submitted = client.post(
+        "/operations",
+        json={"plan_id": planned.json()["plan_id"], "idempotency_key": f"zip-junk-{uuid4().hex}"},
+        headers=headers,
+    )
+    assert submitted.status_code == 202, submitted.text
+    operations_runner.dispatch_once()
+    operations_runner.wait_idle(timeout=30)
+    operation = client.get(f"/operations/{submitted.json()['id']}", headers=headers).json()
+    return operation
+
+
 def state() -> dict:
     """Every row family junk could add to, as plain sets, measured not assumed."""
     with Session(engine) as session:
@@ -285,23 +309,22 @@ def test_an_extensionless_payload_entry_is_reported_not_aborted(tmp_path: Path) 
 # --- AC-3: a junk-only selection is a 200 that writes nothing -------------
 
 
-def test_a_junk_only_selection_answers_200_and_writes_nothing(
+def test_a_junk_only_selection_runs_and_writes_nothing(
     client: TestClient, isolated_storage: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """The run succeeds and writes nothing: the false state is a failed step."""
     storage = isolated_storage
     install_zip_download(monkeypatch, tmp_path / "models.zip", NASTY_ENTRIES)
     headers = auth_header(client)
     before, files_before = state(), files_under(storage)
 
-    response = client.post(
-        "/import/zip",
-        json={"url": "https://example.com/models.zip", "entries": sorted(NASTY_JUNK)},
-        headers=headers,
-    )
+    operation = run_import_zip(client, headers, sorted(NASTY_JUNK))
 
-    assert response.status_code == 200, response.text
-    assert response.json()["assets"] == []
-    assert sorted(response.json()["failed"]) == sorted(NASTY_JUNK)
+    assert operation["status"] == "done", operation
+    result = operation["steps"][0]["result"]
+    assert result["assets"] == []
+    assert result["created"] == []
+    assert sorted(result["failed"]) == sorted(NASTY_JUNK)
     assert state() == before
     assert files_under(storage) == files_before
 
@@ -319,21 +342,13 @@ def test_junk_does_not_count_toward_the_cumulative_cap(
     headers = auth_header(client)
     monkeypatch.setattr(entry_policy, "IMPORT_ZIP_MAX_BYTES", 60)
 
-    junk_only = client.post(
-        "/import/zip",
-        json={"url": "https://example.com/models.zip", "entries": sorted(NASTY_JUNK)},
-        headers=headers,
-    )
-    assert junk_only.status_code == 200, junk_only.text
-    assert junk_only.json()["assets"] == []
+    junk_only = run_import_zip(client, headers, sorted(NASTY_JUNK))
+    assert junk_only["status"] == "done", junk_only
+    assert junk_only["steps"][0]["result"]["assets"] == []
 
-    over_cap = client.post(
-        "/import/zip",
-        json={"url": "https://example.com/models.zip", "entries": ["part.stl"]},
-        headers=headers,
-    )
-    assert over_cap.status_code == 413, over_cap.text
-    assert "IMPORT_ZIP_MAX_MB" in over_cap.json()["detail"]
+    over_cap = run_import_zip(client, headers, ["part.stl"])
+    assert over_cap["status"] == "failed", over_cap
+    assert "IMPORT_ZIP_MAX_MB" in over_cap["steps"][0]["error"]
 
 
 # --- AC-4a: a whole-request 400 is still raised ----------------------------

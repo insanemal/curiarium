@@ -182,13 +182,19 @@ class OperationOut(BaseModel):
 class OperationUndoOut(BaseModel):
   """The result of undoing a finished operation, shaped by its workflow.
 
-  A `create-project` undo answers the project it deleted and leaves the two
-  workflow-specific keys null; a `split-and-create` undo answers ``moves`` (how
+  A `create-project` undo answers the project it deleted and leaves every
+  workflow-specific key null; a `split-and-create` undo answers ``moves`` (how
   many landed moves were folded back) and ``projects_removed`` (the projects it
   created and then deleted), and leaves the project pair null. An `adopt` undo
   answers the project it RESTORED plus how many memberships it took back
   (``members_removed``); `create-project` and `split-and-create` leave it null.
-  Optional on both sides so neither body gains a fabricated zero.
+  An `import-link` undo answers the asset it retired (``asset_id`` and
+  ``filename``) and how many asset rows it removed (``assets_removed``); an
+  `import-zip` undo answers how many assets and mirrored folder rows it removed
+  (``assets_removed``/``folders_removed``) and echoes the entries the run itself
+  could not write (``entries_failed``), so the operator's retry list survives.
+  Optional on both sides so neither body gains a fabricated zero: a leg says only
+  what its own run wrote, and everything it has nothing to say about stays null.
   """
 
   operation_id: str
@@ -198,3 +204,8 @@ class OperationUndoOut(BaseModel):
   moves: Optional[int] = None
   projects_removed: Optional[List[str]] = None
   members_removed: Optional[int] = None
+  asset_id: Optional[str] = None
+  filename: Optional[str] = None
+  assets_removed: Optional[int] = None
+  folders_removed: Optional[int] = None
+  entries_failed: Optional[List[str]] = None

@@ -14,7 +14,6 @@ two filesystem-only actions return 500 and log instead of pretending success.
 import json
 import logging
 import re
-import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
@@ -432,16 +431,6 @@ def persist_fake(url: str, body, origin) -> Asset:
     return import_service.persist_asset_from_response(FakeImportResponse(STL_BYTES), url, body, origin=origin)
 
 
-def install_link_import(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`POST /import`: the URL seam answers with a persisted asset."""
-
-    def import_from_url(url: str, body, *, origin=None):
-        return persist_fake(url, body, origin)
-
-    monkeypatch.setattr(main, "normalize_import_url", lambda url: url)
-    monkeypatch.setattr(main, "import_asset_from_url", import_from_url)
-
-
 def install_single_file_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     """`POST /import/project` without `entries`: the attempt seam answers with one."""
 
@@ -452,30 +441,9 @@ def install_single_file_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main, "import_asset_attempt", attempt)
 
 
-def call_import(client, headers, ids, monkeypatch) -> Response:
-    install_link_import(monkeypatch)
-    return client.post("/import", json={"url": "https://example.com/sweep.stl"}, headers=headers)
-
-
 def call_import_project(client, headers, ids, monkeypatch) -> Response:
     install_single_file_attempt(monkeypatch)
     return client.post("/import/project", json={"url": "https://example.com/sweep-project.stl"}, headers=headers)
-
-
-def call_import_zip(client, headers, ids, monkeypatch) -> Response:
-    # A real zip on disk, and the route's own `finally` unlink of the temp file;
-    # the temporary directory outlives the request only to be cleaned up here.
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "models.zip"
-        with ZipFile(path, "w") as archive:
-            archive.writestr("sweep.stl", STL_BYTES)
-        monkeypatch.setattr(main, "normalize_import_url", lambda url: url)
-        monkeypatch.setattr(main, "download_import_to_temp", lambda url, body: (path, "models.zip", "application/zip"))
-        return client.post(
-            "/import/zip",
-            json={"url": "https://example.com/models.zip", "entries": ["sweep.stl"]},
-            headers=headers,
-        )
 
 
 def call_import_archive(client, headers, ids, monkeypatch) -> Response:
@@ -898,9 +866,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("DELETE", "/me/sessions/{session_id}"): call_delete_own_session,
     ("DELETE", "/sessions/{session_id}"): call_admin_delete_session,
     ("POST", "/upload"): call_upload,
-    ("POST", "/import"): call_import,
     ("POST", "/import/project"): call_import_project,
-    ("POST", "/import/zip"): call_import_zip,
     ("POST", "/import/archive"): call_import_archive,
     ("DELETE", "/asset/{asset_id}"): call_delete_asset,
     ("POST", "/assets/batch/delete"): call_batch_delete,

@@ -959,9 +959,11 @@ def test_audit_the_snapshot_actions_are_declared_and_carried_by_their_routes() -
     # 60 = 62 - 2 and 51 = 53 - 2. Mf-hebx deletes the archive project create
     # door and its one action, so 59 = 60 - 1 and 50 = 51 - 1. Part 1/4 of
     # Mf-y2u3 deletes the library scan's action and its one route, so
-    # 58 = 59 - 1 and 49 = 50 - 1.
+    # 58 = 59 - 1 and 49 = 50 - 1. Part 2/4 deletes the link and zip import
+    # routes: both carried `asset.create`, which stays (the upload and project
+    # doors still emit it), so only the two route keys go, 47 = 49 - 2.
     assert len(audit.ACTIONS) == 58
-    assert len(audit.ROUTE_ACTIONS) == 49
+    assert len(audit.ROUTE_ACTIONS) == 47
     assert audit.assert_audit_coverage() == audit.ROUTE_ACTIONS
 
 
@@ -1002,7 +1004,7 @@ def test_audit_docs_describe_the_snapshot_actions() -> None:
     # The prose is hard-wrapped, so the sentence is pinned with its whitespace
     # normalised: the words are byte-for-byte, the wrap points are not.
     assert (
-        "The matrix has 106 routes, 42 of them `GET`; the remaining 64 split into 49 audited keys and 15 exempt keys."
+        "The matrix has 104 routes, 42 of them `GET`; the remaining 62 split into 47 audited keys and 15 exempt keys."
         in " ".join(text.split())
     )
     assert "fail-loud" in text

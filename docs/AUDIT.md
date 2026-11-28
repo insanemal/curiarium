@@ -72,7 +72,7 @@ could honestly reconstruct.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
 |---|---|---|---|---|
-| `asset.create` | `POST /upload`; `POST /import`; `POST /import/project`; `POST /import/zip` (one row per created asset) | the new asset id, so `GET /audit?target=<id>` finds it | `{"via", "name"}` | fail-closed: staged in the same transaction as the insert |
+| `asset.create` | `POST /upload`; `POST /import/project`; the `import-link` and `import-zip` operations' `fetch`/`fetch-zip` steps (one row per created asset) | the new asset id, so `GET /audit?target=<id>` finds it | `{"via", "name"}` | fail-closed: staged in the same transaction as the insert |
 | `archive.extract` | `POST /import/archive` | the library-relative archive path | `{"destination", "files", "bytes", "scan_started"}` | fail-loud: the files are already published when the row is written |
 | `asset.delete` | `DELETE /asset/{asset_id}`; `POST /assets/batch/delete` (one row per asset) | asset id | `{"filename"}` | fail-closed |
 | `asset.rename` | `POST /asset/{asset_id}/rename`; `POST /asset/{asset_id}/meta` (only when the name changes) | asset id | `{"from", "to"}` names | fail-closed |
@@ -188,7 +188,7 @@ change more than one fact or act on more than one target:
   with detail `{"name", "folders": 1, "assets": 0, "bytes": 0}` when the
   delete empties the folder's directory and so retires that folder's row.
 * `POST /assets/batch/folder` - one `asset.move` per moved asset.
-* `POST /import/zip` - one `asset.create` per extracted entry. An entry that
+* the `import-zip` operation - one `asset.create` per extracted entry. An entry that
   never becomes an asset writes nothing at all: OS metadata (`__MACOSX/`,
   `.DS_Store`, `Thumbs.db`, `desktop.ini`, an AppleDouble `._*`,
   `.Spotlight-*`, `$RECYCLE.BIN/`) is refused before the insert, and an entry
@@ -245,8 +245,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 106 routes, 42
-of them `GET`; the remaining 64 split into 49 audited keys and 15 exempt keys.
+out of scope by construction: they change nothing. The matrix has 104 routes, 42
+of them `GET`; the remaining 62 split into 47 audited keys and 15 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without

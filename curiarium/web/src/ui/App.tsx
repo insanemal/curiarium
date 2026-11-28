@@ -507,9 +507,10 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
   // view === "review" ? view : "library")`, because switching mode must not throw
   // the operator out of a queue - so a project created from the queue would set
   // `openProjectId` and leave the queue on screen: the Projects radio checked,
-  // the project open behind it, and nothing the operator can see. `UploadBar`
-  // mounts only under `activeView === "library"`, which is the only reason its
-  // use of this handler has never shown the defect.
+  // the project open behind it, and nothing the operator can see. The bundles
+  // queue is the only caller left - the upload bar imports nothing - and it is
+  // exactly the surface that can sit outside `library`, which is why the
+  // `setActiveView` call above is load-bearing rather than cosmetic.
   const handleProjectImported = React.useCallback(
     (projectId: string) => {
       handleModeChange("projects");
@@ -797,11 +798,8 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
                 <UploadBar
                   canContribute={canContribute}
                   folderId={folderId}
-                  makerworldCookie={settings.makerworld.cookie}
-                  thingiverseCookie={settings.thingiverse.cookie}
                   onUploaded={handleAssetsChanged}
                   onUnauthorized={handleUnauthorized}
-                  onProjectImported={handleProjectImported}
                 />
               )}
               {activeView !== "library" && (

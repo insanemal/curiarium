@@ -14,9 +14,16 @@ shared queue, attributed to the submitting user - not a queue per user - so two
 operations over the same paths serialise instead of racing.
 
 This module owns the plan codec, the workflow planners (`create-project`,
-`split-and-create`, `adopt`, `extract-and-create` and `library-scan`), submit,
-the reads, cancel, undo, supersede and prune. It never executes a workflow: the
-runner does, and the routes only ever write a row.
+`split-and-create`, `adopt`, `extract-and-create`, `library-scan`, `import-link`
+and `import-zip`), submit, the reads, cancel, undo, supersede and prune. It never
+executes a workflow: the runner does, and the routes only ever write a row.
+
+`import-link` and `import-zip` are the two ingest doors without their doors: the
+same primitives (`import_service.import_asset_from_url`,
+`zip_service.extract_zip_entries_to_assets`) now run inside a step body, and the
+plan is the review the one-call route never had. Planning an import fetches
+nothing: `normalize_import_url` resolves DNS, so the planner keeps to string
+checks and the paid/gated table, and the fetch happens once, at run time.
 
 `split-and-create` is a COMPOSITION, not a second implementation of anything: it
 plans `move_service.preflight_refusals` over the hoists `proposal_engine` implies
@@ -45,8 +52,10 @@ import posixpath
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
+from pydantic import ValidationError
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, select
@@ -56,20 +65,32 @@ import archive_service
 import audit
 import bundle_drift
 import bundle_service
+import folder_service
+import import_policy
 import library_scan
 import move_service
 import permissions
 import project_create_service
 import project_service
 import proposal_engine
+import schemas
 import seams
+import trash_service
 from auth import AuthContext
 from db import engine
 from file_utils import is_model_path
 from models import Asset, Folder, Operation, OperationLock, OperationStep, Project, ProjectAsset
 
 PLAN_VERSION = 1
-WORKFLOWS = ("create-project", "split-and-create", "adopt", "extract-and-create", "library-scan")
+WORKFLOWS = (
+    "create-project",
+    "split-and-create",
+    "adopt",
+    "extract-and-create",
+    "library-scan",
+    "import-link",
+    "import-zip",
+)
 
 # The two shapes a split can enact, and the one it defaults to.
 DEFAULT_SPLIT_SHAPE = "split-top-folders"
@@ -229,8 +250,12 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
     if workflow not in WORKFLOWS:
         raise HTTPException(status_code=400, detail=f"unknown workflow {workflow!r}")
     # The intent carries the NORMALISED target, so two spellings of one directory
-    # are one plan and `Operation.target` reads the way `declared_paths` does.
-    normalized = (target or "").strip().strip("/")
+    # are one plan and `Operation.target` reads the way `declared_paths` does. An
+    # import's target is a URL, whose path a directory-shaped strip would falsify:
+    # `https://example.com/model/` and `https://example.com/model` are two pages.
+    normalized = (target or "").strip()
+    if workflow not in ("import-link", "import-zip"):
+        normalized = normalized.strip("/")
     intent = {"v": PLAN_VERSION, "workflow": workflow, "target": normalized, "params": params or {}}
     if workflow == "create-project":
         steps, review, declared = _plan_create_project(session, normalized, params or {})
@@ -242,6 +267,10 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
         steps, review, declared = _plan_extract_and_create(session, normalized, params or {})
     elif workflow == "library-scan":
         steps, review, declared = _plan_library_scan(session, normalized, params or {})
+    elif workflow == "import-link":
+        steps, review, declared = _plan_import_link(session, normalized, params or {})
+    elif workflow == "import-zip":
+        steps, review, declared = _plan_import_zip(session, normalized, params or {})
     else:  # pragma: no cover - decode/`WORKFLOWS` refuse this before it can be built
         raise HTTPException(status_code=400, detail=f"unknown workflow {workflow!r}")
     digest = plan_digest(intent, steps, review)
@@ -1321,6 +1350,259 @@ def _plan_library_scan(session: Session, target: str, params: dict) -> Tuple[lis
     return steps, review, [scope]
 
 
+# --- import-link / import-zip -------------------------------------------------
+
+# The fields the deleted doors read off `ImportRequest`. `url` is deliberately
+# not one of them: it is the workflow's target and travels as the step's own
+# argument, so a plan cannot be asked to fetch one URL and described by another.
+IMPORT_REQUEST_FIELDS = (
+    "title",
+    "notes",
+    "tags",
+    "filename",
+    "makerworld_cookie",
+    "thingiverse_cookie",
+    "folder_id",
+)
+
+
+def _import_url(target: str) -> str:
+    """The page URL a plan is for, checked with string operations only.
+
+    A pure check on the parsed scheme: the planner must never open a socket, and
+    asking DNS whether a host exists is exactly the double fetch the review is
+    there to prevent (the file would arrive once at plan time and again at run
+    time, and the digest would depend on the network rather than on the request).
+    """
+    url = (target or "").strip()
+    if not url:
+        raise HTTPException(
+            status_code=409, detail="the target must be the page URL to import from"
+        )
+    if urlparse(url).scheme not in ("http", "https"):
+        raise HTTPException(status_code=409, detail="the target must be an http(s) URL")
+    return url
+
+
+def _import_body(url: str, params: dict, *, extra: Sequence[str] = ()) -> schemas.ImportRequest:
+    """The typed import request a step will carry, validated before a step exists.
+
+    A plan is the server's, so the only field a client controls is `params`: a key
+    outside this list is refused (a client cannot smuggle anything in beside the
+    request it names, a step list included), and a value the schema would refuse
+    is a 400 here rather than a step that cannot run.
+    """
+    allowed = set(IMPORT_REQUEST_FIELDS) | set(extra)
+    unknown = sorted(set(params) - allowed)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown import parameter(s) {', '.join(unknown)}: an import takes "
+                f"{', '.join(IMPORT_REQUEST_FIELDS)}"
+            ),
+        )
+    values = {key: params[key] for key in IMPORT_REQUEST_FIELDS if key in params}
+    try:
+        return schemas.ImportRequest(url=url, **values)
+    except ValidationError as error:
+        first = error.errors()[0]
+        field = first["loc"][-1] if first["loc"] else "the request"
+        raise HTTPException(
+            status_code=400, detail=f"the import request is not valid: {field} {first['msg']}"
+        ) from None
+
+
+def _import_destination(session: Session, params: dict) -> Tuple[List[str], str]:
+    """Where an import lands: the paths it declares and the review's own label.
+
+    The folder is checked HERE, before a step exists, so a stale plan is refused at
+    plan time with the door's own sentence rather than as a failed run, and the
+    declared path is the folder's own `storage_path` because that is the prefix a
+    lock can honestly serialise. A folder with no `storage_path` yet - one a zip
+    import created, whose path is derived from its ancestors - cannot name a
+    prefix, so the import declares the empty path and serialises with everything,
+    exactly as a whole-root scan does.
+    """
+    folder_id = params.get("folder_id") or None
+    if not folder_id:
+        return [""], "the library root"
+    try:
+        folder_service.validate_parent_folder(session, folder_id)
+    except HTTPException as error:
+        raise HTTPException(status_code=409, detail=str(error.detail)) from error
+    folder = session.get(Folder, folder_id)
+    if folder is None:  # pragma: no cover - the check above just read the row
+        raise HTTPException(status_code=409, detail="Parent folder not found")
+    return [folder.storage_path or ""], f"the folder {folder.name!r}"
+
+
+def _import_exclusions(url: str, destination: str, *, zip_entries: bool) -> List[dict]:
+    """What an import will NOT do, as review prose with a reason per rule.
+
+    The door is gone but its prohibitions are not: a plan cannot know the bytes it
+    has not fetched, so the review has to name the refusals the step will apply
+    instead of leaving the operator to guess what a blank page means.
+    """
+    rules = [
+        {
+            "path": url,
+            "reason": (
+                "the file is fetched at RUN time and not at plan time, so its "
+                "filename and size are unknown here"
+            ),
+        },
+        {
+            "path": url,
+            "reason": "a paid or account-gated page is refused before any request is made",
+        },
+        {
+            "path": url,
+            "reason": (
+                "one file is capped by IMPORT_MAX_BYTES (IMPORT_MAX_MB), and every "
+                "redirect hop is SSRF-validated"
+            ),
+        },
+        {
+            "path": url,
+            "reason": "a session cookie is sent only to a credentialed host (makerworld, thingiverse)",
+        },
+    ]
+    if zip_entries:
+        rules.extend(
+            [
+                {
+                    "path": url,
+                    "reason": "a junk member (OS metadata) is reported in failed[] and never written",
+                },
+                {
+                    "path": url,
+                    "reason": (
+                        "the entry list is fixed by this plan; the archive's own listing "
+                        "is what POST /import/zip/entries answers"
+                    ),
+                },
+                {
+                    "path": destination,
+                    "reason": (
+                        "each member is capped by IMPORT_MAX_BYTES and the whole "
+                        "selection by IMPORT_ZIP_MAX_BYTES (IMPORT_ZIP_MAX_MB)"
+                    ),
+                },
+                {
+                    "path": destination,
+                    "reason": "a member that fails alone does not fail the others",
+                },
+            ]
+        )
+    return rules
+
+
+def _import_review(
+    workflow: str,
+    url: str,
+    destination: str,
+    *,
+    creates: int,
+    members: int,
+    zip_entries: bool,
+) -> dict:
+    """The standard review key set, with the import's own prohibitions as `excluded`."""
+    return {
+        "workflow": workflow,
+        "target": url,
+        "moves": 0,
+        "creates": creates,
+        "adopts": 0,
+        "deletes": 0,
+        "members": members,
+        "groups": [],
+        "cover": None,
+        "excluded": _import_exclusions(url, destination, zip_entries=zip_entries),
+        "existing_project_id": None,
+        "existing_project_name": None,
+        "move_list": [],
+        "projects": [],
+    }
+
+
+def _plan_import_link(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
+    """The `import-link` planner: the deleted link door as ONE `fetch` step.
+
+    The target IS the page URL. The paid/gated refusal runs FIRST and its 403 is
+    the door's own sentence - it is a URL-only check, so it precedes the one call
+    that would resolve DNS (`normalize_import_url`, which the runner makes at run
+    time and this planner never makes at all).
+
+    `creates` is 1 because the import always creates exactly one asset row: a name
+    collision is the 409 the door answered, not a plan-time count to reconcile.
+    """
+    url = _import_url(target)
+    import_policy.refuse_paid_or_gated(url)
+    body = _import_body(url, params)
+    declared, destination = _import_destination(session, params)
+    request = body.model_dump(exclude={"url"}, exclude_none=True)
+    steps = [
+        {
+            "index": 0,
+            "op": "fetch",
+            "summary": (
+                f"fetch {urlparse(url).hostname or url} and import it into {destination}"
+            ),
+            "args": {"url": url, "request": request, "created_via": "link-import"},
+        }
+    ]
+    review = _import_review(
+        "import-link", url, destination, creates=1, members=0, zip_entries=False
+    )
+    return steps, review, declared
+
+
+def _plan_import_zip(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
+    """The `import-zip` planner: the deleted zip door as ONE `fetch-zip` step.
+
+    The entry list is required and validated at PLAN time: it is the selection the
+    operator confirmed in the entries modal, so an archive's own listing can never
+    silently become the run's selection, and a `str` or a list holding a non-string
+    is a 400 rather than a step that fails on a member it cannot name.
+
+    ONE step and not the plan's `[fetch, extract-entries]` pair, on purpose: the
+    door downloads to a temp file and deletes it in a `finally`. Splitting the
+    download from the extraction would hand that temp path across a step boundary
+    that no step owns, so a cancelled or failed operation would leak it - one body
+    keeps the door's guarantee that the temp file is always deleted.
+    """
+    url = _import_url(target)
+    import_policy.refuse_paid_or_gated(url)
+    body = _import_body(url, params, extra=("entries",))
+    entries = params.get("entries")
+    if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
+        raise HTTPException(status_code=400, detail="entries must be a list of zip entry paths")
+    declared, destination = _import_destination(session, params)
+    request = body.model_dump(exclude={"url"}, exclude_none=True)
+    noun = "entry" if len(entries) == 1 else "entries"
+    steps = [
+        {
+            "index": 0,
+            "op": "fetch-zip",
+            "summary": (
+                f"fetch {urlparse(url).hostname or url} and import {len(entries)} "
+                f"selected zip {noun} into {destination}"
+            ),
+            "args": {
+                "url": url,
+                "request": request,
+                "entries": list(entries),
+                "created_via": "zip-import",
+            },
+        }
+    ]
+    review = _import_review(
+        "import-zip", url, destination, creates=len(entries), members=len(entries), zip_entries=True
+    )
+    return steps, review, declared
+
+
 # Submit -----------------------------------------------------------------------
 
 
@@ -1562,16 +1844,18 @@ def cancel(session: Session, operation_id: str, ctx: Optional[audit.AuditContext
 # Undo -------------------------------------------------------------------------
 
 
-def _project_step(session: Session, operation_id: str) -> Optional[OperationStep]:
+def _step_of(session: Session, operation_id: str, op: str) -> Optional[OperationStep]:
+    """The first step of `op`, or `None`; the steps table is the record, not the plan."""
     statement = (
         select(OperationStep)
-        .where(
-            OperationStep.operation_id == operation_id,
-            OperationStep.op == "create-project",
-        )
+        .where(OperationStep.operation_id == operation_id, OperationStep.op == op)
         .order_by(OperationStep.step_index)
     )
     return session.exec(statement).first()
+
+
+def _project_step(session: Session, operation_id: str) -> Optional[OperationStep]:
+    return _step_of(session, operation_id, "create-project")
 
 
 def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext]) -> dict:
@@ -1585,6 +1869,12 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
     any workflow body runs: a scan writes no bytes and its rows are the library's
     own files, so undoing it would mean deleting rows - a delete workflow, which is
     WRITE and not this ticket. The deleted door had no undo either.
+
+    `import-link` and `import-zip` undo the one asset row (and bytes) their fetch
+    step created, and the zip leg also deletes the folder rows the mirrored tree
+    created - never a folder that predated the run, and never a file it did not
+    write. What neither leg does is put the remote file back: there is nothing on
+    the library side to restore, so the undo removes what the run added.
     """
     operation = get_operation(session, operation_id)
     if operation.undo_state == UNDO_SUPERSEDED:
@@ -1613,6 +1903,10 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
         return _undo_adopt(session, operation, ctx)
     if operation.workflow == "extract-and-create":
         return _undo_extract_and_create(session, operation, ctx)
+    if operation.workflow == "import-link":
+        return _undo_import_link(session, operation, ctx)
+    if operation.workflow == "import-zip":
+        return _undo_import_zip(session, operation, ctx)
     raise HTTPException(
         status_code=409, detail=f"undo is not implemented for workflow {operation.workflow!r}"
     )
@@ -1916,7 +2210,12 @@ def _undo_extract_and_create(
         "undone": True,
         "moves": folded,
         "projects_removed": removed,
-        "folders_removed": folders_removed,
+        # The PATHS this run's move created and the undo pruned, deliberately not
+        # called `folders_removed`: that name on the wire is an import undo's COUNT
+        # of mirrored folder rows, and one name cannot be a list in one leg and a
+        # number in another. This leg's list is not part of `OperationUndoOut`; the
+        # route serves the pair above and the residue sentence below.
+        "directories_removed": folders_removed,
         "payload_residue": EXTRACT_PAYLOAD_RESIDUE,
     }
 
@@ -2022,6 +2321,218 @@ def _undo_adopt(
 
 
 # Supersede and prune ----------------------------------------------------------
+
+
+def _import_undo_event(operation: Operation, detail: dict) -> audit.Event:
+    """The one `operation.undo` row an import undo writes, with its own detail."""
+    return audit.Event(audit.OPERATION_UNDO, operation.id, detail)
+
+
+def _undo_payload(operation: Operation, **own) -> dict:
+    """The whole `OperationUndoOut` shape, with one import leg's own keys filled in.
+
+    Every leg answers the same key set so the wire body never depends on which
+    workflow ran: the keys this leg has nothing to say about are explicitly null
+    (never a fabricated zero), and the route hands the dict straight to the
+    response model. A leg that removed what the run added and told the client only
+    `undone: True` is the false state this shape exists to prevent - the operator's
+    next question is always "what went", and the answer is here.
+    """
+    payload = {
+        "operation_id": operation.id,
+        "undone": True,
+        "project_id": None,
+        "project_name": None,
+        "moves": None,
+        "projects_removed": None,
+        "members_removed": None,
+        "asset_id": None,
+        "filename": None,
+        "assets_removed": None,
+        "folders_removed": None,
+        "entries_failed": None,
+    }
+    payload.update(own)
+    return payload
+
+
+def _undo_import_link(
+    session: Session, operation: Operation, ctx: Optional[audit.AuditContext]
+) -> dict:
+    """Delete the one asset row the `fetch` step created, and its bytes with it.
+
+    `trash_service.trash_asset` is the ONE primitive that removes an asset row and
+    moves its bytes to the trash (`bulk_service.delete_assets` is that primitive
+    per item; `routers/uploads.delete_asset_row_only` deliberately leaves foreign
+    bytes alone and is the wrong one here, because the bytes at that managed path
+    are ours). The asset is re-read in this session first, so a resumed undo of a
+    row that is already gone is a no-op rather than a 404.
+
+    The `operation.undo` row is staged into the SAME session as the delete, so the
+    record and the removal commit together, and `audit_ctx=None` keeps
+    `asset.delete` out of this ledger - the undo row is the operation's own record.
+
+    What it does NOT do is restore anything from the remote: nothing came from the
+    library, so nothing is put back. A path a later operation has taken is already
+    refused by the shared superseded guard, which runs before this body.
+    """
+    result = _result_of(_step_of(session, operation.id, "fetch"))
+    asset_id = result.get("asset_id")
+    filename = result.get("filename")
+    if not result.get("created") or not asset_id:
+        raise HTTPException(
+            status_code=409, detail="nothing to undo: this import created no asset"
+        )
+
+    event = _import_undo_event(operation, {"asset_id": asset_id, "filename": filename})
+    asset = session.get(Asset, asset_id)
+    removed = 0
+    if asset is not None:
+        audit.stage(session, ctx, event)
+        trash_service.trash_asset(session, asset, audit_ctx=None)
+        removed = 1
+
+    with Session(engine) as final:
+        current = final.get(Operation, operation.id)
+        if current is not None:
+            if asset is None:
+                # The row is already gone (a resumed undo, or an operator deleted
+                # it): the row still commits, so this act has its own record.
+                audit.stage(final, ctx, event)
+            current.undo_state = UNDO_UNDONE
+            final.add(current)
+            final.commit()
+
+    # `assets_removed` is what this act actually removed, not what the run wrote: a
+    # resumed undo of an already-deleted row answers 0 and the row it names.
+    return _undo_payload(
+        operation, asset_id=asset_id, filename=filename, assets_removed=removed
+    )
+
+
+def _folder_depth(session: Session, folder: Folder) -> int:
+    """How deep a folder row sits, from its parent chain; the delete order key."""
+    depth = 0
+    seen = set()
+    parent_id = folder.parent_id
+    while parent_id and parent_id not in seen:
+        seen.add(parent_id)
+        depth += 1
+        parent = session.get(Folder, parent_id)
+        parent_id = parent.parent_id if parent is not None else None
+    return depth
+
+
+def _folder_is_empty(session: Session, folder_id: str) -> bool:
+    """Whether no folder and no asset row still points at `folder_id`."""
+    child = session.exec(select(Folder.id).where(Folder.parent_id == folder_id)).first()
+    if child is not None:
+        return False
+    member = session.exec(select(Asset.id).where(Asset.folder_id == folder_id)).first()
+    return member is None
+
+
+def _remove_created_import_folders(folder_ids: Sequence[str]) -> List[str]:
+    """Delete the folder rows a zip run created, deepest first, only when empty.
+
+    Deepest first because `Folder.parent_id` is a real foreign key and a parent
+    with a child row cannot be deleted; empty-only because a row that still holds
+    a child or an asset is not this undo's to remove - it holds something the run
+    did not put there. Every id is attempted and a missing row is skipped, so a
+    resumed undo is a no-op.
+
+    The answer is which of `folder_ids` are GONE once this returns, read back off
+    the table rather than the list this loop deleted: trashing the last asset under
+    a mirrored folder retires that folder row itself
+    (`trash_service.trash_asset`), so the pass finds it already gone and a list of
+    its own deletes would tell the operator one row left the sidebar when two did.
+    """
+    with Session(engine) as session:
+        ordered = []
+        for folder_id in folder_ids:
+            folder = session.get(Folder, folder_id)
+            if folder is not None:
+                ordered.append((_folder_depth(session, folder), folder_id))
+    for _depth, folder_id in sorted(ordered, reverse=True):
+        with Session(engine) as session:
+            folder = session.get(Folder, folder_id)
+            if folder is None or not _folder_is_empty(session, folder_id):
+                continue
+            session.delete(folder)
+            session.commit()
+    with Session(engine) as session:
+        surviving = set(session.exec(select(Folder.id).where(Folder.id.in_(list(folder_ids)))))
+    return [folder_id for folder_id in folder_ids if folder_id not in surviving]
+
+
+def _undo_import_zip(
+    session: Session, operation: Operation, ctx: Optional[audit.AuditContext]
+) -> dict:
+    """Remove exactly what the `fetch-zip` step reported creating, and nothing else.
+
+    The step's result is the ledger: `created` is the asset ids it wrote and
+    `created_folders` is the folder rows the mirrored tree made, measured around
+    the extract so a folder that already existed is not in it. In this order:
+
+      1. every asset id in `created` that still exists is removed with its bytes,
+         through `trash_service.trash_asset` (the one row+bytes deleter);
+      2. every folder in `created_folders` is deleted, deepest first, and only
+         when nothing points at it any more;
+      3. the ONE `operation.undo` row is staged into the first commit that had
+         something to write, or into the final stamp when nothing did.
+
+    `failed` echoes the entry names the run itself could not write, so the
+    operator's retry list survives the undo.
+
+    What it does NOT do is un-import anything from the remote, and it does not
+    touch an asset or a folder this operation did not create - an operator's
+    folder at the same name keeps its row. Resumable, not atomic: every step is
+    idempotent, so a crash between the deletes is repaired by the next attempt.
+    """
+    result = _result_of(_step_of(session, operation.id, "fetch-zip"))
+    created = [asset_id for asset_id in result.get("created") or [] if isinstance(asset_id, str)]
+    created_folders = [
+        folder_id for folder_id in result.get("created_folders") or [] if isinstance(folder_id, str)
+    ]
+    failed = [name for name in result.get("failed") or [] if isinstance(name, str)]
+    if not created and not created_folders:
+        raise HTTPException(
+            status_code=409, detail="nothing to undo: this import created nothing"
+        )
+
+    event = _import_undo_event(
+        operation, {"assets_removed": created, "folders_removed": created_folders, "failed": failed}
+    )
+    removed: List[str] = []
+    staged = False
+    for asset_id in created:
+        with Session(engine) as delete_session:
+            asset = delete_session.get(Asset, asset_id)
+            if asset is None:
+                continue
+            if not staged:
+                audit.stage(delete_session, ctx, event)
+                staged = True
+            trash_service.trash_asset(delete_session, asset, audit_ctx=None)
+        removed.append(asset_id)
+
+    folders_removed = _remove_created_import_folders(created_folders)
+
+    with Session(engine) as final:
+        current = final.get(Operation, operation.id)
+        if current is not None:
+            if not staged:
+                audit.stage(final, ctx, event)
+            current.undo_state = UNDO_UNDONE
+            final.add(current)
+            final.commit()
+
+    return _undo_payload(
+        operation,
+        assets_removed=len(removed),
+        folders_removed=len(folders_removed),
+        entries_failed=failed,
+    )
 
 
 def declared_paths(operation: Operation) -> List[str]:
