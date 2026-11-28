@@ -692,7 +692,8 @@ honoured.
 
 The template affects **new writes only**. Existing files keep the path they were
 written at: the setting never re-arranges the library, and re-arranging an
-existing tree is the approval-gated job of Mf-v9eg, never a silent migration.
+existing tree is the approval-gated job of the `split-and-create` operation
+(`POST /operations/plan` then `POST /operations`), never a silent migration.
 
 One invariant holds over every door that writes bytes -- the plain upload, the
 linked-zip import, the in-library archive extract, the storage scan and a mount

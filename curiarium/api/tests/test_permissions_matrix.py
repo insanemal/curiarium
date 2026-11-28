@@ -32,7 +32,6 @@ guard let an editor through).
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from io import BytesIO
-from pathlib import Path
 from typing import Callable
 from uuid import uuid4
 
@@ -1010,55 +1009,6 @@ def call_dismiss_bundles(client: TestClient, headers: dict[str, str], ids: Ids, 
     return client.post("/bundles/dismiss", json={"keys": ["no/such/bundle"], "dismissed": True}, headers=headers)
 
 
-# The arrange family (Mf-v9eg). The preview is a READ that plans from disk, so a
-# pinned 200 needs a real row: the spec writes the smallest layout the engine
-# renames - one numbered tower beside three siblings that share its title - and
-# asks for that shape. Nothing is registered, because the preview reads the tree
-# and writes no row. The two POSTs name nothing real on purpose: an unknown key
-# is the apply's honest 409 and a made-up id is the undo's 404, so neither sweep
-# moves a byte, creates a project or writes an audit row.
-SERIES = "17_ClockworkMonster"
-SERIES_KEY = f"import/{SERIES}"
-SERIES_SIBLINGS = (
-    "01_Fates End - Wizard Tower",
-    "02_Fates End - Dragon Tower",
-    "03_Fates End - Clock Tower",
-)
-
-
-def write_arrange_tree(root: Path) -> None:
-    """The four directories `proposal_engine` renames, on the temp storage root."""
-    for folder in (SERIES, *SERIES_SIBLINGS):
-        model = root / "import" / folder / "probe.stl"
-        model.parent.mkdir(parents=True, exist_ok=True)
-        model.write_bytes(STL_BYTES)
-
-
-def call_arrange_preview(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    write_arrange_tree(Path(db.STORAGE))
-    return client.get(
-        "/bundles/arrange",
-        params={"key": SERIES_KEY, "shape": "one-project"},
-        headers=headers,
-    )
-
-
-def call_arrange_apply(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    # A schema-valid body for a key that is not a row: the apply refuses it with a
-    # 409 before reading the disk, so the only outcome under test is the guard's.
-    return client.post(
-        "/bundles/arrange",
-        json={"key": "no/such/bundle", "shape": "one-project", "plan_id": "not-a-plan"},
-        headers=headers,
-    )
-
-
-def call_arrange_undo(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    # A well-formed id no project carries: the undo has no ledger to fold, so it
-    # answers 404 having touched nothing.
-    return client.post(f"/bundles/arrange/{PLACEHOLDER_USER_ID}/undo", headers=headers)
-
-
 def call_enrich_bundles(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     """An unknown key short-circuits before any fetch, so this stays hermetic.
 
@@ -1409,9 +1359,6 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/bundles/create"): call_create_bundles,
     ("POST", "/bundles/dismiss"): call_dismiss_bundles,
     ("POST", "/bundles/enrich"): call_enrich_bundles,
-    ("GET", "/bundles/arrange"): call_arrange_preview,
-    ("POST", "/bundles/arrange"): call_arrange_apply,
-    ("POST", "/bundles/arrange/{arrange_id}/undo"): call_arrange_undo,
     ("POST", "/operations/plan"): call_plan_operation,
     ("POST", "/operations"): call_submit_operation,
     ("GET", "/operations"): call_list_operations,
@@ -1539,12 +1486,6 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("POST", "/bundles/create"): 200,
     ("POST", "/bundles/dismiss"): 200,
     ("POST", "/bundles/enrich"): 200,
-    # Mf-v9eg: the preview plans the temp root's series tree and answers 200 with
-    # it; the apply refuses an unknown key with 409 and the undo finds no ledger
-    # for a made-up id, so 404. Neither POST writes anything.
-    ("GET", "/bundles/arrange"): 200,
-    ("POST", "/bundles/arrange"): 409,
-    ("POST", "/bundles/arrange/{arrange_id}/undo"): 404,
     # Mf-5t30: the plan is computed for the seeded library's own directory key and
     # writes nothing; the submit queues it (202) and the three id-routes answer the
     # honest 404 for an id no operation has.
@@ -1679,7 +1620,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 112 routes - 11 public / 40 read / 28 contribute / 15 write / 18 admin.
+    """The matrix is pinned at 109 routes - 11 public / 39 read / 28 contribute / 13 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1689,18 +1630,20 @@ def test_the_matrix_is_the_documented_size() -> None:
     follow-up then moved submit and cancel from contribute to write (25/18), and
     Mf-215n moved submit, cancel and undo back to contribute by the owner's
     rubric - an operation is contribute unless its workflow can REMOVE data - so
-    the split is now 28/15.
+    the split became 28/15. Mf-g759 deleted the three arrange routes - one read
+    (the preview) and two writes (apply and undo) - so the total fell 112 -> 109,
+    read 40 -> 39 and write 15 -> 13.
     """
     counts = {
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 112, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 109, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 40,
+        permissions.READ: 39,
         permissions.CONTRIBUTE: 28,
-        permissions.WRITE: 15,
+        permissions.WRITE: 13,
         permissions.ADMIN: 18,
     }, counts
 

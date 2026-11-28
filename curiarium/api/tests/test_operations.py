@@ -269,6 +269,26 @@ def test_a_plan_names_its_steps_its_counts_and_its_exclusions(client: TestClient
     assert review["cover"]["rel_path"] == f"{WIDGET}/render.png"
 
 
+def test_a_create_project_review_carries_empty_move_and_project_lists(
+    client: TestClient, seeded: list[str]
+) -> None:
+    """The two additive review keys a split fills, answered empty by a create.
+
+    A client may read `review.move_list` and `review.projects` unconditionally, so
+    a create-project review must answer two empty lists rather than omit the keys.
+    Mutation: drop the defaults from `OperationReviewOut` and a reader of either
+    key breaks on the workflow that makes neither.
+    """
+    review = plan_of(client)["review"]
+
+    assert review["move_list"] == []
+    assert review["projects"] == []
+    # And the create's own two lists are still populated: the split's keys are
+    # additive, not a replacement for `groups`/`cover`.
+    assert review["groups"]
+    assert review["cover"] is not None
+
+
 def test_a_plan_excludes_a_child_directory_that_is_already_its_own_project(
     client: TestClient, seeded: list[str]
 ) -> None:
@@ -819,6 +839,37 @@ def test_undo_deletes_the_project_and_never_the_files(
     assert again.json()["detail"] == "the operation has already been undone"
 
 
+def test_the_create_project_undo_body_gains_only_the_two_additive_null_keys(
+    client: TestClient, seeded: list[str]
+) -> None:
+    """The `OperationUndoOut` change is purely additive, and asserted rather than loosened.
+
+    A split's undo answers `moves` and `projects_removed`; a create-project undo
+    answers the project it deleted and leaves those two null. The key set below is
+    EXACT, not a subset: a body that dropped `project_id`, or one that invented a
+    zero for `moves`, reds here with the whole shape in front of the reviewer.
+    """
+    operation = submit_of(client, plan_of(client))
+    run_to_completion()
+
+    undone = client.post(f"/operations/{operation['id']}/undo")
+
+    assert undone.status_code == 200, undone.text
+    body = undone.json()
+    assert set(body) == {
+        "operation_id",
+        "undone",
+        "project_id",
+        "project_name",
+        "moves",
+        "projects_removed",
+    }
+    assert body["undone"] is True
+    assert body["project_id"] is not None and body["project_name"] is not None
+    assert body["moves"] is None
+    assert body["projects_removed"] is None
+
+
 def test_a_later_operation_over_the_same_paths_supersedes_the_earlier_undo(
     client: TestClient, seeded: list[str]
 ) -> None:
@@ -1094,13 +1145,20 @@ def test_a_workflow_with_no_table_entry_is_refused_rather_than_defaulted_to_cont
 
 
 def test_a_declared_workflow_without_a_planner_yet_resolves_to_contribute() -> None:
-    """The owner rubric, table-levelled: organising and splitting are contribute.
+    """The owner rubric, table-levelled: organising and relocating are contribute.
 
-    Honest scope: none of these workflows exists in `WORKFLOWS` yet (still
-    `("create-project",)`), so this is a table-level assertion, not an end-to-end
-    one. It becomes end-to-end the moment a planner is added, and it fails the
-    moment somebody changes a level. The owner's rubric (Mf-215n) is "can they
-    REMOVE data with this action": splitting and relocating remove nothing.
+    Honest scope, in two halves. `adopt` and `relocate` are still DECLARATIONS FOR
+    THE RECORD - neither is in `operations_service.WORKFLOWS`, so their level is a
+    table-level assertion and nothing more. `split-and-create` left that set when
+    its planner landed in Mf-g759: it is a real workflow now and is asserted end to
+    end, roles included, in `tests/test_split_and_create.py`. Both halves fail the
+    moment somebody changes a level, and the first fails the moment a declaration
+    starts claiming to run.
     """
+    assert set(operations_service.WORKFLOWS) == {"create-project", "split-and-create"}
+    for workflow in ("adopt", "relocate"):
+        assert workflow not in operations_service.WORKFLOWS, (
+            f"{workflow} has a planner now; move it out of the declaration-only list"
+        )
     for workflow in ("adopt", "split-and-create", "relocate"):
         assert operations_service.level_for_workflow(workflow) == permissions.CONTRIBUTE, workflow

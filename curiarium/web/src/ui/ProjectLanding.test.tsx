@@ -35,19 +35,21 @@ vi.mock("../lib/api/projects", async importOriginal => ({
   getProjectBundleDrift: driftApi.getProjectBundleDrift,
 }));
 
-// The arrange door imports the domain module directly, so its calls are mocked
-// there rather than on the barrel. The original is spread back so the page's
-// other bundle imports keep working.
-const arrangeApi = vi.hoisted(() => ({
-  getArrangePlan: vi.fn(),
-  arrangeBundles: vi.fn(),
-  undoArrange: vi.fn(),
+// The split door reads the operations module directly, so it is mocked there.
+// This page must never issue that read - the case at the end of the drift block
+// proves it - and the original is spread back so nothing else changes.
+const operationsApi = vi.hoisted(() => ({
+  planOperation: vi.fn(),
+  submitOperation: vi.fn(),
+  getOperation: vi.fn(),
+  undoOperation: vi.fn(),
 }));
-vi.mock("../lib/api/bundles", async importOriginal => ({
-  ...(await importOriginal<typeof import("../lib/api/bundles")>()),
-  getArrangePlan: arrangeApi.getArrangePlan,
-  arrangeBundles: arrangeApi.arrangeBundles,
-  undoArrange: arrangeApi.undoArrange,
+vi.mock("../lib/api/operations", async importOriginal => ({
+  ...(await importOriginal<typeof import("../lib/api/operations")>()),
+  planOperation: operationsApi.planOperation,
+  submitOperation: operationsApi.submitOperation,
+  getOperation: operationsApi.getOperation,
+  undoOperation: operationsApi.undoOperation,
 }));
 
 // The landing delegates the member list to the real grid; this stub records
@@ -86,7 +88,7 @@ import {
 } from "../lib/api";
 import { saveResponseToDisk } from "../lib/download";
 import { getProjectBundleDrift, type ProjectBundleDrift } from "../lib/api/projects";
-import { getArrangePlan, type BundleArrangeApplied, type BundleArrangePlan } from "../lib/api/bundles";
+import { planOperation } from "../lib/api/operations";
 import { getToasts, resetToasts } from "../lib/toast";
 
 const addProjectAssetsMock = vi.mocked(addProjectAssets);
@@ -101,7 +103,7 @@ const uploadAssetMock = vi.mocked(uploadAsset);
 const uploadAssetFileMock = vi.mocked(uploadAssetFile);
 const saveResponseToDiskMock = vi.mocked(saveResponseToDisk);
 const getProjectBundleDriftMock = vi.mocked(getProjectBundleDrift);
-const getArrangePlanMock = vi.mocked(getArrangePlan);
+const planOperationMock = vi.mocked(planOperation);
 
 function makeProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -1172,34 +1174,6 @@ function driftNotice(): HTMLElement | null {
 
 const BUNDLE_MARKER = { key: "Hydra", groups: [{ name: "Hydra", model_count: 3 }] };
 
-/** One plan, shaped the way `GET /bundles/arrange` answers: a move, the engine's
- *  own text and the folder it implies, with no objection. */
-const ARRANGE_PLAN: BundleArrangePlan = {
-  key: "Hydra",
-  shape: "split-top-folders",
-  plan_id: "plan-1",
-  moves: [{ from: "Hydra/a.stl", to: "Hydra/A/a.stl", kind: "file", action: "move" }],
-  text: ['move "Hydra/a.stl" -> "Hydra/A/a.stl"'],
-  creates: [{ path: "Hydra/A", exists: false }],
-  refusals: [],
-  report: { creatable: false, blocked_reason: "needs_arrange" },
-};
-
-/** The verdict of applying that plan, shaped the way `POST /bundles/arrange`
- *  answers. */
-const ARRANGE_APPLIED: BundleArrangeApplied = {
-  key: "Hydra",
-  shape: "split-top-folders",
-  plan_id: "plan-1",
-  arrange_id: "arrange-7",
-  project_id: "p1",
-  applied: true,
-  moves: 1,
-  already_applied: false,
-  unseeable: [],
-  stale: [],
-};
-
 describe("ProjectLanding bundle drift", () => {
   it("asks nothing at all for a project with no _bundle marker", async () => {
     renderLanding();
@@ -1348,135 +1322,27 @@ describe("ProjectLanding bundle drift", () => {
     expect(screen.queryByText(/^5 parts/)).toBeNull();
     expect(getToasts()).toEqual([]);
   });
-});
 
-describe("ProjectLanding arrange door", () => {
-  it("mounts the door for a grown folder and asks for the marker's own plan on the click", async () => {
-    // Catches a door wired to the project id, the display name, or a shape this
-    // client guessed: the plan must be measured against the marker's `key` and
-    // `shape`, and only after the click - the GET is a disk walk.
+  it("offers the notice's one action and no split door, and plans nothing", async () => {
+    // The landing has one action for a grown folder - "Add them" - and no split
+    // door beside it. Offering one would invite a plan request this page cannot
+    // narrate, so the reads below must stay empty.
     getProjectBundleDriftMock.mockResolvedValue({
       state: "known",
-      count: 2,
-      asset_ids: ["a", "b"],
+      count: 3,
+      asset_ids: ["a", "b", "c"],
     });
-    getArrangePlanMock.mockResolvedValue(ARRANGE_PLAN);
     renderLanding({
       project: makeProject({
-        metadata_json: { _bundle: { key: "Hydra", shape: "split-top-folders" } },
+        metadata_json: { _bundle: { rel_dir: "Hydra", shape: "split-top-folders" } },
       }),
     });
 
-    const preview = await screen.findByRole("button", { name: "Preview the moves" });
-    expect(getArrangePlanMock).not.toHaveBeenCalled();
-
-    fireEvent.click(preview);
-
-    await waitFor(() =>
-      expect(getArrangePlanMock).toHaveBeenCalledWith("Hydra", "split-top-folders"),
-    );
-  });
-
-  it("offers a viewer no door and issues no request", async () => {
-    // Catches a door left outside the `canContribute` gate: a READ-only role
-    // would be invited to start a disk walk and then to write.
-    getProjectBundleDriftMock.mockResolvedValue({
-      state: "known",
-      count: 2,
-      asset_ids: ["a", "b"],
-    });
-    getArrangePlanMock.mockResolvedValue(ARRANGE_PLAN);
-    renderLanding({
-      canContribute: false,
-      project: makeProject({
-        metadata_json: { _bundle: { key: "Hydra", shape: "split-top-folders" } },
-      }),
-    });
-
-    expect(await screen.findByText("2 parts in this folder are not in the project")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Preview the moves" })).toBeNull();
-    expect(getArrangePlanMock).not.toHaveBeenCalled();
-  });
-
-  it("keeps the notice and the door mounted while an applied arrange can be undone", async () => {
-    // The apply's `onChanged` refetches the memberships, the drift count reaches
-    // zero and `driftLine` goes null. Gating the notice on the drift line alone
-    // would unmount the panel - and its in-session Undo - the instant the write
-    // landed, leaving the operator no way back.
-    getProjectBundleDriftMock.mockResolvedValue({ state: "known", count: 0, asset_ids: [] });
-    getArrangePlanMock.mockResolvedValue(ARRANGE_PLAN);
-    renderLanding({
-      project: makeProject({
-        metadata_json: {
-          _bundle: {
-            key: "Hydra",
-            shape: "split-top-folders",
-            arrange: { arrange_id: "arrange-7", applied: true, undone: false },
-          },
-        },
-      }),
-    });
-
-    expect(await screen.findByRole("button", { name: "Preview the moves" })).toBeTruthy();
-    expect(driftNotice()).not.toBeNull();
-    // Nothing drifted, so the notice says nothing about drift: the panel carries
-    // the sentence for a plan that only adopts.
-    expect(screen.queryByText(/parts in this folder/)).toBeNull();
-    expect(screen.queryByRole("button", { name: "Add them" })).toBeNull();
-    expect(getArrangePlanMock).not.toHaveBeenCalled();
-  });
-
-  it("offers no door for a zip-project identity marker", async () => {
-    // A zip-project's key is an identity, not a path `GET /bundles/arrange`
-    // could walk; offering the door would invite a request the server can only
-    // answer `unknown bundle`.
-    getProjectBundleDriftMock.mockResolvedValue({
-      state: "known",
-      count: 2,
-      asset_ids: ["a", "b"],
-    });
-    getArrangePlanMock.mockResolvedValue(ARRANGE_PLAN);
-    renderLanding({
-      project: makeProject({
-        metadata_json: {
-          _bundle: { key: "zip-project:https://example.test/thing/1", shape: "generic" },
-        },
-      }),
-    });
-
-    expect(await screen.findByText("2 parts in this folder are not in the project")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Preview the moves" })).toBeNull();
-    expect(getArrangePlanMock).not.toHaveBeenCalled();
-  });
-
-  it("bumps the members and the folder tree exactly once when an arrange is applied", async () => {
-    // A server-side arrange creates Folder rows and rewrites `storage_path`, so
-    // the tree AND the members/counts change in one event and must bump in one
-    // commit - and once each: a second bump would make these counts two.
-    getProjectBundleDriftMock.mockResolvedValue({
-      state: "known",
-      count: 2,
-      asset_ids: ["a", "b"],
-    });
-    getArrangePlanMock.mockResolvedValue(ARRANGE_PLAN);
-    arrangeApi.arrangeBundles.mockResolvedValue(ARRANGE_APPLIED);
-    const onAssetsChanged = vi.fn();
-    const onFoldersChanged = vi.fn();
-    renderLanding({
-      project: makeProject({
-        metadata_json: { _bundle: { key: "Hydra", shape: "split-top-folders" } },
-      }),
-      onAssetsChanged,
-      onFoldersChanged,
-    });
-
-    fireEvent.click(await screen.findByRole("button", { name: "Preview the moves" }));
-    await waitFor(() =>
-      expect(getArrangePlanMock).toHaveBeenCalledWith("Hydra", "split-top-folders"),
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Apply this arrangement" }));
-
-    await waitFor(() => expect(onFoldersChanged).toHaveBeenCalledTimes(1));
-    expect(onAssetsChanged).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("3 parts in this folder are not in the project")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add them" })).toBeTruthy();
+    const notice = driftNotice();
+    expect(notice?.querySelector("[data-split-plan]")).toBeNull();
+    expect(notice?.querySelector("[data-split-action-button]")).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalled();
   });
 });

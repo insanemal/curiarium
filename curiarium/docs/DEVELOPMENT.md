@@ -268,57 +268,6 @@ rather than `None`, `propose()` withholds both split shapes and recommends
 exactly "not a repo" - the image ships `git`, so that path is the exception
 rather than the normal case (`Mf-ky16`).
 
-## The arrange surface (approving a shape, and undoing it)
-
-Detection says what a folder IS; the arrange is the one operation that makes the
-disk match a shape the operator chose. Three routes, classified in
-`permissions.ROUTE_PERMISSIONS`:
-
-| Route | Level | What it does |
-| --- | --- | --- |
-| `GET /bundles/arrange?key=&shape=` | READ | re-walks the folder, asks `proposal_engine` for the move list that shape implies, and returns the moves, the directories they need, the prose rendered from them, the row's own `creatable` verdict and every refusal it found. Each move is `{from, to, kind, action}`: `kind` is `file`/`dir` (what the path is on disk), `action` is one of `hoist`/`move`/`file-archive`/`rename` (why the move exists). A dry run: it writes nothing |
-| `POST /bundles/arrange` | WRITE | applies one previewed plan, echoing its `plan_id` back so a tree that changed since the preview is a 409 rather than an approval of something never shown |
-| `POST /bundles/arrange/{arrange_id}/undo` | WRITE | folds the landed moves back through the same mover and restores the rows from the ledger |
-
-The **ledger** is the durability story. It rides inside the project's existing
-`_bundle` marker as `_bundle["arrange"]`, beside `key`/`detector`/`groups` - the
-whole `_bundle` dict is passed to `project_service.merge_project_marker`, because
-that function replaces a `_`-prefixed key wholesale and a nested-only write would
-drop the detection fields. It carries `id`/`plan`/`shape`/`moves`/`creates`/
-`projects`/`folders`/`assets`/`done`/`applied`/`undone`: `done` is how far a partial
-apply got, `applied` says the move list landed, `undone` says it was folded back,
-and `folders`/`assets` are the row paths an undo restores. Commit 1 writes the
-project(s) and the ledger before a single byte moves, so an interrupted arrange is
-a project with a replayable record, never a project with nothing behind it.
-
-**One mover.** Every move - a file and a directory alike - goes through
-`move_service.move_bytes`, the one arbiter of the bytes: `os.link` is primary
-because it is atomic and refuses an occupied destination, the locked `os.rename`
-fallback covers filesystems that cannot hardlink, and it is that rename which
-moves a DIRECTORY (`os.link` refuses one with `EPERM`). There is no copy path.
-`asset_service.move_managed_file` is now the publishing edge - the streamed upload
-and the file `asset_file_service` saves - alongside
-`asset_service._move_without_clobber`, the bare delegate `archive_service` stages
-an extraction through and `snapshot_service` lands a download with. Neither
-writes a ledger entry: publishing bytes into their rendered path is not a product
-move, and a row per upload would bury the moves an operator made.
-The arrange's loop asks `move_service.move` once per move with
-`arrange:<arrange_id>:<index>` as the intent, so a resume at index N is a new
-intent and a re-run of an index that already landed is the primitive's no-op;
-undo asks `move_bytes` directly, because the arrange's own ledger in the project
-marker is its record. That is what makes the cross-device case a refusal: `EXDEV`
-is translated into a 409 (`"cross-device move refused: nothing moved, and
-this operation has no copy path"`, or `"... after N of M moves landed; re-post the
-same plan to finish"` for a partial one), and the pre-flight reports the same rule
-as a `cross_device` refusal before any byte moves. The refusal is
-`move_service.CrossDevice`, an `OSError` carrying `errno.EXDEV`. A `.zip` row is
-refused with a pointer at the extract door for the same reason: unpacking would be
-a copy.
-
-The service's rules are in `curiarium/api/arrange_service.py`; the HTTP proofs are
-`tests/test_arrange.py` (preview, apply, the four evidence layouts) and
-`tests/test_arrange_undo.py` (the fold backwards, the row restore, the replay).
-
 ## The primitives (move, adopt, create-project)
 
 Three coarse owners sit under the doors, and each is defined as much by what it
@@ -336,9 +285,10 @@ as the ledger row and the row rewrite.
 adopt over the same set is a no-op that says `added=()`, and the group refresh as
 a MEASUREMENT returned to the caller rather than a second write to the marker. It
 never moves bytes and never touches the filesystem, it never creates or deletes a
-`Project` row (deleting one would delete the carrier of the arrange's ledger,
-which is what makes a second undo a 409), and it does not decide which files are
-members - the ids are written verbatim, in the caller's order.
+`Project` row (a split's undo deletes the projects it created through the
+operation's own body, and the `undo_state` guard is what makes a second undo a
+409), and it does not decide which files are members - the ids are written
+verbatim, in the caller's order.
 
 **`bundle_service.create_project`** owns the create a library path describes. It
 resolves the path's members through `bundle_service.members_of`, drops the members
@@ -378,29 +328,31 @@ row and stages the caller's, in the caller's transaction, before the bytes move.
 `pairs_json`, `landed`, `applied`, `undone`, `superseded_by`, `created_at`. The
 pairs are storage-relative, so an undo still names the right file after the
 storage root was configured differently in between. `applied` means "this intent
-is complete"; for the arrange's `apply_rows=False` shape it says the byte half is
-done and the row half is the caller's commit 2. A row that is NOT complete is a
-stopped run, and it RESUMES from `landed` rather than being treated as done: the
-pairs before `landed` are skipped instead of re-clobbered, so a refusal that
-stopped a move (a target that appeared, a cross-device mount) can be retried under
-the intent already recorded. `prune()` keeps the newest 200 rows and everything
-younger than 30 days - a union, not an intersection, so a quiet install never
+is complete"; for the `apply_rows=False` shape the `split-and-create` move step
+asks for, it says the byte half is done and the row half is that step's own
+second commit. A row that is NOT complete is a stopped run, and it RESUMES from
+`landed` rather than being treated as done: the pairs before `landed` are skipped
+instead of re-clobbered, so a refusal that stopped a move (a target that
+appeared, a cross-device mount) can be retried under the intent already recorded.
+`prune()` keeps the newest 200 rows and everything younger than 30 days - a
+union, not an intersection, so a quiet install never
 loses a row it could still undo - and `supersede(prefix, by=...)` marks every live
 row under an intent prefix as superseded, which is how a caller that has already
-folded those moves back by its own reckoning (the arrange is the case it was
-written for) stops a later `undo_ledger` relocating those bytes a second, blind
-time. `audit_events` stays the permanent record of what moved; the ledger is a
-bounded tail.
+folded those moves back by its own reckoning stops a later `undo_ledger`
+relocating those bytes a second, blind time. No door calls it today: the
+`split-and-create` undo folds through the very ledger whose intent it names.
+`audit_events` stays the permanent record of what moved; the ledger is a bounded
+tail.
 
 **The honest boundary.** The bundle door (`bundle_service._create_one`) and the
-arrange still hand their OWN member sets to `create_project_from_members` rather
-than composing through `create_project`. The bundle door's set is the CLAIMED set -
-`_own_assets` narrowed by the report-wide `_claim_owners` map, a fact about the
-scan - and its cover
-comes from the artifact's evidence; the arrange's set is the POST-MOVE projected
-paths, which registering by key would get wrong for the very plan that is moving
-them. Converging them is a later slice, so nothing here should be read as saying
-the three compose today.
+`split-and-create` planner still hand their OWN member sets to
+`create_project_from_members` rather than composing through `create_project`. The
+bundle door's set is the CLAIMED set - `_own_assets` narrowed by the report-wide
+`_claim_owners` map, a fact about the scan - and its cover comes from the
+artifact's evidence; the split's set is the POST-MOVE projected paths, which
+registering by key would get wrong for the very plan that is moving them.
+Converging them is a later slice, so nothing here should be read as saying the
+three compose today.
 
 **The asymmetry, resolved.** A contributor may create a project through
 `POST /projects` (CONTRIBUTE) AND queue one through `POST /operations`, because
@@ -408,14 +360,16 @@ Mf-215n's amendment set the rubric the owner uses: an operation is contribute
 unless the action can REMOVE data. The per-workflow level lives in one table,
 `operations_service.WORKFLOW_LEVELS`, and the handler enforces it (a route may
 declare only one level). A row for a workflow that does not exist yet is a
-declaration for the record, not a claim that it runs - `WORKFLOWS` is still
-`("create-project",)`.
+declaration for the record, not a claim that it runs - `WORKFLOWS` is
+`("create-project", "split-and-create")`, and the second one is there because
+`Mf-g759` landed its planner.
 
 ## The import flow (auto for high confidence, guided for the rest)
 
-Detection says what a row is and the arrange says what a shape costs. This is the
-door that writes: one project per row, with the cover and the metadata the
-operator accepted and nothing else. `Mf-yz9e` built it without a new route.
+Detection says what a row is and the `split-and-create` plan says what a shape
+costs. This is the door that writes: one project per row, with the cover and the
+metadata the operator accepted and nothing else. `Mf-yz9e` built it without a new
+route.
 
 **The band is the engine's.** `proposal_engine._assign_confidence` sets each
 `Option.confidence`: `high` when documentary evidence sits at the candidate's OWN
@@ -439,8 +393,9 @@ re-implemented; `"auto"` needs a HIGH row that is `ready` with a shape in
 with `{"items": [{"key": ..., "auto": true}]}`. `bundle_service.AUTO_SHAPES` is
 `{"one-project", "git-project"}` - small and explicit, the two shapes the create
 door can enact in place. `add-to-project` is deliberately excluded: it is not in
-`creatable_shapes`, its whole operation is the arrange door, and auto must never
-half-do one. `_auto_refusal` runs BEFORE any write and refuses, in this order: a
+`creatable_shapes`, its whole operation is an `adopt` workflow - declared in
+`WORKFLOW_LEVELS`, not yet in `WORKFLOWS` - and auto must never half-do one.
+`_auto_refusal` runs BEFORE any write and refuses, in this order: a
 non-HIGH band (`auto requires high confidence`), a shape outside `AUTO_SHAPES`, an
 operator-supplied shape that differs from the recommendation, a row that is not
 `ready`, and a recommended shape whose `proposal_engine.arrange_moves(facts, shape)`
@@ -464,16 +419,16 @@ metadata field instead of being silently dropped. Omitting both `cover` and
 `metadata` is the legacy create, byte-identical to before this ticket.
 
 **The panel** is `curiarium/web/src/ui/review/GuidedImportPanel.tsx`, self-contained
-like `ArrangePlanPanel`: it imports the domain module `lib/api/bundles` and never
-the barrel, owns its own plan read and its own write, and renders nothing for a
-viewer. It shows the cover chooser (the engine's choice, no cover, or the row's
+like `SplitAndCreatePanel`: it imports the domain modules `lib/api/bundles` and
+`lib/api/operations` and never the barrel, owns its own write, and renders nothing
+for a viewer. It shows the cover chooser (the engine's choice, no cover, or the row's
 registered images - an engine candidate with no registered asset is shown inert as
 "not registered - cannot be chosen"), the metadata source field with "Use this
 source" and on-demand enrichment, the parsed suggestions each accepted, edited or
 dismissed with the `where` that produced them and nothing pre-accepted, the shape
-chooser over `matches` (a `creatable: false` shape, or a plan with moves, says
-"Needs arranging" and mounts `ArrangePlanPanel` instead of writing), and the move
-list from `GET /bundles/arrange` before anything is written.
+chooser over `matches` (a `creatable: false` shape says "Needs arranging", shuts
+the Create button, and mounts `SplitAndCreatePanel` - which plans and shows the
+moves from `POST /operations/plan` itself - instead of writing).
 
 **Four additive row fields** carry that panel: `metadata_suggestions`, `provenance`,
 `cover_candidates` and `images`. All are defaulted, and all are declared on
@@ -491,9 +446,9 @@ should "fix" it by inventing a band in the client.
 
 The proofs live in `curiarium/api/tests/test_bundles_api.py` (auto success, refusal
 and idempotency; guided accepted-only metadata; a dismissed licence; an operator
-cover; split -> arrange -> undo) and in
-`curiarium/web/src/ui/review/GuidedImportPanel.test.tsx` plus `bundleRows.test.ts`
-for the predicate.
+cover), in `curiarium/api/tests/test_split_and_create.py` for the split itself,
+and in `curiarium/web/src/ui/review/GuidedImportPanel.test.tsx` plus
+`bundleRows.test.ts` for the predicate.
 
 ## Build warnings in the web bundle
 

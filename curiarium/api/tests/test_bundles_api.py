@@ -1200,7 +1200,8 @@ def test_creating_a_split_recommendation_fails_with_needs_arrange_and_writes_not
 ) -> None:
     """AC-4: the honest split offer is refused at the door, before a project or a marker.
 
-    The arrangement door (`POST /bundles/arrange`) is what enacts a split, so a
+    The `split-and-create` operation (`POST /operations/plan` then
+    `POST /operations`) is what enacts a split, so a
     CREATE of the split shape answers `failed`/`needs-arrange` and writes nothing at
     all: no project in the listing, no `_bundle` marker in any row, no assets added.
     A creatable create beside it still succeeds and still records its shape and rule,
@@ -1653,68 +1654,3 @@ def test_a_cover_asset_outside_the_bundle_is_refused(
     assert (body["created"], body["failed"]) == (0, 1), body
     assert body["results"][0]["reason"] == "cover asset is not in this bundle"
     assert project_ids(client, contributor) == [], "a refused cover writes no project"
-
-
-def test_a_split_shape_from_a_high_row_is_refused_and_the_arrange_door_creates_the_operators_split(
-    client: TestClient, admin: Actor, isolated_storage: Path
-) -> None:
-    """The create refuses a split with `needs-arrange`; the arrange door enacts it, and undo returns the tree.
-
-    Mutation: let the create enact a split itself and the first refusal reds and a
-    project named after the product exists; drop the undo's reverse moves and the
-    two part folders stay hoisted beside the bundle.
-    """
-    bundle = vendor_bundle(isolated_storage)
-    scan()
-    row = row_for(report_for(client, admin), VENDOR_KEY)
-    assert any(
-        match["shape"] == "split-top-folders" and match["creatable"] is False
-        for match in row["matches"]
-    ), "the fixture must offer the split this test refuses"
-
-    refused = create_items(
-        client, admin, [{"key": VENDOR_KEY, "shape": "split-top-folders"}]
-    )
-
-    assert (refused["created"], refused["failed"]) == (0, 1), refused
-    assert refused["results"][0]["reason"] == "needs-arrange"
-    assert project_ids(client, admin) == [], "a refused split writes no project"
-
-    preview = client.get(
-        "/bundles/arrange",
-        params={"key": VENDOR_KEY, "shape": "split-top-folders"},
-        headers=bearer(admin.token),
-    )
-    assert preview.status_code == 200, preview.text
-    plan = preview.json()
-    hoisted = sorted(move["to"].rsplit("/", 1)[-1] for move in plan["moves"] if move["kind"] == "dir")
-    assert hoisted == ["Base", "Head"], plan["moves"]
-
-    applied_response = client.post(
-        "/bundles/arrange",
-        json={"key": VENDOR_KEY, "shape": "split-top-folders", "plan_id": plan["plan_id"]},
-        headers=bearer(admin.token),
-    )
-    assert applied_response.status_code == 200, applied_response.text
-    applied = applied_response.json()
-    assert applied["applied"] is True
-    assert len(applied["project_ids"]) == 2, applied
-    names = {
-        project_by_id(client, admin, project_id)["name"]
-        for project_id in applied["project_ids"]
-    }
-    assert names == {"Base", "Head"}, names
-
-    undo = client.post(
-        f"/bundles/arrange/{applied['arrange_id']}/undo", headers=bearer(admin.token)
-    )
-
-    assert undo.status_code == 200, undo.text
-    assert (bundle / "Base").is_dir() and (bundle / "Head").is_dir(), "the tree is returned"
-    assert not (isolated_storage / "import" / "Base").exists()
-    assert not (isolated_storage / "import" / "Head").exists()
-    remaining = {
-        project_by_id(client, admin, project_id)["name"]
-        for project_id in project_ids(client, admin)
-    }
-    assert "Moai statue -No overhang" not in remaining

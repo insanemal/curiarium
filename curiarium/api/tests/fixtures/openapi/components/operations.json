@@ -78,6 +78,35 @@
     "title": "OperationGroupOut",
     "type": "object"
   },
+  "OperationMoveOut": {
+    "description": "One move a plan would make, both ends storage-root-relative.\n\n``source``/``target`` rather than ``from``/``to`` because ``from`` is a Python\nkeyword; unlike the deleted arrange model this does not alias, because the\noperations review is the only place the pair is served and the wire reads\nbetter naming both ends symmetrically.\n\n``kind`` is what the path IS (``file``/``dir``); ``action`` is why the move\nexists (``hoist`` for a split). The client renders the line from these records\nand never from prose.",
+    "properties": {
+      "action": {
+        "title": "Action",
+        "type": "string"
+      },
+      "kind": {
+        "title": "Kind",
+        "type": "string"
+      },
+      "source": {
+        "title": "Source",
+        "type": "string"
+      },
+      "target": {
+        "title": "Target",
+        "type": "string"
+      }
+    },
+    "required": [
+      "source",
+      "target",
+      "kind",
+      "action"
+    ],
+    "title": "OperationMoveOut",
+    "type": "object"
+  },
   "OperationOut": {
     "description": "One operation and its steps, newest state as stored.",
     "properties": {
@@ -260,6 +289,30 @@
     "title": "OperationPlanStepOut",
     "type": "object"
   },
+  "OperationProjectOut": {
+    "description": "One project a plan would create: its name, the path it lives at, its size.\n\n``members`` is the count of files the plan would attach, after every exclusion,\nso it is the number the create step will actually write - not a folder's file\ncount.",
+    "properties": {
+      "members": {
+        "title": "Members",
+        "type": "integer"
+      },
+      "name": {
+        "title": "Name",
+        "type": "string"
+      },
+      "root": {
+        "title": "Root",
+        "type": "string"
+      }
+    },
+    "required": [
+      "name",
+      "root",
+      "members"
+    ],
+    "title": "OperationProjectOut",
+    "type": "object"
+  },
   "OperationReviewOut": {
     "description": "The human-readable summary of what a plan would do, before it runs.",
     "properties": {
@@ -327,9 +380,25 @@
         "title": "Members",
         "type": "integer"
       },
+      "move_list": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/OperationMoveOut"
+        },
+        "title": "Move List",
+        "type": "array"
+      },
       "moves": {
         "title": "Moves",
         "type": "integer"
+      },
+      "projects": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/OperationProjectOut"
+        },
+        "title": "Projects",
+        "type": "array"
       },
       "target": {
         "title": "Target",
@@ -442,8 +511,19 @@
     "type": "object"
   },
   "OperationUndoOut": {
-    "description": "The result of undoing a finished operation.",
+    "description": "The result of undoing a finished operation, shaped by its workflow.\n\nA `create-project` undo answers the project it deleted and leaves the two\nworkflow-specific keys null; a `split-and-create` undo answers ``moves`` (how\nmany landed moves were folded back) and ``projects_removed`` (the projects it\ncreated and then deleted), and leaves the project pair null. Optional on both\nsides so neither body gains a fabricated zero.",
     "properties": {
+      "moves": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Moves"
+      },
       "operation_id": {
         "title": "Operation Id",
         "type": "string"
@@ -469,6 +549,20 @@
           }
         ],
         "title": "Project Name"
+      },
+      "projects_removed": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Projects Removed"
       },
       "undone": {
         "title": "Undone",

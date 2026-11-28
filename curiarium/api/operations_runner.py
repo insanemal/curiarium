@@ -31,10 +31,12 @@ from sqlmodel import Session, delete, select
 
 import audit
 import bundle_service
+import folder_service
+import move_service
 import operations_service
 import project_create_service
 from db import engine
-from models import Operation, OperationLock, OperationStep, Project, ProjectAsset
+from models import Folder, Operation, OperationLock, OperationStep, Project, ProjectAsset
 
 log = logging.getLogger(__name__)
 
@@ -372,6 +374,75 @@ def _project_id_from_step(session: Session, operation_id: str, step_index: int) 
     return project_id
 
 
+def _move(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `move` step body: the bytes through the primitive, the rows in one commit.
+
+    Two transactions, deliberately. `move_service.move` is asked WITHOUT a session,
+    so the ledger row is committed and durable before a single byte moves - a crash
+    mid-transfer is then a record naming exactly what was about to happen, not a
+    tree with no trace of it. The row half is a SECOND transaction: the created
+    destination rows (`ensure_directory_row`, shallowest first) and
+    `apply_rows(..., retire_ids=<the ids the plan snapshotted>)` commit together.
+
+    Step order is `move` FIRST, the creates after - the reverse of the
+    detected-bundle arrange, whose projects-first order existed because its ledger
+    lived in a project's marker. Here the operation's step rows are the record, and
+    the semantics owed are that a refusal at the move step stops before any project
+    exists: the mover's batch pre-flight is what makes that structural.
+
+    A mid-bytes `OSError` (a cross-device rename, a disk that filled up) is
+    COMPENSATED: the ledger this intent already wrote is folded back before the
+    error is re-raised, so a failed step does not leave half a split on disk with
+    an undo record nobody pointed at. The compensation never masks the original
+    failure - if it fails too, the move ledger is still there to fold by hand, and
+    the error the operator sees is the one that stopped the step.
+    """
+    pairs = [move_service.Pair(entry[0], entry[1], entry[2]) for entry in args["pairs"]]
+    root = move_service.storage_root()
+    intent = operations_service.move_intent(operation_id)
+    try:
+        outcome = move_service.move(
+            pairs, intent=intent, key=args.get("key", ""), apply_rows=False, root=root
+        )
+    except OSError:
+        ledger_id = move_service.ledger_id_for_intent(intent)
+        if ledger_id:
+            try:
+                move_service.undo_ledger(ledger_id)
+            except Exception:  # the original failure is the one to report
+                log.exception("could not compensate the interrupted move %s", ledger_id)
+        raise
+
+    retire_ids = [entry["id"] for entry in args.get("folders") or [] if isinstance(entry, dict)]
+    with Session(engine) as session:
+        for relative in sorted(args.get("creates") or [], key=lambda path: (path.count("/"), path)):
+            folder_service.ensure_directory_row(session, relative)
+        move_service.apply_rows(pairs, session=session, root=root, retire_ids=retire_ids)
+        session.commit()
+
+    # Re-read after the commit: the retirement decided which of the snapshotted
+    # rows it was entitled to delete, and the ones that are gone are the entries
+    # undo has to put back. Reporting the snapshot would claim deletes that never
+    # happened; reporting nothing would lose the row an emptied container owned.
+    retired: List[dict] = []
+    if retire_ids:
+        with Session(engine) as session:
+            present = {row.id for row in session.exec(select(Folder).where(Folder.id.in_(retire_ids)))}
+        retired = [
+            entry for entry in args.get("folders") or []
+            if isinstance(entry, dict) and entry.get("id") not in present
+        ]
+
+    return {
+        "ledger_id": outcome.ledger_id,
+        "landed": outcome.landed,
+        "already_applied": outcome.already_applied,
+        "moves": [[pair.source, pair.target, pair.kind] for pair in outcome.pairs[: outcome.landed]],
+        "creates": list(args.get("creates") or []),
+        "retired": retired,
+    }
+
+
 def _create_project(operation_id: str, step_index: int, args: dict) -> dict:
     """The `create-project` step body: `bundle_service.create_project`, one verb.
 
@@ -382,6 +453,12 @@ def _create_project(operation_id: str, step_index: int, args: dict) -> dict:
     The verb still owns the exclusion, the group merge, the dedupe and the write, so
     a second run of this step is `already_created` with the project the first run
     made instead of a duplicate.
+
+    `groups`/`model_ids` are handed in by the split planner and absent for
+    `create-project`: a hoisted folder's own group list and the members that are
+    printed parts are facts the plan measured, and the marker's `attached` counts
+    are only honest when both come from the reviewed plan rather than from a second
+    reading of the disk.
     """
     with Session(engine) as session:
         outcome = bundle_service.create_project(
@@ -392,7 +469,9 @@ def _create_project(operation_id: str, step_index: int, args: dict) -> dict:
                 project_create_service.MemberCandidate(entry["asset_id"], entry["path"])
                 for entry in args["members"]
             ],
-            marker={"key": args["key"], "detector": "operations", "rel_dir": args["key"]},
+            model_ids=args.get("model_ids") or None,
+            marker={**args.get("marker", {"key": args["key"], "detector": "operations", "rel_dir": args["key"]})},
+            groups=args.get("groups") or (),
             cover_asset_id=args["cover_asset_id"],
         )
     if outcome.status == project_create_service.STATUS_REFUSED:
@@ -445,6 +524,7 @@ def _verify_cover(operation_id: str, step_index: int, args: dict) -> dict:
 
 
 _STEP_BODIES = {
+    "move": _move,
     "create-project": _create_project,
     "verify-members": _verify_members,
     "verify-cover": _verify_cover,

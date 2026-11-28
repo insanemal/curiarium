@@ -470,10 +470,11 @@ def test_a_contributor_action_is_audited_with_the_contributor_role(client: TestC
     # account retirement route (42 -> 43) and Mf-vwqf the bundle create and
     # dismiss pair (43 -> 45) and Mf-1zmd the archive extract route (45 -> 46)
     # and Mf-nivh the enrich route (46 -> 47) and Mf-0ck5 the archive project
-    # create route (47 -> 48) and Mf-v9eg the arrange apply and undo pair
-    # (48 -> 50), and Mf-5t30 the operations trio (50 -> 53) - which is why the
-    # number here is not the contributor ticket's.
+    # create route (47 -> 48), and Mf-5t30 the operations trio (51 = 48 + 3)
+    # - which is why the number here is not the contributor ticket's. Mf-g759
+    # deleted the arrange apply and undo pair with the surface: those two
+    # audited keys are gone, so the 53 this counter once read is 51.
     assert audit.ROUTE_ACTIONS[("POST", "/upload")] == (audit.ASSET_CREATE,)
     assert audit.assert_audit_coverage() is audit.ROUTE_ACTIONS
-    assert len(audit.ROUTE_ACTIONS) == 53
+    assert len(audit.ROUTE_ACTIONS) == 51
     assert len(audit.EXEMPT_ROUTES) == 15

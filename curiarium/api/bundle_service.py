@@ -2112,6 +2112,37 @@ def _marker_keys() -> FrozenSet[str]:
         return known_project_keys(session)
 
 
+def row_for_key(key: str) -> Optional[dict]:
+    """One detection row by storage-relative key, computed exactly as a create is.
+
+    The planner's read: a plan needs the row's own verdict about the folder it is
+    about to act on - ``detector``, ``confidence``, the ``matches`` a shape's
+    ``rule`` comes from, the ``archive`` twin, and ``blocked_reason`` - and it must
+    be the SAME row ``GET /bundles/detect`` shows, or the plan would act on a
+    folder the operator was told something else about. One walk serves the lookup,
+    through the same exclusions the create door uses, so a key a create recognises
+    is a key a plan recognises too.
+
+    The arrange service used to own this as a private ``_report_rows``; it is a
+    public read here because the operations planner has to ask it and a private
+    name reached across a module boundary is the drift this promotion ends.
+    """
+    known = _marker_keys()
+    scan = scan_bundles(
+        Path(STORAGE),
+        excluded_keys=_excluded_keys("", known=known),
+        project_keys=known,
+    )
+    report = _report_from_scan(
+        scan,
+        root=Path(STORAGE),
+        scope="",
+        limit=MAX_SCAN_ENTRIES,
+        include_dismissed=True,
+    )
+    return {row["key"]: row for row in report["bundles"]}.get(key)
+
+
 def build_report(*, path: str = "", limit: int = DEFAULT_LIMIT, include_dismissed: bool = False) -> dict:
     """The whole detection report, read from disk now. Writes nothing.
 

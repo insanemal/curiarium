@@ -8537,3 +8537,38 @@ def test_a_create_without_a_shape_records_the_recommended_shape(
     ], "the compound marker still names the row's groups, in order"
 
 
+
+
+def test_row_for_key_answers_the_row_the_detect_route_reports(
+    client: TestClient, isolated_storage: Path
+) -> None:
+    """`row_for_key` is the planner's read: the SAME row the operator was shown.
+
+    Mutation: a second walk with its own exclusions. The planner asks this for the
+    folder it is about to act on (`detector`, `confidence`, `matches` - where a
+    shape's `rule` comes from - and `blocked_reason`), so a row that disagreed with
+    `GET /bundles/detect` would let a plan act on a folder the operator was told
+    something else about. A key that is not a row answers None rather than raising,
+    because a plan's unknown-key 409 is the planner's sentence to say.
+    """
+    moai_bundle(isolated_storage)
+    scan()
+
+    report_row = row_for(bundle_service.build_report(), MOAI)
+    row = bundle_service.row_for_key(MOAI)
+
+    assert row is not None
+    assert row == report_row, "one walk, one row: the planner and the report cannot disagree"
+    # The one field the HTTP response drops: `build_report` stamps a single
+    # report-level `rule_set` on every row and `BundleDetectItemOut` does not
+    # declare it (see `service_row`), so the route's row is the service's row
+    # minus that stamp - and nothing else.
+    served = row_for(detect(client, auth_header(client)), MOAI)
+    assert served == {key: value for key, value in report_row.items() if key != "rule_set"}
+    assert {"key", "detector", "confidence", "matches", "blocked_reason"} <= set(row)
+    assert row["key"] == MOAI
+    assert row["detector"] == "engine:one-project"
+    assert row["matches"], "the matches are what a split's marker reads its rule from"
+
+    assert bundle_service.row_for_key("No Such Folder") is None
+    assert bundle_service.row_for_key("") is None

@@ -84,11 +84,6 @@ BUNDLE_DISMISS = "bundle.dismiss"
 # The act is an outbound fetch plus a stored claim about a model's licence, so it
 # is recorded; a refusal changes nothing and is reported per item instead.
 BUNDLE_ENRICH = "bundle.enrich"
-# An arrange moves bytes on disk and an undo reverses them, so both are the
-# operator's own history of a shape they approved: one row per apply (including a
-# partial one, whose detail carries how far it got) and one per undo.
-ARRANGE_APPLY = "arrange.apply"
-ARRANGE_UNDO = "arrange.undo"
 TRASH_PURGE = "trash.purge"
 SETTINGS_STORAGE_UPDATE = "settings.storage.update"
 SETTINGS_MOUNT_IMPORT_UPDATE = "settings.mount_import.update"
@@ -181,8 +176,6 @@ ACTIONS: frozenset[str] = frozenset({
     BUNDLE_CREATE,
     BUNDLE_DISMISS,
     BUNDLE_ENRICH,
-    ARRANGE_APPLY,
-    ARRANGE_UNDO,
     TRASH_PURGE,
     SETTINGS_STORAGE_UPDATE,
     SETTINGS_MOUNT_IMPORT_UPDATE,
@@ -470,11 +463,6 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     ("POST", "/bundles/create"): (BUNDLE_CREATE,),
     ("POST", "/bundles/dismiss"): (BUNDLE_DISMISS,),
     ("POST", "/bundles/enrich"): (BUNDLE_ENRICH,),
-    # The one operation that moves bytes on disk for a shape the operator approved.
-    # A partial apply writes its row too: the detail says how many moves landed.
-    ("POST", "/bundles/arrange"): (ARRANGE_APPLY,),
-    # Reversing an apply is the same power in the other direction.
-    ("POST", "/bundles/arrange/{arrange_id}/undo"): (ARRANGE_UNDO,),
     ("POST", "/trash/purge"): (TRASH_PURGE, DESTRUCTIVE_SNAPSHOT_TAKEN, DESTRUCTIVE_SNAPSHOT_MISSED),
     ("POST", "/settings/storage"): (SETTINGS_STORAGE_UPDATE,),
     ("POST", "/settings/mount-import"): (SETTINGS_MOUNT_IMPORT_UPDATE,),

@@ -41,23 +41,31 @@ vi.mock("../ModelViewer", () => ({
   generateModelSnapshot: vi.fn(),
 }));
 
-// The arrange door and the guided panel import the domain module directly, so
-// their calls are mocked there rather than on the barrel. The original is spread
-// back so the suite's other bundle imports keep working.
-const arrangeApi = vi.hoisted(() => ({
-  getArrangePlan: vi.fn(),
-  arrangeBundles: vi.fn(),
-  undoArrange: vi.fn(),
+// The split door and the guided panel import their domain modules directly, so
+// their calls are mocked there rather than on the barrel. The originals are
+// spread back so the suite's other imports keep working.
+const bundleApi = vi.hoisted(() => ({
   createBundles: vi.fn(),
   enrichBundles: vi.fn(),
 }));
 vi.mock("../../lib/api/bundles", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/bundles")>()),
-  getArrangePlan: arrangeApi.getArrangePlan,
-  arrangeBundles: arrangeApi.arrangeBundles,
-  undoArrange: arrangeApi.undoArrange,
-  createBundles: arrangeApi.createBundles,
-  enrichBundles: arrangeApi.enrichBundles,
+  createBundles: bundleApi.createBundles,
+  enrichBundles: bundleApi.enrichBundles,
+}));
+
+const operationsApi = vi.hoisted(() => ({
+  planOperation: vi.fn(),
+  submitOperation: vi.fn(),
+  getOperation: vi.fn(),
+  undoOperation: vi.fn(),
+}));
+vi.mock("../../lib/api/operations", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../lib/api/operations")>()),
+  planOperation: operationsApi.planOperation,
+  submitOperation: operationsApi.submitOperation,
+  getOperation: operationsApi.getOperation,
+  undoOperation: operationsApi.undoOperation,
 }));
 
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
@@ -66,12 +74,6 @@ import type { Project } from "../../lib/api/projects";
 import type { LibraryScanStatus } from "../../lib/api/settings";
 import {
   ENRICH_MAX_KEYS,
-  arrangeBundles,
-  getArrangePlan,
-  undoArrange,
-  type BundleArrangeApplied,
-  type BundleArrangePlan,
-  type BundleArrangeUndo,
   type BundleCreateItemResult,
   type BundleCreateResponse,
   type BundleDetectItem,
@@ -79,6 +81,16 @@ import {
   type BundleMatch,
   type BundleReport,
 } from "../../lib/api/bundles";
+import {
+  planOperation,
+  submitOperation,
+  undoOperation,
+  type Operation,
+  type OperationPlan,
+  type OperationReview,
+  type OperationStep,
+  type OperationUndo,
+} from "../../lib/api/operations";
 import type { SettleOutcome } from "../../lib/scanSettle";
 import { UnauthorizedError } from "../../lib/api/http";
 import { getToasts, resetToasts } from "../../lib/toast";
@@ -101,9 +113,9 @@ import type { LibraryScanState } from "./useLibraryScan";
 const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
 const extractArchiveMock = vi.mocked(extractArchive);
 const createProjectFromExtractMock = vi.mocked(createProjectFromExtract);
-const getArrangePlanMock = vi.mocked(getArrangePlan);
-const arrangeBundlesMock = vi.mocked(arrangeBundles);
-const undoArrangeMock = vi.mocked(undoArrange);
+const planOperationMock = vi.mocked(planOperation);
+const submitOperationMock = vi.mocked(submitOperation);
+const undoOperationMock = vi.mocked(undoOperation);
 
 const ARCHIVE_ENTRIES = [
   { path: "Moai.stl", size: 2048 },
@@ -862,6 +874,12 @@ beforeEach(() => {
       updated_at: "2026-01-01T00:00:00Z",
     },
   });
+  // The split door plans on mount, so a test that reaches it without saying what
+  // the server answers gets a real plan rather than an undefined `.then`. The
+  // suites that care assert the call; the ones that do not are unaffected.
+  planOperationMock.mockReset();
+  planOperationMock.mockResolvedValue(makeOperationPlan());
+  submitOperationMock.mockReset();
 });
 
 afterEach(() => {
@@ -1474,12 +1492,6 @@ describe("BundleReviewView writes", () => {
 });
 
 describe("BundleReviewView guided import door", () => {
-  /** A plan with nothing to move, so the panel's Apply is not held by an
-   *  arrangement it cannot make. */
-  function planWithoutMoves(): BundleArrangePlan {
-    return makeArrangePlan({ moves: [], creates: [], text: [], refusals: [] });
-  }
-
   /** The server's sentence when it refuses AUTO. */
   const AUTO_REFUSAL = "auto needs arranging first: 1 move(s); review it instead";
 
@@ -1525,7 +1537,6 @@ describe("BundleReviewView guided import door", () => {
   });
 
   it("opens the guided panel and sends auto on Create", async () => {
-    getArrangePlanMock.mockResolvedValue(planWithoutMoves());
     const state = makeState({ report: makeReport([autoRow()]) });
     renderView(state);
 
@@ -1539,7 +1550,6 @@ describe("BundleReviewView guided import door", () => {
   });
 
   it("falls back to the guided panel when the server refuses auto", async () => {
-    getArrangePlanMock.mockResolvedValue(planWithoutMoves());
     const state = makeState({
       report: makeReport([autoRow()]),
       create: vi.fn(async () => refusalResponse()),
@@ -3180,9 +3190,9 @@ describe("BundleReviewView import-as chooser", () => {
 
   it("shows a reading the server cannot enact as a visible, selectable radio carrying its note", () => {
     // Catches a chooser that DROPS a non-enactable reading (the operator loses
-    // the cardinality question) and one that DISABLES it: the arrange door is
-    // the only way to make that reading true, and a disabled radio makes the
-    // door unreachable from any payload the server actually emits.
+    // the cardinality question) and one that DISABLES it: the split door is the
+    // only way to make that reading true, and a disabled radio makes the door
+    // unreachable from any payload the server actually emits.
     renderView(makeState({ report: makeReport([splitTopFolders]) }));
 
     const radios = within(importAs()).getAllByRole("radio") as HTMLInputElement[];
@@ -3215,10 +3225,10 @@ describe("BundleReviewView import-as chooser", () => {
     );
   });
 
-  it("selects that reading, shuts the create door and offers the arrange door", () => {
+  it("selects that reading, shuts the create door and offers the split door", async () => {
     // The contract change: choosing a reading the server cannot enact must not
     // silently create the recommendation. It selects, the Create button refuses
-    // with the server's own reason, and the arrange door takes its place.
+    // with the server's own reason, and the split door takes its place.
     const state = makeState({ report: makeReport([autoSplitTopFolders]) });
     renderView(state);
 
@@ -3246,10 +3256,10 @@ describe("BundleReviewView import-as chooser", () => {
     expect(createSelected.disabled).toBe(true);
     expect(createSelected.getAttribute("title")).toBe(SPLIT_NOTE);
 
-    const preview = within(detail()).getByRole("button", {
-      name: "Preview the moves",
-    }) as HTMLButtonElement;
-    expect(preview.disabled).toBe(false);
+    // The split door takes the create door's place, and its one action is live
+    // once the plan names something to do.
+    await waitFor(() => expect(splitPreview()).toBeTruthy());
+    expect(splitActionButton().disabled).toBe(false);
   });
 
   it("never sends a shape the server cannot enact", () => {
@@ -4978,9 +4988,9 @@ describe("BundleReviewView storage scan on an unresolved row", () => {
 });
 
 /** A row whose EVERY served reading needs arranging first, so the shape the pane
- *  falls back to is `creatable: false` - the one state the arrange door exists
- *  for. `activeShape` answers the first offered reading when nothing on offer can
- *  be enacted (`bundleRows`), and that reading is the one a plan is built for. */
+ *  falls back to is `creatable: false` - the one state the split door exists for.
+ *  `activeShape` answers the first offered reading when nothing on offer can be
+ *  enacted (`bundleRows`), and that reading is the one a plan is built for. */
 const MODEL_SPLIT_NOTE =
   "needs arranging first: one project per model folder; fragments a single product if it was one";
 const arrangingRow = makeBundle({
@@ -5022,133 +5032,222 @@ const arrangingRow = makeBundle({
   ],
 });
 
-/** One plan, shaped the way `GET /bundles/arrange` answers: two directory moves
- *  out of the container, the engine's own text, the folder they imply, and no
- *  objection - so Apply is offered. */
-function makeArrangePlan(overrides: Partial<BundleArrangePlan> = {}): BundleArrangePlan {
+/** The Mf-jsw5 payload: the RECOMMENDATION itself is the shape the server cannot
+ *  enact, and the enactable reading is offered second. `activeShape` prefers the
+ *  first enactable reading while nothing is chosen, so this is the one row where
+ *  clicking the recommendation's own radio has to STORE the choice for the split
+ *  door to be reachable at all. */
+const recommendedRefused = makeBundle({
+  key: "Multi",
+  rel_path: "Multi",
+  title: "Multi folder",
+  name_suggestion: "Multi folder",
+  creator: null,
+  licence: null,
+  licence_url: null,
+  source_url: null,
+  detector: "generic-bundle",
+  confidence: "high",
+  metadata_shape: "one-project",
+  description_excerpt: null,
+  matches: [
+    {
+      shape: "split-top-folders",
+      rule: "engine:split-top-folders",
+      confidence: "high",
+      model_count: 3,
+      image_count: 0,
+      text_count: 0,
+      other_count: 0,
+      note: SPLIT_NOTE,
+      creatable: false,
+    },
+    {
+      shape: "one-project",
+      rule: "generic-bundle",
+      confidence: "high",
+      model_count: 3,
+      image_count: 0,
+      text_count: 0,
+      other_count: 0,
+      note: null,
+    },
+  ],
+});
+
+/** One split the server planned. Both halves of the intent ride ONE payload -
+ *  `move_list` is the moves and `projects` the creates - because one action
+ *  approves both; the remaining review fields are the wire's own, so a fixture
+ *  that skipped one would not be the payload the panel reads. */
+function makeOperationReview(overrides: Partial<OperationReview> = {}): OperationReview {
   return {
-    key: "Container",
-    shape: "split-top-folders",
-    plan_id: "plan-1",
-    moves: [
-      { from: "Container/Alpha", to: "Alpha", kind: "dir", action: "hoist" },
-      { from: "Container/Beta", to: "Beta", kind: "dir", action: "hoist" },
+    workflow: "split-and-create",
+    target: "Container",
+    moves: 3,
+    creates: 3,
+    adopts: 0,
+    deletes: 0,
+    members: 27,
+    groups: [],
+    cover: null,
+    excluded: [{ path: "Container/notes.psd", reason: "does not hold a model" }],
+    existing_project_id: null,
+    existing_project_name: null,
+    move_list: [
+      { source: "Container/Alpha", target: "Alpha", kind: "dir", action: "hoist" },
+      { source: "Container/Beta", target: "Beta", kind: "dir", action: "hoist" },
+      { source: "Container/Gamma", target: "Gamma", kind: "dir", action: "hoist" },
     ],
-    text: ['move "Container/Alpha" -> "Alpha"', 'move "Container/Beta" -> "Beta"'],
-    creates: [{ path: "Alpha", exists: false }],
-    refusals: [],
-    report: { creatable: false, blocked_reason: "needs_arrange" },
+    projects: [
+      { name: "Alpha", root: "Alpha", members: 9 },
+      { name: "Beta", root: "Beta", members: 9 },
+      { name: "Gamma", root: "Gamma", members: 9 },
+    ],
     ...overrides,
   };
 }
 
-/** One apply verdict. `unseeable`/`stale` are the server's own self-report and
- *  default to empty, so a test that cares about them says so. */
-function makeArrangeApplied(overrides: Partial<BundleArrangeApplied> = {}): BundleArrangeApplied {
+/** A plan the server issued: `plan_id` is the whole submit argument, so a test
+ *  that post-fixed it into a step list would not be proving anything. */
+function makeOperationPlan(overrides: Partial<OperationPlan> = {}): OperationPlan {
   return {
-    key: "Container",
-    shape: "split-top-folders",
     plan_id: "plan-1",
-    arrange_id: "arrange-7",
-    project_id: "p1",
-    applied: true,
-    moves: 2,
-    already_applied: false,
-    unseeable: [],
-    stale: [],
+    workflow: "split-and-create",
+    target: "Container",
+    steps: [{ index: 0, op: "move", summary: "hoist 3 folders" }],
+    review: makeOperationReview(),
     ...overrides,
   };
 }
 
-function makeArrangeUndone(overrides: Partial<BundleArrangeUndo> = {}): BundleArrangeUndo {
+function makeOperationStep(overrides: Partial<OperationStep> = {}): OperationStep {
   return {
-    arrange_id: "arrange-7",
-    key: "Container",
-    undone: true,
-    moves: 2,
-    project_removed: true,
-    unseeable: [],
-    stale: [],
+    index: 0,
+    op: "move",
+    status: "done",
+    result: null,
+    error: null,
+    started_at: "2026-01-01T00:00:01Z",
+    finished_at: "2026-01-01T00:00:02Z",
     ...overrides,
   };
 }
 
-function planPanel(): HTMLElement {
-  return within(detail()).getByRole("group", { name: "Arrangement preview" });
+/** The runner's finished record, with its undo still available - so no poll is
+ *  armed and the undo control is on offer. */
+function makeOperation(overrides: Partial<Operation> = {}): Operation {
+  return {
+    id: "op-7",
+    workflow: "split-and-create",
+    target: "Container",
+    status: "done",
+    submitted_by: "u1",
+    created_at: "2026-01-01T00:00:00Z",
+    started_at: "2026-01-01T00:00:01Z",
+    finished_at: "2026-01-01T00:00:09Z",
+    error: null,
+    undo_state: "available",
+    superseded_by: null,
+    steps: [
+      makeOperationStep({ index: 0, op: "move" }),
+      makeOperationStep({ index: 1, op: "create-project", result: { created: true } }),
+      makeOperationStep({ index: 2, op: "create-project", result: { created: true } }),
+      makeOperationStep({ index: 3, op: "create-project", result: { created: true } }),
+    ],
+    ...overrides,
+  };
 }
 
-function previewButton(): HTMLButtonElement {
-  return within(detail()).getByRole("button", {
-    name: "Preview the moves",
-  }) as HTMLButtonElement;
+/** The verdict of an undo: the operation's new state, plus the projects the
+ *  undo itself removed. */
+function makeUndone(overrides: Partial<OperationUndo> = {}): OperationUndo {
+  return {
+    operation_id: "op-7",
+    undone: true,
+    project_id: null,
+    project_name: null,
+    moves: 3,
+    projects_removed: ["Alpha", "Beta", "Gamma"],
+    ...overrides,
+  };
 }
 
-function applyButton(): HTMLButtonElement {
-  return within(detail()).getByRole("button", {
-    name: "Apply this arrangement",
-  }) as HTMLButtonElement;
+/** The plan as INFORMATION: the moves and the projects the one action would make.
+ *  Nothing inside it is a tab stop - the action is. */
+function splitPreview(): HTMLElement {
+  return within(detail()).getByRole("group", { name: "Split preview" });
 }
 
-function undoButton(): HTMLButtonElement {
-  return within(detail()).getByRole("button", {
-    name: "Undo this arrange",
-  }) as HTMLButtonElement;
+/** The ONE action, found by its data attribute because its label names the
+ *  OUTCOME ("Split into 3 projects") rather than the subsystem. */
+function splitActionButton(): HTMLButtonElement {
+  const button = detail().querySelector<HTMLButtonElement>("[data-split-action-button]");
+  if (!button) throw new Error("no split action");
+  return button;
 }
 
-describe("the arrange door", () => {
-  it("forwards a 401 from the arrange door to the shell's sign-out", async () => {
+function splitUndoButton(): HTMLButtonElement | null {
+  return detail().querySelector<HTMLButtonElement>("[data-split-undo]");
+}
+
+describe("the split door", () => {
+  it("forwards a 401 from the plan read to the shell's sign-out", async () => {
     // Catches a view that mounts the door without the shell's sign-out: the 401
     // would die inside the panel and leave the operator on an expired session,
     // while every other door on this screen signs them out.
     const onUnauthorized = vi.fn();
-    getArrangePlanMock.mockRejectedValue(new UnauthorizedError());
+    planOperationMock.mockRejectedValue(new UnauthorizedError());
     renderView(makeState({ report: makeReport([arrangingRow]) }), true, { onUnauthorized });
 
-    fireEvent.click(previewButton());
-
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1));
+    // The session's news is the shell's; the panel writes no sentence of its own.
     expect(within(detail()).queryByRole("alert")).toBeNull();
   });
 
-  it("previews the moves for a shape the server cannot enact yet", async () => {
-    // Catches a pane that asks for a plan on mount, or one that renders none of
-    // what came back: the click is the only trigger, and the wire's move array
-    // (not the engine's prose) is what the operator decides on.
-    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
+  it("plans for a shape the server cannot enact yet, and lists the wire's moves", async () => {
+    // Catches a pane that renders nothing for the refused reading: the plan is a
+    // READ on mount, and the wire's move array (not a prose rendering of it) is
+    // what the operator decides on.
+    planOperationMock.mockResolvedValue(makeOperationPlan());
     renderView(makeState({ report: makeReport([arrangingRow]) }));
 
-    // Nothing is asked for before the click: a preview is a disk walk.
-    expect(getArrangePlanMock).not.toHaveBeenCalled();
-    fireEvent.click(previewButton());
+    await waitFor(() => expect(splitPreview()).toBeTruthy());
+    expect(planOperationMock).toHaveBeenCalledWith({
+      workflow: "split-and-create",
+      target: "Container",
+      params: { shape: "split-top-folders" },
+    });
 
-    await waitFor(() => expect(planPanel()).toBeTruthy());
-    expect(getArrangePlanMock).toHaveBeenCalledWith("Container", "split-top-folders");
-
-    const panel = planPanel();
+    const panel = splitPreview();
+    const moves = Array.from(panel.querySelectorAll<HTMLElement>("[data-split-move]"));
     // One list item per WIRE move, each naming its action.
-    const moves = Array.from(panel.querySelectorAll<HTMLElement>("[data-arrange-move]"));
-    expect(moves.map(node => node.getAttribute("data-arrange-action"))).toEqual(["hoist", "hoist"]);
+    expect(moves.map(node => node.getAttribute("data-split-action"))).toEqual([
+      "hoist",
+      "hoist",
+      "hoist",
+    ]);
     expect(within(moves[0]).getByText('move "Container/Alpha" -> "Alpha"')).toBeTruthy();
-    expect(within(moves[1]).getByText('move "Container/Beta" -> "Beta"')).toBeTruthy();
-    expect(within(panel).getByText("Creates these folders")).toBeTruthy();
+    expect(within(moves[2]).getByText('move "Container/Gamma" -> "Gamma"')).toBeTruthy();
+    // The projects the same action would create, with the plan's own member count.
     expect(
-      Array.from(panel.querySelectorAll("[data-arrange-create]")).map(node => node.textContent),
-    ).toEqual(["Alpha"]);
-    // The count comes through the one formatter, so it is a real count here and
-    // an en dash when the server does not send one.
-    expect(panel.querySelector("[data-arrange-moves]")?.textContent).toBe("Arrangement: 2 moves");
-    // A clean plan is a click that can work.
-    expect(applyButton().disabled).toBe(false);
+      Array.from(panel.querySelectorAll("[data-split-project]")).map(node => node.textContent),
+    ).toEqual(["Alpha from 9 files", "Beta from 9 files", "Gamma from 9 files"]);
+    // The server's refusal of one file, verbatim: the client decided none of this.
+    expect(panel.querySelector("[data-split-excluded]")?.textContent).toBe(
+      "Container/notes.psd: does not hold a model",
+    );
   });
 
   it("is reachable from a real payload by choosing the refused reading", async () => {
     // The payload the server actually emits: `generic` plus a `creatable: false`
-    // `split-top-folders` plus `manual`. Choosing that reading must keep it
-    // selected (or the door never opens), then Preview and Apply must carry the
-    // chosen shape and the served `plan_id` to the server.
-    getArrangePlanMock.mockResolvedValue(makeArrangePlan({ key: "Multi" }));
-    arrangeBundlesMock.mockResolvedValue(makeArrangeApplied({ key: "Multi" }));
+    // `split-top-folders` plus `manual`. Until that reading is chosen the door is
+    // not offered - and once it is, the panel must plan for THAT shape.
+    planOperationMock.mockResolvedValue(makeOperationPlan({ target: "Multi" }));
     renderView(makeState({ report: makeReport([splitTopFolders]) }));
+
+    // An enactable recommendation means no split is offered, so nothing is read.
+    expect(detail().querySelector("[data-split-plan]")).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalled();
 
     const importAs = within(detail()).getByRole("radiogroup", { name: "Import as" });
     fireEvent.click(
@@ -5158,77 +5257,105 @@ describe("the arrange door", () => {
       (within(importAs).getByRole("radio", { checked: true }) as HTMLInputElement).value,
     ).toBe("split-top-folders");
 
-    fireEvent.click(previewButton());
-    await waitFor(() => expect(planPanel()).toBeTruthy());
-    expect(getArrangePlanMock).toHaveBeenCalledWith("Multi", "split-top-folders");
-
-    fireEvent.click(applyButton());
-    await waitFor(() => expect(undoButton()).toBeTruthy());
-    expect(arrangeBundlesMock).toHaveBeenCalledWith({
-      key: "Multi",
-      shape: "split-top-folders",
-      planId: "plan-1",
+    await waitFor(() => expect(splitPreview()).toBeTruthy());
+    expect(planOperationMock).toHaveBeenCalledWith({
+      workflow: "split-and-create",
+      target: "Multi",
+      params: { shape: "split-top-folders" },
     });
   });
 
-  it("refuses to offer Apply while the server holds an objection", async () => {
-    // Catches an Apply that ignores `refusals`: pressing it would answer 409 and
-    // write nothing, so the pane must not present a move that cannot be done.
-    const refusal = {
-      status: 409,
-      reason: "destination_exists",
-      detail: "destination exists: Alpha",
-    };
-    getArrangePlanMock.mockResolvedValue(
-      makeArrangePlan({
-        refusals: [{ ...refusal, detail: "cross-device move refused: 2 of 2 moves" }, refusal],
-      }),
+  it("keeps a chosen recommended creatable:false shape checked and plans for it", async () => {
+    // Dropping the stored choice for a recommendation made `activeShape` fall back
+    // to the first enactable shape, so the radio snapped back to `one-project` and
+    // the split door could never open (Mf-jsw5). The recommendation here is the
+    // refused reading, which is exactly the row the old rule broke.
+    planOperationMock.mockResolvedValue(makeOperationPlan({ target: "Multi" }));
+    const state = makeState({ report: makeReport([recommendedRefused]) });
+    renderView(state);
+
+    // Nothing is planned before the choice: the pane offers the enactable reading.
+    expect(detail().querySelector("[data-split-plan]")).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalled();
+
+    const importAs = within(detail()).getByRole("radiogroup", { name: "Import as" });
+    fireEvent.click(
+      within(importAs).getByRole("radio", { name: SHAPE_LABELS["split-top-folders"] }),
     );
-    renderView(makeState({ report: makeReport([arrangingRow]) }));
 
-    fireEvent.click(previewButton());
-    await waitFor(() => expect(planPanel()).toBeTruthy());
+    // (a) The radio stays where the operator put it.
+    expect(
+      (within(importAs).getByRole("radio", { checked: true }) as HTMLInputElement).value,
+    ).toBe("split-top-folders");
 
-    expect(applyButton().disabled).toBe(true);
-    // The server's sentence, verbatim and in the reason style - including its own
-    // count of the moves it refused. The client decided neither.
-    const refusals = Array.from(planPanel().querySelectorAll("[data-arrange-refusal]"));
-    expect(refusals.map(node => node.textContent)).toEqual([
-      "cross-device move refused: 2 of 2 moves",
-      "destination exists: Alpha",
-    ]);
-    expect(refusals[0].className).toContain("review-detail-reason");
-  });
-
-  it("applies the previewed plan, names the moves that landed and offers the undo", async () => {
-    // Catches an Apply that sends the row key instead of the served `plan_id`, and
-    // one that leaves the consumed preview on screen: the plan names a tree that
-    // has just moved.
-    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
-    arrangeBundlesMock.mockResolvedValue(makeArrangeApplied());
-    renderView(makeState({ report: makeReport([arrangingRow]) }));
-
-    fireEvent.click(previewButton());
-    await waitFor(() => expect(planPanel()).toBeTruthy());
-    fireEvent.click(applyButton());
-
-    await waitFor(() => expect(undoButton()).toBeTruthy());
-    expect(arrangeBundlesMock).toHaveBeenCalledWith({
-      key: "Container",
-      shape: "split-top-folders",
-      planId: "plan-1",
+    // (b) The door behind it opens, for the chosen shape.
+    await waitFor(() => expect(splitPreview()).toBeTruthy());
+    expect(planOperationMock).toHaveBeenCalledWith({
+      workflow: "split-and-create",
+      target: "Multi",
+      params: { shape: "split-top-folders" },
     });
-    expect(detail().querySelector("[data-arrange-applied]")?.textContent).toBe("Arranged: 2 moves");
-    expect(detail().querySelector("[data-arrange-plan]")).toBeNull();
+
+    // (c) No create was attempted for a shape the server refuses.
+    const create = within(detail()).getByRole("button", {
+      name: "Create project",
+    }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    fireEvent.click(create);
+    expect(state.create).not.toHaveBeenCalled();
   });
 
-  it("bumps the project list and the folder tree exactly once when an arrange is applied", async () => {
-    // The arrange door is the single completion signal for its own event: the
-    // server creates folders and rewrites `storage_path` in that one write, and
-    // no scan can complete for it (arrange refuses while a scan holds the slot
-    // and never starts one). A second bump would make these counts two.
-    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
-    arrangeBundlesMock.mockResolvedValue(makeArrangeApplied());
+  it("offers one action labelled with the outcome, not a preview/apply pair", async () => {
+    // Catches a door rebuilt as a ladder: the moves are information, so the one
+    // thing to press says what it will MAKE.
+    planOperationMock.mockResolvedValue(makeOperationPlan());
+    renderView(makeState({ report: makeReport([arrangingRow]) }));
+
+    await waitFor(() => expect(splitPreview()).toBeTruthy());
+    expect(splitActionButton().textContent).toBe("Split into 3 projects");
+    expect(within(detail()).queryByRole("button", { name: "Preview the moves" })).toBeNull();
+    expect(within(detail()).queryByRole("button", { name: "Apply this arrangement" })).toBeNull();
+  });
+
+  it("submits the served plan id with one idempotency key and narrates the run", async () => {
+    // Catches a submit that sends the row key or a second key: the plan id is the
+    // whole approval, and one key per intent is what makes a double-click a
+    // replay rather than a second split.
+    planOperationMock.mockResolvedValue(makeOperationPlan());
+    submitOperationMock.mockResolvedValue(makeOperation());
+    renderView(makeState({ report: makeReport([arrangingRow]) }));
+
+    await waitFor(() => expect(splitPreview()).toBeTruthy());
+    fireEvent.click(splitActionButton());
+
+    await waitFor(() => expect(splitUndoButton()).toBeTruthy());
+    const submitted = submitOperationMock.mock.calls[0][0];
+    expect(submitted.planId).toBe("plan-1");
+    expect(submitted.idempotencyKey).toEqual(expect.any(String));
+
+    // The popup narrates the runner's own steps, in index order.
+    const dialog = detail().querySelector<HTMLElement>("[data-split-dialog]");
+    if (!dialog) throw new Error("no split dialog");
+    expect(dialog.getAttribute("role")).toBe("dialog");
+    expect(
+      Array.from(dialog.querySelectorAll("[data-split-step]")).map(node => node.textContent),
+    ).toEqual([
+      "moved the folders",
+      "created a project",
+      "created a project",
+      "created a project",
+    ]);
+    expect(dialog.querySelector("[data-split-result]")?.textContent).toBe("Done: 3 projects");
+    // The consumed plan is gone: it named a tree that has just moved.
+    expect(detail().querySelector("[data-split-plan]")).toBeNull();
+  });
+
+  it("bumps the project list and the folder tree exactly once when the split lands", async () => {
+    // The split door is the single completion signal for its own event: the server
+    // rewrites `storage_path` and creates `Folder` rows in that one operation, and
+    // a second bump would make these counts two.
+    planOperationMock.mockResolvedValue(makeOperationPlan());
+    submitOperationMock.mockResolvedValue(makeOperation());
     const onProjectsChanged = vi.fn();
     const onFoldersChanged = vi.fn();
     renderView(makeState({ report: makeReport([arrangingRow]) }), true, {
@@ -5236,79 +5363,78 @@ describe("the arrange door", () => {
       onFoldersChanged,
     });
 
-    fireEvent.click(previewButton());
-    await waitFor(() => expect(planPanel()).toBeTruthy());
-    fireEvent.click(applyButton());
-    await waitFor(() => expect(undoButton()).toBeTruthy());
+    await waitFor(() => expect(splitPreview()).toBeTruthy());
+    fireEvent.click(splitActionButton());
+    await waitFor(() => expect(splitUndoButton()).toBeTruthy());
 
     expect(onProjectsChanged).toHaveBeenCalledTimes(1);
     expect(onFoldersChanged).toHaveBeenCalledTimes(1);
   });
 
-  it("undoes that arrangement by the id the server issued", async () => {
+  it("offers the undo while the run is undoable, and undoes it by the operation id", async () => {
     // Catches an undo driven by the row key or the plan id: the ledger is found by
-    // `arrange_id`, and a second arrange has its own.
-    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
-    arrangeBundlesMock.mockResolvedValue(makeArrangeApplied({ arrange_id: "arrange-9" }));
-    undoArrangeMock.mockResolvedValue(makeArrangeUndone({ arrange_id: "arrange-9" }));
+    // the operation's own id, and a second split has its own.
+    planOperationMock.mockResolvedValue(makeOperationPlan());
+    submitOperationMock.mockResolvedValue(makeOperation({ undo_state: "available" }));
+    undoOperationMock.mockResolvedValue(makeUndone());
     renderView(makeState({ report: makeReport([arrangingRow]) }));
 
-    fireEvent.click(previewButton());
-    await waitFor(() => expect(planPanel()).toBeTruthy());
-    fireEvent.click(applyButton());
-    await waitFor(() => expect(undoButton()).toBeTruthy());
+    await waitFor(() => expect(splitPreview()).toBeTruthy());
+    fireEvent.click(splitActionButton());
+    await waitFor(() => expect(splitUndoButton()).toBeTruthy());
 
-    fireEvent.click(undoButton());
+    fireEvent.click(splitUndoButton() as HTMLButtonElement);
 
-    await waitFor(() => expect(undoArrangeMock).toHaveBeenCalledWith("arrange-9"));
-    // The count is gone with the moves, and so is the undo control: there is
-    // nothing left of this arrange to fold back a second time.
-    await waitFor(() => expect(detail().querySelector("[data-arrange-applied]")).toBeNull());
-    expect(within(detail()).queryByRole("button", { name: "Undo this arrange" })).toBeNull();
+    await waitFor(() => expect(undoOperationMock).toHaveBeenCalledWith("op-7"));
+    // The answer IS the row's new state, so the button goes without another read:
+    // there is nothing left of this split to fold back a second time.
+    await waitFor(() => expect(splitUndoButton()).toBeNull());
   });
 
-  it("names the paths a response could not see, rather than passing over them", async () => {
-    // Catches a silent pass: a directory this write made that the library walk
-    // cannot see, and an asset row whose path names no file, are the two things an
-    // operator must be told about by name.
-    getArrangePlanMock.mockResolvedValue(makeArrangePlan());
-    arrangeBundlesMock.mockResolvedValue(
-      makeArrangeApplied({ unseeable: ["Ghost"], stale: ["Container/gone.stl"] }),
+  it("offers no undo while the server says the run is not undoable", async () => {
+    // `undo_state` is the server's answer, never a guess from the status: a run a
+    // later operation superseded must not be offered back.
+    planOperationMock.mockResolvedValue(makeOperationPlan());
+    submitOperationMock.mockResolvedValue(makeOperation({ undo_state: "unavailable" }));
+    renderView(makeState({ report: makeReport([arrangingRow]) }));
+
+    await waitFor(() => expect(splitPreview()).toBeTruthy());
+    fireEvent.click(splitActionButton());
+
+    await waitFor(() =>
+      expect(detail().querySelector("[data-split-result]")?.textContent).toBe("Done: 3 projects"),
     );
-    renderView(makeState({ report: makeReport([arrangingRow]) }));
-
-    fireEvent.click(previewButton());
-    await waitFor(() => expect(planPanel()).toBeTruthy());
-    fireEvent.click(applyButton());
-
-    await waitFor(() => expect(detail().querySelector("[data-arrange-unseeable]")).not.toBeNull());
-    const unseeable = detail().querySelector("[data-arrange-unseeable]");
-    const stale = detail().querySelector("[data-arrange-stale]");
-    expect(unseeable?.textContent).toContain("Ghost");
-    expect(stale?.textContent).toContain("Container/gone.stl");
-    // They live beside the reason style, not in a live region that would
-    // re-announce the queue on every ArrowDown.
-    expect(unseeable?.className).toContain("review-detail-reason");
-    expect(unseeable?.getAttribute("role")).toBeNull();
-  });
-
-  it("offers no arrange door for a shape the server can already enact", () => {
-    // Catches a door that ignores `isArrangable`: an ordinary row would be offered
-    // "Preview the moves" beside a Create that already works, and the operator
-    // would be invited to rearrange a folder nothing asked to move.
-    renderView(makeState({ report: makeReport([moai]) }));
-    expect(detail().querySelector("[data-arrange-preview]")).toBeNull();
+    expect(splitUndoButton()).toBeNull();
   });
 
   it("offers a viewer none of these controls, and asks for no plan", () => {
-    // Catches an arrange door left outside the `canContribute` gate: a READ-only
-    // role would be invited to start a disk walk and then to write.
+    // Catches a door left outside the `canContribute` gate: a READ-only role would
+    // start a plan request and then be offered a write.
     renderView(makeState({ report: makeReport([arrangingRow]) }), false);
 
-    expect(within(detail()).queryByRole("button", { name: "Preview the moves" })).toBeNull();
-    expect(within(detail()).queryByRole("button", { name: "Apply this arrangement" })).toBeNull();
-    expect(within(detail()).queryByRole("button", { name: "Undo this arrange" })).toBeNull();
-    expect(detail().querySelector("[data-arrange-plan]")).toBeNull();
-    expect(getArrangePlanMock).not.toHaveBeenCalled();
+    expect(detail().querySelector("[data-split-plan]")).toBeNull();
+    expect(detail().querySelector("[data-split-action-button]")).toBeNull();
+    expect(detail().querySelector("[data-split-dialog]")).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalled();
+  });
+
+  it("still sends no shape for an untouched row whose recommendation is enactable", async () => {
+    // The other half of the Mf-jsw5 fix: storing a refused recommendation must not
+    // start storing the ENACTABLE one. A row nobody chose a shape for keeps the
+    // original, byte-identical create body - no `shape` key at all.
+    const state = makeState({ report: makeReport([autoSplitTopFolders]) });
+    renderView(state);
+
+    const importAs = within(detail()).getByRole("radiogroup", { name: "Import as" });
+    expect(
+      (within(importAs).getByRole("radio", { checked: true }) as HTMLInputElement).value,
+    ).toBe("generic");
+
+    fireEvent.click(within(detail()).getByRole("button", { name: "Create project" }));
+
+    expect(state.create).toHaveBeenCalledTimes(1);
+    const items = vi.mocked(state.create).mock.calls[0][0];
+    expect(items[0]).toMatchObject({ key: "Multi", auto: true });
+    expect(items[0]).not.toHaveProperty("shape");
   });
 });

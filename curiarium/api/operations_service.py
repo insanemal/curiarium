@@ -13,16 +13,24 @@ pool that reads queued rows, takes prefix locks and executes steps. There is one
 shared queue, attributed to the submitting user - not a queue per user - so two
 operations over the same paths serialise instead of racing.
 
-This module owns the plan codec, the `create-project` planner, submit, the
-reads, cancel, undo, supersede and prune. It never executes a workflow: the
-runner does, and the routes only ever write a row.
+This module owns the plan codec, both workflow planners (`create-project` and
+`split-and-create`), submit, the reads, cancel, undo, supersede and prune. It
+never executes a workflow: the runner does, and the routes only ever write a row.
+
+`split-and-create` is a COMPOSITION, not a second implementation of anything: it
+plans `move_service.preflight_refusals` over the hoists `proposal_engine` implies
+and then one `create-project` per hoisted folder, using the same member rule and
+the same create verb `create-project` uses. Its undo folds the move ledger back
+and deletes only the projects its own create steps reported creating.
 """
 
 import base64
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta, timezone
-from typing import List, NamedTuple, Optional, Tuple
+from pathlib import Path
+from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 from fastapi import HTTPException, Request
 from sqlalchemy import func
@@ -32,25 +40,34 @@ from sqlmodel import Session, delete, select
 import audit
 import bundle_service
 import library_scan
+import move_service
 import permissions
 import project_create_service
 import project_service
+import proposal_engine
+import seams
 from auth import AuthContext
 from db import engine
-from models import Asset, Operation, OperationLock, OperationStep, Project, ProjectAsset
+from models import Asset, Folder, Operation, OperationLock, OperationStep, Project, ProjectAsset
 
 PLAN_VERSION = 1
-WORKFLOWS = ("create-project",)
+WORKFLOWS = ("create-project", "split-and-create")
+
+# The two shapes a split can enact, and the one it defaults to.
+DEFAULT_SPLIT_SHAPE = "split-top-folders"
+# The declared cap, the same number the arrange declared: a plan above it is
+# refused by name, before any byte moves.
+MAX_SPLIT_MOVES = 400
 
 # The owner's rubric, 2026-11-27 (the Mf-215n amendment): an operation is
 # CONTRIBUTE unless it can REMOVE data with this action - destruction is not a
 # contributor's job, uploading and organising are. The owner's words: "can they
 # REMOVE data with this action".
 #
-# `WORKFLOWS` is still `("create-project",)`: a row for a workflow that does not
-# exist yet is a DECLARATION FOR THE RECORD, not a claim that the workflow runs.
-# Do not invent a workflow to justify a row, and do not add these names to
-# `WORKFLOWS`.
+# `WORKFLOWS` names the workflows that actually run. A row in `WORKFLOW_LEVELS`
+# below for a workflow that is not here is a DECLARATION FOR THE RECORD, not a
+# claim that the workflow runs - but the two lists must not disagree about what
+# exists: `split-and-create` has a planner, so it is in both.
 #
 # Fails closed: `level_for_workflow` refuses a workflow with no row rather than
 # defaulting it to CONTRIBUTE, because an unclassified workflow is a bug.
@@ -197,7 +214,10 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
     # are one plan and `Operation.target` reads the way `declared_paths` does.
     normalized = (target or "").strip().strip("/")
     intent = {"v": PLAN_VERSION, "workflow": workflow, "target": normalized, "params": params or {}}
-    steps, review, declared = _plan_create_project(session, normalized, params or {})
+    if workflow == "split-and-create":
+        steps, review, declared = _plan_split_and_create(session, normalized, params or {})
+    else:
+        steps, review, declared = _plan_create_project(session, normalized, params or {})
     digest = plan_digest(intent, steps, review)
     return Plan(intent=intent, steps=steps, review=review, digest=digest, declared_paths=declared)
 
@@ -230,44 +250,30 @@ def _group_of(rel_path: str) -> str:
     return rel_path.split("/", 1)[0] if "/" in rel_path else ""
 
 
-def _plan_create_project(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
-    """The `create-project` planner: one library-relative directory key in, three steps out."""
-    key = (target or "").strip().strip("/")
-    if not key:
-        raise HTTPException(
-            status_code=409,
-            detail="the target must be a library-relative directory key (not the library root)",
-        )
-    assets = bundle_service.registered_assets(session, key)
-    if not assets:
-        raise HTTPException(status_code=409, detail=f"no registered files under {key!r}")
-    # The one owner of the member rule, through its public name (Mf-215n promoted
-    # the alias, so this door no longer reaches for a private one).
-    member_set = bundle_service.members_of(key, assets)
-    entries = list(member_set.entries)
+def _excluded_members(
+    session: Session, key: str, entries: Sequence, existing
+) -> Tuple[list, List[dict]]:
+    """THE member rule: which of a path's registered files a create would leave out.
 
-    groups: dict = {}
-    for entry in entries:
-        group_name = _group_of(entry.rel_path)
-        group = groups.setdefault(group_name, {"name": group_name, "members": 0, "models": 0})
-        group["members"] += 1
-        if entry.role == library_scan.MODEL:
-            group["models"] += 1
-    group_list = list(groups.values())
+    Extracted from the `create-project` planner so ONE rule serves both planners -
+    a split's per-folder review and a whole-folder create must not be able to
+    disagree about whether a file is a member. Three exclusions, in this order:
 
-    # Named and deduped FIRST: the "already a member" exclusion below needs to
-    # know which project this plan's own create would answer, so it never
-    # excludes the members of that project.
-    name = (params.get("name") or "").strip() or key.rsplit("/", 1)[-1]
-    existing = project_create_service.find_existing_project(session, key=key, name=name)
+      1. a first-level group that is already its own project is excluded wholesale;
+      2. a file the last scan flagged missing is not a member;
+      3. a file already a member of ANOTHER project is not a member of a second
+         one. The project this plan's own create would dedupe to is not "another"
+         - its members are exactly what a re-run attaches.
 
+    Returns `(kept entries, excluded)`; `excluded` carries the current storage
+    path (what the operator sees on disk now) and a human reason.
+    """
     excluded: List[dict] = []
 
     # 1. A group that is already its own project is excluded wholesale.
     known = bundle_service.known_project_keys(session)
-    excluded_groups = {
-        group_name for group_name in groups if group_name and f"{key}/{group_name}" in known
-    }
+    groups = {_group_of(entry.rel_path) for entry in entries}
+    excluded_groups = {group_name for group_name in groups if group_name and f"{key}/{group_name}" in known}
     for group_name in sorted(excluded_groups):
         excluded.append(
             {"path": f"{key}/{group_name}", "reason": "this directory is already its own project"}
@@ -322,7 +328,41 @@ def _plan_create_project(session: Session, target: str, params: dict) -> Tuple[l
             }
         )
         member_removed.add(entry.asset.id)
-    members = [entry for entry in after_missing if entry.asset.id not in member_removed]
+    return [entry for entry in after_missing if entry.asset.id not in member_removed], excluded
+
+
+def _plan_create_project(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
+    """The `create-project` planner: one library-relative directory key in, three steps out."""
+    key = (target or "").strip().strip("/")
+    if not key:
+        raise HTTPException(
+            status_code=409,
+            detail="the target must be a library-relative directory key (not the library root)",
+        )
+    assets = bundle_service.registered_assets(session, key)
+    if not assets:
+        raise HTTPException(status_code=409, detail=f"no registered files under {key!r}")
+    # The one owner of the member rule, through its public name (Mf-215n promoted
+    # the alias, so this door no longer reaches for a private one).
+    member_set = bundle_service.members_of(key, assets)
+    entries = list(member_set.entries)
+
+    groups: dict = {}
+    for entry in entries:
+        group_name = _group_of(entry.rel_path)
+        group = groups.setdefault(group_name, {"name": group_name, "members": 0, "models": 0})
+        group["members"] += 1
+        if entry.role == library_scan.MODEL:
+            group["models"] += 1
+    group_list = list(groups.values())
+
+    # Named and deduped FIRST: the "already a member" exclusion needs to know which
+    # project this plan's own create would answer, so it never excludes the members
+    # of that project.
+    name = (params.get("name") or "").strip() or key.rsplit("/", 1)[-1]
+    existing = project_create_service.find_existing_project(session, key=key, name=name)
+
+    members, excluded = _excluded_members(session, key, entries, existing)
 
     if not members:
         raise HTTPException(
@@ -382,6 +422,325 @@ def _plan_create_project(session: Session, target: str, params: dict) -> Tuple[l
         "existing_project_name": existing.project.name if existing else None,
     }
     return steps, review, [key]
+
+
+# --- split-and-create --------------------------------------------------------
+
+
+def _move_path(path: str, moves: Sequence[dict]) -> str:
+    """Where a storage-relative path will live once the move list has run, in order."""
+    for move in moves:
+        source, target, kind = move["from"], move["to"], move["kind"]
+        if kind == "dir":
+            if path.startswith(source + "/"):
+                path = target + path[len(source):]
+        elif path == source:
+            path = target
+    return path
+
+
+def _under(path: str, root: str) -> bool:
+    """Whether `path` is `root` or sits below it, on a segment boundary."""
+    return path == root or path.startswith(root + "/")
+
+
+def _folder_snapshot(session: Session, key: str) -> List[dict]:
+    """The folder rows at or below `key`, as the move step's retirement scope.
+
+    Read BEFORE anything moves, and its ids are the only ids the step is entitled
+    to retire: `move()` retires nothing by default, and an unscoped sweep would
+    delete a row another request had just created. The whole row travels (id,
+    name, tags_json, parent_id, storage_path) because the emptied container row
+    IS deleted, and `move_ledger`'s reversal rewrites rows it finds - it cannot
+    recreate one that is gone.
+    """
+    rows: List[dict] = []
+    for folder in session.exec(select(Folder)):
+        path = folder.storage_path or ""
+        if not path or not _under(path, key):
+            continue
+        rows.append(
+            {
+                "id": folder.id,
+                "name": folder.name,
+                "tags_json": folder.tags_json,
+                "parent_id": folder.parent_id,
+                "storage_path": folder.storage_path,
+            }
+        )
+    rows.sort(key=lambda entry: ((entry["storage_path"] or ""), entry["id"]))
+    return rows
+
+
+def _detection_marker(row: dict, shape: str, root_rel: str) -> dict:
+    """The detection marker a hoisted folder's project carries.
+
+    The SAME vocabulary the detected-bundle arrange wrote, and read from the
+    container's own row through `bundle_service.row_for_key`: the project this
+    creates was made from that folder, so its provenance is the row the operator
+    saw, not a second reading of the disk.
+    """
+    archive = row.get("archive") or {}
+    rule = None
+    for match in row.get("matches") or []:
+        if isinstance(match, dict) and match.get("shape") == shape:
+            rule = match.get("rule")
+            break
+    return {
+        "key": root_rel,
+        "detector": row.get("detector") or "",
+        "confidence": row.get("confidence") or "",
+        "shape": shape,
+        "rule": rule or row.get("detector") or "",
+        "rel_dir": root_rel,
+        "archive": archive.get("rel_path"),
+        "twin_verified": archive.get("twin_verified") if row.get("archive") else None,
+    }
+
+
+def _hoisted_groups(facts: proposal_engine.Facts, key: str, root: str) -> List[dict]:
+    """A hoisted folder's OWN groups, read off the container's single walk.
+
+    The engine measured the container, so the hoisted child's subdirectories are
+    already in `facts.groups` as the children of the node whose path is the child.
+    They are what the project's marker must carry: the container's own group list
+    would name folders that are now siblings of the project, not parts of it.
+    """
+    child = root[len(key) + 1:] if root.startswith(key + "/") else ""
+    if not child:
+        return []
+    stack = list(facts.groups)
+    while stack:
+        node = stack.pop()
+        if node.get("path") == child:
+            return bundle_service.wire_groups(node.get("children") or [])
+        stack.extend(node.get("children") or [])
+    return []
+
+
+def _plan_split_and_create(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
+    """The `split-and-create` planner: hoist a container's folders, then create one project each.
+
+    A COMPOSITION, and every plan-time refusal is the primitive's own:
+    `proposal_engine` decides which moves the shape implies,
+    `move_service.preflight_refusals` answers every question about a pair, and the
+    member rule is the one `_excluded_members` shares with `create-project`.
+    Nothing here re-implements a question another module owns.
+
+    The step order is `move` FIRST and the creates after - deliberately the
+    reverse of the detected-bundle arrange, whose projects-first order existed to
+    keep its own marker ledger durable before a byte moved. Here the operation's
+    step rows are that record, and the semantics this workflow owes are that a
+    refusal at the move step stops before any project exists, which the mover's
+    batch pre-flight makes structural rather than conventional.
+
+    The review carries the move list AND the projects, because the operator
+    approves both halves in one action: the moves are what the app will do, and
+    the projects are the outcome they named.
+    """
+    key = (target or "").strip().strip("/")
+    if not key:
+        raise HTTPException(
+            status_code=409,
+            detail="the target must be a library-relative directory key (not the library root)",
+        )
+    shape = (params.get("shape") or "").strip() or DEFAULT_SPLIT_SHAPE
+    if shape not in proposal_engine.SPLIT_SHAPES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{shape!r} is not a split shape; this workflow enacts "
+                + ", ".join(repr(known) for known in proposal_engine.SPLIT_SHAPES)
+            ),
+        )
+
+    row = bundle_service.row_for_key(key)
+    if row is None:
+        raise HTTPException(status_code=409, detail=f"unknown bundle: {key}")
+    if row.get("blocked_reason") == bundle_service.ARCHIVE_ONLY:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this row is an archive: extract it first with POST /import/archive, then split the "
+                "folder it produced (the split never copies or unpacks)"
+            ),
+        )
+
+    root_path = Path(bundle_service.STORAGE)
+    facts = proposal_engine.measure(str(root_path / key), key)
+    moves = proposal_engine.arrange_moves(facts, shape)
+    if not moves:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"this shape would change nothing: {key!r} has no top folder holding models to hoist; "
+                "a folder that is already one product is created, not split"
+            ),
+        )
+    if len(moves) > MAX_SPLIT_MOVES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{key!r} needs {len(moves)} moves, above the declared cap of {MAX_SPLIT_MOVES}; "
+                "nothing moved"
+            ),
+        )
+    if seams.scan_status().get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"a library scan is running; nothing was moved for {key!r}. Try again when it finishes",
+        )
+
+    pairs = [move_service.Pair(move["from"], move["to"], move["kind"]) for move in moves]
+    refusals = move_service.preflight_refusals(pairs, session, root_path)
+    if refusals:
+        # The primitive's own sentence and its own status, never a second copy of
+        # the rule: a plan that says a different thing from the run is the drift
+        # this delegation exists to prevent.
+        first = refusals[0]
+        raise HTTPException(status_code=first["status"], detail=first["detail"])
+
+    roots: List[str] = []
+    for move in moves:
+        if move["kind"] != "dir" or move["to"] in roots:
+            continue
+        roots.append(move["to"])
+    if not roots:
+        raise HTTPException(
+            status_code=409, detail=f"{key!r} has no folder to hoist into a project"
+        )
+
+    # The member rule asked ONCE over the registered files, then every path
+    # projected through the move list: a member's path on the wire is the path it
+    # will HAVE, because the create step executes the set the operator reviewed.
+    entries = list(bundle_service.members_of(key, bundle_service.registered_assets(session, key)).entries)
+    projected = [(entry, _move_path(entry.asset.path, moves)) for entry in entries]
+
+    creates = sorted({os.path.dirname(move["to"]) for move in moves} - {"", "."})
+
+    projects: List[dict] = []
+    excluded: List[dict] = []
+    create_steps: List[dict] = []
+    assigned: set = set()
+    dropped: set = set()
+    for position, root in enumerate(roots):
+        name = proposal_engine.folder_title(os.path.basename(root))
+        existing = project_create_service.find_existing_project(session, key=root, name=name)
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"a project already covers {root!r}; the split would hoist a folder onto it, so "
+                    "nothing was planned"
+                ),
+            )
+        bucket = [entry for entry, path in projected if _under(path, root)]
+        kept, root_excluded = _excluded_members(session, root, bucket, existing)
+        excluded.extend(root_excluded)
+        if not kept:
+            raise HTTPException(
+                status_code=409,
+                detail=f"nothing to create from {root!r}: every file under it is excluded",
+            )
+        kept_ids = {entry.asset.id for entry in kept}
+        # Two different silences: a file the MEMBER RULE dropped already carries its
+        # own reason above, and a file no root would hold is named below. Keeping the
+        # two apart is what stops one path being served twice with contradictory
+        # reasons.
+        dropped.update({entry.asset.id for entry in bucket} - kept_ids)
+        members = [
+            (entry, path) for entry, path in projected if _under(path, root) and entry.asset.id in kept_ids
+        ]
+        assigned.update(kept_ids)
+        cover = bundle_service.cover_for_registered([entry.asset for entry in kept], None)
+        groups = _hoisted_groups(facts, key, root)
+        projects.append({"name": name, "root": root, "members": len(members)})
+        create_index = 1 + 2 * position
+        create_steps.append(
+            {
+                "index": create_index,
+                "op": "create-project",
+                "summary": f"create project {name!r} from {len(members)} member file(s)",
+                "args": {
+                    "key": root,
+                    "name": name,
+                    "members": [
+                        {"asset_id": entry.asset.id, "path": path} for entry, path in members
+                    ],
+                    "model_ids": [
+                        entry.asset.id for entry, _path in members if entry.role == library_scan.MODEL
+                    ],
+                    "groups": groups,
+                    "marker": _detection_marker(row, shape, root),
+                    "cover_asset_id": cover.get("asset_id"),
+                },
+            }
+        )
+        create_steps.append(
+            {
+                "index": create_index + 1,
+                "op": "verify-members",
+                "summary": f"verify {len(members)} member file(s) landed in project {name!r}",
+                "args": {
+                    "project_step": create_index,
+                    "asset_ids": [entry.asset.id for entry, _path in members],
+                },
+            }
+        )
+
+    # Everything the split leaves behind is NAMED, with a reason: a registered file
+    # that sits at the container's root is not under any folder the shape hoists, so
+    # no project would ever hold it, and the operator must not have to discover that
+    # from a member count.
+    for entry, path in projected:
+        if entry.asset.id in assigned or entry.asset.id in dropped:
+            continue
+        excluded.append(
+            {
+                "path": path,
+                "reason": "not inside one of the folders the split hoists, so no project would hold it",
+            }
+        )
+
+    steps = [
+        {
+            "index": 0,
+            "op": "move",
+            "summary": f"move {len(moves)} top folder(s) out of {key!r}",
+            "args": {
+                "key": key,
+                "pairs": [[pair.source, pair.target, pair.kind] for pair in pairs],
+                "creates": creates,
+                "folders": _folder_snapshot(session, key),
+            },
+        },
+        *create_steps,
+    ]
+    review = {
+        "workflow": "split-and-create",
+        "target": key,
+        "moves": len(moves),
+        "creates": len(projects),
+        "adopts": 0,
+        "deletes": 0,
+        "members": sum(project["members"] for project in projects),
+        "groups": [],
+        "cover": None,
+        "excluded": excluded,
+        "existing_project_id": None,
+        "existing_project_name": None,
+        "move_list": [
+            {
+                "source": move["from"],
+                "target": move["to"],
+                "kind": move["kind"],
+                "action": move["action"],
+            }
+            for move in moves
+        ],
+        "projects": projects,
+    }
+    return steps, review, [key, *roots]
 
 
 # Submit -----------------------------------------------------------------------
@@ -630,6 +989,12 @@ def _project_step(session: Session, operation_id: str) -> Optional[OperationStep
 
 
 def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext]) -> dict:
+    """Undo one finished operation, workflow by workflow.
+
+    The guards below are the shared ones - a superseded, already-undone, unfinished
+    or nothing-changed operation answers the same 409 whichever workflow it was -
+    and only the body is workflow-shaped.
+    """
     operation = get_operation(session, operation_id)
     if operation.undo_state == UNDO_SUPERSEDED:
         raise HTTPException(
@@ -649,6 +1014,19 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
             status_code=409, detail="this operation changed nothing that can be undone"
         )
 
+    if operation.workflow == "create-project":
+        return _undo_create_project(session, operation, ctx)
+    if operation.workflow == "split-and-create":
+        return _undo_split_and_create(session, operation, ctx)
+    raise HTTPException(
+        status_code=409, detail=f"undo is not implemented for workflow {operation.workflow!r}"
+    )
+
+
+def _undo_create_project(
+    session: Session, operation: Operation, ctx: Optional[audit.AuditContext]
+) -> dict:
+    """The create-project undo, byte for byte what it did before split existed."""
     step = _project_step(session, operation.id)
     result = json.loads(step.result_json) if step and step.result_json else {}
     if not result.get("created"):
@@ -689,6 +1067,157 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
         "undone": True,
         "project_id": project_id,
         "project_name": project_name,
+    }
+
+
+def move_intent(operation_id: str) -> str:
+    """The intent the split's move step used; deterministic, so it is findable later."""
+    return f"operation:{operation_id}:move"
+
+
+def _result_of(step: Optional[OperationStep]) -> dict:
+    """One step's stored result, or `{}` for a step that has none or a broken one."""
+    if step is None or not step.result_json:
+        return {}
+    try:
+        payload = json.loads(step.result_json)
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _restore_retired(entries: Sequence) -> int:
+    """Recreate the folder rows the move step's retirement deleted.
+
+    Shallowest path first, because `folder.parent_id` is a real foreign key: a row
+    whose parent is not there yet cannot be inserted. A row that already exists is
+    left alone, which is what makes a resumed undo a no-op here.
+    """
+    ordered = sorted(
+        (entry for entry in entries if isinstance(entry, dict) and entry.get("id")),
+        key=lambda entry: (
+            (entry.get("storage_path") or "").count("/"),
+            entry.get("storage_path") or "",
+            entry["id"],
+        ),
+    )
+    restored = 0
+    with Session(engine) as session:
+        for entry in ordered:
+            if session.get(Folder, entry["id"]) is not None:
+                continue
+            session.add(
+                Folder(
+                    id=entry["id"],
+                    name=entry.get("name") or "",
+                    tags_json=entry.get("tags_json") or "[]",
+                    parent_id=entry.get("parent_id"),
+                    storage_path=entry.get("storage_path"),
+                )
+            )
+            session.flush()
+            restored += 1
+        session.commit()
+    return restored
+
+
+def _undo_split_and_create(
+    session: Session, operation: Operation, ctx: Optional[audit.AuditContext]
+) -> dict:
+    """Fold the split back: the retired rows, the moves, the projects, the state.
+
+    The order is the contract and it is NOT the create-project one:
+
+      1. the folder rows the move step retired are recreated first. The move fold's
+         row rewrite takes each hoisted folder's `parent_id` from the row at its old
+         parent path, so restoring afterwards would leave every child pointing at
+         the grandparent - rows that are not byte-identical to the pre-plan
+         snapshot, which is exactly what this undo owes;
+      2. `move_service.undo_ledger` folds the landed pairs back and writes the
+         rows, and the `operation.undo` audit row is staged INTO that transaction
+         so the record commits with `undone = 1`;
+      3. only the projects whose create step reported `created: true` are deleted.
+         A create that answered "already created" raced the plan and is KEPT:
+         deleting a project this operation did not make would destroy somebody
+         else's work, and the audit detail names it as kept;
+      4. `undo_state = undone` is stamped LAST.
+
+    It is resumable, not atomic. `AlreadyUndone` from the fold is tolerated - a run
+    that folded and died leaves the ledger undone, and the retry finishes the
+    deletes and the stamp - and every step above is idempotent. What it is not is
+    a single transaction: a crash between the fold and the deletes leaves a project
+    whose bytes are back, which the next undo attempt repairs.
+    """
+    steps = steps_for(session, operation.id)
+    move_step = next((step for step in steps if step.op == "move"), None)
+    move_result = _result_of(move_step)
+    ledger_id = move_result.get("ledger_id") or move_service.ledger_id_for_intent(
+        move_intent(operation.id)
+    )
+
+    created: List[str] = []
+    kept: List[str] = []
+    for step in steps:
+        if step.op != "create-project":
+            continue
+        result = _result_of(step)
+        project_id = result.get("project_id")
+        if not isinstance(project_id, str) or not project_id:
+            continue
+        (created if result.get("created") else kept).append(project_id)
+
+    retired = move_result.get("retired") or []
+    _restore_retired(retired)
+
+    folded = 0
+    if ledger_id:
+        try:
+            outcome = move_service.undo_ledger(
+                ledger_id,
+                ctx=ctx,
+                events=(
+                    audit.Event(
+                        audit.OPERATION_UNDO,
+                        operation.id,
+                        {
+                            # What the fold does, and what the undo will act on: both
+                            # lists are read off the step rows, which are the record.
+                            "moves": int(move_result.get("landed") or 0),
+                            "projects_removed": created,
+                            "projects_kept": kept,
+                        },
+                    ),
+                ),
+            )
+            folded = len(outcome.pairs)
+        except move_service.AlreadyUndone:
+            # The undo is resumable, not atomic: this run is finishing a fold that
+            # already happened, and the audit row it wrote says so.
+            folded = int(move_result.get("landed") or 0)
+
+    removed: List[str] = []
+    for project_id in created:
+        with Session(engine) as delete_session:
+            project = delete_session.get(Project, project_id)
+            if project is None:
+                # Already gone: a resumed undo, or an operator deleted it. Either
+                # way there is nothing to remove and nothing to report.
+                continue
+            project_service.delete_project(delete_session, project, audit_ctx=None)
+        removed.append(project_id)
+
+    with Session(engine) as final:
+        current = final.get(Operation, operation.id)
+        if current is not None:
+            current.undo_state = UNDO_UNDONE
+            final.add(current)
+            final.commit()
+
+    return {
+        "operation_id": operation.id,
+        "undone": True,
+        "moves": folded,
+        "projects_removed": removed,
     }
 
 

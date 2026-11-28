@@ -8,25 +8,38 @@ import type { ComponentProps } from "react";
 const bundleApi = vi.hoisted(() => ({
   createBundles: vi.fn(),
   enrichBundles: vi.fn(),
-  getArrangePlan: vi.fn(),
 }));
 vi.mock("../../lib/api/bundles", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/bundles")>()),
   createBundles: bundleApi.createBundles,
   enrichBundles: bundleApi.enrichBundles,
-  getArrangePlan: bundleApi.getArrangePlan,
+}));
+
+// The split door the panel mounts reads its own domain module, so its calls are
+// mocked there. The original is spread back so every other export keeps working.
+const operationsApi = vi.hoisted(() => ({
+  planOperation: vi.fn(),
+  submitOperation: vi.fn(),
+  getOperation: vi.fn(),
+  undoOperation: vi.fn(),
+}));
+vi.mock("../../lib/api/operations", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../lib/api/operations")>()),
+  planOperation: operationsApi.planOperation,
+  submitOperation: operationsApi.submitOperation,
+  getOperation: operationsApi.getOperation,
+  undoOperation: operationsApi.undoOperation,
 }));
 
 import {
   createBundles,
   enrichBundles,
-  getArrangePlan,
-  type BundleArrangePlan,
   type BundleCreateResponse,
   type BundleDetectItem,
   type BundleEnrichResponse,
   type BundleMatch,
 } from "../../lib/api/bundles";
+import { planOperation, type OperationPlan } from "../../lib/api/operations";
 import { UnauthorizedError } from "../../lib/api/http";
 import { getToasts, resetToasts } from "../../lib/toast";
 import Toaster from "../Toaster";
@@ -34,7 +47,7 @@ import GuidedImportPanel from "./GuidedImportPanel";
 
 const createBundlesMock = vi.mocked(createBundles);
 const enrichBundlesMock = vi.mocked(enrichBundles);
-const getArrangePlanMock = vi.mocked(getArrangePlan);
+const planOperationMock = vi.mocked(planOperation);
 
 const LARGE_IMAGE = {
   asset_id: "img-large",
@@ -164,16 +177,36 @@ function makeRenamedTwin(): BundleDetectItem {
   });
 }
 
-function mockPlan(overrides: Partial<BundleArrangePlan> = {}): BundleArrangePlan {
+/** A split the server planned: two hoists and the two projects they make, so
+ *  the panel has a list to read and one action to offer. */
+function makePlan(overrides: Partial<OperationPlan> = {}): OperationPlan {
   return {
-    key: "import/Renamed Moai",
-    shape: "one-project",
-    plan_id: "p",
-    moves: [],
-    text: [],
-    creates: [],
-    refusals: [],
-    report: { creatable: true, blocked_reason: null },
+    plan_id: "plan-1",
+    workflow: "split-and-create",
+    target: "import/Renamed Moai",
+    steps: [],
+    review: {
+      workflow: "split-and-create",
+      target: "import/Renamed Moai",
+      moves: 2,
+      creates: 2,
+      adopts: 0,
+      deletes: 0,
+      members: 4,
+      groups: [],
+      cover: null,
+      excluded: [],
+      existing_project_id: null,
+      existing_project_name: null,
+      move_list: [
+        { source: "Container/Alpha", target: "Alpha", kind: "dir", action: "hoist" },
+        { source: "Container/Beta", target: "Beta", kind: "dir", action: "hoist" },
+      ],
+      projects: [
+        { name: "Alpha", root: "Alpha", members: 2 },
+        { name: "Beta", root: "Beta", members: 2 },
+      ],
+    },
     ...overrides,
   };
 }
@@ -228,8 +261,9 @@ function suggestionBox(field: string): HTMLElement {
 beforeEach(() => {
   vi.clearAllMocks();
   resetToasts();
-  // The panel reads the plan on mount, so every test's read must resolve.
-  getArrangePlanMock.mockResolvedValue(mockPlan());
+  // The split door plans on mount when it is offered, so every test's read must
+  // resolve.
+  planOperationMock.mockResolvedValue(makePlan());
 });
 
 afterEach(() => {
@@ -241,7 +275,7 @@ describe("GuidedImportPanel", () => {
     const { container } = renderPanel(makeRow(), { canContribute: false });
 
     expect(container.firstChild).toBeNull();
-    expect(getArrangePlanMock).not.toHaveBeenCalled();
+    expect(planOperationMock).not.toHaveBeenCalled();
   });
 
   it("shows a PDF-sourced suggestion with its source and keeps it visually distinct from a fact", async () => {
@@ -347,9 +381,9 @@ describe("GuidedImportPanel", () => {
     await waitForApply();
 
     fireEvent.click(document.querySelector('[data-guided-shape="one-project"]') as HTMLElement);
-    await waitFor(() =>
-      expect(getArrangePlanMock).toHaveBeenCalledWith("import/Renamed Moai", "one-project"),
-    );
+    expect(
+      (document.querySelector('[data-guided-shape="one-project"]') as HTMLInputElement).checked,
+    ).toBe(true);
     fireEvent.click(document.querySelector('[data-guided-cover-asset="img-small"]') as HTMLElement);
     await waitForApply();
 
@@ -370,38 +404,34 @@ describe("GuidedImportPanel", () => {
     expect(items[0]).not.toHaveProperty("auto");
   });
 
-  it("hands a split to the arrange preview and never calls createBundles", async () => {
-    getArrangePlanMock.mockImplementation(async (_key: string, shape: string) =>
-      shape === "split-top-folders"
-        ? mockPlan({
-            shape,
-            moves: [
-              { from: "Container/Alpha", to: "Alpha", kind: "dir", action: "hoist" },
-              { from: "Container/Beta", to: "Beta", kind: "dir", action: "hoist" },
-            ],
-            text: ['move "Container/Alpha" -> "Alpha"', 'move "Container/Beta" -> "Beta"'],
-            creates: [{ path: "Alpha", exists: false }],
-            report: { creatable: false, blocked_reason: "needs_arrange" },
-          })
-        : mockPlan(),
-    );
+  it("hands a split to the split door and never calls createBundles", async () => {
     renderPanel();
     await waitForApply();
+
+    // Nothing is planned while the row's shape is one the server can enact.
+    expect(planOperationMock).not.toHaveBeenCalled();
 
     fireEvent.click(document.querySelector('[data-guided-shape="split-top-folders"]') as HTMLElement);
 
     expect(screen.getByText(/Needs arranging:/)).toBeTruthy();
+    // The panel that owns the WRITE is the one that plans: this panel no longer
+    // fetches a second copy of the same move list.
     await waitFor(() =>
-      expect(document.querySelectorAll("[data-guided-move]")).toHaveLength(2),
+      expect(planOperationMock).toHaveBeenCalledWith({
+        workflow: "split-and-create",
+        target: "import/Renamed Moai",
+        params: { shape: "split-top-folders" },
+      }),
     );
-    const moves = Array.from(document.querySelectorAll("[data-guided-move]")).map(
+    await waitFor(() => expect(document.querySelectorAll("[data-split-move]")).toHaveLength(2));
+    const moves = Array.from(document.querySelectorAll("[data-split-move]")).map(
       node => node.textContent,
     );
     expect(moves[0]).toContain('move "Container/Alpha" -> "Alpha"');
     expect(moves[1]).toContain('move "Container/Beta" -> "Beta"');
 
     // The door that CAN move the bytes is right beside the disabled import.
-    expect(screen.getByRole("button", { name: "Preview the moves" })).toBeTruthy();
+    expect(document.querySelector("[data-split-action-button]")).toBeTruthy();
     expect(applyButton().disabled).toBe(true);
     expect(createBundlesMock).not.toHaveBeenCalled();
   });
@@ -493,8 +523,6 @@ describe("GuidedImportPanel", () => {
       createBundlesMock.mockResolvedValue(createdResponse(row.key, row.name_suggestion));
       renderPanel(row);
       await waitForApply();
-
-      expect(getArrangePlanMock).toHaveBeenCalledWith(row.key, "one-project");
 
       fireEvent.click(applyButton());
 

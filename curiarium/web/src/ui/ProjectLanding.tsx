@@ -65,13 +65,9 @@ import {
   DRIFT_NOT_APPLICABLE,
   DRIFT_UNKNOWN,
   driftNoticeLine,
-  driftWantsArrange,
-  projectArrangeOffer,
-  undoableArrange,
 } from "./projectBundleDrift";
 import { useFileGrants, useLiveFileGrants } from "../lib/useFileGrants";
 import ConfirmDialog, { type ConfirmRequest } from "./ConfirmDialog";
-import ArrangePlanPanel from "./review/ArrangePlanPanel";
 import AssetGrid from "./asset-grid/AssetGrid";
 import LicenceChip from "./LicenceChip";
 import AttachFilesControl from "./project-attach/AttachFilesControl";
@@ -99,10 +95,10 @@ type Props = {
    */
   onAssetsChanged: () => void;
   /**
-   * App's `handleFoldersChanged`. A server-side arrange creates Folder rows and
-   * rewrites `storage_path`, so the sidebar tree and the members/counts change
-   * in one event. Optional because a host that does not own the tree (a test
-   * harness, or a future embed) simply has nothing to bump.
+   * App's `handleFoldersChanged`. Declared for the host's contract, but this
+   * panel no longer moves files: the drift notice's one action attaches members
+   * through `POST /project/{id}/assets`, which creates no `Folder` rows and
+   * rewrites no `storage_path`, so nothing here bumps the tree.
    */
   onFoldersChanged?: () => void;
   onUnauthorized?: () => void;
@@ -258,7 +254,6 @@ export default function ProjectLanding({
   onProjectUpdated,
   onProjectDeleted,
   onAssetsChanged,
-  onFoldersChanged,
   onUnauthorized,
   slicerSettings,
   engravingSettings,
@@ -276,15 +271,6 @@ export default function ProjectLanding({
     },
     [onUnauthorized],
   );
-
-  // The arrange door's ONE completion signal: server-side arrange creates Folder
-  // rows and rewrites `storage_path`, so the tree AND the members/counts change
-  // in one event and must bump in one commit. The member grid below keeps
-  // `onProjectsChanged={onAssetsChanged}`: membership is an asset-only change.
-  const handleArranged = useCallback(() => {
-    onAssetsChanged();
-    onFoldersChanged?.();
-  }, [onAssetsChanged, onFoldersChanged]);
 
   // --- Attaching the user's own files -------------------------------------
 
@@ -364,16 +350,6 @@ export default function ProjectLanding({
   }, [project.id, bundleMarker, assetsVersion]);
 
   const driftLine = driftNoticeLine(drift.state, drift.count);
-  // The bundle key + shape a plan on this project would be measured against.
-  // Derived once, from the marker itself: the arrange door is offered only when
-  // there is a path and a shape to ask the server about.
-  const projectOffer = projectArrangeOffer(project.metadata_json?._bundle);
-  // An arrange this project has already applied and not undone. The apply
-  // refetches the memberships, the drift count then reaches zero and
-  // `driftLine` goes null - so the notice is pinned on the ledger instead, or
-  // the panel (and its in-session Undo) would unmount the instant the write
-  // landed.
-  const pinnedArrange = undoableArrange(project.metadata_json?._bundle);
 
   // The one action on the notice, through the membership path that already
   // exists: nothing is attached without the click, and there is no new write
@@ -946,15 +922,14 @@ export default function ProjectLanding({
 
         {/* One notice for the whole project, never one per group: the marker's
             groups are a creation-time snapshot, so a new subfolder is not a
-            group and a per-group notice would miss exactly this growth. */}
-        {(driftLine || pinnedArrange) && (
+            group and a per-group notice would miss exactly this growth. It
+            stands while the server names parts the project does not have. */}
+        {driftLine !== null && (
           <div
             data-bundle-drift="true"
             className="flex flex-wrap items-center gap-3 rounded-md border border-panel-strong bg-panel-soft px-3 py-2 text-sm"
           >
-            {/* A pinned notice with no drift line has nothing to say about
-                drift: the arrange panel below carries the sentence. */}
-            {driftLine && <span className="text-muted">{driftLine}</span>}
+            <span className="text-muted">{driftLine}</span>
             {/* No ids, no action: a count with nothing to send cannot be honoured. */}
             {canContribute && drift.asset_ids.length > 0 && (
               <button
@@ -966,21 +941,6 @@ export default function ProjectLanding({
                 {ADD_DRIFT_PARTS_LABEL}
               </button>
             )}
-            {/* The arrange door: a grown folder can also be rearranged into the
-                shape it was created as, so the same door the review queue uses
-                is mounted here - no route, no new state, and no request until
-                the operator asks for a preview. */}
-            {canContribute &&
-              projectOffer !== null &&
-              (driftWantsArrange(drift.state, drift.count) || pinnedArrange) && (
-                <ArrangePlanPanel
-                  bundleKey={projectOffer.bundleKey}
-                  shape={projectOffer.shape}
-                  canContribute={canContribute}
-                  onChanged={handleArranged}
-                  onUnauthorized={onUnauthorized}
-                />
-              )}
           </div>
         )}
       </header>

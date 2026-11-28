@@ -67,7 +67,7 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 62 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 60 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
@@ -90,8 +90,6 @@ could honestly reconstruct.
 | `bundle.create` | `POST /bundles/create` (one row per created bundle) | the bundle key: the storage-root-relative directory, or the zip's relative path | `{"project_id", "created", "assets_added", "assets_failed", "detector", "confidence", "name_only", "shape", "auto", "cover", "accepted_fields"}` - which rule matched and how sure it was, and the last four record WHICH shape was created, whether a single-click auto ran, which cover decision the operator made (`engine`/`asset`/`none`) and which metadata fields they accepted, never the parsed documents | fail-loud: the project and its memberships are committed by shared services that own their sessions |
 | `bundle.dismiss` | `POST /bundles/dismiss` (one row per key that actually changed) | the bundle key | `{"dismissed"}` - `true` for a dismissal, `false` for its undo | fail-loud: the map lives in the appconfig store, which commits in its own session |
 | `bundle.enrich` | `POST /bundles/enrich` (one row per bundle whose page answered) | the bundle key | `{"thing_id", "source_url", "fields"}` - which fields the page supplied, never the page body or the cookie | fail-loud: the record lives in the appconfig store, which commits in its own session; a refusal writes no row |
-| `arrange.apply` | `POST /bundles/arrange` | the bundle key the plan was measured on | `{"arrange_id", "plan", "shape", "moves", "project_ids", "created_project", "done"}` - the plan the operator approved by echoing its id, and `done` is how many of `moves` landed, so a partial apply says so. An adopt moves nothing, so `moves` being empty beside a non-empty `project_ids` is the membership half: commit 1 also rewrites that project's `groups` from the engine's current measurement and keeps the snapshot it replaced in the ledger (`projects[*].groups_before`) | fail-loud: the projects, their groups and the ledger are committed before the row is written, and the ledger is what a re-post resumes from |
-| `arrange.undo` | `POST /bundles/arrange/{arrange_id}/undo` | the bundle key the undone plan was measured on | `{"arrange_id", "plan", "shape", "moves", "memberships_removed", "projects_removed"}` - `moves` is how many landed moves were folded back, `memberships_removed` how many of the ledger's added memberships were dropped (the wire answers the same number), `projects_removed` the projects the arrange created and the undo dropped | fail-loud: the bytes are back, the rows restored and each adopted project's group snapshot put back before the row is written |
 | `trash.purge` | `POST /trash/purge` | `"trash"` | `{"purged", "bytes", "failed"}` from `trash_service.purge()` | fail-loud |
 | `settings.storage.update` | `POST /settings/storage` | `"storage_path_template"` | `{"from", "to"}` templates | fail-closed |
 | `settings.mount_import.update` | `POST /settings/mount-import` | `"mount_import"` | `{"enabled", "copy_files"}` | fail-closed |
@@ -265,8 +263,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 112 routes, 44
-of them `GET`; the remaining 68 split into 53 audited keys and 15 exempt keys.
+out of scope by construction: they change nothing. The matrix has 109 routes, 43
+of them `GET`; the remaining 66 split into 51 audited keys and 15 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without
@@ -626,7 +624,7 @@ administration).
 | Parameter | Type | Semantics |
 |---|---|---|
 | `actor` | string | exact match, case-insensitive (both sides lowered, value stripped) |
-| `action` | string | exact match, case-sensitive - one of the 62 names above |
+| `action` | string | exact match, case-sensitive - one of the 60 names above |
 | `target` | string | case-sensitive substring match; `%`, `_` and `\` are escaped, so it is a literal substring. An asset id also returns that asset's `asset.create` row, because creation's target is the new id |
 | `since` | string | `created_at >= value` |
 | `until` | string | `created_at <= value` |

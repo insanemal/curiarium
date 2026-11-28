@@ -709,65 +709,6 @@ def call_enrich_bundle(client, headers, ids, monkeypatch) -> Response:
     return client.post("/bundles/enrich", json={"keys": [DRAGON_KEY]}, headers=headers)
 
 
-# The arrange pair (Mf-v9eg) moves bytes, so these two specs build a real tree
-# instead of naming a dead key: the smallest layout the engine renames - one
-# numbered tower beside three siblings that share its title - registered the way
-# a scan registers it, previewed, then applied by echoing the plan id back. The
-# undo needs that apply to have landed, so it runs the same setup first. The
-# setup requests carry no `X-Request-ID`, so the apply's row is not read back as
-# the undo's event.
-SERIES = "17_ClockworkMonster"
-SERIES_KEY = f"import/{SERIES}"
-SERIES_SIBLINGS = (
-    "01_Fates End - Wizard Tower",
-    "02_Fates End - Dragon Tower",
-    "03_Fates End - Clock Tower",
-)
-
-
-def setup_headers(headers: dict[str, str]) -> dict[str, str]:
-    """The sweep's credentials without its request id, for the setup requests."""
-    return bearer(headers["Authorization"].partition("Bearer ")[2])
-
-
-def arrange_tree() -> None:
-    """The series layout on the temp root, with the rows a scan would write."""
-    for folder in (SERIES, *SERIES_SIBLINGS):
-        model = db.STORAGE / "import" / folder / "a.stl"
-        model.parent.mkdir(parents=True, exist_ok=True)
-        model.write_bytes(STL_BYTES)
-    state = library_scan.scan_storage_root()
-    assert state.failed == 0, state.errors
-
-
-def apply_arrange(client, headers: dict[str, str]) -> Response:
-    """Preview the series tree, then apply that exact plan."""
-    preview = client.get(
-        "/bundles/arrange",
-        params={"key": SERIES_KEY, "shape": "one-project"},
-        headers=headers,
-    )
-    assert preview.status_code == 200, preview.text
-    plan = preview.json()
-    return client.post(
-        "/bundles/arrange",
-        json={"key": plan["key"], "shape": plan["shape"], "plan_id": plan["plan_id"]},
-        headers=headers,
-    )
-
-
-def call_arrange_apply(client, headers, ids, monkeypatch) -> Response:
-    arrange_tree()
-    return apply_arrange(client, headers)
-
-
-def call_arrange_undo(client, headers, ids, monkeypatch) -> Response:
-    arrange_tree()
-    applied = apply_arrange(client, setup_headers(headers))
-    assert applied.status_code == 200, applied.text
-    return client.post(f"/bundles/arrange/{applied.json()['arrange_id']}/undo", headers=headers)
-
-
 # The MFA routes (Mf-lg02) are driven by a throwaway account, never the fixture
 # admin: enrolling the admin would turn `/login` into a challenge and every later
 # spec in this sweep would be a different test. The sweep's request id has to
@@ -996,8 +937,6 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/bundles/create"): call_create_bundle,
     ("POST", "/bundles/dismiss"): call_dismiss_bundle,
     ("POST", "/bundles/enrich"): call_enrich_bundle,
-    ("POST", "/bundles/arrange"): call_arrange_apply,
-    ("POST", "/bundles/arrange/{arrange_id}/undo"): call_arrange_undo,
     ("POST", "/trash/purge"): call_purge,
     ("POST", "/settings/storage"): call_storage_settings,
     ("POST", "/settings/mount-import"): call_mount_import_settings,

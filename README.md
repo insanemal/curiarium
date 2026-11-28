@@ -35,7 +35,7 @@ looking for one specific document, start there.
 | **Folders are directories** | A folder *is* a directory under the storage root. Create, rename, move and delete in the UI and the filesystem follows; `DELETE` moves the subtree to trash, never unlinks blind. |
 | **Rescan for files you copied in** | `rsync`/`cp` files into the storage root, press **Rescan storage folder** in **REVIEW → Missing files**, and they are registered where they already sit — no import dance, no re-templating. That queue is also where files flagged *missing* are listed. |
 | **Nothing disappears quietly** | A file removed behind the app's back is flagged *missing* (with a date) rather than vanishing from the library. Reference imports whose source is gone are flagged too, never deleted. |
-| **Storage template** | New files land in a configurable layout (`{folder}/{filename}` by default), so a file lands directly in its folder's directory. `{model}` remains available for the upstream one-directory-per-model layout, and a deliberate template is honoured. This affects new writes only — existing files are never re-arranged, and re-arranging an existing tree is the approval-gated job of Mf-v9eg, never a silent migration. |
+| **Storage template** | New files land in a configurable layout (`{folder}/{filename}` by default), so a file lands directly in its folder's directory. `{model}` remains available for the upstream one-directory-per-model layout, and a deliberate template is honoured. This affects new writes only — existing files are never re-arranged, and re-arranging an existing tree is the approval-gated job of the `split-and-create` operation (`POST /operations/plan` then `POST /operations`), never a silent migration. |
 
 **Organisation**
 

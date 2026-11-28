@@ -2,15 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   ENRICH_MAX_KEYS,
-  type BundleArrangeAdoptions,
-  type BundleArrangePlan,
-  type BundleArrangeRefusal,
   type BundleDetectCounts,
   type BundleDetectItem,
   type BundleEnrichment,
   type BundleMatch,
   type BundleSuggestion,
 } from "../../lib/api/bundles";
+import {
+  type OperationExcluded,
+  type OperationStep,
+} from "../../lib/api/operations";
 import {
   ARCHIVE_ONLY_FOLDER_LABEL,
   AUTO_SHAPES,
@@ -35,15 +36,6 @@ import {
   activeShape,
   archiveExtractTitle,
   archiveLine,
-  arrangeActionLabel,
-  arrangeAdoptionCount,
-  arrangeAdoptionGroupCount,
-  arrangeAppliesNothing,
-  arrangeHeadline,
-  arrangeMoveCount,
-  arrangeMoveCountLabel,
-  arrangeMoveLine,
-  arrangeRefusalLine,
   blockedReasonLabel,
   bulkEnrichNoneLine,
   bulkEnrichTitle,
@@ -60,6 +52,7 @@ import {
   enrichSelectionLabel,
   enrichUnavailableLine,
   enrichmentLine,
+  excludedLine,
   extractPathFor,
   hasThingSource,
   headline,
@@ -77,6 +70,9 @@ import {
   needsStorageScan,
   newPartsLine,
   noPayloadDoor,
+  operationActionLabel,
+  operationMoveLine,
+  operationStatusLine,
   payloadOnDisk,
   recommendationEnactable,
   recommendedMatch,
@@ -2620,7 +2616,7 @@ describe("needsStorageScan", () => {
   });
 });
 
-describe("arranging", () => {
+describe("the split's narration", () => {
   /** A served reading the server cannot enact: the dissenting cardinality
    *  shapes, which need the folder's files moved before a create can be sent. */
   const needsArranging: BundleMatch = {
@@ -2646,33 +2642,33 @@ describe("arranging", () => {
   };
   const manual: BundleMatch = { ...enactable, shape: "manual", rule: "manual" };
 
-  /** One previewed plan, shaped the way the server answers `GET
-   *  /bundles/arrange`: the moves, the engine's own text, the directories they
-   *  imply and whatever the server refuses. */
-  function arrangePlan(overrides: Partial<BundleArrangePlan> = {}): BundleArrangePlan {
-    return {
-      key: "Moai statue",
-      shape: "split-top-folders",
-      plan_id: "plan-1",
-      moves: [
-        { from: "Moai statue/a.stl", to: "Moai statue/Fates End/a.stl", kind: "file", action: "move" },
-        { from: "Moai statue/b.stl", to: "Moai statue/Fates End/b.stl", kind: "file", action: "move" },
-      ],
-      text: ['move "Moai statue/a.stl" -> "Moai statue/Fates End/a.stl"'],
-      creates: [{ path: "Moai statue/Fates End", exists: false }],
-      refusals: [],
-      report: { creatable: false, blocked_reason: "nothing_to_arrange" },
-      ...overrides,
-    };
-  }
+  it("offers the split door for the shape the server cannot enact yet", () => {
+    const row = makeBundle({ matches: [enactable, needsArranging, manual] });
+    // The door is for exactly this reading: the server says `creatable: false`,
+    // so a create would answer `needs-arrange` and write nothing.
+    expect(isArrangable(row, "split-top-folders")).toBe(true);
+  });
+
+  it("never offers it for an ENACTABLE shape, nor for one the row does not serve", () => {
+    // Catches an inverted `isEnactable` here: the door would appear on every
+    // ordinary row, so an enactable shape - one create can already write - would
+    // be offered the split instead, and the operator would rearrange a folder
+    // that needed no rearranging.
+    const row = makeBundle({ matches: [enactable, needsArranging, manual] });
+    expect(isArrangable(row, "generic")).toBe(false);
+    expect(isArrangable(row, "manual")).toBe(false);
+    // A shape this row does not offer has no match to judge, so the answer is no
+    // door rather than a door for a shape nobody can choose.
+    expect(isArrangable(row, "compound")).toBe(false);
+  });
 
   it("quotes both paths of a move, so a path with spaces still reads as two", () => {
     // Catches dropping either pair of quotes: with the paths bare, `a b/c.stl ->
     // a b/d/c.stl` has four possible readings of where the source ends.
     expect(
-      arrangeMoveLine({
-        from: "Moai statue/a.stl",
-        to: "Moai statue/Fates End/a.stl",
+      operationMoveLine({
+        source: "Moai statue/a.stl",
+        target: "Moai statue/Fates End/a.stl",
         kind: "file",
         action: "move",
       }),
@@ -2684,144 +2680,74 @@ describe("arranging", () => {
     // renders one as a dash: a newer server's token is still a real move, and a
     // dash would make it read as an absent one. The four known tokens are the
     // only ones the client may translate.
-    expect(arrangeActionLabel("hoist")).toBe("hoist");
-    expect(arrangeActionLabel("move")).toBe("move");
-    expect(arrangeActionLabel("file-archive")).toBe("file archive");
-    expect(arrangeActionLabel("rename")).toBe("rename");
-    expect(arrangeActionLabel("retire-containerish")).toBe("retire-containerish");
+    expect(operationActionLabel("hoist")).toBe("hoist");
+    expect(operationActionLabel("move")).toBe("move");
+    expect(operationActionLabel("file-archive")).toBe("file archive");
+    expect(operationActionLabel("rename")).toBe("rename");
+    expect(operationActionLabel("retire-containerish")).toBe("retire-containerish");
   });
 
-  it("renders a refusal as the server's own detail, verbatim", () => {
-    // Catches a sentence rebuilt from `status`/`reason`: the server's detail is
-    // the operator sentence, its count is the server's own measurement, and a
-    // client that rewrites it prints a second explanation of one refusal.
-    const refusal: BundleArrangeRefusal = {
-      status: 409,
-      reason: "cross_device",
-      detail: "cross-device move refused: 3 of 5 moves would cross a device boundary",
+  it("renders an exclusion as the server's own reason beside its path, verbatim", () => {
+    // Catches a sentence rebuilt or paraphrased here: the reason is the server's
+    // measurement of the folder it walked, and a client that rewrote it would
+    // print a second explanation of one exclusion.
+    const entry: OperationExcluded = {
+      path: "Moai statue/notes.psd",
+      reason: "does not hold a model and is not a part of any group",
     };
-    expect(arrangeRefusalLine(refusal)).toBe(
-      "cross-device move refused: 3 of 5 moves would cross a device boundary",
+    expect(excludedLine(entry)).toBe(
+      "Moai statue/notes.psd: does not hold a model and is not a part of any group",
     );
   });
 
-  it("counts the moves a previewed plan would make", () => {
-    // Catches counting `creates` or `text` instead: the two move records are the
-    // only ones that describe a write.
-    expect(arrangeMoveCount(arrangePlan())).toBe(2);
-    expect(arrangeMoveCount(arrangePlan({ moves: [] }))).toBe(0);
-  });
-
-  it("renders an unknown move count as the en dash, never a fabricated 0", () => {
-    // Catches a `moves.length` read on an absent list (`undefined.length` would
-    // throw, and `?? 0` would claim a plan of zero moves) and a label that
-    // prints the bare number: an unknown count is the one formatter's dash.
-    const payload = { ...arrangePlan() } as Partial<BundleArrangePlan>;
-    delete payload.moves;
-    expect(arrangeMoveCount(payload as BundleArrangePlan)).toBeNull();
-    expect(arrangeMoveCountLabel(null)).toBe("\u2013 moves");
-    expect(arrangeMoveCountLabel(1)).toBe("1 move");
-    expect(arrangeMoveCountLabel(0)).toBe("0 moves");
-  });
-
-  it("offers the arrange door for the shape the server cannot enact yet", () => {
-    const row = makeBundle({ matches: [enactable, needsArranging, manual] });
-    // The door is for exactly this reading: the server says
-    // `creatable: false`, so a Create would answer `needs-arrange` and write
-    // nothing.
-    expect(isArrangable(row, "split-top-folders")).toBe(true);
-  });
-
-  it("never offers it for an ENACTABLE shape, nor for one the row does not serve", () => {
-    // Catches an inverted `isEnactable` here: the door would appear on every
-    // ordinary row, so an enactable shape - one Create can already write -
-    // would be offered "Preview the moves" instead, and the operator would
-    // rearrange a folder that needed no arranging.
-    const row = makeBundle({ matches: [enactable, needsArranging, manual] });
-    expect(isArrangable(row, "generic")).toBe(false);
-    expect(isArrangable(row, "manual")).toBe(false);
-    // A shape this row does not offer has no match to judge, so the answer is no
-    // door rather than a door for a shape nobody can choose.
-    expect(isArrangable(row, "compound")).toBe(false);
-  });
-
-  it("calls a plan with no move and no directory nothing to apply", () => {
-    // Catches a check that reads only one of the two lists: a plan that creates
-    // a directory without moving anything is work, and the server applies it.
-    expect(arrangeAppliesNothing(arrangePlan({ moves: [], creates: [] }))).toBe(true);
-    expect(arrangeAppliesNothing(arrangePlan({ creates: [] }))).toBe(false);
-    expect(arrangeAppliesNothing(arrangePlan({ moves: [] }))).toBe(false);
-  });
-
-  /** The adoptions block `GET /bundles/arrange` serves beside the moves: a
-   *  zero-move plan whose whole outcome is memberships. */
-  function adoptions(overrides: Partial<BundleArrangeAdoptions> = {}): BundleArrangeAdoptions {
+  /** One step of a running split, with only the two fields the narration may
+   *  read set to anything interesting. */
+  function step(op: string, status: string): OperationStep {
     return {
-      target: { root: "import/Stagetop", project_id: "p1", creates_project: false },
-      total: 171,
-      by_role: { model: 102, image: 27, text: 18, archive: 12, other: 12 },
-      groups: Array.from({ length: 9 }, (_unused, index) => ({
-        name: `Group ${index}`,
-        root: "import/Stagetop",
-        files: 19,
-        new: index === 0,
-        foreign: false,
-        separable: true,
-        sample_names: ["part.stl"],
-      })),
-      sample_names: ["part.stl", "bracket.stl"],
-      unregistered: 0,
-      ...overrides,
+      index: 0,
+      op,
+      status,
+      result: null,
+      error: null,
+      started_at: null,
+      finished_at: null,
     };
   }
 
-  it("never calls a membership-only plan nothing to apply", () => {
-    // The zero-move adopt: no move, no create, and 171 memberships. Reading only
-    // the move and create lists is what asked the operator to approve a blank
-    // plan - and it would disable the one Apply this door exists for.
-    const plan = arrangePlan({ moves: [], creates: [], adoptions: adoptions() });
-    expect(arrangeAppliesNothing(plan)).toBe(false);
-    expect(arrangeAdoptionCount(plan)).toBe(171);
-    expect(arrangeAdoptionGroupCount(plan)).toBe(9);
-  });
+  it("narrates each known op from its own words, in every status", () => {
+    // Catches a narration driven by a count, or one whose four statuses collapse:
+    // the popup must say what the runner is DOING, and `waiting`, `doing`,
+    // `done` and `refused` are four different things to the operator.
+    expect(operationStatusLine(step("move", "done"))).toBe("moved the folders");
+    expect(operationStatusLine(step("move", "running"))).toBe("moving the folders\u2026");
+    expect(operationStatusLine(step("move", "failed"))).toBe("the move was refused");
+    expect(operationStatusLine(step("move", "pending"))).toBe("waiting to move the folders");
 
-  it("names the files and folders an adoption plan would add", () => {
-    // The badge: a `0 moves` beside a live Apply is the bug. The count and the
-    // folder count come from the adoptions block, and the badge says "adds".
-    expect(arrangeHeadline(arrangePlan({ moves: [], creates: [], adoptions: adoptions() }))).toBe(
-      "Adds 171 files in 9 folders",
+    expect(operationStatusLine(step("create-project", "done"))).toBe("created a project");
+    expect(operationStatusLine(step("create-project", "running"))).toBe(
+      "creating a project\u2026",
+    );
+    expect(operationStatusLine(step("create-project", "failed"))).toBe("the create was refused");
+    expect(operationStatusLine(step("create-project", "pending"))).toBe(
+      "waiting to create a project",
+    );
+
+    expect(operationStatusLine(step("verify-members", "done"))).toBe("checked the project's files");
+    expect(operationStatusLine(step("verify-members", "running"))).toBe(
+      "checking the project's files\u2026",
+    );
+    expect(operationStatusLine(step("verify-members", "failed"))).toBe(
+      "the project's files did not match",
+    );
+    expect(operationStatusLine(step("verify-members", "pending"))).toBe(
+      "waiting to check the files",
     );
   });
 
-  it("says a plan applies nothing when it has no move and no membership", () => {
-    // A zero total IS an answer ("nothing to adopt"), and an ABSENT block is not
-    // one - but both leave the plan with nothing to do, so both must say so
-    // rather than wear a `0 moves` badge beside a dead Apply.
-    const nothing = arrangePlan({ moves: [], creates: [], adoptions: adoptions({ total: 0 }) });
-    const absent = arrangePlan({ moves: [], creates: [], adoptions: null });
-    for (const plan of [nothing, absent]) {
-      expect(arrangeAppliesNothing(plan)).toBe(true);
-      expect(arrangeHeadline(plan)).toBe("Arrangement: applies nothing");
-    }
-  });
-
-  it("renders an absent folder count as the en dash, never a fabricated 0", () => {
-    // `groups` is optional on the wire: an older server sends a total and no
-    // group list, and "5 files in 0 folders" would be a number it did not
-    // measure. The dash is the one formatter's.
-    const plan = arrangePlan({
-      moves: [],
-      creates: [],
-      adoptions: adoptions({ total: 5, groups: undefined }),
-    });
-    expect(arrangeAdoptionGroupCount(plan)).toBeNull();
-    expect(arrangeHeadline(plan)).toBe("Adds 5 files in \u2013 folders");
-  });
-
-  it("keeps the move count as the badge when moves are what would happen", () => {
-    // The existing wording, byte for byte: a plan that moves files is a moves
-    // plan, adoptions block or not.
-    expect(arrangeHeadline(arrangePlan())).toBe("Arrangement: 2 moves");
+  it("shows an unknown op's two tokens verbatim rather than inventing a word", () => {
+    // A newer server's step is still a real step, so it is named as the server
+    // named it: the client has no word for an op it does not know.
+    expect(operationStatusLine(step("reindex", "running"))).toBe("reindex running");
   });
 });
 

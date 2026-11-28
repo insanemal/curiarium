@@ -4,14 +4,16 @@
 
 import {
   ENRICH_MAX_KEYS,
-  type BundleArrangeMove,
-  type BundleArrangePlan,
-  type BundleArrangeRefusal,
   type BundleDetectCounts,
   type BundleDetectItem,
   type BundleMatch,
   type BundleSuggestion,
 } from "../../lib/api/bundles";
+import {
+  type OperationExcluded,
+  type OperationMove,
+  type OperationStep,
+} from "../../lib/api/operations";
 import { DRIFT_KNOWN, DRIFT_NOT_APPLICABLE } from "../projectBundleDrift";
 // Declaration-only import cycles, proved green by these suites: this module
 // imports the count formatter from `useReviewCounts`, which imports
@@ -823,21 +825,21 @@ export function typedName(names: Record<string, string>, row: BundleDetectItem):
   return name.trim();
 }
 
-// Arranging: the moves a shape needs before it can be created at all. Every
-// function below is pure - the plan is the server's, and this module only says
-// what one of its lines reads as, never what the plan should have been.
+// The split's narration. Every function below is pure - the plan and the
+// operation are the server's, and this module only says what one of their lines
+// reads as, never what the server should have done.
 
 /** One move, with both paths quoted: a path may hold spaces, and the separator
  *  between the two is the only thing that says which half is which. */
-export function arrangeMoveLine(move: BundleArrangeMove): string {
-  return `move "${move.from}" -> "${move.to}"`;
+export function operationMoveLine(move: OperationMove): string {
+  return `move "${move.source}" -> "${move.target}"`;
 }
 
 /** The word for WHY a move exists. The four tokens this client knows each get
  *  their own reading; any other token (a newer server's) is shown verbatim,
  *  because the client invents no word for a token it does not know - and never
  *  a dash, which would make a real move read as an absent one. */
-export function arrangeActionLabel(action: string): string {
+export function operationActionLabel(action: string): string {
   switch (action) {
     case "hoist":
       return "hoist";
@@ -852,93 +854,72 @@ export function arrangeActionLabel(action: string): string {
   }
 }
 
-/** The server's operator sentence for one refusal, VERBATIM - including any
- *  count in it, which is the server's own measurement of the tree it walked.
- *  The client decided no refusal, so it writes no words for one: a sentence
- *  rebuilt from `status`/`reason` here would drift from the detail the 409
- *  carries, and an operator would read two explanations of one refusal. */
-export function arrangeRefusalLine(refusal: BundleArrangeRefusal): string {
-  return refusal.detail;
+/** One file the plan would leave out: the server's path and the server's own
+ *  reason beside it, VERBATIM. The client decided no exclusion, so it writes no
+ *  words for one - a reason paraphrased here would drift from the sentence the
+ *  plan actually carries. */
+export function excludedLine(entry: OperationExcluded): string {
+  return `${entry.path}: ${entry.reason}`;
 }
 
-/** How many moves a previewed plan would make, or null when the payload carries
- *  no move list at all. A zero is a real answer - `nothing_to_arrange` is a
- *  refusal with its own sentence - so an absent list must never read as one. */
-export function arrangeMoveCount(plan: BundleArrangePlan): number | null {
-  const moves: BundleArrangeMove[] | undefined = plan.moves;
-  return Array.isArray(moves) ? moves.length : null;
+/** The four phrases one step's narration is chosen from: the runner's own
+ *  vocabulary, one phrase per status a step can be in. */
+type StepPhrases = { done: string; running: string; failed: string; pending: string };
+
+/** One step's phrase for its status. A status outside the three finished ones
+ *  reads as still-waiting, which is what anything not yet done means to the
+ *  operator - the client invents no fifth word for it. */
+function stepLine(status: string, phrases: StepPhrases): string {
+  switch (status) {
+    case "done":
+      return phrases.done;
+    case "running":
+      return phrases.running;
+    case "failed":
+      return phrases.failed;
+    default:
+      return phrases.pending;
+  }
 }
 
-/** That count's words, noun included so the one formatter owns the number here.
- *  An unknown count reads `– moves` and never a fabricated `0`. */
-export function arrangeMoveCountLabel(count: number | null): string {
-  return `${formatReviewCount(count)} ${count === 1 ? "move" : "moves"}`;
+/** The line a running operation's step reads as, driven by `op` and `status`
+ *  alone - never by a count, which only the server's own result carries. A step
+ *  whose `op` this client does not know is narrated with its two tokens
+ *  verbatim: the client invents no word for a step it does not know. */
+export function operationStatusLine(step: OperationStep): string {
+  switch (step.op) {
+    case "move":
+      return stepLine(step.status, {
+        done: "moved the folders",
+        running: "moving the folders\u2026",
+        failed: "the move was refused",
+        pending: "waiting to move the folders",
+      });
+    case "create-project":
+      return stepLine(step.status, {
+        done: "created a project",
+        running: "creating a project\u2026",
+        failed: "the create was refused",
+        pending: "waiting to create a project",
+      });
+    case "verify-members":
+      return stepLine(step.status, {
+        done: "checked the project's files",
+        running: "checking the project's files\u2026",
+        failed: "the project's files did not match",
+        pending: "waiting to check the files",
+      });
+    default:
+      return `${step.op} ${step.status}`;
+  }
 }
 
 /** Whether the chosen shape needs arranging before it can be created: the row
  *  offers that shape AND the server cannot enact it yet. That is exactly when
- *  the arrange door is the right button - an enactable shape is created, never
- *  arranged - and it reads `isEnactable`, so this door and the `creatable:
- *  false` note beside the radio cannot disagree about which shapes are in this
- *  state. */
+ *  the split door is the right button - an enactable shape is created, never
+ *  split - and it reads `isEnactable`, so this door and the `creatable: false`
+ *  note beside the radio cannot disagree about which shapes are in this state. */
 export function isArrangable(row: BundleDetectItem, shape: string): boolean {
   const match = importMatches(row).find(entry => entry.shape === shape);
   return match !== undefined && !isEnactable(match);
-}
-
-/** How many files the plan would ADD to a project, or null when the payload
- *  carries no adoptions block at all. A zero is a real answer ("nothing to
- *  adopt"), so an absent block must never read as one. */
-export function arrangeAdoptionCount(plan: BundleArrangePlan): number | null {
-  const total = plan.adoptions?.total;
-  return typeof total === "number" ? total : null;
-}
-
-/** How many folders those files fall into, or null when the group list is
- *  absent - the same rule, one level down. */
-export function arrangeAdoptionGroupCount(plan: BundleArrangePlan): number | null {
-  const groups = plan.adoptions?.groups;
-  return Array.isArray(groups) ? groups.length : null;
-}
-
-/** Whether applying this plan would change NOTHING: no move, no directory to
- *  create, and no membership to add. THE one predicate - the preview's badge and
- *  the Apply button both read it, so the sentence and the enabled state cannot
- *  disagree. A membership-only plan is NOT nothing: that is exactly the grown
- *  project this door exists for.
- *
- *  An absent adoptions block on a zero-move plan reads as "applies nothing",
- *  and that is deliberate: the server refuses that shape with
- *  `nothing_to_arrange`, so Apply would answer 409 anyway - a button that can
- *  only be refused may not look like a working one. */
-export function arrangeAppliesNothing(plan: BundleArrangePlan): boolean {
-  // Neither list may be read with a bare `.length`: an ABSENT list means the
-  // server did not say, so it may not be counted as a zero - the same reason
-  // `arrangeMoveCount` exists.
-  const creates = plan.creates;
-  return (
-    arrangeMoveCount(plan) === 0 &&
-    Array.isArray(creates) &&
-    creates.length === 0 &&
-    (arrangeAdoptionCount(plan) ?? 0) === 0
-  );
-}
-
-/** What the preview's badge says. An adoption plan names the files and folders it
- *  would add - a `0 moves` badge beside an Apply button is what left the operator
- *  approving a blank plan. A plan that changes nothing says so, and the move
- *  count is only the badge when moves are what would happen. */
-export function arrangeHeadline(plan: BundleArrangePlan): string {
-  const total = arrangeAdoptionCount(plan);
-  if (total !== null && total > 0) {
-    // An absent group count renders through the one formatter's en dash, never
-    // a fabricated 0: the sentence then says the server did not say how many
-    // folders, which is the truth.
-    const groups = arrangeAdoptionGroupCount(plan);
-    const files = total === 1 ? "file" : "files";
-    const folders = groups === 1 ? "folder" : "folders";
-    return `Adds ${formatReviewCount(total)} ${files} in ${formatReviewCount(groups)} ${folders}`;
-  }
-  if (arrangeAppliesNothing(plan)) return "Arrangement: applies nothing";
-  return `Arrangement: ${arrangeMoveCountLabel(arrangeMoveCount(plan))}`;
 }

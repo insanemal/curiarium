@@ -7,8 +7,6 @@ import React from "react";
 import {
   createBundles,
   enrichBundles,
-  getArrangePlan,
-  type BundleArrangePlan,
   type BundleCoverCandidate,
   type BundleCreateItem,
   type BundleDetectItem,
@@ -16,12 +14,9 @@ import {
 } from "../../lib/api/bundles";
 import { UnauthorizedError } from "../../lib/api/http";
 import { notifyInfo } from "../../lib/toast";
-import ArrangePlanPanel from "./ArrangePlanPanel";
+import SplitAndCreatePanel from "./SplitAndCreatePanel";
 import {
   METADATA_FIELDS,
-  arrangeActionLabel,
-  arrangeMoveLine,
-  arrangeRefusalLine,
   countsLine,
   coverLine,
   shapeLabel,
@@ -60,12 +55,14 @@ function failureDetail(err: unknown, fallback: string): string {
 /**
  * The guided import door: everything the engine parsed for one row, in the
  * operator's hands before anything is written. Self-contained on purpose - it
- * owns its own plan read and its own write, so the host only supplies the row,
- * the gate and its callbacks.
+ * owns its own write, so the host only supplies the row, the gate and its
+ * callbacks.
  *
  * Nothing is pre-accepted: `accepted`/`dismissed` start empty, and a create
  * writes only what this panel's map names. A shape the server cannot enact is
- * handed to `ArrangePlanPanel`, the one door that can move the bytes.
+ * handed to `SplitAndCreatePanel`, the one door that can move the bytes, and the
+ * Create button stays shut for it: the server refuses `needs-arrange` for a shape
+ * it cannot enact, so only that door can make the shape true.
  */
 export default function GuidedImportPanel({
   row,
@@ -87,44 +84,16 @@ export default function GuidedImportPanel({
   const [editing, setEditing] = React.useState<string | null>(null);
   const [editingValue, setEditingValue] = React.useState("");
   const [shape, setShape] = React.useState(row.matches?.[0]?.shape ?? row.metadata_shape);
-  const [plan, setPlan] = React.useState<BundleArrangePlan | null>(null);
-  const [planFailure, setPlanFailure] = React.useState<string | null>(null);
   const [enrichLine, setEnrichLine] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [failure, setFailure] = React.useState<string | null>(null);
   const [already, setAlready] = React.useState<string | null>(null);
 
   // The host may hand this panel a fresh callback identity every render, so the
-  // plan effect reads it through a ref: the plan is keyed by the row and the
-  // shape alone, and a READ must not run again because a parent re-rendered.
+  // callbacks the write reads are kept in refs: a WRITE must not run again
+  // because a parent re-rendered.
   const unauthorizedRef = React.useRef(onUnauthorized);
   unauthorizedRef.current = onUnauthorized;
-
-  // A plan is a READ: fetch it for the shape on offer, and again whenever the
-  // operator picks another. A viewer issues no request at all.
-  React.useEffect(() => {
-    if (!canContribute) return;
-    let live = true;
-    setPlan(null);
-    setPlanFailure(null);
-    getArrangePlan(row.key, shape)
-      .then(next => {
-        if (live) setPlan(next);
-      })
-      .catch((err: unknown) => {
-        if (!live) return;
-        // A 401 is the host's cue to sign the operator out, so the panel writes
-        // no sentence of its own.
-        if (err instanceof UnauthorizedError) {
-          unauthorizedRef.current?.();
-          return;
-        }
-        setPlanFailure(failureDetail(err, "Failed to preview the arrangement."));
-      });
-    return () => {
-      live = false;
-    };
-  }, [row.key, shape, canContribute]);
 
   if (!canContribute) return null;
 
@@ -152,20 +121,12 @@ export default function GuidedImportPanel({
   const suggestions = row.metadata_suggestions ?? [];
   const matches = row.matches ?? [];
   const chosenMatch = matches.find(match => match.shape === shape);
-  const moves = plan?.moves ?? [];
-  const creates = plan?.creates ?? [];
-  const refusals = plan?.refusals ?? [];
-  // The server's verdict and the plan's own moves both say the files must be
-  // arranged first: one when the shape is refused outright, the other when it
-  // is enactable but not from where the files sit today.
-  const needsArranging = chosenMatch?.creatable === false || moves.length > 0;
-  const applyDisabled =
-    busy ||
-    plan === null ||
-    planFailure !== null ||
-    refusals.length > 0 ||
-    moves.length > 0 ||
-    chosenMatch?.creatable === false;
+  // The server's own verdict is the whole reason to arrange first: it refuses
+  // the create with `needs-arrange` for a shape it cannot enact, so the Create
+  // button must not fire for one. The split door beside it is the only thing that
+  // can make the shape true.
+  const needsArranging = chosenMatch?.creatable === false;
+  const applyDisabled = busy || chosenMatch?.creatable === false;
 
   /** A field the operator said yes to: it shows as accepted and is no longer
    *  dismissed, so the two markers never disagree. */
@@ -619,53 +580,6 @@ export default function GuidedImportPanel({
         )}
       </fieldset>
 
-      <div className="review-detail-facts" role="group" aria-label="What will move">
-        <span>What will move</span>
-        {plan !== null && (
-          <>
-            <ul className="flex flex-col gap-1" data-guided-moves="true">
-              {moves.map((move, index) => (
-                <li
-                  key={`${index}-${move.from}-${move.to}`}
-                  data-guided-move="true"
-                  data-guided-action={move.action}
-                >
-                  <span className="font-mono">{arrangeMoveLine(move)}</span>{" "}
-                  <span className="text-muted">{arrangeActionLabel(move.action)}</span>
-                </li>
-              ))}
-            </ul>
-            {creates.map(create => (
-              <span key={create.path} className="font-mono" data-guided-create="true">
-                {create.path}
-              </span>
-            ))}
-            {refusals.map(refusal => (
-              <span
-                key={`${refusal.status}-${refusal.reason}`}
-                className="review-detail-reason text-red-500"
-                data-guided-refusal="true"
-              >
-                {arrangeRefusalLine(refusal)}
-              </span>
-            ))}
-            {moves.length === 0 && creates.length === 0 && (
-              <span data-guided-no-moves="true">
-                No file moves: the project is created from the files already in place.
-              </span>
-            )}
-          </>
-        )}
-        {planFailure !== null && (
-          <span
-            className="review-detail-reason text-red-500"
-            data-guided-plan-failure="true"
-          >
-            {planFailure}
-          </span>
-        )}
-      </div>
-
       <div className="review-detail-actions">
         <button
           type="button"
@@ -684,7 +598,7 @@ export default function GuidedImportPanel({
       )}
       {already !== null && <span data-guided-already="true">{already}</span>}
       {needsArranging && (
-        <ArrangePlanPanel
+        <SplitAndCreatePanel
           bundleKey={row.key}
           shape={shape}
           canContribute={canContribute}

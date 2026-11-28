@@ -3,8 +3,8 @@
 Before this module there were four answers to "move this". `asset_service.move_managed_file`
 moved a file's bytes and pruned the directory it vacated; `folder_service.move_folder`
 called `os.rename` on a directory itself; `asset_service.move_asset_to_folder_by_id`
-composed the first with a row update; and `arrange_service` ran its own loop over
-`move_managed_file`. Four callers is four chances to get no-clobber, cross-device
+composed the first with a row update; and the detected-bundle arrange (since
+deleted) ran its own loop over `move_managed_file`. Four callers is four chances to get no-clobber, cross-device
 and row-consistency wrong in a different order. They now all ask this module, and
 the four public names above are thin doors onto it:
 
@@ -30,11 +30,16 @@ the four public names above are thin doors onto it:
     found; the same intent with different pairs is refused.
   * `apply_rows(pairs, session=...)` is the row half on its own, for the callers
     that own their transaction order (`folder_service.move_folder`'s convergence
-    branch, `arrange_service._rewrite_rows`).
+    branch, and the operations runner's `move` step, which writes the created
+    destination rows in the same commit).
   * `undo_ledger(ledger_id)` replays one ledger backwards: bytes first, then the
-    rows, then `undone = 1`. Arrange does not use it - its ledger carries the
-    project, membership and group snapshot that this module knows nothing about,
-    so arrange's undo asks `move_bytes` directly and marks its own record.
+    rows, then `undone = 1`. The `split-and-create` operation's undo is its one
+    caller; a door whose own record supersedes this one marks the row instead
+    (`supersede`), so a second, blind relocation is refused rather than replayed.
+  * `preflight_refusals(pairs, session, root)` is the PLANNER's read: every reason
+    a batch cannot move, in one answer, with nothing written. The operations
+    planner asks it so a plan refuses in the mover's own words instead of
+    re-deriving the questions.
 
 What this module deliberately does NOT do:
 
@@ -196,10 +201,10 @@ class CrossDevice(OSError):
     """A move that would have to cross a filesystem, which this module will not copy.
 
     An `OSError` on purpose: before this module the bare `os.rename` raised
-    `OSError(EXDEV)` and every caller already branches on exactly that
-    (`arrange_service._move_forward` translates it into its partial-landed
-    sentence; the folder door lets it become a 500). Making it a named class
-    rather than a second vocabulary is what keeps those branches true.
+    `OSError(EXDEV)` and every caller already branches on exactly that (the
+    operations runner compensates a mid-bytes failure from the ledger; the folder
+    door lets it become a 500). Making it a named class rather than a second
+    vocabulary is what keeps those branches true.
     """
 
     def __init__(self, message: str) -> None:
@@ -297,6 +302,21 @@ def _recorded_pairs(row: MoveLedger) -> List[Pair]:
     except (TypeError, ValueError):
         return []
     return _from_records(records if isinstance(records, list) else [])
+
+
+def ledger_id_for_intent(intent: str) -> Optional[str]:
+    """The id of the ledger row this intent already wrote, or None.
+
+    A caller whose own record of a move is missing - a step that died after the
+    bytes landed, before its result row was written - still knows the intent it
+    used, and the intent is unique. This is how such a caller finds the ledger it
+    must fold back instead of re-deriving one from the disk.
+    """
+    if not intent:
+        return None
+    with Session(engine) as session:
+        row = _ledger_by_intent(session, intent)
+        return row.id if row is not None else None
 
 
 # --- the bytes -------------------------------------------------------------
@@ -431,6 +451,147 @@ def infer_kind(session: Session, pair: Pair) -> str:
     return KIND_FILE
 
 
+# --- the pair questions a planner asks, with nothing written -----------------
+
+
+def _refusal(status: int, reason: str, detail: str) -> dict:
+    """One refusal in the wire vocabulary a review carries."""
+    return {"status": status, "reason": reason, "detail": detail}
+
+
+def _inside_root(root: Path, relative: str) -> bool:
+    """Whether a storage-relative path resolves to something below the root."""
+    if not relative:
+        return False
+    resolved_root = root.resolve()
+    candidate = (resolved_root / relative).resolve()
+    return candidate != resolved_root and resolved_root in candidate.parents
+
+
+def _nearest_existing(path: Path) -> Optional[Path]:
+    """The closest ancestor of `path` that exists, or None at the filesystem root."""
+    current = path
+    while True:
+        if current.exists():
+            return current
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+def _stat_device(path: Path) -> int:
+    """The device a path lives on; the one seam the cross-device question reads."""
+    return os.stat(path).st_dev
+
+
+def _pinned_folder(session: Session, source: str) -> Optional[Tuple[Folder, str]]:
+    """A row that owns `source` while its PARENT implies a different path.
+
+    This is the case `folder_paths.converge_ancestor_paths` can write and the scan
+    can never heal: the row's stored path and the path its parent line derives are
+    two different folders. A planner refuses rather than converge, because moving
+    the bytes would leave the row describing the other one.
+    """
+    wanted = source.casefold()
+    for row in session.exec(select(Folder).where(Folder.storage_path.is_not(None))):
+        if (row.storage_path or "").casefold() != wanted:
+            continue
+        parent_relative = folder_paths.preview_converged_path(session, row.parent_id)
+        derived = folder_paths.join_relative(parent_relative, row.name)
+        if derived != source:
+            return row, derived
+    return None
+
+
+def preflight_refusals(
+    pairs: Sequence[Pair], session: Session, root: Optional[Path] = None
+) -> List[dict]:
+    """Every reason this batch cannot move, in one answer, with nothing written.
+
+    The planner asks this instead of re-deriving the questions, so a plan refuses
+    with the same sentences the execution would raise one at a time. It is the
+    same five questions the detected-bundle arrange asked before it delegated to
+    this module, and they now live beside the verb that answers them: the
+    destination is not in a system/hidden directory, both ends resolve inside the
+    storage root, the source has bytes, the destination is free, the two ends are
+    on one device, and the source's folder row does not contradict its parent.
+
+    `move()`'s own `_preflight` is deliberately NOT this function and keeps its
+    exact two raises and their precedence, so no existing door changes status.
+    """
+    root = root or storage_root()
+    findings: List[dict] = []
+    for pair in pairs:
+        source = pair.source
+        target = pair.target
+        pair_findings: List[dict] = []
+        first = target.split("/", 1)[0]
+        if first.startswith(".") or first in folder_service.SYSTEM_DIRS:
+            pair_findings.append(
+                _refusal(
+                    400,
+                    "hidden_destination",
+                    f'the destination "{target}" is in a system or hidden directory; refusing to move "{source}" into it',
+                )
+            )
+        if not _inside_root(root, source):
+            pair_findings.append(
+                _refusal(400, "outside_root", f'the source "{source}" resolves outside the storage root')
+            )
+        if not _inside_root(root, target):
+            pair_findings.append(
+                _refusal(
+                    400, "outside_root", f'the destination "{target}" resolves outside the storage root'
+                )
+            )
+        findings.extend(pair_findings)
+        if pair_findings:
+            # A pair whose ends cannot even be resolved is not asked the questions
+            # that need a stat on them; the next pair still is.
+            continue
+        source_path = root / source
+        target_path = root / target
+        if not source_path.exists():
+            pair_findings.append(
+                _refusal(409, "missing_source", f'the source "{source}" is not on disk; nothing moved')
+            )
+            findings.extend(pair_findings)
+            continue
+        if target_path.exists():
+            pair_findings.append(
+                _refusal(
+                    409,
+                    "destination_exists",
+                    f'the destination "{target}" already exists; refusing to move "{source}" onto it',
+                )
+            )
+            findings.extend(pair_findings)
+            continue
+        anchor = _nearest_existing(target_path.parent)
+        if anchor is not None and _stat_device(source_path) != _stat_device(anchor):
+            pair_findings.append(
+                _refusal(
+                    409,
+                    "cross_device",
+                    "cross-device move refused: nothing moved, and this operation has no copy path "
+                    f'("{source}" -> "{target}")',
+                )
+            )
+        pinned = _pinned_folder(session, source)
+        if pinned is not None:
+            folder, derived = pinned
+            pair_findings.append(
+                _refusal(
+                    409,
+                    "pinned_row",
+                    f'the folder row "{folder.name}" ({folder.id}) implies "{derived}" while the move source is '
+                    f'"{source}"; the scan can never heal this, so the plan refuses',
+                )
+            )
+        findings.extend(pair_findings)
+    return findings
+
+
 def apply_rows(
     pairs: Sequence[Pair],
     *,
@@ -440,8 +601,8 @@ def apply_rows(
 ) -> None:
     """Rewrite the rows that describe `pairs`, deepest rule first, in the caller's transaction.
 
-    Order is the contract, and it is the order `arrange_service._rewrite_rows` had
-    before it delegated here: every directory pair's folder subtree and its assets
+    Order is the contract, and it is the order the detected-bundle arrange's row
+    rewrite had before it delegated here: every directory pair's folder subtree and its assets
     are rewritten before any file pair's row, because a file pair can name a path
     inside a directory pair's target and the directory rewrite would otherwise
     claim it twice.

@@ -244,8 +244,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 112 routes: 11 public, 40 read,
-28 contribute, 15 write, 18 admin.
+Paths are FastAPI templates exactly as declared. 109 routes: 11 public, 39 read,
+28 contribute, 13 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -306,7 +306,6 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | GET    | `/trash`                                | list the trash |
 | GET    | `/storage/capabilities`                 | read-only filesystem capability report; creates nothing |
 | GET    | `/bundles/detect`                       | dry-run report computed from disk on every read: which directories are vendor bundles and what a create would make of each; writes nothing, resolves nothing, heals nothing |
-| GET    | `/bundles/arrange`                      | the arrangement preview for one key and one shape: the move list, the directories it would create, the prose rendered from that list and every refusal; a dry run read off the disk, so it writes nothing and the moves an approval approves are on the wire before the approval |
 | GET    | `/snapshots`                           | lists the snapshots this volume has; reads the provider view, creates nothing |
 | GET    | `/snapshots/{name}/browse`             | browses one snapshot read-only; creates nothing |
 | GET    | `/operations`                          | the queue, newest first, with each operation's steps, status and undo state; a viewer may read what is running |
@@ -375,8 +374,6 @@ the handler refuses a data-removing workflow to a contributor.
 | POST   | `/library/scan`                             | starts a scan: registers files found on disk and refreshes `missing_since`; audited as `library.scan.start` |
 | POST   | `/snapshots`                                | takes a snapshot of the library; an editor's library action |
 | POST   | `/snapshots/{name}/restore`                 | copies snapshot bytes into `recovered/`; never overwrites |
-| POST   | `/bundles/arrange`                          | applies one previewed arrangement: it moves bytes on the volume for a shape the operator approved, so it is the editor's move, not a contribute; what it renames are the same paths `/asset/{asset_id}/rename` and `/asset/{asset_id}/folder` touch, in bulk |
-| POST   | `/bundles/arrange/{arrange_id}/undo`        | folds that arrangement back through the same mover and restores the rows from its ledger; the reversal is the same power as the move, so it sits on the same line |
 
 ### admin (administrators only)
 

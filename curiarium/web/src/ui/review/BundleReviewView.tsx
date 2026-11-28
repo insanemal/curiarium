@@ -97,11 +97,11 @@ import {
   type BulkPlan,
   type BulkRunResult,
 } from "./extractAndCreate";
-import ArrangePlanPanel from "./ArrangePlanPanel";
 import GuidedImportPanel from "./GuidedImportPanel";
 import ReviewQueueView from "./ReviewQueueView";
 import ScanFidelityNotice from "./ScanFidelityNotice";
 import ScanStorageAction from "./ScanStorageAction";
+import SplitAndCreatePanel from "./SplitAndCreatePanel";
 import type { BundleDetectState } from "./useBundleDetect";
 import type { LibraryScanState } from "./useLibraryScan";
 import { bundleBadgeCount, describeQueueCount, formatReviewCount } from "./useReviewCounts";
@@ -259,7 +259,7 @@ type Props = {
    *  queue adds no mechanism of its own.
    */
   onProjectsChanged?: () => void;
-  /** App's `handleFoldersChanged`. An arrange or a guided import creates folder
+  /** App's `handleFoldersChanged`. A split or a guided import creates folder
    *  rows and rewrites `storage_path`, so the sidebar tree must reload with the
    *  project list in the same commit. */
   onFoldersChanged?: () => void;
@@ -282,7 +282,7 @@ type Props = {
   /** Starts the shell's scan. The report is not auto-refreshed after a scan
    *  (the queue's own Refresh stays) - a named boundary, not an omission. */
   onScan: () => void;
-  /** The shell's sign-out, forwarded to the arrange door the same way the hook
+  /** The shell's sign-out, forwarded to the split door the same way the hook
    *  that door replaced used to call it: a 401 mid-session still ends on a fresh
    *  sign-in instead of a sentence on an expired session. */
   onUnauthorized?: () => void;
@@ -461,12 +461,13 @@ export default function BundleReviewView({
     refresh,
   } = state;
 
-  // The arrange door and the guided panel have ONE completion signal, this
-  // handler, and it bumps both versions in one commit. Arrange refuses while a
-  // scan holds the slot and never starts a scan itself, so no scan completion
-  // can fire for the same event. That is also why the guided panel no longer
-  // bumps the project list itself: with both, one landing-with-no-project would
-  // bump it twice in the same event.
+  // The split door and the guided panel have ONE completion signal, this
+  // handler, and it bumps both versions in one commit. A split rewrites
+  // `storage_path` and creates `Folder` rows in one server-side operation, so
+  // the project list and the folder tree move together or not at all. Neither
+  // door starts a scan, so no scan completion can fire for the same event. That
+  // is also why the guided panel no longer bumps the project list itself: with
+  // both, one landing-with-no-project would bump it twice in the same event.
   const handleArranged = React.useCallback((): void => {
     void refresh();
     onProjectsChanged?.();
@@ -632,19 +633,19 @@ export default function BundleReviewView({
   // `matches` was served has no matches at all, and then the row's own groups
   // are the only ones there are.
   const activeShapeName = activeRow ? activeShape(activeRow, chosenShape[activeRow.key]) : "";
-  // "This shape needs arranging first" is exactly when the arrange door is the
-  // right button: the row offers the shape and the server cannot enact it. The
-  // badge's `creatable: false` note, this button and the panel behind it all
-  // read this one predicate (`isArrangable`), so they cannot disagree about
-  // which shapes are in this state. It is a contribute door, so a viewer is
-  // offered neither it nor the panel behind it.
+  // "This shape needs arranging first" is exactly when the split door is the
+  // right door: the row offers the shape and the server cannot enact it. The
+  // badge's `creatable: false` note, the panel behind it and the create doors'
+  // refusal all read this one predicate (`isArrangable`), so they cannot
+  // disagree about which shapes are in this state. It is a contribute door, so a
+  // viewer is offered neither it nor the panel behind it.
   const activeArrangable =
     canContribute && activeRow !== null && isArrangable(activeRow, activeShapeName);
   const activeMatch = activeRow
     ? importMatches(activeRow).find(match => match.shape === activeShapeName)
     : undefined;
   // A chosen reading the server cannot enact is not a create: the doors refuse
-  // it and the arrange door beside them is the only way to make it true. The
+  // it and the split door beside them is the only way to make it true. The
   // reason is the server's own note, the same one the radio carries, so the
   // client still invents no copy.
   const activeShapeUnenactable = activeMatch !== undefined && !isEnactable(activeMatch);
@@ -726,14 +727,21 @@ export default function BundleReviewView({
     });
   };
 
-  // Choosing the recommendation drops the key rather than storing it, so an
-  // operator who looks at the chooser and leaves it alone sends no `shape` at
-  // all and the body stays byte-identical.
   const chooseShape = (row: BundleDetectItem, shape: string) => {
     setChosenShape(prev => {
       const draft = { ...prev };
-      if (shape === importShapes(row)[0]) delete draft[row.key];
-      else draft[row.key] = shape;
+      const match = importMatches(row).find(entry => entry.shape === shape);
+      // Drop the key only when the chosen RECOMMENDATION is enactable. That keeps
+      // the original intent - an operator who looks at the chooser and leaves it
+      // alone sends NO `shape`, so the create body stays byte-identical - while a
+      // recommendation the server cannot enact is STORED: dropping it made
+      // `activeShape` fall back to the first enactable shape, the radio snap back,
+      // and the split door behind it unreachable (Mf-jsw5).
+      if (shape === importShapes(row)[0] && match !== undefined && isEnactable(match)) {
+        delete draft[row.key];
+      } else {
+        draft[row.key] = shape;
+      }
       return draft;
     });
   };
@@ -755,7 +763,7 @@ export default function BundleReviewView({
       if (chosen !== undefined && shape === chosen) {
         // The server answers `needs-arrange` and writes nothing for a shape it
         // cannot enact, so the client must not ask. The pane's create doors are
-        // disabled while such a reading is chosen (the arrange door is offered
+        // disabled while such a reading is chosen (the split door is offered
         // instead), and this guard is the wire's last resort: a race that got
         // here anyway must still not post a shape the server refuses.
         const match = importMatches(row).find(entry => entry.shape === shape);
@@ -1701,7 +1709,7 @@ export default function BundleReviewView({
                         const shape = match.shape;
                         // A reading the server cannot enact is VISIBLE and
                         // SELECTABLE: the operator may choose it precisely so
-                        // the arrange door below can approve the moves that make
+                        // the split door below can approve the moves that make
                         // it true. Its radio stays a normal control; only the
                         // create doors refuse while it stands, and the server's
                         // own `note` says why.
@@ -1907,14 +1915,13 @@ export default function BundleReviewView({
                       )}
                       {activeArrangable && (
                         // The whole door: a shape the server cannot enact yet
-                        // needs its files moved first, so this is where the
-                        // operator reads every move before any of them happens.
-                        // Nothing is written until Apply, and Apply is not
-                        // offered while the server holds an objection to the
-                        // plan. Keyed by row AND shape so a row or shape change
-                        // resets the door instead of painting one bundle's
-                        // moves under another's title.
-                        <ArrangePlanPanel
+                        // needs its files moved first. The door is ONE action and
+                        // the moves are information - nothing is written until
+                        // the operator presses it. The gate is `activeArrangable`:
+                        // a shape the server cannot enact yet. Keyed by row AND
+                        // shape so a row or shape change resets the door instead
+                        // of painting one bundle's moves under another's title.
+                        <SplitAndCreatePanel
                           key={`${activeRow.key}/${activeShapeName}`}
                           bundleKey={activeRow.key}
                           shape={activeShapeName}
@@ -1938,8 +1945,8 @@ export default function BundleReviewView({
                       )}
                     </div>
                     {/* The guided door, mounted below the action row beside the
-                        arrange door so one read can finish the import. A stale
-                        key never matches, so a row or shape change unmounts it. */}
+                        split door so one read can finish the import. A stale key
+                        never matches, so a row or shape change unmounts it. */}
                     {canContribute && guidedForKey === guidedKey && (
                       <GuidedImportPanel
                         key={guidedKey}

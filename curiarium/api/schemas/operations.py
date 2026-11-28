@@ -15,10 +15,12 @@ __all__ = [
   "OperationCoverOut",
   "OperationExcludedOut",
   "OperationGroupOut",
+  "OperationMoveOut",
   "OperationOut",
   "OperationPlanOut",
   "OperationPlanRequest",
   "OperationPlanStepOut",
+  "OperationProjectOut",
   "OperationReviewOut",
   "OperationStepOut",
   "OperationSubmitRequest",
@@ -49,6 +51,38 @@ class OperationExcludedOut(BaseModel):
   reason: str
 
 
+class OperationMoveOut(BaseModel):
+  """One move a plan would make, both ends storage-root-relative.
+
+  ``source``/``target`` rather than ``from``/``to`` because ``from`` is a Python
+  keyword; unlike the deleted arrange model this does not alias, because the
+  operations review is the only place the pair is served and the wire reads
+  better naming both ends symmetrically.
+
+  ``kind`` is what the path IS (``file``/``dir``); ``action`` is why the move
+  exists (``hoist`` for a split). The client renders the line from these records
+  and never from prose.
+  """
+
+  source: str
+  target: str
+  kind: str
+  action: str
+
+
+class OperationProjectOut(BaseModel):
+  """One project a plan would create: its name, the path it lives at, its size.
+
+  ``members`` is the count of files the plan would attach, after every exclusion,
+  so it is the number the create step will actually write - not a folder's file
+  count.
+  """
+
+  name: str
+  root: str
+  members: int
+
+
 class OperationReviewOut(BaseModel):
   """The human-readable summary of what a plan would do, before it runs."""
 
@@ -64,6 +98,12 @@ class OperationReviewOut(BaseModel):
   excluded: List[OperationExcludedOut] = []
   existing_project_id: Optional[str] = None
   existing_project_name: Optional[str] = None
+  # The other half of a plan that moves bytes: the moves themselves and the
+  # projects they feed. Empty for a workflow that makes neither, so a
+  # `create-project` review answers with two empty lists rather than omitting the
+  # keys a client may read unconditionally.
+  move_list: List[OperationMoveOut] = []
+  projects: List[OperationProjectOut] = []
 
 
 class OperationPlanStepOut(BaseModel):
@@ -135,9 +175,18 @@ class OperationOut(BaseModel):
 
 
 class OperationUndoOut(BaseModel):
-  """The result of undoing a finished operation."""
+  """The result of undoing a finished operation, shaped by its workflow.
+
+  A `create-project` undo answers the project it deleted and leaves the two
+  workflow-specific keys null; a `split-and-create` undo answers ``moves`` (how
+  many landed moves were folded back) and ``projects_removed`` (the projects it
+  created and then deleted), and leaves the project pair null. Optional on both
+  sides so neither body gains a fabricated zero.
+  """
 
   operation_id: str
   undone: bool
   project_id: Optional[str] = None
   project_name: Optional[str] = None
+  moves: Optional[int] = None
+  projects_removed: Optional[List[str]] = None

@@ -649,3 +649,230 @@ def test_prune_keeps_the_newest_rows_and_everything_young(isolated_storage: Path
 def _all_ledger_rows() -> list:
     with Session(engine) as session:
         return list(session.exec(select(MoveLedger)))
+
+
+# --- the pair questions a planner asks -------------------------------------
+#
+# `preflight_refusals` is what `split-and-create` asks before it plans a byte, so
+# each question below is written the way the planner needs it: one finding per
+# broken pair, the primitive's own status and sentence, and nothing written.
+
+
+def refusals(pairs: list) -> list:
+    """The findings for a batch, over a real session and the test's storage root."""
+    with Session(engine) as session:
+        return move_service.preflight_refusals(pairs, session)
+
+
+def one_refusal(pair: move_service.Pair) -> dict:
+    findings = refusals([pair])
+    assert len(findings) == 1, findings
+    return findings[0]
+
+
+def agreed_tree(storage: Path) -> None:
+    """Two files and one directory whose row agrees with the path its parent line derives.
+
+    `three_files` above writes a `Kit` row with NO parent, which the pinned-row
+    question correctly reads as a contradiction; the all-clear cases need a tree
+    where every question really is answered "no".
+    """
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    write_file(storage / "Boxes" / "Kit" / "part.stl", b"part bytes")
+    insert_asset("Boxes/one.stl")
+    insert_asset("Boxes/Kit/part.stl")
+    boxes = insert_folder("Boxes", "Boxes")
+    insert_folder("Kit", "Boxes/Kit", parent_id=boxes)
+
+
+def agreed_pairs() -> list:
+    return [
+        move_service.Pair("Boxes/one.stl", "Sorted/one.stl", move_service.KIND_FILE),
+        move_service.Pair("Boxes/Kit", "Sorted/Kit", move_service.KIND_DIRECTORY),
+    ]
+
+
+def test_a_hidden_or_system_destination_is_refused_under_both_spellings(isolated_storage: Path) -> None:
+    """Mutation: moving library bytes into `thumbs/` or a dotted directory.
+
+    Both spellings the rule covers are asked: a leading dot and a name in
+    `folder_service.SYSTEM_DIRS`. A rule that checked only the dot would let the
+    thumbnails tree become a move target, and the status is 400 because the request
+    is malformed rather than lost to a race.
+    """
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    insert_asset("Boxes/one.stl")
+
+    for target in (".hidden/one.stl", "thumbs/one.stl"):
+        finding = one_refusal(
+            move_service.Pair("Boxes/one.stl", target, move_service.KIND_FILE)
+        )
+        assert finding["status"] == 400
+        assert finding["reason"] == "hidden_destination"
+        assert target in finding["detail"], "the detail names the destination it refused"
+
+
+def test_a_source_or_a_destination_outside_the_storage_root_is_a_400(isolated_storage: Path) -> None:
+    """Mutation: resolving a pair outside the root and then asking the disk about it.
+
+    Both ends are asked separately: a check on the source alone would let a
+    traversal in the TARGET through, which is the end that writes.
+    """
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    insert_asset("Boxes/one.stl")
+
+    outside_source = one_refusal(
+        move_service.Pair("../outside/one.stl", "Sorted/one.stl", move_service.KIND_FILE)
+    )
+    assert outside_source["status"] == 400
+    assert outside_source["reason"] == "outside_root"
+    assert "../outside/one.stl" in outside_source["detail"]
+
+    outside_target = one_refusal(
+        move_service.Pair("Boxes/one.stl", "Sorted/../../outside/one.stl", move_service.KIND_FILE)
+    )
+    assert outside_target["status"] == 400
+    assert outside_target["reason"] == "outside_root"
+    assert "Sorted/../../outside/one.stl" in outside_target["detail"]
+
+
+def test_a_source_with_no_bytes_and_no_row_is_a_missing_source(isolated_storage: Path) -> None:
+    """Mutation: planning a pair whose source the disk does not hold."""
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    insert_asset("Boxes/one.stl")
+
+    finding = one_refusal(
+        move_service.Pair("Boxes/ghost.stl", "Sorted/ghost.stl", move_service.KIND_FILE)
+    )
+
+    assert finding["status"] == 409
+    assert finding["reason"] == "missing_source"
+    assert "Boxes/ghost.stl" in finding["detail"]
+
+
+def test_an_occupied_destination_is_refused_before_a_byte_moves(isolated_storage: Path) -> None:
+    """Mutation: planning onto an occupied target and discovering it mid-batch."""
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    write_file(storage / "Sorted" / "one.stl", b"already here\n")
+    insert_asset("Boxes/one.stl")
+
+    finding = one_refusal(
+        move_service.Pair("Boxes/one.stl", "Sorted/one.stl", move_service.KIND_FILE)
+    )
+
+    assert finding["status"] == 409
+    assert finding["reason"] == "destination_exists"
+    assert "Sorted/one.stl" in finding["detail"]
+    assert (storage / "Sorted" / "one.stl").read_bytes() == b"already here\n"
+
+
+def test_a_cross_device_pair_is_refused_by_the_planner_too(
+    isolated_storage: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: planning a move the mover would refuse with EXDEV.
+
+    The device question is read through `_stat_device`, the module's one seam for
+    it, so the two ends can be told apart without a real second mount. The detail
+    names BOTH ends, because the operator's next move is to work out which mount is
+    which.
+    """
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    insert_asset("Boxes/one.stl")
+    monkeypatch.setattr(
+        move_service,
+        "_stat_device",
+        lambda path: 1 if Path(path).name == "one.stl" else 2,
+    )
+
+    finding = one_refusal(
+        move_service.Pair("Boxes/one.stl", "Sorted/one.stl", move_service.KIND_FILE)
+    )
+
+    assert finding["status"] == 409
+    assert finding["reason"] == "cross_device"
+    assert "nothing moved" in finding["detail"]
+    assert "Boxes/one.stl" in finding["detail"] and "Sorted/one.stl" in finding["detail"]
+
+
+def test_a_pinned_folder_row_is_refused_by_the_planner_too(isolated_storage: Path) -> None:
+    """Mutation: converging a row the parent line pins elsewhere, which the scan can never heal.
+
+    The row stores `Boxes/Kit` while its PARENT row derives `Sibling/Kit`, so the
+    stored path and the derived one disagree. Planning the move would rewrite the
+    row onto the moved path and leave it describing the other folder for ever.
+    """
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "Kit" / "part.stl", b"part bytes")
+    insert_asset("Boxes/Kit/part.stl")
+    insert_folder("Boxes", "Boxes")
+    sibling = insert_folder("Sibling", "Sibling")
+    pinned = insert_folder("Kit", "Boxes/Kit", parent_id=sibling)
+
+    finding = one_refusal(
+        move_service.Pair("Boxes/Kit", "Sorted/Kit", move_service.KIND_DIRECTORY)
+    )
+
+    assert finding["status"] == 409
+    assert finding["reason"] == "pinned_row"
+    assert pinned in finding["detail"], "the operator is told which row to repair"
+    assert "Boxes/Kit" in finding["detail"]
+
+
+def test_a_good_pair_answers_with_no_findings(isolated_storage: Path) -> None:
+    """Mutation: a pre-flight that refuses a legal batch (and a planner that can never plan)."""
+    agreed_tree(isolated_storage)
+
+    assert refusals(agreed_pairs()) == []
+
+
+def test_the_preflight_writes_nothing_and_moves_nothing(isolated_storage: Path) -> None:
+    """Mutation: asking the questions with a side effect - a lock, a ledger row, a byte.
+
+    The tree digest, the rows and the ledger are compared before and after a batch
+    that includes a refusal: a pre-flight that wrote its own ledger row (or repaired
+    a row it was only asked about) fails here, and a planner that asked it twice
+    would compound the damage.
+    """
+    storage = isolated_storage
+    agreed_tree(storage)
+    write_file(storage / "Sorted" / "one.stl", b"occupied\n")
+    before_tree = tree_digest(storage)
+    before_assets = asset_rows()
+    before_folders = folder_rows()
+    # Counted, not assumed empty: another suite in the same run may have left
+    # ledger rows behind, and this test is about what THIS call writes.
+    before_ledger = len(_all_ledger_rows())
+
+    findings = refusals(agreed_pairs())
+
+    assert [finding["reason"] for finding in findings] == ["destination_exists"]
+    assert tree_digest(storage) == before_tree
+    assert asset_rows() == before_assets
+    assert folder_rows() == before_folders
+    assert len(_all_ledger_rows()) == before_ledger, "the questions never write a ledger row"
+
+
+def test_ledger_id_for_intent_finds_the_row_one_intent_wrote(isolated_storage: Path) -> None:
+    """Mutation: a caller that lost its own record cannot find the ledger to fold back.
+
+    The intent is unique, so this is how a step that died after the bytes landed -
+    before its result row was written - still finds what it must undo. An intent
+    nobody used answers None rather than raising or inventing an id.
+    """
+    storage = isolated_storage
+    write_file(storage / "Boxes" / "one.stl", b"one bytes")
+    insert_asset("Boxes/one.stl")
+
+    outcome = move_service.move(
+        [move_service.Pair("Boxes/one.stl", "Sorted/one.stl", move_service.KIND_FILE)],
+        intent="test:ledger-id",
+    )
+
+    assert move_service.ledger_id_for_intent("test:ledger-id") == outcome.ledger_id
+    assert move_service.ledger_id_for_intent("test:nobody-used-this") is None
+    assert move_service.ledger_id_for_intent("") is None
