@@ -32,6 +32,11 @@ import { scanOutcome, useLibraryScan } from "./useLibraryScan";
 
 const FINISHED_AT = 1_700_000_010;
 
+/** The server's sentence for a scan that could not take the slot. Spelled here
+ *  because this file mocks `lib/api/settings`, whose own `SCAN_ALREADY_RUNNING`
+ *  the hook never imports. */
+const REFUSAL = "A library scan is already running";
+
 function makeStatus(overrides: Partial<LibraryScanStatus> = {}): LibraryScanStatus {
   return {
     running: false,
@@ -378,9 +383,21 @@ describe("useLibraryScan failure handling", () => {
 });
 
 describe("useLibraryScan run", () => {
-  it("starts a scan and surfaces the already-running message", async () => {
+  it("reports a refused scan as a scan that already holds the slot", async () => {
     readReturns(finishedStatus);
-    startScan.mockRejectedValue(new Error("A scan is already running"));
+    // The server no longer refuses the START: it accepts the operation and ends
+    // it `failed` with its own sentence, so `startLibraryScan` RESOLVES with a
+    // status that says a scan is already running. Spelling that here as a
+    // resolved status (not a rejection) is the assertion: the hook must not
+    // invent an error line for a scan that is demonstrably walking.
+    startScan.mockResolvedValue(
+      makeStatus({
+        running: true,
+        started_at: null,
+        finished_at: null,
+        errors: [REFUSAL],
+      }),
+    );
 
     const { result } = renderHook(() => useLibraryScan({ enabled: true }));
     await settle();
@@ -389,7 +406,25 @@ describe("useLibraryScan run", () => {
       await result.current.run();
     });
 
-    expect(result.current.error).toBe("A scan is already running");
+    expect(startScan).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toBeNull();
+    expect(result.current.scan?.running).toBe(true);
+    expect(result.current.scan?.errors).toEqual([REFUSAL]);
+    expect(result.current.busy).toBe(false);
+  });
+
+  it("shows the message when the plan or the submit is refused", async () => {
+    readReturns(finishedStatus);
+    startScan.mockRejectedValue(new Error("Failed to plan the operation"));
+
+    const { result } = renderHook(() => useLibraryScan({ enabled: true }));
+    await settle();
+
+    await act(async () => {
+      await result.current.run();
+    });
+
+    expect(result.current.error).toBe("Failed to plan the operation");
     expect(result.current.busy).toBe(false);
     expect(startScan).toHaveBeenCalledTimes(1);
   });

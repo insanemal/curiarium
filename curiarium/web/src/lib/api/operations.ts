@@ -209,6 +209,27 @@ export async function getOperation(operationId: string): Promise<Operation> {
   return res.json();
 }
 
+/** Pages the ledger, newest first. Every filter is the server's own (`workflow`,
+ *  `state`, and a `limit`/`offset` page), so "the latest scan operation" is one
+ *  query instead of a client-side scan of the whole history. A READ like
+ *  `getOperation`, and the same rule applies: the rows are what the runner
+ *  wrote, so a caller reads a status off them rather than inventing one. */
+export async function listOperations(
+  input: { workflow?: string; state?: string; limit?: number; offset?: number } = {},
+): Promise<Operation[]> {
+  const qs = new URLSearchParams();
+  if (input.workflow) qs.set("workflow", input.workflow);
+  if (input.state) qs.set("state", input.state);
+  if (input.limit != null) qs.set("limit", String(input.limit));
+  if (input.offset != null) qs.set("offset", String(input.offset));
+  const query = qs.toString();
+  const res = await fetch(`${apiBase()}/operations${query ? `?${query}` : ""}`, {
+    headers: authHeaders(),
+  });
+  assertOk(res, "Failed to load operations");
+  return res.json();
+}
+
 /** Folds one finished operation back. The request carries no body at all: the id
  *  in the path IS the argument, and the ledger the run wrote says what to undo.
  *  The server answers 409 with its own `detail` for every case it refuses - an

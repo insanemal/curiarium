@@ -31,7 +31,11 @@ time, which is a `sys.modules` lookup after the first request.
 `start_scan`/`scan_status` resolve against MAIN's copy rather than calling
 `library_scan` directly, because `main` is the name the suite patches. That is
 today's exact semantics, not an accident to be "fixed": a direct
-`library_scan.start_scan()` call would silently stop honouring the patch.
+`library_scan.start_scan()` call would silently stop honouring the patch. The
+readers are live and outlive the deleted route: `archive_service.extract_out`
+and `snapshot_service`'s restore both call `start_scan` to kick a background
+pass after they write, and the operation planners read `scan_status` for their
+running-scan guard.
 
 The import accessors forward the caller's `AssetOrigin` (Mf-0u1y) as a keyword
 argument, unconditionally, so a fake patched into `main` has to accept it: the

@@ -503,15 +503,15 @@ def test_the_four_steps_run_in_order_and_leave_the_tree_the_review_promised(
 
 
 def test_the_workflow_contains_no_scan_step(client: TestClient, storage: Path) -> None:
-    """AC-4. Mutation: a scan sneaking back in by op name, step body or call.
+    """AC-4. Mutation: a scan sneaking into this composition by op name or call.
 
     The ticket's inversion, asserted structurally rather than by grep: this workflow
     knows its own file list, so it may not discover anything. Four independent
     witnesses, because there are four ways a scan comes back - a planner emitting the
     op, a step body left in the runner, a plan literal naming it, or a runner calling
-    the whole-root primitive. `library_scan.scan_storage_root` and
-    `POST /library/scan` remain the rescan primitive; they are simply not this
-    operation's job.
+    the whole-root primitive. The `scan` step body EXISTS, but it belongs to the
+    `library-scan` workflow (Mf-y2u3); this composition's plan still names no scan
+    step, and its runner calls `library_scan.register`, never the walk.
     """
     register_archive()
     plan = plan_extract(client)
@@ -521,13 +521,14 @@ def test_the_workflow_contains_no_scan_step(client: TestClient, storage: Path) -
         "register",
         "create-project",
     ]
-    assert "scan" not in operations_runner._STEP_BODIES
+    assert "scan" in operations_runner._STEP_BODIES
     assert "register" in operations_runner._STEP_BODIES
 
     service_tree = _module_tree("operations_service.py")
-    assert _dicts_naming(service_tree, "op", "scan") == [], "no plan names a scan step"
-    # The walk above is only evidence if it can SEE an op literal, so the same pass
-    # over the same tree must find the one the planner really emits.
+    # The scan op literal belongs to `library-scan`, not to this composition: the
+    # plan asserted above names no `scan` step, and the AST pass still proves it can
+    # SEE an op literal (the library-scan planner is the one that emits it).
+    assert _dicts_naming(service_tree, "op", "scan"), "the AST pass can see an op literal"
     assert _dicts_naming(service_tree, "op", "register"), "the AST pass can see an op literal"
 
     runner = _module_tree("operations_runner.py")
@@ -1158,22 +1159,25 @@ def test_the_deleted_route_is_reconciled_in_every_count() -> None:
     Before this commit: ROUTE_PERMISSIONS 109 (11/39/27/13/18), GET 43, ACTIONS 60,
     ROUTE_ACTIONS 51, EXEMPT 15, WORKFLOWS 3. The deletion removes exactly one
     route (one permission row, one audit route row, one action) and the workflow
-    set gains its fourth entry.
+    set gains its fourth entry. Part 1/4 of Mf-y2u3 then deleted the two
+    /library/scan routes, so 106 (11/38/27/12/18), GET 42, ACTIONS 58,
+    ROUTE_ACTIONS 49, WORKFLOWS 5.
     """
-    assert len(permissions.ROUTE_PERMISSIONS) == 108
+    assert len(permissions.ROUTE_PERMISSIONS) == 106
     by_level: dict[str, int] = {}
     for level in permissions.ROUTE_PERMISSIONS.values():
         by_level[level] = by_level.get(level, 0) + 1
-    assert by_level == {"public": 11, "read": 39, "contribute": 27, "write": 13, "admin": 18}
-    assert sum(1 for method, _path in permissions.ROUTE_PERMISSIONS if method == "GET") == 43
-    assert len(audit.ACTIONS) == 59
-    assert len(audit.ROUTE_ACTIONS) == 50
+    assert by_level == {"public": 11, "read": 38, "contribute": 27, "write": 12, "admin": 18}
+    assert sum(1 for method, _path in permissions.ROUTE_PERMISSIONS if method == "GET") == 42
+    assert len(audit.ACTIONS) == 58
+    assert len(audit.ROUTE_ACTIONS) == 49
     assert len(audit.EXEMPT_ROUTES) == 15
     assert operations_service.WORKFLOWS == (
         "create-project",
         "split-and-create",
         "adopt",
         "extract-and-create",
+        "library-scan",
     )
     assert operations_service.WORKFLOW_LEVELS["extract-and-create"] == permissions.CONTRIBUTE
 

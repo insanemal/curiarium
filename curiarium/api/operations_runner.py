@@ -867,6 +867,27 @@ def _refresh_groups(operation_id: str, step_index: int, args: dict) -> dict:
     return {"project_id": project_id, "groups": len(groups), "verified": True}
 
 
+def _scan(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `scan` step body: `library_scan.scan_subtree`, the walk itself.
+
+    The scan is this workflow's whole write, and the runner IS the thread the
+    deleted route used to spawn: the walk runs inside this step, so the operation
+    row's lifecycle is the scan's lifecycle. `scope` of ``''`` is the whole
+    library; anything else is a folder the plan already checked exists.
+
+    The result is ``ScanState.as_dict()`` VERBATIM - no extra keys - because that
+    field set is the wire shape the deleted status route published. A second slot
+    is refused by the primitive, and the refusal is re-raised with the door's own
+    sentence so the step row reads the way the operator used to see the 409.
+    """
+    scope = args.get("scope") or ""
+    try:
+        state = library_scan.scan_subtree(scope)
+    except library_scan.ScanAlreadyRunning as error:
+        raise RuntimeError(library_scan.ALREADY_RUNNING_DETAIL) from error
+    return state.as_dict()
+
+
 _STEP_BODIES = {
     "extract": _extract,
     "move": _move,
@@ -876,6 +897,10 @@ _STEP_BODIES = {
     "refresh-groups": _refresh_groups,
     "verify-members": _verify_members,
     "verify-cover": _verify_cover,
+    # The scan is the `library-scan` workflow's whole write. The deleted route
+    # spawned a background thread; the runner IS that thread, so the walk runs
+    # inside this step.
+    "scan": _scan,
 }
 
 

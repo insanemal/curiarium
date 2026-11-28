@@ -1,14 +1,15 @@
 /**
  * The one place in the tree that knows how to wait for a library scan.
  *
- * A scan is asynchronous by design: `POST /library/scan` answers as soon as the
- * walk is queued, and the files a caller just wrote are only visible once the
- * walk registers them. Anything that must observe the result of a write (an
- * archive extract today, an import later) therefore polls the status endpoint
- * here instead of growing its own retry loop. Keeping the loop in one module
- * also keeps its two awkward rules in one place: a read that never happened
- * cannot claim the scan settled, and a revoked session must never be mistaken
- * for a slow scan.
+ * A scan is asynchronous by design: starting one queues an operation that
+ * answers as soon as the row exists, and the files a caller just wrote are only
+ * visible once the walk registers them. Anything that must observe the result
+ * of a write (an archive extract today, an import later) therefore polls the
+ * scan's status here instead of growing its own retry loop - and that status is
+ * read off the newest `library-scan` operation row, because the row is the only
+ * evidence the browser has. Keeping the loop in one module also keeps its two
+ * awkward rules in one place: a read that never happened cannot claim the scan
+ * settled, and a revoked session must never be mistaken for a slow scan.
  *
  * Domain modules only, never the `lib/api` barrel: `App`'s tests replace that
  * barrel with a fixed object, so a named import from it would throw "No export
@@ -47,9 +48,6 @@ export type SettleOptions = {
   /** A revoked session is the shell's business, not a scan outcome. */
   onUnauthorized?: () => void;
 };
-
-/** The exact text `startLibraryScan` throws for a 409 (`lib/api/settings.ts:106-113`). */
-const ALREADY_RUNNING = "A scan is already running";
 
 /**
  * Shared by both waits so neither can drift from the poll interval. The plain
@@ -105,13 +103,16 @@ export async function waitForScanSettle(opts: SettleOptions = {}): Promise<Settl
  * Waits out the scan an archive extract relies on, re-kicking it when the
  * extract could not.
  *
- * `start_scan()` returns False when a scan already holds the slot and does NOT
- * queue another pass (`curiarium/api/library_scan.py:83-84` and `:253-258`), so
- * the walk that was already running may have passed the new directory before
- * the extract wrote it. An extract that reports `scan_started: false` was in
- * exactly that position: the first window drains that pre-existing walk, and
- * only then is a fresh pass kicked, because a second start while the old walk
- * is still running would be refused. That gives two windows, never a third.
+ * The server reports `scan_started: false` when its own start could not take
+ * the scan slot, so the walk that was already running may have passed the new
+ * directory before the extract wrote it. An extract that reports exactly that
+ * was in that position, and the re-kick below queues a SECOND `library-scan`
+ * operation instead of fighting for the slot: the ledger's queue serialises two
+ * operations over the same paths (the server's prefix lock runs them one at a
+ * time), so the fresh pass is accepted while the old walk is still going and
+ * simply walks after it. That gives two windows, never a third - and it no
+ * longer depends on catching a 409, because a refusal is a row now, not a
+ * throw.
  *
  * Nothing written means nothing to wait for: a batch of all-`already_present`
  * results, or one whose entries were all junk (`files: 0`), returns without
@@ -138,9 +139,10 @@ export async function settleAfterExtract(
       opts.onUnauthorized?.();
       return "cancelled";
     }
-    // A scan that grabbed the slot between our read and this call is not a
-    // failure: it walks the new directory anyway, which is what we wanted.
-    if (!(err instanceof Error) || err.message !== ALREADY_RUNNING) return "timeout";
+    // A scan the queue has not accepted at all: no row exists to poll, so this
+    // wait has nothing to follow and must not claim the write is visible. A
+    // scan that lost the slot is NOT this case - it came back as a row.
+    return "timeout";
   }
 
   return waitForScanSettle(opts);

@@ -5,11 +5,10 @@ Failure semantics (the ticket's crux):
     session and transaction as the mutation and committed with it, so a failed
     audit write rolls the mutation back and the caller sees an error. The audit
     row and the row set it describes are one atomic fact.
-  * Filesystem-only actions are FAIL-LOUD. `POST /trash/purge` and
-    `POST /library/scan` destroy or launch things that carry no DB row, so there
-    is nothing to roll back. Their row is written immediately after the action
-    and a failure raises a 500, after logging. The bytes/scan are already gone or
-    started; that residual window is documented, not hidden.
+  * Filesystem-only actions are FAIL-LOUD. `POST /trash/purge` destroys things
+    that carry no DB row, so there is nothing to roll back. Its row is written
+    immediately after the action and a failure raises a 500, after logging. The
+    bytes are already gone; that residual window is documented, not hidden.
 
 The emission point is the action site, not `permissions.authorize()`. Those are
 two different things: `authorize()` is the *authorization* choke point (who may
@@ -95,7 +94,6 @@ USER_PASSWORD_RESET = "user.password_reset"
 # riding on `user.disable`. The target username is the snapshot the audit rows it
 # already wrote keep, and the detail names the row that is gone.
 USER_DELETE = "user.delete"
-LIBRARY_SCAN_START = "library.scan.start"
 LOGIN_SUCCEEDED = "login.succeeded"
 # An SSO login is its own action pair rather than a `kind` on login.succeeded:
 # the exchange route is the only mutation, and the callback is the only place a
@@ -181,7 +179,6 @@ ACTIONS: frozenset[str] = frozenset({
     USER_ENABLE,
     USER_PASSWORD_RESET,
     USER_DELETE,
-    LIBRARY_SCAN_START,
     LOGIN_SUCCEEDED,
     LOGIN_OIDC_SUCCEEDED,
     LOGIN_OIDC_FAILED,
@@ -334,9 +331,9 @@ def stage(session: Session, ctx: Optional[AuditContext], *events: Event) -> None
 def record(*events: Event, ctx: AuditContext) -> None:
     """Write events that have no transaction to join; log and raise on failure.
 
-    Only for actions whose effect is outside the database (`trash.purge`,
-    `library.scan.start`) and for a creation whose row is written by shared
-    services that own their own sessions (`bundle.create`, `bundle.dismiss`).
+    Only for actions whose effect is outside the database (`trash.purge`) and
+    for a creation whose row is written by shared services that own their own
+    sessions (`bundle.create`, `bundle.dismiss`).
     There is nothing here to roll back: for the filesystem actions the residual
     window is the action itself, and for a bundle create it is the project row
     plus its `_bundle` marker, which commit together before this call. The event
@@ -470,7 +467,6 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     # A sub-resource rather than a `password` field on the PATCH: one route, one
     # action, one row (Mf-bj51).
     ("POST", "/users/{user_id}/password"): (USER_PASSWORD_RESET,),
-    ("POST", "/library/scan"): (LIBRARY_SCAN_START,),
     # Silent on the normal path, audited on the two paths that say something
     # happened: the grace window was used, or a previous-generation token was
     # replayed and the session revoked.

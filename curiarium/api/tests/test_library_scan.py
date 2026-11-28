@@ -1,4 +1,6 @@
 """Tests for the storage-root scanner (filesystem-authoritative library, phase 1)."""
+import ast
+import inspect
 import logging
 import re
 import threading
@@ -12,7 +14,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import event, update
+from sqlalchemy import create_engine, event, update
 from sqlmodel import Session, select
 
 import asset_service
@@ -24,7 +26,6 @@ from db import STORAGE, engine
 from library_scan import scan_storage_root
 from migrations import run_migrations
 from models import Asset, AuditEvent, Folder
-from schemas.library import LibraryScanStatusOut
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -189,91 +190,6 @@ def test_missing_files_are_counted_not_deleted(library_root):
     # made, so dropping the path here leaks a row into the shared session DB.
 
 
-def test_scan_endpoint_returns_before_the_background_run_finishes(
-    library_root, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The POST answers while the worker is still parked mid-run.
-
-    `library_scan._run_scan` resolves `scan_storage_root` through the module
-    global at call time, so patching that name is what gates the background
-    thread. The worker is held on an Event this test owns, which is why the
-    status read below can never race the walk finishing.
-    """
-    rel = "Loose/background-proof.stl"
-    _write(rel, b"solid background\n")
-    library_root.append(rel)
-
-    real_scan = library_scan.scan_storage_root
-    parked = threading.Event()
-    release = threading.Event()
-
-    def parked_scan(state=None):
-        parked.set()
-        # Bounded, not conditional: if a failure stopped the test before it could
-        # release, the worker still delegates and the run closes itself, instead
-        # of leaving the module-global run slot claimed for the rest of the
-        # session. The bound is well past the test's own deadline, so a parked
-        # assertion below can never lose a race with this timeout.
-        release.wait(timeout=SCAN_WAIT_SECONDS * 3)
-        return real_scan(state=state)
-
-    monkeypatch.setattr(library_scan, "scan_storage_root", parked_scan)
-
-    with TestClient(main.app) as client:
-        headers = _auth_header(client)
-        # The POST is inside the try: it claims the run slot, so any assertion
-        # from here on must still go through the release below.
-        try:
-            start = client.post("/library/scan", headers=headers)
-            assert start.status_code == 202, start.text
-            assert parked.wait(timeout=SCAN_WAIT_SECONDS), "the background run never reached the scanner"
-            status = client.get("/library/scan", headers=headers)
-            assert status.status_code == 200, status.text
-            # The work is provably unfinished: the worker is parked on `release`.
-            assert status.json()["running"] is True
-            assert status.json()["finished_at"] is None
-        finally:
-            # A failed assertion must not leave the daemon thread holding the run
-            # slot, or every later start_scan() would be refused.
-            release.set()
-            final = _wait_for_scan_status(
-                lambda: client.get("/library/scan", headers=headers).json(),
-                _scan_is_finished,
-                message="the released background run never finished",
-            )
-        assert final["registered"] >= 1
-
-    assert rel in _assets_by_path()
-
-
-def test_scan_endpoint_runs_in_background(library_root):
-    rel = "Loose/from-api.stl"
-    _write(rel, b"solid api\n")
-    library_root.append(rel)
-
-    with TestClient(main.app) as client:
-        headers = _auth_header(client)
-        start = client.post("/library/scan", headers=headers)
-        assert start.status_code == 202, start.text
-        # `running` is not asserted here: the endpoint may already have finished
-        # the walk. Test A owns that proof. The endpoint also keeps the *last*
-        # finished run visible, so `started_at` is the per-run identity that
-        # distinguishes this run from an earlier finished one.
-        started_at = start.json()["started_at"]
-        assert started_at is not None
-
-        def this_run_finished(status: dict) -> bool:
-            return status["started_at"] == started_at and _scan_is_finished(status)
-
-        status = _wait_for_scan_status(
-            lambda: client.get("/library/scan", headers=headers).json(),
-            this_run_finished,
-            message="the started run never finished",
-        )
-        assert status["registered"] >= 1
-
-    assert rel in _assets_by_path()
-
 
 # --- batched, bounded-memory scanning (Mf-025u) ------------------------------
 #
@@ -436,9 +352,9 @@ def test_interrupted_scan_leaves_whole_committed_batches(temp_library: Path, mon
     real_walk = library_scan._walk_storage
     walked = 0
 
-    def interrupting_walk(root):
+    def interrupting_walk(root, **kwargs):
         nonlocal walked
-        for item in real_walk(root):
+        for item in real_walk(root, **kwargs):
             yield item
             walked += len(item[1])
             if walked >= library_scan.BATCH_SIZE * 1.5:
@@ -1161,7 +1077,7 @@ def test_an_aborted_scan_still_logs_one_summary_line(
 ) -> None:
     _write_under(temp_library, "aborted/one.stl", b"solid x\n")
 
-    def exploding_walk(root):
+    def exploding_walk(root, **kwargs):
         raise RuntimeError("walker interrupted")
         yield  # pragma: no cover - keeps this a generator so the raise lands mid-walk
 
@@ -1244,9 +1160,25 @@ def test_a_truncated_error_list_is_reported_as_a_pair(
     assert snapshot["failed"] == len(snapshot["errors"]) + status.errors_omitted
 
 
-def test_scan_status_fields_match_the_schema() -> None:
+def test_the_scan_state_field_set_is_the_deleted_wire_shape() -> None:
+    """The primitive's field set is the shape the deleted status route published.
+
+    `schemas/library.py` is gone, so this is pinned against the literal field set
+    instead of a pydantic model: the same nine fields are now the `scan` step's
+    result, and `errors_omitted` stays internal.
+    """
     state = library_scan.ScanState()
-    assert set(state.as_dict()) == set(LibraryScanStatusOut.model_fields)
+    assert set(state.as_dict()) == {
+        "running",
+        "started_at",
+        "finished_at",
+        "registered",
+        "known",
+        "ignored",
+        "missing",
+        "failed",
+        "errors",
+    }
     assert "errors_omitted" not in state.as_dict()
 
 
@@ -1287,10 +1219,10 @@ def test_a_second_scan_is_refused_while_one_is_running(
     entered = threading.Event()
     gate = threading.Event()
 
-    def gated_walk(root):
+    def gated_walk(root, **kwargs):
         entered.set()
         assert gate.wait(timeout=10)
-        yield from real_walk(root)
+        yield from real_walk(root, **kwargs)
 
     monkeypatch.setattr(library_scan, "_walk_storage", gated_walk)
     assert library_scan.start_scan() is True
@@ -1315,6 +1247,218 @@ def test_a_second_scan_is_refused_while_one_is_running(
             _scan_has_stopped,
             message="the first run never finished",
         )
+
+
+# --- one scan slot, two entry points (Mf-y2u3) -------------------------------
+
+
+def test_a_scoped_scan_never_flags_an_out_of_scope_row_missing(temp_library: Path) -> None:
+    """A scoped run never even considers a row outside its scope.
+
+    The R2 defect: the missing-flag pass used to reason over every asset row, so a
+    rescan of one folder stamped every absent file in the library. Here an outside
+    row whose file is gone must keep its NULL stamp, while an inside row's absence
+    is stamped, because the run declared only that folder.
+    """
+    _write_under(temp_library, "scopeinside/kept.stl", b"solid kept\n")
+    _write_under(temp_library, "scopeoutside/gone.stl", b"solid gone\n")
+    scan_storage_root()
+    assert _library_rows("scopeoutside/")["scopeoutside/gone.stl"].missing_since is None
+    assert _library_rows("scopeinside/")["scopeinside/kept.stl"].missing_since is None
+
+    (temp_library / "scopeoutside/gone.stl").unlink()
+    (temp_library / "scopeinside/kept.stl").unlink()
+    run = library_scan.scan_subtree("scopeinside")
+
+    rows = _library_rows("scope")
+    assert rows["scopeoutside/gone.stl"].missing_since is None
+    assert rows["scopeinside/kept.stl"].missing_since is not None
+    assert run.missing == 1
+
+
+def test_a_scoped_scan_matches_a_root_scan_on_the_same_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder scan and a root scan of that folder agree, field for field.
+
+    The two runs share one isolated database so the comparison is not polluted by
+    the suite's other rows. A scoped walk starts mid-tree but keeps its rel paths
+    library-relative, so names, folder parents and storage paths must be identical
+    to the root walk. Asset rows are truncated between the runs (folder rows stay,
+    so their ids do), and the rows each run stamps missing must be the same set -
+    the timestamp itself is the run's own clock, so the compared invariant is
+    which rows carry a stamp.
+    """
+    storage = tmp_path / "storage"
+    _write_under(storage, "same/root/a.stl", b"solid a\n")
+    _write_under(storage, "same/root/nested/b.stl", b"solid b\n")
+    _write_under(storage, "same/root/nested/c.txt", b"c\n")
+    _write_under(storage, "same/root/gone.stl", b"solid gone\n")
+    isolated = create_engine(
+        f"sqlite:///{tmp_path / 'isolated.db'}", connect_args={"check_same_thread": False}
+    )
+    run_migrations(isolated)
+    monkeypatch.setattr(library_scan, "STORAGE", storage)
+    monkeypatch.setattr(library_scan, "engine", isolated)
+
+    def snapshot() -> tuple:
+        with Session(isolated) as session:
+            assets = sorted(
+                (asset.storage_path, asset.filename) for asset in session.exec(select(Asset))
+            )
+            folders = sorted(
+                (folder.name, folder.parent_id) for folder in session.exec(select(Folder))
+            )
+            stamped = {
+                asset.storage_path
+                for asset in session.exec(select(Asset))
+                if asset.missing_since is not None
+            }
+        return assets, folders, stamped
+
+    def counters(state: library_scan.ScanState) -> dict:
+        view = state.as_dict()
+        return {
+            key: view[key]
+            for key in ("registered", "known", "ignored", "missing", "failed", "errors")
+        }
+
+    root_state = scan_storage_root()
+    root_assets, root_folders, root_stamped = snapshot()
+    assert root_state.registered == 4
+    with Session(isolated) as session:
+        for asset in list(session.exec(select(Asset))):
+            session.delete(asset)
+        session.commit()
+
+    scoped_state = library_scan.scan_subtree("same")
+    scoped_assets, scoped_folders, scoped_stamped = snapshot()
+
+    assert counters(scoped_state) == counters(root_state)
+    assert scoped_assets == root_assets
+    assert scoped_folders == root_folders
+    assert scoped_stamped == root_stamped == set()
+
+    # Now one file is gone: both scans must stamp exactly the same rows.
+    (storage / "same/root/gone.stl").unlink()
+    scan_storage_root()
+    _assets, _folders, root_stamped = snapshot()
+    with Session(isolated) as session:
+        session.execute(update(Asset).values(missing_since=None))
+        session.commit()
+    library_scan.scan_subtree("same")
+    _assets, _folders, scoped_stamped = snapshot()
+
+    assert root_stamped == {"same/root/gone.stl"}
+    assert scoped_stamped == root_stamped
+
+
+def test_a_scoped_scan_does_not_call_the_global_backfill(temp_library: Path) -> None:
+    """The scoped body cannot reason over rows outside its scope.
+
+    `folder_paths.backfill_paths_from_asset_dirs` walks every folder and asset row
+    in the library, so it is discovery under another name. The source witness pins
+    that `scan_subtree` never calls it; the behavioural half shows a stale folder
+    row elsewhere is left stale by the scoped run and healed by the root run.
+    """
+
+    def called_names(function) -> set:
+        tree = ast.parse(inspect.getsource(function))
+        return {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+
+    assert "backfill_paths_from_asset_dirs" not in called_names(library_scan.scan_subtree)
+    assert "backfill_paths_from_asset_dirs" in called_names(library_scan._scan_library)
+
+    _write_under(temp_library, "bfoutside/bfreal/part.stl", b"solid part\n")
+    _write_under(temp_library, "bfscope/inside.stl", b"solid inside\n")
+    scan_storage_root()
+
+    with Session(engine) as session:
+        folder = session.exec(select(Folder).where(Folder.name == "bfreal")).one()
+        folder.storage_path = None
+        session.add(folder)
+        session.commit()
+
+    library_scan.scan_subtree("bfscope")
+    with Session(engine) as session:
+        stale = session.exec(select(Folder).where(Folder.name == "bfreal")).one().storage_path
+    assert stale is None
+
+    scan_storage_root()
+    with Session(engine) as session:
+        healed = session.exec(select(Folder).where(Folder.name == "bfreal")).one().storage_path
+    assert healed == "bfoutside/bfreal"
+
+
+def test_two_scans_share_one_slot(temp_library: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scoped run and a background start_scan() refuse each other.
+
+    The scoped entry point is a storage run like any other, so the ONE slot is
+    shared in both directions, and a refusal never touches the run holding it.
+    """
+    _write_under(temp_library, "slot/one.stl", b"solid x\n")
+    real_walk = library_scan._walk_storage
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def gated_walk(root, **kwargs):
+        entered.set()
+        assert gate.wait(timeout=10)
+        yield from real_walk(root, **kwargs)
+
+    monkeypatch.setattr(library_scan, "_walk_storage", gated_walk)
+
+    # The background root run holds the slot first; the scoped call is refused.
+    assert library_scan.start_scan() is True
+    try:
+        assert entered.wait(timeout=10)
+        before = library_scan.scan_status()
+        with pytest.raises(library_scan.ScanAlreadyRunning):
+            library_scan.scan_subtree("slot")
+        assert library_scan.scan_status() == before
+    finally:
+        gate.set()
+        _wait_for_scan_status(
+            library_scan.scan_status,
+            _scan_has_stopped,
+            message="the first run never finished",
+        )
+
+    # And a scoped run holds it just as firmly against both other entry points.
+    entered.clear()
+    gate.clear()
+    refusals: list = []
+
+    def scoped() -> None:
+        try:
+            library_scan.scan_subtree("slot")
+        except library_scan.ScanAlreadyRunning:
+            refusals.append("refused")
+        except BaseException as exc:  # pragma: no cover - a real failure must surface
+            refusals.append(exc)
+
+    worker = threading.Thread(target=scoped, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(timeout=10)
+        before = library_scan.scan_status()
+        assert library_scan.start_scan() is False
+        with pytest.raises(library_scan.ScanAlreadyRunning):
+            scan_storage_root()
+        assert library_scan.scan_status() == before
+    finally:
+        gate.set()
+        worker.join(timeout=10)
+        _wait_for_scan_status(
+            library_scan.scan_status,
+            _scan_has_stopped,
+            message="the scoped run never finished",
+        )
+    assert refusals == []
 
 
 # --- derived display names (Mf-tkdp) ----------------------------------------

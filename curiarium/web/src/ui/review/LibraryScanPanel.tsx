@@ -5,9 +5,10 @@ import type { LibraryScanState } from "./useLibraryScan";
 type Props = {
   state: LibraryScanState;
   /**
-   * `editor` and above: `POST /library/scan` is WRITE. The status line and the
-   * failure report are reads (`GET /library/scan` is READ) and stay visible to
-   * a viewer, so moving the surface broadens no write permission.
+   * `editor` and above: the `library-scan` workflow is WRITE. The status line
+   * and the failure report are reads (`GET /operations?workflow=library-scan`
+   * is READ) and stay visible to a viewer, so moving the surface broadens no
+   * write permission.
    */
   canWrite: boolean;
   /**

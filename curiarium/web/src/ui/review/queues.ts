@@ -16,8 +16,9 @@ export type ReviewQueue = {
  * `minRole` is per row because the queues' own routes differ: creating or
  * dismissing a bundle is CONTRIBUTE, while `GET /imports/runs` is READ - a
  * viewer already reads the run history, so the queue must not delete a proven
- * read surface. `GET /assets?missing=true` and `GET /library/scan` are READ too,
- * so a viewer reads the missing queue; only the rescan it offers is a WRITE. A
+ * read surface. `GET /assets?missing=true` and the `library-scan` operation row
+ * are READ too, so a viewer reads the missing queue; only the rescan it offers
+ * is a WRITE. A
  * role below a row's threshold simply does not see that row.
  *
  * Trash follows the same split: `GET /trash` is require_read, so a viewer reads

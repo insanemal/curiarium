@@ -595,11 +595,6 @@ def call_reset_password(client, headers, ids, monkeypatch) -> Response:
     )
 
 
-def call_start_scan(client, headers, ids, monkeypatch) -> Response:
-    monkeypatch.setattr(main, "start_scan", lambda: True)
-    return client.post("/library/scan", headers=headers)
-
-
 def call_create_snapshot(client, headers, ids, monkeypatch) -> Response:
     # A real provider: this sweep asserts at least one row, and a null provider
     # would answer 409 instead of creating anything. The tree copy writes into
@@ -931,7 +926,6 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("PATCH", "/users/{user_id}"): call_update_user,
     ("DELETE", "/users/{user_id}"): call_delete_user,
     ("POST", "/users/{user_id}/password"): call_reset_password,
-    ("POST", "/library/scan"): call_start_scan,
     ("POST", "/snapshots"): call_create_snapshot,
     ("DELETE", "/snapshots/{name}"): call_delete_snapshot,
     ("POST", "/snapshots/{name}/restore"): call_restore_snapshot,

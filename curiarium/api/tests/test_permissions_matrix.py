@@ -549,10 +549,6 @@ def call_first_run_setup(client: TestClient, headers: dict[str, str], ids: Ids, 
     )
 
 
-def call_scan_status(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    return client.get("/library/scan", headers=headers)
-
-
 def call_list_import_runs(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     return client.get("/imports/runs", headers=headers)
 
@@ -820,12 +816,6 @@ def call_get_storage_capabilities(client: TestClient, headers: dict[str, str], i
 def call_update_storage_settings(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     # Post back the template the deployment already has: a 200 with nothing moved.
     return client.post("/settings/storage", json={"template": ids.storage_template}, headers=headers)
-
-
-def call_start_scan(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    # A real scan would make a later folder delete a 409 while it runs.
-    monkeypatch.setattr(main, "start_scan", lambda: True)
-    return client.post("/library/scan", headers=headers)
 
 
 def call_create_user(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
@@ -1271,7 +1261,6 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("DELETE", "/mfa"): call_mfa_disable,
     ("POST", "/mfa/recovery-codes"): call_mfa_recovery_codes,
     ("POST", "/settings/mfa"): call_mfa_policy,
-    ("GET", "/library/scan"): call_scan_status,
     ("GET", "/file/{asset_id}/{name}"): call_file,
     ("GET", "/asset/{asset_id}/files"): call_supporting_files,
     ("GET", "/asset/{asset_id}/files/{file_id}"): call_supporting_file,
@@ -1322,7 +1311,6 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("GET", "/settings/storage"): call_get_storage_settings,
     ("POST", "/settings/storage"): call_update_storage_settings,
     ("GET", "/storage/capabilities"): call_get_storage_capabilities,
-    ("POST", "/library/scan"): call_start_scan,
     ("POST", "/users"): call_create_user,
     ("GET", "/users"): call_list_users,
     ("PATCH", "/users/{user_id}"): call_update_user,
@@ -1385,7 +1373,6 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     # caller in the sweeps because no spec targets a live session.
     ("GET", "/me/sessions"): 200,
     ("DELETE", "/me/sessions/{session_id}"): 404,
-    ("GET", "/library/scan"): 200,
     ("GET", "/imports/runs"): 200,
     ("GET", "/imports/runs/{run_id}"): 200,
     # Mf-1zmd: the archive is not in the library, so both doors answer the honest
@@ -1433,7 +1420,6 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("GET", "/settings/storage"): 200,
     ("POST", "/settings/storage"): 200,
     ("GET", "/storage/capabilities"): 200,
-    ("POST", "/library/scan"): 202,
     ("POST", "/users"): 201,
     ("GET", "/users"): 200,
     ("PATCH", "/users/{user_id}"): 200,
@@ -1612,7 +1598,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 108 routes - 11 public / 39 read / 27 contribute / 13 write / 18 admin.
+    """The matrix is pinned at 106 routes - 11 public / 38 read / 27 contribute / 12 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1626,18 +1612,19 @@ def test_the_matrix_is_the_documented_size() -> None:
     (the preview) and two writes (apply and undo) - so the total fell 112 -> 109,
     read 40 -> 39 and write 15 -> 13. Mf-hebx deleted the archive-project door
     (the extract-and-create workflow replaced it), so the total fell 109 -> 108
-    and contribute 28 -> 27.
+    and contribute 28 -> 27. Part 1/4 of Mf-y2u3 deleted GET and POST
+    /library/scan, so the total fell 108 -> 106, read 39 -> 38 and write 13 -> 12.
     """
     counts = {
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 108, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 106, counts
     assert counts == {
         permissions.PUBLIC: 11,
-        permissions.READ: 39,
+        permissions.READ: 38,
         permissions.CONTRIBUTE: 27,
-        permissions.WRITE: 13,
+        permissions.WRITE: 12,
         permissions.ADMIN: 18,
     }, counts
 
@@ -1815,43 +1802,54 @@ def test_admin_is_never_denied(client, ids, admin_headers, key, monkeypatch) -> 
         assert response.status_code == expected, f"{route_id(key)} answered {response.status_code}: {response.text}"
 
 
-def test_starting_a_scan_is_editor_work(client, ids, editor_headers, contributor_headers, viewer_headers, monkeypatch) -> None:
-    """`POST /library/scan` is write, not admin or contribute: the banner offers it.
+def test_the_scan_level_lives_on_the_workflow_now(
+    client, ids, editor_headers, contributor_headers, monkeypatch
+) -> None:
+    """The scan routes are gone; the WRITE decision moved to the workflow.
 
-    This guards the re-scan affordance: the asset grid's "Re-scan" button calls
-    the POST, so classifying it as admin turns an offered action into a 403 for
-    every editor. A contributor is refused it because registering files found on
-    disk rewrites `missing_since` on rows they may not destroy - the banner's
-    Re-scan is an editor affordance. The GET stays read because every client
-    polls the status. The audit event on the POST is covered by
-    `test_audit_log.py`.
+    `POST /library/scan` was an editor affordance and `GET /library/scan` a read,
+    but part 1/4 of Mf-y2u3 deleted both and made the scan one `library-scan`
+    operation. The level did not widen: `WORKFLOW_LEVELS` still says WRITE, a
+    contributor is refused at submit with the permissions module's own sentence,
+    and an editor is accepted.
     """
-    key = ("POST", "/library/scan")
-    assert permissions.ROUTE_PERMISSIONS[key] == permissions.WRITE
-    assert permissions.ROUTE_PERMISSIONS[("GET", "/library/scan")] == permissions.READ
+    assert ("GET", "/library/scan") not in permissions.ROUTE_PERMISSIONS
+    assert ("POST", "/library/scan") not in permissions.ROUTE_PERMISSIONS
+    assert operations_service.WORKFLOW_LEVELS["library-scan"] == permissions.WRITE
 
-    from_editor = call(key, client, editor_headers, ids, monkeypatch)
-    assert from_editor.status_code != 403, f"an editor was refused the scan they are offered: {from_editor.text}"
-    assert from_editor.status_code == EXPECTED_STATUS[key], f"{route_id(key)} answered {from_editor.status_code}: {from_editor.text}"
-
-    from_contributor = call(key, client, contributor_headers, ids, monkeypatch)
-    assert from_contributor.status_code == 403, (
-        f"a contributor started a scan: {from_contributor.status_code} {from_contributor.text}"
+    planned = client.post(
+        "/operations/plan",
+        json={"workflow": "library-scan", "target": "", "params": {}},
+        headers=contributor_headers,
     )
-    assert from_contributor.json()["detail"] == permissions.DENY_DETAIL[permissions.WRITE]
+    assert planned.status_code == 200, planned.text
+    plan_id = planned.json()["plan_id"]
 
-    from_viewer = call(key, client, viewer_headers, ids, monkeypatch)
-    assert from_viewer.status_code == 403, f"a viewer started a scan: {from_viewer.status_code} {from_viewer.text}"
-    assert from_viewer.json()["detail"] == permissions.DENY_DETAIL[permissions.WRITE]
+    refused = client.post(
+        "/operations",
+        json={"plan_id": plan_id, "idempotency_key": "permissions-scan-contributor"},
+        headers=contributor_headers,
+    )
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"] == permissions.DENY_DETAIL[permissions.WRITE]
+
+    accepted = client.post(
+        "/operations",
+        json={"plan_id": plan_id, "idempotency_key": "permissions-scan-editor"},
+        headers=editor_headers,
+    )
+    assert accepted.status_code == 202, accepted.text
+    discard_operation(accepted.json()["id"])
 
 
 def test_the_measured_levels_do_not_drift() -> None:
     """The levels measured at 2d089fa, pinned so a permission edit cannot move them silently.
 
     These are the catalogue's load-bearing classifications: the contributor's
-    creation and membership doors, and the editor's rename/move/scan line. The
-    keys are named here and the levels are read off `ROUTE_PERMISSIONS` itself,
-    so this fails only when the matrix really changes.
+    creation and membership doors, and the editor's rename/move line. The keys
+    are named here and the levels are read off `ROUTE_PERMISSIONS` itself, so
+    this fails only when the matrix really changes. The scan key is asserted
+    ABSENT, because part 1/4 of Mf-y2u3 moved that decision onto the workflow.
     """
     matrix = permissions.ROUTE_PERMISSIONS
 
@@ -1865,9 +1863,11 @@ def test_the_measured_levels_do_not_drift() -> None:
     for key in (
         ("PATCH", "/folder/{folder_id}"),
         ("POST", "/asset/{asset_id}/folder"),
-        ("POST", "/library/scan"),
     ):
         assert matrix[key] == permissions.WRITE, key
+
+    assert ("POST", "/library/scan") not in matrix
+    assert ("GET", "/library/scan") not in matrix
 
 
 def test_a_contributor_may_plan_and_submit_an_operation(

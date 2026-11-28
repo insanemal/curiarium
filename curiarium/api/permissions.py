@@ -203,7 +203,7 @@ def authorize_metadata_edit(request: Request, context: Optional[AuthContext], fi
 
 # The audited matrix. Path strings are the FastAPI templates exactly as declared
 # on the routes; `(method, path)` is the key so one path can carry two levels
-# (`GET /library/scan` is a read, `POST /library/scan` is write).
+# (`GET /operations` is a read, `POST /operations` is contribute).
 ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     # public: no authentication; the token endpoints 503 when auth is disabled.
     ("GET", "/health"): PUBLIC,
@@ -248,7 +248,6 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("POST", "/mfa/step-up"): READ,
     ("DELETE", "/mfa"): READ,
     ("POST", "/mfa/recovery-codes"): READ,
-    ("GET", "/library/scan"): READ,
     ("GET", "/imports/runs"): READ,
     ("GET", "/imports/runs/{run_id}"): READ,
     # A read of an archive the library already holds; it writes nothing.
@@ -338,9 +337,6 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("DELETE", "/folder/{folder_id}"): WRITE,
     ("DELETE", "/project/{project_id}"): WRITE,
     ("POST", "/asset/{asset_id}/folder"): WRITE,
-    # Registering files found on disk is library work, not administration, and
-    # the missing-file banner offers Re-scan to editors; the audit event stays.
-    ("POST", "/library/scan"): WRITE,
     # Taking a snapshot and restoring one are library mutations, not administration.
     ("POST", "/snapshots"): WRITE,
     # A restore copies snapshot bytes back into the library: an editor's move.

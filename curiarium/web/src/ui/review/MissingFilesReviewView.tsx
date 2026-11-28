@@ -11,7 +11,7 @@ import { scanOutcome, type LibraryScanState } from "./useLibraryScan";
 
 type Props = {
   state: LibraryScanState;
-  /** `editor` and above: the rescan is `POST /library/scan` (write). */
+  /** `editor` and above: the rescan is the `library-scan` workflow (write). */
   canWrite: boolean;
   canContribute: boolean;
   canDelete: boolean;

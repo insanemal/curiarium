@@ -244,8 +244,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 108 routes: 11 public, 39 read,
-27 contribute, 13 write, 18 admin.
+Paths are FastAPI templates exactly as declared. 106 routes: 11 public, 38 read,
+27 contribute, 12 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -280,7 +280,6 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | POST   | `/mfa/step-up`                         | proves a code for the *current* session; the one route an admin who did not come through `/login` needs |
 | DELETE | `/mfa`                                 | disables two-factor for the caller; refused while the admin policy depends on it |
 | POST   | `/mfa/recovery-codes`                  | replaces the caller's ten recovery codes; the plaintext is returned once |
-| GET    | `/library/scan`                        | status poll every client uses; no secrets |
 | GET    | `/imports/runs`                         | mount-import history; same disclosure class as scan errors |
 | GET    | `/imports/runs/{run_id}`                | one run with its bounded per-file errors |
 | GET    | `/import/archive/entries`               | lists the entries of an archive already in the library; reads the archive, writes nothing |
@@ -354,9 +353,10 @@ data; an operation row is not library content.
 ### write (editor or admin)
 
 Destroy or rename on disk - the editor line. Every route here either moves bytes
-out of the library, renames a file the library owns, or rescans the volume.
+out of the library, renames a file the library owns, or takes a snapshot.
 Submitting an operation is not on this line: its level is its workflow's, and
-the handler refuses a data-removing workflow to a contributor.
+the handler refuses a data-removing workflow to a contributor. A whole-library
+scan is an operation whose workflow is still `write` (see "Operations").
 
 | Method | Path                                        | Why |
 |--------|---------------------------------------------|-----|
@@ -370,7 +370,6 @@ the handler refuses a data-removing workflow to a contributor.
 | PATCH  | `/folder/{folder_id}`                       | rename/move a folder - and it carries the folder's tags in the same body, which is why a contributor cannot retag one (see "Known consequences") |
 | DELETE | `/folder/{folder_id}`                       | delete a folder (to trash) |
 | DELETE | `/project/{project_id}`                     | delete a project and its memberships (never an asset) |
-| POST   | `/library/scan`                             | starts a scan: registers files found on disk and refreshes `missing_since`; audited as `library.scan.start` |
 | POST   | `/snapshots`                                | takes a snapshot of the library; an editor's library action |
 | POST   | `/snapshots/{name}/restore`                 | copies snapshot bytes into `recovered/`; never overwrites |
 
@@ -442,16 +441,20 @@ at `write`, a move's at `contribute` - would make one button two different
 levels depending on history.
 
 **Declarations for the record.** `operations_service.WORKFLOWS` is
-`("create-project", "split-and-create", "adopt")`: those three have a planner
-and run. Every other row records the level the owner decided for a workflow that
-does not exist yet - `relocate`, the import doors and `enrich` are exactly that -
-so a row is a decision, not a claim about today's code. Read a row against
-`WORKFLOWS` before believing it runs; a name reaches `WORKFLOWS` when it has a
-planner, never before. `adopt` left this list when its planner landed (Mf-ytig).
+`("create-project", "split-and-create", "adopt", "extract-and-create",
+"library-scan")`: those five have a planner and run. Every other row records the
+level the owner decided for a workflow that does not exist yet - `relocate`, the
+import doors and `enrich` are exactly that - so a row is a decision, not a claim
+about today's code. Read a row against `WORKFLOWS` before believing it runs; a
+name reaches `WORKFLOWS` when it has a planner, never before. `adopt` left this
+list when its planner landed (Mf-ytig), and `library-scan` when part 1/4 of
+Mf-y2u3 replaced the deleted `GET`/`POST /library/scan` routes with the workflow.
 
-**`library-scan` is an OPEN QUESTION.** The rubric reads contribute - a scan
-removes nothing - but it is an existing route whose capacity consequence is
-still with the owner, so it is kept at `write` until that is settled.
+**`library-scan` is WRITE, waiting on Mf-gciy.** The rubric reads contribute - a
+scan removes nothing - but its capacity consequence is still with the owner, so
+it stays at `write` until Mf-gciy settles that and moves it. The level is now the
+workflow's (`WORKFLOW_LEVELS`), enforced at submit rather than by a route-level
+declaration, and the two deleted routes are gone from the matrix above.
 
 Everything under `/operations` is a persisted plan with a review, and the plan
 is the server's: `POST /operations/plan` computes it from the library as it is
@@ -699,21 +702,23 @@ sessions stay valid.
 
 ## Known consequences worth knowing
 
-* **`POST /library/scan` is write**, while `GET /library/scan` is read. A scan
-  is library work - it walks storage, registers files found on disk and
-  refreshes `missing_since` - not an administration job, so editors may start
-  one and it is still audited as `library.scan.start`. The GET stays read
-  because every client polls the status. A viewer *or a contributor* clicking
-  the same "Re-scan" action still gets a 403: starting a scan is not a
-  contribute action, and the missing-file banner only offers Re-scan to
-  editors.
-* **`GET /library/scan` returns `errors: List[str]`** that may contain storage
+* **A whole-library scan is `write`, and it is a workflow now.** A scan is
+  library work - it walks storage, registers files found on disk and refreshes
+  `missing_since` - not an administration job, so editors may start one; it is
+  recorded as an `operation.submit`/`operation.done` pair rather than as the
+  deleted `library.scan.start`, because the operation row carries the actor and
+  the counts. Reading a scan's status is `GET /operations?workflow=library-scan`
+  (`read`), open to every client, so polling is not a write and every client
+  still sees the counters. A viewer *or a contributor* submitting that workflow
+  still gets a 403: starting a scan is not a contribute action, and the
+  missing-file banner only offers Re-scan to editors.
+* **A scan's step result carries `errors: List[str]`** that may contain storage
   filenames. That is the same disclosure class as `storage_path` on `AssetOut`
   and `FolderOut`, which viewers already receive, so it is not a new leak.
 * **`GET /imports/runs` discloses run telemetry.** A row carries the mount
   root, per-file relative paths in its error list, and the run mode/counters.
-  That is the same disclosure class as the storage filenames in
-  `GET /library/scan` errors, which viewers already receive; it is read-only and
+  That is the same disclosure class as the storage filenames in a scan
+  operation's step result, which viewers already receive; it is read-only and
   grants no new action.
 * **Settings reads are admin**, and the client no longer makes a non-admin pay
   for it: the Storage Structure card is hidden from the settings menu and the
@@ -759,7 +764,7 @@ sessions stay valid.
   capabilities locally, and `ui/settings/Settings.tsx` is configuration only:
   it derives no write capability at all. REVIEW's own mutating surfaces each
   take the capability of the route they call: the missing queue's per-card
-  Re-scan (`POST /library/scan`, `write`) and Forget
+  Re-scan (the `library-scan` workflow, `write`) and Forget
   (`DELETE /asset/{asset_id}`, `write`) render only when `canDelete`, the
   bundle queue's create and dismiss are gated per row at `require_contribute`,
   and Empty trash needs `canPurgeTrash`. The local folder-scan panel in
@@ -823,8 +828,8 @@ sessions stay valid.
   back into the storage folder and rescan the library in REVIEW → Missing files.
 * **Audit.** Every audited action now writes one row (one per affected asset on
   the batch routes) in the same transaction as the mutation, so an audit write
-  failure is a failed mutation - fail-closed, except for the two filesystem-only
-  actions (`trash.purge`, `library.scan.start`), which are fail-loud. That costs
+  failure is a failed mutation - fail-closed, except for the one filesystem-only
+  action (`trash.purge`), which is fail-loud. That costs
   one insert per audited action and grants nothing new: the actor is the
   principal the request already carried, or `local` when auth is disabled.
   `GET /audit` is an admin read; the sidebar "Audit log" entry is shown only

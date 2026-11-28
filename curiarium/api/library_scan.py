@@ -99,6 +99,14 @@ discovery, so an unnamed file sitting beside a named one gets no row, and it
 never flags - it clears ``missing_since`` on the paths it verified present and
 stamps nothing. Mount import is not a backfill caller: its asset paths are
 relative to the mount root, not the storage root.
+
+The storage scan itself has two entry points. ``scan_storage_root`` walks the
+whole root and heals folder paths from asset evidence afterwards;
+``scan_subtree(scope)`` walks one folder inside it and deliberately does NOT
+call that backfill, because ``backfill_paths_from_asset_dirs`` reasons over every
+folder and asset row in the library - discovery outside the scope the run
+declared. ``scan_subtree('')`` delegates to ``scan_storage_root``, so there is
+one implementation of a whole-root run.
 """
 import json
 import logging
@@ -351,6 +359,41 @@ class ScanAlreadyRunning(RuntimeError):
     """A second storage scan was started while one still holds the slot."""
 
 
+# The sentence the deleted route answered with; the exception's own message stays
+# lowercase because it is a log/step detail, not the operator-facing refusal.
+ALREADY_RUNNING_DETAIL = "A library scan is already running"
+
+
+class ScanScopeError(ValueError):
+    """A scan scope that is not a folder inside the library root."""
+
+
+def normalise_scope(raw: str) -> str:
+    """Normalise a library-relative folder path, or refuse it before any walk.
+
+    A scope of ``''`` - blank, or only slashes and whitespace - is the whole
+    library, so a root scan and a scoped scan share one spelling of "the root".
+    Anything else is a folder INSIDE the library: an absolute path, an empty,
+    ``.`` or ``..`` segment, or a backslash is refused, because each of those
+    would let the walk start outside the root or join a path the operator did not
+    review. The answer is the stripped library-relative path, no leading or
+    trailing slash.
+    """
+    text = (raw or "").strip()
+    if not text.strip("/"):
+        return ""
+    if text.startswith("/") or "\\" in text:
+        raise ScanScopeError(
+            "a scan scope must be a folder inside the library: '' scans the whole library"
+        )
+    scope = text.strip("/")
+    if any(part in ("", ".", "..") for part in scope.split("/")):
+        raise ScanScopeError(
+            "a scan scope must be a folder inside the library: '' scans the whole library"
+        )
+    return scope
+
+
 @dataclass
 class ScanState:
     running: bool = False
@@ -406,6 +449,10 @@ class TreePlan:
     dest_root: Optional[Path] = None  # copy target; None registers files in place
     prepare: Optional[Callable[[Session, List[PendingAsset], dict], None]] = None
     include_hidden: bool = False
+    # The library-relative directory the walk starts at; ``''`` walks the whole
+    # root. Relative paths stay relative to the ROOT, not the scope, so a scoped
+    # walk's names, folder rows and storage paths are identical to a root scan's.
+    scope: str = ""
     # True when every folder this walk creates stands for a real directory under
     # the storage root, so its row must carry that path (the storage scan, and
     # mount copy mode). False for a reference walk, whose folders are grouping
@@ -558,7 +605,9 @@ def _finish_run(run: ScanState) -> None:
     )
 
 
-def _walk_storage(root: Path, *, include_hidden: bool = False) -> Iterator[Tuple[str, List[os.DirEntry], int]]:
+def _walk_storage(
+    root: Path, *, include_hidden: bool = False, start_rel: str = ""
+) -> Iterator[Tuple[str, List[os.DirEntry], int]]:
     """Yield ``(rel_dir, file_entries, ignored_entries)`` per directory.
 
     Iterative on purpose: a deep tree must not hit the recursion limit. One
@@ -572,8 +621,12 @@ def _walk_storage(root: Path, *, include_hidden: bool = False) -> Iterator[Tuple
     directories are always pruned silently and not counted; so are hidden
     directories, unless the caller passes ``include_hidden=True`` for a source
     whose dot-directories are real content.
+
+    ``start_rel`` seeds the stack at one directory inside ``root`` instead of the
+    root itself, while the yielded ``rel_dir`` stays library-relative: a scoped
+    walk reports ``scope/child``, not ``child``.
     """
-    stack: List[Tuple[str, Path]] = [("", root)]
+    stack: List[Tuple[str, Path]] = [(start_rel, root / start_rel if start_rel else root)]
     while stack:
         rel_dir, directory = stack.pop()
         try:
@@ -640,6 +693,49 @@ def is_skipped_name(name: str, *, include_hidden: bool = False) -> bool:
     entry.
     """
     return name in IGNORED_FILENAMES or (not include_hidden and name.startswith(HIDDEN_NAME_PREFIX))
+
+
+def skip_rules(scope: str) -> List[dict]:
+    """The walk's own pruning policy as review prose, one row per rule.
+
+    A scan's review names what the run will NOT look at, so an operator confirming
+    a blank page is told why it is blank instead of guessing whether the walk
+    failed. Each reason names the constant it enforces, and ``path`` is the scope
+    the run declares (``''`` for the whole library).
+    """
+    path = scope or ""
+    return [
+        {
+            "path": path,
+            "reason": f"hidden names (starting with {HIDDEN_NAME_PREFIX!r}) are skipped (HIDDEN_NAME_PREFIX)",
+        },
+        {
+            "path": path,
+            "reason": (
+                f"the app's own folders {', '.join(sorted(RESERVED_DIRS))} are skipped "
+                "(RESERVED_DIRS)"
+            ),
+        },
+        {
+            "path": path,
+            "reason": (
+                f"OS debris {', '.join(sorted(IGNORED_FILENAMES))} is skipped "
+                "(IGNORED_FILENAMES)"
+            ),
+        },
+        {
+            "path": path,
+            "reason": "symlinks are never followed: a symlinked directory is not walked and a symlinked file is ignored",
+        },
+        {
+            "path": path,
+            "reason": "non-regular files are ignored: only a regular file is registered",
+        },
+        {
+            "path": path,
+            "reason": "the run registers and stamps missing_since; it never deletes a row or a file",
+        },
+    ]
 
 
 def _name_parts(filename: str) -> Tuple[str, str]:
@@ -741,7 +837,7 @@ def _apply_missing_flags(session: Session, flag_ids: List[str], clear_ids: List[
 
 
 def _flag_missing_assets(
-    session: Session, root: Path, seen: set, now: str, state: ScanState
+    session: Session, root: Path, seen: set, now: str, state: ScanState, *, scope: Optional[str] = None
 ) -> None:
     """Set or clear ``missing_since`` for every candidate row, in bounded batches.
 
@@ -750,6 +846,10 @@ def _flag_missing_assets(
     held in memory for a whole tree. A rolled-back flag batch is a diagnostic in
     the log only: it is not a failed file, so it must not inflate ``errors``
     without bumping ``failed``.
+
+    A non-empty ``scope`` restricts the candidate query to rows under that folder,
+    so a row outside the scope this run declared is never even considered: the
+    scan only stamps a file it actually looked for.
     """
     flag_ids: List[str] = []
     clear_ids: List[str] = []
@@ -788,12 +888,15 @@ def _flag_missing_assets(
         consecutive_failures = 0
 
     while True:
+        filters = [
+            or_(Asset.storage_path.is_not(None), Asset.source_path.is_not(None)),
+            Asset.id > last_id,
+        ]
+        if scope:
+            filters.append(Asset.storage_path.like(f"{scope}/%"))
         rows = session.exec(
             select(Asset.id, Asset.filename, Asset.storage_path, Asset.source_path, Asset.missing_since)
-            .where(
-                or_(Asset.storage_path.is_not(None), Asset.source_path.is_not(None)),
-                Asset.id > last_id,
-            )
+            .where(*filters)
             .order_by(Asset.id)
             .limit(BATCH_SIZE)
         ).all()
@@ -1150,7 +1253,7 @@ def _register_tree(session: Session, plan: TreePlan, state: ScanState, seen: set
             state.registered += len(committed)
 
     try:
-        walk = _walk_storage(plan.root, include_hidden=True) if plan.include_hidden else _walk_storage(plan.root)
+        walk = _walk_storage(plan.root, include_hidden=plan.include_hidden, start_rel=plan.scope)
         for rel_dir, file_entries, ignored in walk:
             if ignored:
                 with _state_lock:
@@ -1214,26 +1317,34 @@ def _accept_every_file(_rel_path: str, _size: int) -> bool:
     return True
 
 
-def _storage_plan(root: Path, tracked: set) -> TreePlan:
+def _storage_plan(root: Path, tracked: set, scope: str = "") -> TreePlan:
     """The plan for the library itself: register every file where it lies."""
-    return TreePlan(root=root, tracked=tracked, keys_for=_self_key, accept=_accept_every_file, build=partial(build_asset, root))
+    return TreePlan(
+        root=root,
+        tracked=tracked,
+        keys_for=_self_key,
+        accept=_accept_every_file,
+        build=partial(build_asset, root),
+        scope=scope,
+    )
 
 
-def scan_storage_root(state: Optional[ScanState] = None) -> ScanState:
-    """Walk the storage root and register unknown files. Safe to call directly.
+def _scan_library(scope: str, state: Optional[ScanState]) -> ScanState:
+    """Run one storage scan, optionally over one folder of the library.
 
-    This is the single owner of a storage-scan run: it claims the slot through
-    ``_begin_run``, walks, and closes the run in a ``finally``. Counters describe
-    this scan only; a caller that needs history reads the status endpoint, which
-    keeps the last finished run visible. A second direct call while one holds the
-    slot raises ``ScanAlreadyRunning``; an abort is recorded on the run and then
-    re-raised.
+    Shared by ``scan_storage_root`` and ``scan_subtree`` so the slot claim, the
+    timestamp, the tracked set, the exception path and the ``finally`` close are
+    one implementation. Only a whole-root run calls the asset-evidence folder
+    backfill; a scoped run refuses it by name in ``scan_subtree``.
     """
     run = _begin_run(state)
     try:
         root = STORAGE.resolve()
         if not root.exists() or not root.is_dir():
             _note_failure(run, f"storage root not found: {root}")
+            return run
+        if scope and not (root / scope).is_dir():
+            _note_failure(run, f"scan scope not found: {scope}")
             return run
 
         # one timestamp per run: every asset the scan first notices as missing this
@@ -1248,18 +1359,23 @@ def scan_storage_root(state: Optional[ScanState] = None) -> ScanState:
             )
 
             seen: set = set()
-            _register_tree(session, _storage_plan(root, tracked), run, seen)
+            _register_tree(session, _storage_plan(root, tracked, scope=scope), run, seen)
 
             # registers nothing and deletes nothing: it only stamps or clears
             # ``missing_since``. The ``missing`` counter covers managed rows only,
-            # while reference rows may be flagged too.
-            _flag_missing_assets(session, root, seen, now, run)
+            # while reference rows may be flagged too. A scoped run passes its
+            # scope, so a row outside it is never a candidate.
+            _flag_missing_assets(session, root, seen, now, run, scope=scope or None)
 
-            # After the walk and after the fresh flags: the walk's own name-heal
-            # wins for every directory it touched, and this run's missing flags
-            # are part of the liveness evidence. Pure ORM, no filesystem call, so
-            # an unmounted volume cannot make a scan fail here.
-            folder_paths.backfill_paths_from_asset_dirs(session)
+            if not scope:
+                # After the walk and after the fresh flags: the walk's own
+                # name-heal wins for every directory it touched, and this run's
+                # missing flags are part of the liveness evidence. Pure ORM, no
+                # filesystem call, so an unmounted volume cannot make a scan fail
+                # here. Deliberately NOT called for a scoped run: it reasons over
+                # every folder and asset row in the library, i.e. it is discovery
+                # outside the scope the run declared.
+                folder_paths.backfill_paths_from_asset_dirs(session)
 
         return run
     except Exception as exc:
@@ -1269,6 +1385,42 @@ def scan_storage_root(state: Optional[ScanState] = None) -> ScanState:
         raise
     finally:
         _finish_run(run)
+
+
+def scan_storage_root(state: Optional[ScanState] = None) -> ScanState:
+    """Walk the storage root and register unknown files. Safe to call directly.
+
+    This is the single owner of a whole-root run: it claims the slot through
+    ``_begin_run``, walks, and closes the run in a ``finally``. Counters describe
+    this scan only; a caller that needs history reads ``scan_status()``, which
+    keeps the last finished run visible. A second direct call while one holds the
+    slot raises ``ScanAlreadyRunning``; an abort is recorded on the run and then
+    re-raised.
+    """
+    return _scan_library("", state)
+
+
+def scan_subtree(rel_dir: str, state: Optional[ScanState] = None) -> ScanState:
+    """Walk one folder of the library and register unknown files inside it.
+
+    The scope is validated by ``normalise_scope``; ``''`` is the whole library and
+    delegates to ``scan_storage_root``, so a root run and a scoped run share one
+    implementation. A scope that is not a directory fails the run with
+    ``scan scope not found`` before anything is walked.
+
+    A scoped run never calls ``folder_paths.backfill_paths_from_asset_dirs``: that
+    helper reasons over every folder and asset row in the library, which is
+    discovery outside the scope this run declared. The walk itself heals the
+    folder rows for the directories it touches, which is all a scoped run may do.
+
+    Counters describe this run only, and the run holds the one scan slot exactly
+    like a root scan: a scoped run and a background ``start_scan()`` refuse each
+    other with ``ScanAlreadyRunning``.
+    """
+    scope = normalise_scope(rel_dir)
+    if not scope:
+        return scan_storage_root(state)
+    return _scan_library(scope, state)
 
 
 def register_tree(plan: TreePlan, state: Optional[ScanState] = None) -> ScanState:

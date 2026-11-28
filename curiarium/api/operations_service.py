@@ -13,10 +13,10 @@ pool that reads queued rows, takes prefix locks and executes steps. There is one
 shared queue, attributed to the submitting user - not a queue per user - so two
 operations over the same paths serialise instead of racing.
 
-This module owns the plan codec, the three workflow planners (`create-project`,
-`split-and-create` and `adopt`), submit, the reads, cancel, undo, supersede and
-prune. It never executes a workflow: the runner does, and the routes only ever
-write a row.
+This module owns the plan codec, the workflow planners (`create-project`,
+`split-and-create`, `adopt`, `extract-and-create` and `library-scan`), submit,
+the reads, cancel, undo, supersede and prune. It never executes a workflow: the
+runner does, and the routes only ever write a row.
 
 `split-and-create` is a COMPOSITION, not a second implementation of anything: it
 plans `move_service.preflight_refusals` over the hoists `proposal_engine` implies
@@ -69,7 +69,7 @@ from file_utils import is_model_path
 from models import Asset, Folder, Operation, OperationLock, OperationStep, Project, ProjectAsset
 
 PLAN_VERSION = 1
-WORKFLOWS = ("create-project", "split-and-create", "adopt", "extract-and-create")
+WORKFLOWS = ("create-project", "split-and-create", "adopt", "extract-and-create", "library-scan")
 
 # The two shapes a split can enact, and the one it defaults to.
 DEFAULT_SPLIT_SHAPE = "split-top-folders"
@@ -240,6 +240,8 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
         steps, review, declared = _plan_adopt(session, normalized, params or {})
     elif workflow == "extract-and-create":
         steps, review, declared = _plan_extract_and_create(session, normalized, params or {})
+    elif workflow == "library-scan":
+        steps, review, declared = _plan_library_scan(session, normalized, params or {})
     else:  # pragma: no cover - decode/`WORKFLOWS` refuse this before it can be built
         raise HTTPException(status_code=400, detail=f"unknown workflow {workflow!r}")
     digest = plan_digest(intent, steps, review)
@@ -813,9 +815,10 @@ def _plan_extract_and_create(
     The step order is extract -> move -> register -> create-project, and the
     planned list is the ONE list: it names the extract's entries, the register
     step's paths, the review's `members` and the create's provenance. There is no
-    discovery step left in this workflow - `library_scan.scan_storage_root` and
-    `POST /library/scan` stay the rescan primitive, so a file dropped elsewhere
-    between the plan and the run is a rescan's job, never this operation's.
+    discovery step left in this workflow: a file dropped elsewhere between the plan
+    and the run is a rescan's job, never this operation's, and that rescan is the
+    `library-scan` workflow over `library_scan.scan_subtree`, so the walk stays one
+    primitive behind one route.
     """
     archive = (target or "").strip().strip("/")
     if not archive:
@@ -1257,6 +1260,67 @@ def _plan_adopt(session: Session, target: str, params: dict) -> Tuple[list, dict
     return steps, review, [root]
 
 
+# --- library-scan -------------------------------------------------------------
+
+
+def _plan_library_scan(session: Session, target: str, params: dict) -> Tuple[list, dict, List[str]]:
+    """The `library-scan` planner: one `scan` step over the whole library or a folder.
+
+    The target is the scope: ``''`` is the whole library, anything else is a
+    library-relative folder that must exist, refused as a 409 before a step is
+    planned. The scope is normalised through ``library_scan.normalise_scope`` so a
+    plan and the primitive refuse the same strings.
+
+    `members` is 0 ON PURPOSE: a plan must never walk the tree. The walk IS the
+    operation, and a second walk at plan time would double the cost and make the
+    plan digest depend on the disk rather than on the request, so the review
+    cannot count files. What it can name is the pruning policy, which is fixed.
+
+    `declared_paths` is `[scope]`, so a whole-root scan declares `['']` - which
+    ``paths_overlap`` already treats as overlapping everything. That means a
+    queued root scan serialises with every operation, a deliberate capacity
+    consequence the owner owns in Mf-gciy.
+    """
+    try:
+        scope = library_scan.normalise_scope(target or "")
+    except library_scan.ScanScopeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if scope and not (Path(library_scan.STORAGE) / scope).is_dir():
+        raise HTTPException(
+            status_code=409,
+            detail=f"no folder {scope!r} in the library: nothing was planned",
+        )
+
+    steps = [
+        {
+            "index": 0,
+            "op": "scan",
+            "summary": (
+                f"scan {scope or 'the whole library'}: register the files it finds "
+                "and stamp the ones it cannot"
+            ),
+            "args": {"scope": scope},
+        }
+    ]
+    review = {
+        "workflow": "library-scan",
+        "target": scope,
+        "moves": 0,
+        "creates": 0,
+        "adopts": 0,
+        "deletes": 0,
+        "members": 0,
+        "groups": [],
+        "cover": None,
+        "excluded": library_scan.skip_rules(scope),
+        "existing_project_id": None,
+        "existing_project_name": None,
+        "move_list": [],
+        "projects": [],
+    }
+    return steps, review, [scope]
+
+
 # Submit -----------------------------------------------------------------------
 
 
@@ -1419,13 +1483,21 @@ def operation_payload(session: Session, operation: Operation) -> dict:
 
 
 def list_operations(
-    session: Session, state: Optional[str] = None, limit: int = 50, offset: int = 0
+    session: Session,
+    state: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    workflow: Optional[str] = None,
 ) -> Tuple[List[Operation], int]:
     if state is not None and state not in STATUSES:
         raise HTTPException(status_code=400, detail="unknown state")
+    if workflow is not None and workflow not in WORKFLOWS:
+        raise HTTPException(status_code=400, detail="unknown workflow")
     filters = []
     if state:
         filters.append(Operation.status == state)
+    if workflow:
+        filters.append(Operation.workflow == workflow)
     total = session.exec(select(func.count()).select_from(Operation).where(*filters)).one()
     statement = (
         select(Operation)
@@ -1508,6 +1580,11 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
     The guards below are the shared ones - a superseded, already-undone, unfinished
     or nothing-changed operation answers the same 409 whichever workflow it was -
     and only the body is workflow-shaped.
+
+    `library-scan` is `UNDO_NONE`, so the shared nothing-changed guard fires before
+    any workflow body runs: a scan writes no bytes and its rows are the library's
+    own files, so undoing it would mean deleting rows - a delete workflow, which is
+    WRITE and not this ticket. The deleted door had no undo either.
     """
     operation = get_operation(session, operation_id)
     if operation.undo_state == UNDO_SUPERSEDED:

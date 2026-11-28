@@ -2,7 +2,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-import type { LibraryScanStatus } from "../../lib/api/settings";
+import {
+  SCAN_ALREADY_RUNNING,
+  scanStatusFromOperation,
+  type LibraryScanStatus,
+} from "../../lib/api/settings";
+import type { Operation } from "../../lib/api/operations";
 import LibraryScanPanel from "./LibraryScanPanel";
 import type { LibraryScanState } from "./useLibraryScan";
 
@@ -18,6 +23,35 @@ function makeStatus(overrides: Partial<LibraryScanStatus> = {}): LibraryScanStat
     failed: 0,
     errors: [],
     ...overrides,
+  };
+}
+
+/** The operation row a scan the server refused leaves behind: the slot was held
+ *  by another walker, so the row ends `failed` with the server's own sentence. */
+function refusedScanRow(): Operation {
+  return {
+    id: "op-scan",
+    workflow: "library-scan",
+    target: "",
+    status: "failed",
+    submitted_by: "u1",
+    created_at: "2026-01-01T00:00:00Z",
+    started_at: "2026-01-01T00:00:00Z",
+    finished_at: "2026-01-01T00:00:00Z",
+    error: SCAN_ALREADY_RUNNING,
+    undo_state: "none",
+    superseded_by: null,
+    steps: [
+      {
+        index: 0,
+        op: "scan",
+        status: "failed",
+        result: null,
+        error: SCAN_ALREADY_RUNNING,
+        started_at: null,
+        finished_at: null,
+      },
+    ],
   };
 }
 
@@ -85,10 +119,24 @@ describe("LibraryScanPanel", () => {
     expect(state.run).not.toHaveBeenCalled();
   });
 
-  it("shows the already-running message", () => {
-    renderPanel(makeState({ error: "A scan is already running" }));
+  it("shows the error line the hook reports", () => {
+    renderPanel(makeState({ error: "Failed to plan the operation" }));
 
-    expect(screen.getByText("A scan is already running")).toBeTruthy();
+    expect(screen.getByText("Failed to plan the operation")).toBeTruthy();
+  });
+
+  it("shows a row-carried refusal as a scan already holding the slot", () => {
+    // A refused scan is no longer a thrown 409 but the operation row's own
+    // `failed` answer, so the panel reads it as a scan in progress and carries
+    // the server's sentence in the status it renders.
+    const scan = scanStatusFromOperation(refusedScanRow());
+    renderPanel(makeState({ scan }));
+
+    const button = screen.getByRole("button", { name: "Scanning..." }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(screen.getByText("Scan in progress")).toBeTruthy();
+    expect(screen.queryByText(/Last scan:/)).toBeNull();
+    expect(scan.errors).toEqual([SCAN_ALREADY_RUNNING]);
   });
 
   it("renders the failure report when files failed", () => {
@@ -107,9 +155,10 @@ describe("LibraryScanPanel", () => {
     expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
   });
 
-  // The rescan is `POST /library/scan` (WRITE); the status line and the failure
-  // report are `GET /library/scan` (READ). Moving this surface into the queue
-  // must broaden no write permission, and must hide nothing a viewer may read.
+  // The rescan is `POST /operations` (WRITE, the `library-scan` workflow); the
+  // status line and the failure report are the newest `library-scan` row (READ).
+  // Moving this surface into the queue must broaden no write permission, and
+  // must hide nothing a viewer may read.
   it("hides the rescan button below editor but keeps the read surfaces", () => {
     const { container } = renderPanel(
       makeState({ scan: makeStatus({ failed: 2, errors: ["a.stl: IntegrityError: duplicate name"] }) }),

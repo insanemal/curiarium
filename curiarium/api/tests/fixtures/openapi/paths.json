@@ -2830,50 +2830,6 @@
       "summary": "Get Import Run"
     }
   },
-  "/library/scan": {
-    "get": {
-      "operationId": "library_scan_status_library_scan_get",
-      "responses": {
-        "200": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LibraryScanStatusOut"
-              }
-            }
-          },
-          "description": "Successful Response"
-        }
-      },
-      "security": [
-        {
-          "HTTPBearer": []
-        }
-      ],
-      "summary": "Library Scan Status"
-    },
-    "post": {
-      "operationId": "library_scan_start_library_scan_post",
-      "responses": {
-        "202": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LibraryScanStatusOut"
-              }
-            }
-          },
-          "description": "Successful Response"
-        }
-      },
-      "security": [
-        {
-          "HTTPBearer": []
-        }
-      ],
-      "summary": "Library Scan Start"
-    }
-  },
   "/login": {
     "post": {
       "operationId": "login_login_post",
@@ -3311,7 +3267,7 @@
   },
   "/operations": {
     "get": {
-      "description": "Newest-first page of the queue, optionally filtered by status.",
+      "description": "Newest-first page of the queue, optionally filtered by status and by workflow.",
       "operationId": "list_operations_route_operations_get",
       "parameters": [
         {
@@ -3328,6 +3284,22 @@
               }
             ],
             "title": "State"
+          }
+        },
+        {
+          "in": "query",
+          "name": "workflow",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow"
           }
         },
         {

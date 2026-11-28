@@ -7,8 +7,8 @@ type ScanSurface = "header" | "panel" | "empty" | "detail";
 
 type Props = {
   state: LibraryScanState;
-  /** `editor` and above: `POST /library/scan` is WRITE. The status line and the
-   *  error line are reads and stay visible to a viewer. */
+  /** `editor` and above: the `library-scan` workflow is WRITE. The status line
+   *  and the error line are reads and stay visible to a viewer. */
   canWrite: boolean;
   surface: ScanSurface;
   /** The queue's entry point: every mount passes the shell's `scanFromShell`,

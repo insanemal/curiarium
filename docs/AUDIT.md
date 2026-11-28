@@ -15,7 +15,7 @@ One mechanism, in three parts:
 
 `audit.record(*events, ctx=...)` is the second emission function and exists for
 the actions whose effect is outside the database (`trash.purge`,
-`library.scan.start`, `snapshot.create`, `snapshot.prune`, `snapshot.delete`,
+`snapshot.create`, `snapshot.prune`, `snapshot.delete`,
 `snapshot.restore`, the two `snapshot.schedule.*` actions the scheduler thread
 writes, the two `destructive.snapshot_*` actions the snapshot guard writes, and
 `login.oidc.failed`, which is written from a `GET` that has no transaction to
@@ -67,7 +67,7 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 59 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 58 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
@@ -99,7 +99,6 @@ could honestly reconstruct.
 | `user.enable` | `PATCH /users/{user_id}` (only when `disabled` goes true -> false) | username | `{"from", "to"}` booleans | fail-closed |
 | `user.password_reset` | `POST /users/{user_id}/password` | username | `{"user_id", "sessions_revoked", "reset_disabled", "granted_local_login"}` - per the target's state before the write; never the password or a hash | fail-closed |
 | `user.delete` | `DELETE /users/{user_id}` | username | `{"role", "user_id"}` of the retired account; never a password or a hash | fail-closed |
-| `library.scan.start` | `POST /library/scan` | `"library"` | none | fail-loud |
 | `login.succeeded` | `POST /login` | the real username | `{"kind", "client_ip"}` | fail-closed |
 | `first_run.setup` | `POST /auth/first-run/setup` | the username the setup chose | `{"user_id", "username", "role", "source", "break_glass_sessions_revoked", "flag"}` | fail-closed |
 | `login.oidc.succeeded` | `POST /auth/oidc/exchange` | the real username | `{"kind", "client_ip", "issuer"}` | fail-closed |
@@ -246,8 +245,8 @@ mutation.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 108 routes, 43
-of them `GET`; the remaining 65 split into 50 audited keys and 15 exempt keys.
+out of scope by construction: they change nothing. The matrix has 106 routes, 42
+of them `GET`; the remaining 64 split into 49 audited keys and 15 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without
@@ -327,13 +326,15 @@ per item in the response, so it writes no row. Like `bundle.create`, the event i
 written with `audit.record` because the cache lives in the appconfig store, which
 commits in its own session.
 
-**Scan and mount import write no per-asset rows.** They are background work with no
-route and no actor - the same reason the scheduler's `snapshot.schedule.skipped` and
-`snapshot.schedule.failed` are actions without a route - and a 100k-file scan inside
-one daemon-thread batch would flood an append-only log. `library.scan.start` plus
-the `import_run` row already record the batch. What records the individual file is
-the `created_via` column: it reads `scan` or `mount-import` on every row those paths
-write, so the asset itself still says which door it came through.
+**Scan and mount import write no per-asset rows.** A scan is now an operation, so
+its own record is the operation row plus the `operation.submit`/`operation.done`
+rows the ledger writes for any workflow; a mounted import is background work with
+no route and no actor - the same reason the scheduler's `snapshot.schedule.skipped`
+and `snapshot.schedule.failed` are actions without a route - and its `import_run`
+row records the batch. Neither writes a row per registered file: a 100k-file scan
+inside one batch would flood an append-only log. What records the individual file
+is the `created_via` column: it reads `scan` or `mount-import` on every row those
+paths write, so the asset itself still says which door it came through.
 
 **A create row records that the insert committed, not that the bytes landed.**
 Creation commits before the bytes are streamed, so a mid-stream 413, or a 409 for a
@@ -428,12 +429,11 @@ Batch delete is fail-closed per asset: the failed item lands in the response's
 `failed` list, its row and its bytes survive, so one broken item does not
 silently vanish and its neighbours are not rolled back.
 
-**Fail-loud: `POST /trash/purge` and `POST /library/scan`.** Both destroy or
-launch something that carries no database row, so there is nothing to roll back.
-`audit.record` writes immediately after the action and raises on failure, after
-`log.exception`; the caller gets a 500 and the log line names the action that
-could not be recorded. The bytes/scan are already gone/started at that point - see
-the residual windows below.
+**Fail-loud: `POST /trash/purge`.** It destroys something that carries no
+database row, so there is nothing to roll back. `audit.record` writes immediately
+after the action and raises on failure, after `log.exception`; the caller gets a
+500 and the log line names the action that could not be recorded. The bytes are
+already gone at that point - see the residual window below.
 
 `tests/test_audit_log.py` injects a failure at the single insert seam
 (`audit._add`) and asserts each of these: the asset row still exists after a
@@ -473,10 +473,9 @@ it. They are listed so nobody assumes more atomicity than there is.
   thumbnails can therefore outlive their rows, and an emptied directory can be
   left behind. The audit row records the authoritative row deletion, which did
   happen.
-* **The purge/scan window.** For `POST /trash/purge` the bytes are removed before
-  the audit row is written; for `POST /library/scan` the background thread is
-  already running. If the audit write then fails, the action happened and is not
-  in the log. The response is a 500 and the failure is logged, so the gap is
+* **The purge window.** For `POST /trash/purge` the bytes are removed before the
+  audit row is written. If the audit write then fails, the action happened and is
+  not in the log. The response is a 500 and the failure is logged, so the gap is
   visible rather than silent.
 
 ## The `IntegrityError` -> 409 caveat
@@ -607,7 +606,7 @@ administration).
 | Parameter | Type | Semantics |
 |---|---|---|
 | `actor` | string | exact match, case-insensitive (both sides lowered, value stripped) |
-| `action` | string | exact match, case-sensitive - one of the 59 names above |
+| `action` | string | exact match, case-sensitive - one of the 58 names above |
 | `target` | string | case-sensitive substring match; `%`, `_` and `\` are escaped, so it is a literal substring. An asset id also returns that asset's `asset.create` row, because creation's target is the new id |
 | `since` | string | `created_at >= value` |
 | `until` | string | `created_at <= value` |

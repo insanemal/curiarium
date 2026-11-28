@@ -270,7 +270,7 @@ type Props = {
    *  follow a scan without a second poller. */
   scan: LibraryScanState;
   /** The WRITE rank (`canDelete` in App), deliberately NOT `canContribute`:
-   *  `POST /library/scan` is WRITE. */
+   *  the `library-scan` workflow is WRITE. */
   canScan: boolean;
   /** Starts the shell's scan. The report is not auto-refreshed after a scan
    *  (the queue's own Refresh stays) - a named boundary, not an omission. */

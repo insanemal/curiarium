@@ -234,8 +234,11 @@ export function useLibraryScan({
         onUnauthorized?.();
         return;
       }
-      // A 409 arrives as `Error("A scan is already running")`, which IS the
-      // message the panel shows for it.
+      // A scan that could not take the slot is NOT an error here: the server
+      // accepts the operation and ends it `failed` with
+      // `SCAN_ALREADY_RUNNING`, so `startLibraryScan` resolves with a status the
+      // panel reads as running. Only a refused plan or submit throws, and its
+      // message is what the panel shows.
       setError(err instanceof Error ? err.message : "Failed to start scan");
     } finally {
       setBusy(false);

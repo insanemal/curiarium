@@ -373,8 +373,8 @@ export default function App({ initialMode, initialProjects }: AppProps = {}) {
   // Declared after its callbacks: it registers them for the finish signal, and
   // a hook argument list cannot read a not-yet-initialised `const`. The SHELL
   // owns this single instance: one poller, one announcement and one `adopt`
-  // target shared by four write-gated mounts. `GET /library/scan` is READ, so a
-  // viewer may read the queue and the status; only the rescan button is WRITE
+  // target shared by four write-gated mounts. Reading the scan's operation row is
+  // READ, so a viewer may read the queue and the status; only the rescan is WRITE
   // and every mount hides it below editor. The entry read happens once per
   // activation - opening the missing queue or arming a shell scan - never on app
   // load, and the poll loop runs only while a scan is walking.

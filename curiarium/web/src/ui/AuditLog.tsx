@@ -29,7 +29,6 @@ const AUDIT_ACTIONS = [
   "user.role_change",
   "user.disable",
   "user.enable",
-  "library.scan.start",
   "login.succeeded",
   "snapshot.schedule.skipped",
   "snapshot.schedule.failed",

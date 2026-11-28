@@ -55,7 +55,6 @@ from routers import (
     bundles,
     folders,
     imports,
-    library,
     mfa,
     operations,
     projects,
@@ -84,7 +83,6 @@ API_ROUTERS = (
     system.router,
     settings.router,
     snapshots.router,
-    library.router,
     auth_users.router,
     # Immediately after the login surface it extends: first-run setup is the same
     # pre-session job one step earlier, and the order is what the guards read back.
