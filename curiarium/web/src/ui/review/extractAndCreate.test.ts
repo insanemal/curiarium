@@ -44,7 +44,7 @@ function operationPlan(overrides: Partial<OperationPlan> = {}): OperationPlan {
     steps: [
       { index: 0, op: "extract", summary: "extract the archive" },
       { index: 1, op: "move", summary: "file the archive" },
-      { index: 2, op: "scan", summary: "register the files" },
+      { index: 2, op: "register", summary: "register the files" },
       { index: 3, op: "create-project", summary: "create 1 project" },
     ],
     review: {
@@ -102,7 +102,7 @@ function createdSteps(name = PROJECT): OperationStep[] {
   return [
     step({ index: 0, op: "extract" }),
     step({ index: 1, op: "move" }),
-    step({ index: 2, op: "scan" }),
+    step({ index: 2, op: "register" }),
     step({
       index: 3,
       op: "create-project",
@@ -544,7 +544,7 @@ describe("runExtractAndCreate", () => {
         submit: async () =>
           operation({
             steps: [
-              step({ index: 0, op: "scan" }),
+              step({ index: 0, op: "register" }),
               step({
                 index: 1,
                 op: "create-project",
@@ -601,7 +601,7 @@ describe("runExtractAndCreate", () => {
       name: PROJECT,
       deps: deps({
         submit: async () =>
-          operation({ steps: [step({ index: 0, op: "scan", result: { registered: 0 } })] }),
+          operation({ steps: [step({ index: 0, op: "register", result: { registered: 0 } })] }),
       }),
     });
 

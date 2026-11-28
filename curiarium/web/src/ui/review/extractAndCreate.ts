@@ -65,7 +65,7 @@ function notify(action: () => void): void {
 }
 
 /** The two stages this flow narrates. The runner's own pipeline (extract, move,
- *  scan, create-project) is narrated by its step rows, not by the client. */
+ *  register, create-project) is narrated by its step rows, not by the client. */
 export type ExtractAndCreatePhase = "planning" | "running";
 
 /** What the client calls to drive one archive. Injected so this module never

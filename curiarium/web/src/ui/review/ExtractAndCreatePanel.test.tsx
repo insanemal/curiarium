@@ -85,7 +85,7 @@ function makePlan(overrides: Partial<OperationPlan> = {}): OperationPlan {
     steps: [
       { index: 0, op: "extract", summary: "extract 20 files" },
       { index: 1, op: "move", summary: "file the archive" },
-      { index: 2, op: "scan", summary: "register 20 files" },
+      { index: 2, op: "register", summary: "register 20 files" },
       { index: 3, op: "create-project", summary: "create 1 project" },
     ],
     review: makeReview(),
@@ -146,7 +146,7 @@ function makeOperation(overrides: Partial<Operation> = {}): Operation {
 const FOUR_STEPS: OperationStep[] = [
   makeStep({ index: 0, op: "extract", status: "done" }),
   makeStep({ index: 1, op: "move", status: "done" }),
-  makeStep({ index: 2, op: "scan", status: "done" }),
+  makeStep({ index: 2, op: "register", status: "done" }),
   makeStep({
     index: 3,
     op: "create-project",
@@ -332,7 +332,7 @@ describe("ExtractAndCreatePanel", () => {
     expect(stepLines().map(node => node.getAttribute("data-extract-op"))).toEqual([
       "extract",
       "move",
-      "scan",
+      "register",
       "create-project",
     ]);
     expect(stepLines()[0].textContent).toBe("extracted the archive");
@@ -357,7 +357,7 @@ describe("ExtractAndCreatePanel", () => {
       makeOperation({
         status: "done",
         steps: [
-          makeStep({ index: 0, op: "scan", status: "done" }),
+          makeStep({ index: 0, op: "register", status: "done" }),
           makeStep({
             index: 1,
             op: "create-project",

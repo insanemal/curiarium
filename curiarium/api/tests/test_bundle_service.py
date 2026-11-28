@@ -6894,7 +6894,7 @@ def extract_and_create(
     assert body["status"] == "done", body
     steps = {step["op"]: step for step in body["steps"]}
     create = steps["create-project"]["result"]
-    scan = steps["scan"]["result"]
+    registered = steps["register"]["result"]
     return {
         "status": "created" if create["created"] else "already_created",
         "plan": plan,
@@ -6902,7 +6902,7 @@ def extract_and_create(
         "steps": steps,
         "project": {"id": create["project_id"], "name": create["name"]},
         "planned": plan["review"]["members"],
-        "resolved": scan["count"],
+        "resolved": registered["count"],
         "reads_the_archive": True,
     }
 
@@ -7157,17 +7157,18 @@ def test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower(
     Mf-wsdo and Mf-7oow changed ONE door - the bundle door's member set - and the claim
     is that the archive workflow is untouched, because it never had a suffix table at
     all: the plan's listing IS the file set, and its create step hands the primitive
-    every entry its scan resolved. So the same live tower resolves 20 of 20 and attaches
-    all twenty - fifteen STLs, three PNGs, the vendor ``.txt`` AND the nested deliverable
-    zip - and its cover is still the first member ``is_model_path`` answers for, which is
-    ``file_utils.MODEL_SUFFIXES``, a third table neither ticket touches.
+    every entry the register step resolved. So the same live tower resolves 20 of 20 and
+    attaches all twenty - fifteen STLs, three PNGs, the vendor ``.txt`` AND the nested
+    deliverable zip - and its cover is still the first member ``is_model_path`` answers
+    for, which is ``file_utils.MODEL_SUFFIXES``, a third table neither ticket touches.
 
     Re-derived for Mf-hebx: the archive is FILED under ``<twin>/_source`` by the move
     step, so the registered set under the twin is 21, not 20 - the archive itself is a
     registered archive-role asset under the project's own root. The twenty MEMBERS do
-    not move (the create takes the scan's verified planned set, never a re-read of the
-    key), and that new row is named here rather than silently excluded, because it is a
-    real consequence of the owner's ``_source`` rule and a follow-up owns it.
+    not move (the create takes the register step's verified planned set, never a
+    re-read of the key), and that new row is named here rather than silently excluded,
+    because it is a real consequence of the owner's ``_source`` rule and a follow-up
+    owns it.
 
     It is also the producer of the archive door's measurement artifact (AGENTS.md wants
     the data, not the count: ``.plans/measurements/2026-11-10-bundle-members-mf-wsdo-archive-*.json``,
@@ -7176,10 +7177,10 @@ def test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower(
     every member named on both sides, not a ``member_count == 20`` that would also be
     true of a door that attached the wrong twenty files.
 
-    Mutation: filter the workflow's scan result by any suffix table (the bundle door's
-    deleted one included) and 20 becomes 18, red here and at ``planned``/``resolved``,
-    while the ``.txt`` and the nested ``.zip`` drop out of the member set. That is the
-    pair of artifacts this witness exists to keep comparable.
+    Mutation: filter the workflow's register result by any suffix table (the bundle
+    door's deleted one included) and 20 becomes 18, red here and at
+    ``planned``/``resolved``, while the ``.txt`` and the nested ``.zip`` drop out of the
+    member set. That is the pair of artifacts this witness exists to keep comparable.
     """
     live_tower_extraction(isolated_storage)
     scan()
@@ -7209,15 +7210,15 @@ def test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower(
 
     filed = f"{TOWER_DIR}/_source/{Path(TOWER_ZIP).name}"
     assert filed in registered, (
-        "the move step filed the archive inside the twin, so the scan registered it as "
-        "an archive-role asset under the project's own root"
+        "the move step rewrote the archive's row to its filed home inside the twin; "
+        "the register step registered the planned members"
     )
     assert member_paths == registered - {filed}, (
         "all twenty planned files are members - the two the bundle door excludes "
         "included - and the filed archive is the ONE registered path that is not, "
-        "because the create takes the scan's verified planned set and never re-reads "
-        "the key. The two doors answer different questions and their member sets "
-        "legitimately differ, which is why this one is pinned here and not shared"
+        "because the create takes the register step's verified planned set and never "
+        "re-reads the key. The two doors answer different questions and their member "
+        "sets legitimately differ, which is why this one is pinned here and not shared"
     )
 
 
@@ -8014,10 +8015,10 @@ def test_the_member_set_is_decided_once_by_the_detectors_own_classifier() -> Non
 
     # The extract-and-create workflow is the third caller of this create, and it too
     # consults no bundle member rule: its planner reads the archive's LISTING
-    # (`archive_service.plan_extraction`) and its create step writes the scan's
-    # verified set. A planner or a step that named `_members_of`/`classify_entry` would
-    # be a second member rule, and the two doors would start disagreeing about which
-    # files are one product.
+    # (`archive_service.plan_extraction`) and its create step writes the register
+    # step's verified set. A planner or a step that named
+    # `_members_of`/`classify_entry` would be a second member rule, and the two doors
+    # would start disagreeing about which files are one product.
     for workflow_body, where in (
         (_top_level_function(operations_service, "_plan_extract_and_create"), "the extract planner"),
         (_top_level_function(operations_runner, "_create_project"), "the create step"),

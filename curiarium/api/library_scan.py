@@ -87,18 +87,23 @@ Every run is its own state object:
 * a run logs exactly one summary line when it ends, and an aborted run logs one
   too - its counters plus a recorded ``scan aborted: ...`` failure.
 
-Two registration writers share this machinery: the storage scan
+Three registration writers share this machinery: the storage scan
 (``scan_storage_root``, which also owns the missing-flag pass and the
-asset-evidence folder backfill) and mount import (``mount_import`` via
-``register_tree``). They are serialised by ``_write_lock``, because both create
-folder rows. Only the storage scan flags files missing, so pointing a
-registration walk at a mount can never mark the library missing. Mount import is
-not a backfill caller: its asset paths are relative to the mount root, not the
-storage root.
+asset-evidence folder backfill), mount import (``mount_import`` via
+``register_tree``) and the explicit ``register(paths)`` door (extract-and-create,
+whose members are the archive listing's planned paths). They are serialised by
+``_write_lock``, because all three create folder rows. Only the storage scan
+flags files missing, so pointing a registration walk at a mount can never mark
+the library missing. ``register`` takes an explicit list: it never walks for
+discovery, so an unnamed file sitting beside a named one gets no row, and it
+never flags - it clears ``missing_since`` on the paths it verified present and
+stamps nothing. Mount import is not a backfill caller: its asset paths are
+relative to the mount root, not the storage root.
 """
 import json
 import logging
 import os
+import posixpath
 import re
 import threading
 import time
@@ -106,7 +111,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path, PurePath
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Sequence, Tuple
 
 from sqlalchemy import or_, update
 from sqlmodel import Session, select
@@ -1288,3 +1293,324 @@ def register_tree(plan: TreePlan, state: Optional[ScanState] = None) -> ScanStat
     finally:
         state.finished_at = time.time()
     return state
+
+
+# --- the explicit register door (Mf-u2el) ------------------------------------
+#
+# Everything above registers what a WALK finds. ``register`` is the third door:
+# the caller names the files, and the rows written are exactly that list. It
+# reuses the same naming rule, the same folder resolver and the same batch
+# machinery, and it never walks for discovery - an unnamed sibling on disk gets
+# no row. That is what a caller who already knows its members needs: the plan is
+# the list, so no step can contradict it.
+
+
+class RegisterPathError(ValueError):
+    """A path ``register`` refuses before it opens a session or writes a row."""
+
+
+@dataclass(frozen=True)
+class RegisteredPath:
+    """One named path that has a row, and whether this call made that row."""
+
+    rel_path: str
+    asset_id: str
+    created: bool
+
+
+class RegisterResult(NamedTuple):
+    """What one ``register`` call wrote, and what it could not.
+
+    ``entries`` follows the caller's order (first-seen wins for a duplicate);
+    ``absent`` names paths that are not a regular file on disk, and ``failed``
+    names paths that were handed to a batch and got no row (rejected by a batch
+    savepoint). Nothing is ever silently skipped: every named path is in exactly
+    one of the three.
+    """
+
+    entries: Tuple[RegisteredPath, ...]
+    absent: Tuple[str, ...]
+    failed: Tuple[str, ...]
+    state: ScanState
+
+    @property
+    def known(self) -> Tuple[RegisteredPath, ...]:
+        """The named paths that already had a row: nothing was written for them."""
+        return tuple(entry for entry in self.entries if not entry.created)
+
+
+def _register_rel_path(raw: str) -> str:
+    """Normalise one named path, or refuse it before anything is written.
+
+    Deliberately NOT ``snapshots.assert_library_path``: that guard refuses
+    ``thumbs/`` and ``bundles/`` at ANY depth, which would refuse a legitimate
+    member a scan registers (``01_Wizard/thumbs/x.stl``). The rules here are the
+    walk's own - app-owned directories only at the root, the basename predicate
+    at the tail, hidden segments pruned exactly as the walk prunes them - plus the
+    containment check that keeps a caller-supplied string inside storage.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise RegisterPathError(f"an empty path is not a library file: {raw!r}")
+    if PurePath(raw).is_absolute():
+        raise RegisterPathError(f"an absolute path is not registered: {raw}")
+    rel_path = posixpath.normpath(raw)
+    segments = rel_path.split("/")
+    if rel_path in (".", "..") or rel_path.startswith("../") or segments[0].startswith("~"):
+        raise RegisterPathError(f"the path escapes the storage root: {raw}")
+
+    root = STORAGE.resolve()
+    try:
+        resolved = (root / rel_path).resolve()
+    except OSError as exc:
+        raise RegisterPathError(f"the path cannot be resolved: {raw} ({type(exc).__name__})") from exc
+    if not resolved.is_relative_to(root) or resolved == root:
+        raise RegisterPathError(f"the path resolves outside the storage root: {raw}")
+
+    if segments[0] in RESERVED_DIRS:
+        raise RegisterPathError(f"{segments[0]}/ is app-owned and never library content: {raw}")
+    if any(segment.startswith(HIDDEN_NAME_PREFIX) for segment in segments):
+        raise RegisterPathError(f"a hidden name is not registered: {raw}")
+    if segments[-1] in IGNORED_FILENAMES:
+        raise RegisterPathError(f"tool debris is not registered: {raw}")
+    if (root / rel_path).is_symlink():
+        raise RegisterPathError(f"a symlinked file is not registered: {raw}")
+    return rel_path
+
+
+def _register_rel_paths(paths: Sequence[str]) -> List[str]:
+    """Validate every named path, then dedupe preserving first-seen order.
+
+    Validation happens for the whole list before a single path is used, so a
+    refused path can never leave the call half-applied: either every name is
+    registrable or nothing is written at all.
+    """
+    seen: set = set()
+    rel_paths: List[str] = []
+    for raw in paths:
+        rel_path = _register_rel_path(raw)
+        if rel_path in seen:
+            continue
+        seen.add(rel_path)
+        rel_paths.append(rel_path)
+    return rel_paths
+
+
+def _stored_ids(session: Session, rel_paths: Sequence[str]) -> Dict[str, str]:
+    """``{storage_path: id}`` for the named paths, read in ``BATCH_SIZE`` chunks.
+
+    A caller can name a whole project, so the ``IN`` list is never handed to
+    SQLite in one piece; an empty list issues no query at all.
+    """
+    ids: Dict[str, str] = {}
+    for start in range(0, len(rel_paths), BATCH_SIZE):
+        chunk = list(rel_paths[start:start + BATCH_SIZE])
+        rows = session.exec(
+            select(Asset.id, Asset.storage_path).where(Asset.storage_path.in_(chunk))
+        ).all()
+        for asset_id, storage_path in rows:
+            ids[storage_path] = asset_id
+    return ids
+
+
+def _directory_listing(root: Path, rel_dir: str) -> Optional[List[Tuple[str, int]]]:
+    """The scan's accepted listing for one directory, or ``None`` if unreadable.
+
+    Exactly the walk's own answer - readdir order sorted by ``(casefold, name)``,
+    regular non-symlink entries only, ``is_skipped_name`` applied - because the
+    naming rule is a function of the whole listing. Reading only the named subset
+    would hand the derivation a tree the scan never sees, and a file sharing a
+    stem with an unnamed sibling would come out with a different name through
+    this door (Oracle N-1).
+    """
+    try:
+        with os.scandir(root / rel_dir if rel_dir else root) as scan:
+            entries = list(scan)
+    except OSError:
+        return None
+    entries.sort(key=lambda entry: (entry.name.casefold(), entry.name))
+    accepted: List[Tuple[str, int]] = []
+    for entry in entries:
+        try:
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                continue
+            if is_skipped_name(entry.name):
+                continue
+            size = entry.stat(follow_symlinks=False).st_size
+        except OSError:
+            continue
+        accepted.append((f"{rel_dir}/{entry.name}" if rel_dir else entry.name, size))
+    return accepted
+
+
+def _clear_missing_flags(session: Session, asset_ids: Sequence[str]) -> None:
+    """Clear ``missing_since`` on exactly the rows this call verified present.
+
+    One targeted ``UPDATE`` (never ``_flag_missing_assets``, which stamps every
+    absent candidate in the library) and best-effort: a failed clear costs a stale
+    badge that the next rescan converges, so it is logged rather than raised.
+    """
+    if not asset_ids:
+        return
+    try:
+        session.execute(update(Asset).where(Asset.id.in_(list(asset_ids))).values(missing_since=None))
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        log.warning(
+            "register: clearing missing_since for %d row(s) failed: %s: %s",
+            len(asset_ids), type(exc).__name__, exc,
+        )
+
+
+def _register_named(
+    rel_paths: Sequence[str], *, created_via: str, state: ScanState
+) -> Tuple[Tuple[RegisteredPath, ...], Tuple[str, ...], Tuple[str, ...]]:
+    """Write rows for exactly ``rel_paths``; ``register`` owns validation/state.
+
+    The caller has already refused every unregistrable name, so this only looks
+    at the disk: a named path that is not a regular file is ``absent``, a named
+    path a batch rejected is ``failed``, and everything else gets a row (or
+    already had one). It never claims the scan slot, never flags missing rows and
+    never deletes or prunes - the folder rows for the directories it touches are
+    created/healed as a side effect of resolving them, shallowest first.
+    """
+    root = STORAGE.resolve()
+    present: List[str] = []
+    absent: List[str] = []
+    for rel_path in rel_paths:
+        try:
+            is_file = (root / rel_path).is_file()
+        except OSError:
+            is_file = False
+        if is_file:
+            present.append(rel_path)
+        else:
+            # never silently skipped: a missing file, a directory or a dead link
+            # is reported, and the rest of the list still proceeds
+            absent.append(rel_path)
+
+    attempted: List[str] = []
+    folder_cache: dict = {}
+    assigned_names: dict = {}
+    pending: List[PendingAsset] = []
+    with _write_lock, Session(engine) as session:
+        tracked = set(_stored_ids(session, rel_paths))
+        plan = _storage_plan(root, tracked)
+        # For the duration of the writes: note_error/_note_batch_failure count
+        # against THIS state, and _assign_folders gives folder rows their paths.
+        _local.state = state
+        _local.plan = plan
+
+        # One readdir per distinct directory, in first-seen order: directories
+        # that resolve to the same folder share the run's naming bucket.
+        wanted_by_dir: Dict[str, List[str]] = {}
+        for rel_path in present:
+            if rel_path in tracked:
+                continue
+            wanted_by_dir.setdefault(posixpath.dirname(rel_path), []).append(rel_path)
+
+        for rel_dir, wanted in wanted_by_dir.items():
+            accepted = _directory_listing(root, rel_dir)
+            if accepted is None:
+                # the directory cannot be read, so nothing in it can be named
+                absent.extend(wanted)
+                continue
+            sizes = dict(accepted)
+            names = _directory_names(session, plan, rel_dir, accepted, wanted, folder_cache, assigned_names)
+            for rel_path in wanted:
+                if rel_path not in names:
+                    # the listing lost it between the existence check and the
+                    # readdir: report it rather than write a guessed row
+                    absent.append(rel_path)
+                    continue
+                pending.append(
+                    PendingAsset(
+                        asset=build_asset(root, rel_path, sizes[rel_path], names[rel_path], created_via),
+                        rel_path=rel_path,
+                        rel_dir=rel_dir,
+                    )
+                )
+                attempted.append(rel_path)
+                if len(pending) >= BATCH_SIZE:
+                    _flush_batch(session, pending, folder_cache, root)
+                    pending.clear()
+        if pending:
+            _flush_batch(session, pending, folder_cache, root)
+            pending.clear()
+
+        # After the commits: the ids a rejected row never got are what `failed`
+        # means, and a present row is what "clear the badge" is allowed to touch.
+        rows = _stored_ids(session, present)
+        _clear_missing_flags(session, list(rows.values()))
+
+        entries = tuple(
+            RegisteredPath(rel_path, rows[rel_path], created=rel_path not in tracked)
+            for rel_path in rel_paths
+            if rel_path in rows
+        )
+        failed = tuple(rel_path for rel_path in attempted if rel_path not in rows)
+        created = sum(1 for entry in entries if entry.created)
+        with _state_lock:
+            state.registered += created
+            state.known += len(entries) - created
+
+    return entries, absent, failed
+
+
+def register(
+    paths: Sequence[str],
+    *,
+    created_via: str = "scan",
+    state: Optional[ScanState] = None,
+) -> RegisterResult:
+    """Register EXACTLY the named files, in batches, without walking.
+
+    The third registration door, for a caller that already knows its members (an
+    archive listing's planned paths). Four differences from ``scan_storage_root``
+    are the whole point:
+
+    * **no discovery**: a row is written only for a named path, so an unnamed file
+      beside a named one is left alone;
+    * **no scan slot**: it takes ``_write_lock`` in ``_register_tree``'s order and
+      never calls ``_begin_run``, so ``scan_status()`` is untouched, a scan in
+      flight serialises it exactly as it serialises mount import, and a later
+      ``start_scan()`` still claims the slot;
+    * **no missing-flag pass**: it never stamps ``missing_since`` and never prunes.
+      It clears the badge on the paths it verified present, one targeted
+      ``UPDATE``, because a row whose bytes are here is not missing;
+    * **no walk-level folder backfill**: ``folder_paths.backfill_paths_from_asset_dirs``
+      reasons over every folder and asset row globally, which is discovery again.
+      ``resolve_dir_folder(with_storage_path=True)`` still creates and heals every
+      folder row for the directories this call touches.
+
+    Every path is validated before a session is opened (``RegisterPathError``:
+    empty, absolute, escaping storage, app-owned root directory, hidden segment,
+    tool debris, a symlink), so a bad name writes nothing at all. A named path
+    that is not a regular file is ``absent``; a named path a batch rejected is
+    ``failed``; a named path that already had a row is reported through
+    ``RegisterResult.known`` without a second row.
+
+    ``created_via`` defaults to ``"scan"`` on purpose: ``CreatedVia`` is a closed
+    literal, and these are the rows a rescan would have made. A caller's own step
+    log is the finer record.
+
+    ``state`` lets a caller own the counters; when omitted a fresh state is
+    created and its ``started_at``/``finished_at`` are stamped here. The run is
+    never published, so nothing ever reads it as the library scan.
+    """
+    rel_paths = _register_rel_paths(paths)
+    owns_state = state is None
+    if state is None:
+        state = ScanState(started_at=time.time())
+    previous_state = getattr(_local, "state", None)
+    previous_plan = getattr(_local, "plan", None)
+    try:
+        if not rel_paths:
+            return RegisterResult(entries=(), absent=(), failed=(), state=state)
+        entries, absent, failed = _register_named(rel_paths, created_via=created_via, state=state)
+        return RegisterResult(entries=entries, absent=tuple(absent), failed=failed, state=state)
+    finally:
+        _local.state = previous_state
+        _local.plan = previous_plan
+        if owns_state:
+            state.finished_at = time.time()

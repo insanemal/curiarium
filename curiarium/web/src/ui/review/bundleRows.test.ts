@@ -2917,14 +2917,18 @@ describe("the split's narration", () => {
       "waiting to extract the archive",
     );
 
-    expect(operationStatusLine(step("scan", "done"))).toBe("registered the extracted files");
-    expect(operationStatusLine(step("scan", "running"))).toBe(
-      "waiting for the library scan to register the files\u2026",
+    expect(operationStatusLine(step("register", "done"))).toBe(
+      "registered the extracted files",
     );
-    expect(operationStatusLine(step("scan", "failed"))).toBe(
-      "the scan did not register the files",
+    expect(operationStatusLine(step("register", "running"))).toBe(
+      "registering the extracted files\u2026",
     );
-    expect(operationStatusLine(step("scan", "pending"))).toBe("waiting for the library scan");
+    expect(operationStatusLine(step("register", "failed"))).toBe(
+      "the files could not be registered",
+    );
+    expect(operationStatusLine(step("register", "pending"))).toBe(
+      "waiting to register the files",
+    );
   });
 
   it("shows an unknown op's two tokens verbatim rather than inventing a word", () => {

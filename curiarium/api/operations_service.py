@@ -28,9 +28,10 @@ and deletes only the projects its own create steps reported creating.
 deleted one-call `POST /import/archive/project`: `archive_service.plan_extraction`
 reads the archive's listing once and names every file the run would write (and
 every member it would leave out), `archive_service.extract_out` writes them, the
-`move` step files the archive under `<twin>/_source/<archive>.zip`, a `scan` step
-registers the tree and refuses a partial result naming every miss, and the
-`create-project` step creates the project from the scan's VERIFIED set. The
+`move` step files the archive under `<twin>/_source/<archive>.zip`, a `register`
+step registers EXACTLY the planned paths and refuses a partial result naming
+every miss, and the `create-project` step creates the project from the register
+step's verified set. The
 archive's new home is `_source`, not the review queue, because the review row for
 a `.zip` is how the door is offered; filing it beside its twin is the owner's
 existing rule for an archive that became a folder.
@@ -781,7 +782,7 @@ EXTRACT_PAYLOAD_RESIDUE = (
 def _plan_extract_and_create(
     session: Session, target: str, params: dict
 ) -> Tuple[list, dict, List[str]]:
-    """The `extract-and-create` planner: a `.zip` in, extract + file + scan + create out.
+    """The `extract-and-create` planner: a `.zip` in, extract + file + register + create out.
 
     This is the workflow that replaced `POST /import/archive/project`. The order
     below is the contract:
@@ -793,8 +794,8 @@ def _plan_extract_and_create(
          is what keeps a re-plan from a 404;
       2. the archive is resolved - the declared path, else the copy an earlier run
          already filed at `<twin>/_source/<basename>` - so a re-plan after a failed
-         scan or create answers the two remaining steps instead of 404ing on a file
-         the run itself moved;
+         register or create answers the two remaining steps instead of 404ing on a
+         file the run itself moved;
       3. the listing is read ONCE, through `archive_service.plan_extraction`, which
          is the extractor's own rule (`entry_policy`) and the extractor's own
          refusals; the plan's members and exclusions are that listing;
@@ -806,8 +807,15 @@ def _plan_extract_and_create(
     common root (with `""` for the files sitting directly in it, the same loose
     bucket `create-project` uses), the cover is the first planned model PATH, and
     `excluded` names every member the extractor would leave out. The cover is a
-    path rather than an id because no asset row exists until the scan has run; the
-    scan step resolves it.
+    path rather than an id because no asset row exists until the register step has
+    run; register resolves it from the listing's planned order.
+
+    The step order is extract -> move -> register -> create-project, and the
+    planned list is the ONE list: it names the extract's entries, the register
+    step's paths, the review's `members` and the create's provenance. There is no
+    discovery step left in this workflow - `library_scan.scan_storage_root` and
+    `POST /library/scan` stay the rescan primitive, so a file dropped elsewhere
+    between the plan and the run is a rescan's job, never this operation's.
     """
     archive = (target or "").strip().strip("/")
     if not archive:
@@ -888,6 +896,18 @@ def _plan_extract_and_create(
     cover = next((entry for entry in planned if is_model_path(entry.rel_path)), None)
     source_dir = posixpath.join(selection.twin, "_source")
     paths = [{"path": entry.rel_path, "entry": entry.entry} for entry in planned]
+    member_paths = [pair["path"] for pair in paths]
+    grouped_members = sum(group.members for group in selection.groups)
+    if grouped_members != len(member_paths) or len(set(member_paths)) != len(member_paths):
+        # A SERVER bug, not an operator refusal: the listing's own groups and its own
+        # planned list are the same fact counted twice, and a plan where they differ
+        # would show one number in the review and write another set on disk.
+        raise RuntimeError(
+            f"the archive listing's groups name {grouped_members} file(s) but its planned "
+            f"list names {len(member_paths)} "
+            f"({len(member_paths) - len(set(member_paths))} duplicate path(s)): the review "
+            "and the run would disagree about the members, so no steps were built"
+        )
     steps: List[dict] = []
     if not filed:
         steps.append(
@@ -901,9 +921,9 @@ def _plan_extract_and_create(
                 # The PLANNED entries, not the raw selection: the review says what
                 # this run writes, so the extract writes exactly that - a hidden or
                 # junk member the plan excluded is not written behind the operator's
-                # back. And the scan is the next-but-one step's job: an extract that
-                # started its own walk would register the tree while the archive was
-                # still beside it.
+                # back. And registration is the next-but-one step's job: an extract
+                # that started its own walk would register the tree while the archive
+                # was still beside it.
                 "args": {
                     "path": archive,
                     "entries": [entry.entry for entry in planned],
@@ -930,28 +950,33 @@ def _plan_extract_and_create(
             }
         )
 
-    scan_index = len(steps)
+    register_index = len(steps)
     steps.append(
         {
-            "index": scan_index,
-            "op": "scan",
+            "index": register_index,
+            "op": "register",
             "summary": (
-                f"scan the library and resolve {len(planned)} planned file(s) "
+                f"register the {len(planned)} planned file(s) the extraction wrote "
                 f"under {selection.twin!r}"
             ),
-            "args": {"key": selection.twin, "paths": paths},
+            # The ONE list: these are the listing's planned paths, in listing
+            # order, and the register step writes a row for exactly these. The
+            # archive's new home rides along because today's scan left a row there
+            # and a filed archive without one would be a silent regression - it is
+            # NOT a member, since the create reads only `paths`.
+            "args": {"key": selection.twin, "paths": paths, "archive_path": home},
         }
     )
     steps.append(
         {
-            "index": scan_index + 1,
+            "index": register_index + 1,
             "op": "create-project",
             "summary": f"create project {name!r} from {len(planned)} member file(s)",
             "args": {
-                # The reviewed set is the SCAN's verified set, never a second
-                # resolve: a rescan between the review and the run must not attach
-                # files nobody approved.
-                "resolve_from": scan_index,
+                # The reviewed set is the REGISTER step's verified set, never a
+                # second resolve: a file that appeared between the review and the
+                # run must not be attached without approval.
+                "resolve_from": register_index,
                 "key": selection.twin,
                 "name": name,
                 "archive": archive,
@@ -959,7 +984,7 @@ def _plan_extract_and_create(
                 "provenance": {
                     "archive": archive,
                     "twin": selection.twin,
-                    "planned": len(planned),
+                    "planned": len(member_paths),
                     "fingerprint": selection.fingerprint,
                     "common_root": selection.common_root,
                     "groups": [
@@ -978,13 +1003,14 @@ def _plan_extract_and_create(
         "creates": 1,
         "adopts": 0,
         "deletes": 0,
-        "members": len(planned),
+        "members": len(member_paths),
         "groups": [
             {"name": group.name, "members": group.members, "models": group.models}
             for group in selection.groups
         ],
-        # A PATH, not an id: the scan step resolves the cover from the listing it
-        # verified. An id here would be a client-visible value nothing has produced.
+        # A PATH, not an id: the register step resolves the cover from the listing's
+        # planned order. An id here would be a client-visible value nothing has
+        # produced yet.
         "cover": (
             {
                 "asset_id": None,
@@ -1009,8 +1035,8 @@ def _resolve_extract_source(
     """The archive's listing, from its declared path or the copy a run already filed.
 
     A 404 on the declared path is the ONLY status that falls through: the archive
-    may already be at `<twin>/_source/<basename>` because an earlier run's scan or
-    create step failed after the move. Any other refusal (400, 413, 415) is the
+    may already be at `<twin>/_source/<basename>` because an earlier run's register
+    or create step failed after the move. Any other refusal (400, 413, 415) is the
     extractor's own and is re-raised untouched - a plan must never paper over a
     broken archive by looking somewhere else for it.
     """

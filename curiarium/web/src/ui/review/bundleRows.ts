@@ -342,7 +342,7 @@ export function isArchiveOnly(row: BundleDetectItem): boolean {
  *  project and the file count, which changes with the plan, so a quote here would
  *  be a name the operator never reads. */
 export const EXTRACT_AND_CREATE_ROW_TITLE =
-  "Extract this archive in place (Enter). The detail panel's extract-and-create door does the whole job: extract, wait for the scan, then create the project.";
+  "Extract this archive in place (Enter). The detail panel's extract-and-create door does the whole job: extract, register the files, then create the project.";
 
 /** A row the extract-and-create door may run on: the zip-only row, and not one
  *  that already became a project. The server's zero-step plan is the real belt;
@@ -912,15 +912,15 @@ export function operationStatusLine(step: OperationStep): string {
         failed: "the project's files did not match",
         pending: "waiting to check the files",
       });
-    case "scan":
-      // The extract-and-create runner's walk: it registers the files it just
-      // wrote, so the phrase is about registration rather than about a scan of
-      // the whole library.
+    case "register":
+      // The extract-and-create runner's third step registers exactly the files
+      // the plan named, so the phrase is about registration rather than about a
+      // scan of the whole library.
       return stepLine(step.status, {
         done: "registered the extracted files",
-        running: "waiting for the library scan to register the files\u2026",
-        failed: "the scan did not register the files",
-        pending: "waiting for the library scan",
+        running: "registering the extracted files\u2026",
+        failed: "the files could not be registered",
+        pending: "waiting to register the files",
       });
     default:
       return `${step.op} ${step.status}`;

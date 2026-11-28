@@ -3778,7 +3778,7 @@ describe("BundleReviewView extract and create door", () => {
         steps: [
           makeOperationStep({ index: 0, op: "extract" }),
           makeOperationStep({ index: 1, op: "move" }),
-          makeOperationStep({ index: 2, op: "scan" }),
+          makeOperationStep({ index: 2, op: "register" }),
           makeOperationStep({
             index: 3,
             op: "create-project",
@@ -4171,7 +4171,7 @@ describe("BundleReviewView bulk extract and create", () => {
       steps: [
         makeOperationStep({ index: 0, op: "extract" }),
         makeOperationStep({ index: 1, op: "move" }),
-        makeOperationStep({ index: 2, op: "scan" }),
+        makeOperationStep({ index: 2, op: "register" }),
         makeOperationStep({
           index: 3,
           op: "create-project",
@@ -4685,7 +4685,7 @@ function makeExtractPlan(
     steps: [
       { index: 0, op: "extract", summary: "extract 2 files" },
       { index: 1, op: "move", summary: "file the archive" },
-      { index: 2, op: "scan", summary: "register 2 files" },
+      { index: 2, op: "register", summary: "register 2 files" },
       { index: 3, op: "create-project", summary: "create 1 project" },
     ],
     review: {

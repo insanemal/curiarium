@@ -364,9 +364,10 @@ def _complete_step(operation_id: str, step_index: int, result: dict) -> None:
 # Each body takes `(operation_id, step_index, args)` and returns a JSON-safe
 # result dict; an exception is what marks the step (and operation) failed.
 # `adopt`/`refresh-groups` are the adopt workflow's two writes: membership, then
-# the marker's group list the plan measured. `extract`/`scan` are
-# extract-and-create's: the extractor's own write, then the walk that turns its
-# files into rows, refused while any planned file is missing.
+# the marker's group list the plan measured. `extract`/`register` are
+# extract-and-create's: the extractor's own write, then the registration that
+# turns the plan's named files into rows, refused while any planned file is
+# missing.
 
 
 def _refusal_detail(error: HTTPException) -> str:
@@ -385,8 +386,9 @@ def _extract(operation_id: str, step_index: int, args: dict) -> dict:
     """The `extract` step body: `archive_service.extract_out`, the one extractor.
 
     `start_scan=False` is the step order, not an optimisation: the next step files
-    the archive beside its twin and the step after THAT owns the scan. A walk
-    started here would race the move and register the archive at its old path.
+    the archive beside its twin and the step after THAT owns the registration. A
+    walk started here would race the move and register the archive at its old
+    path.
 
     The entry policy is EXECUTED, never restated: this body hands the selection to
     the same `extract_out` the extract route calls, so junk, the budget, the
@@ -409,57 +411,81 @@ def _extract(operation_id: str, step_index: int, args: dict) -> dict:
     }
 
 
-def _scan(operation_id: str, step_index: int, args: dict) -> dict:
-    """The `scan` step body: walk, then resolve the REVIEWED paths, all or nothing.
+def _register(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `register` step body: `library_scan.register`, the primitive, not a walk.
 
-    The walk is `library_scan.scan_storage_root`, the one registering step the
-    library already has; this body owns nothing about discovery. What it owns is
-    the comparison: every planned path must now be a registered asset under the
-    twin. Every miss is collected before the refusal, so one entry the archive
-    lied about cannot hide the other nineteen - and the refusal names the ENTRY,
-    which is what the operator saw in the listing, not the rendered library path.
+    `library_scan.register` writes a row for EXACTLY the paths it is handed: there
+    is no discovery here, no whole-root walk and no pruning, so the members are the
+    PLAN's list and no row is ever written for a file the plan did not name. That
+    is the whole point of this step: the review named 20 files, and the 20 rows the
+    create step attaches are those files, in that order.
 
-    Zero resolved is its own sentence naming the twin: "none of them registered"
-    sends the operator to a different place than "these three did not".
+    `args["paths"]` is the listing's planned list (the one list the planner
+    computed) and `args["archive_path"]` is the archive's filed home, named so the
+    `<twin>/_source/<archive>.zip` row a scan used to leave survives - it is
+    registered but never a member.
 
-    The cover is resolved here because this is the first moment an asset id
-    exists for it: the plan named the first planned model PATH, and the first such
-    path in planned order wins.
+    Every planned path must come back with an id. Misses are collected before the
+    refusal, so one entry the archive lied about cannot hide the other nineteen,
+    and the refusal names the ENTRY (the archive-relative name the operator saw in
+    the listing), not the rendered library path. Zero resolved is its own sentence
+    naming the twin: "none of them registered" sends the operator somewhere
+    different than "these three did not". A path the primitive REFUSES
+    (`RegisterPathError`) becomes a failed step with that refusal's sentence, not a
+    traceback.
+
+    The cover is resolved here because this is the first moment an asset id exists
+    for it: the plan named the first planned model PATH, and the first such path in
+    planned order wins. No cover is not an error.
+
+    `members` and `count` are the shape the create step and the workflow's
+    witnesses read; `registered`/`known`/`absent`/`failed` are the primitive's own
+    report, kept verbatim so a step row says what was written and what was not.
     """
-    library_scan.scan_storage_root()
     pairs = args.get("paths") or []
-    with Session(engine) as session:
-        registered = {
-            asset.path: asset.id
-            for asset in bundle_service.registered_assets(session, args["key"])
-        }
+    # The ENTRY is what the operator saw in the listing; `path` is where the plan
+    # said it would land. A refusal names the entry, so the miss is findable.
+    entry_by_path = {pair["path"]: pair.get("entry") or pair["path"] for pair in pairs}
+    named = [pair["path"] for pair in pairs]
+    if args.get("archive_path"):
+        named.append(args["archive_path"])
+    try:
+        result = library_scan.register(named)
+    except library_scan.RegisterPathError as error:
+        raise RuntimeError(str(error)) from error
+
+    asset_id_by_path = {entry.rel_path: entry.asset_id for entry in result.entries}
     members: List[dict] = []
-    misses: List[dict] = []
+    misses: List[str] = []
     cover_asset_id: Optional[str] = None
     for pair in pairs:
-        asset_id = registered.get(pair["path"])
+        asset_id = asset_id_by_path.get(pair["path"])
         if asset_id is None:
-            misses.append(pair)
+            misses.append(entry_by_path[pair["path"]])
             continue
         members.append({"asset_id": asset_id, "path": pair["path"]})
         if cover_asset_id is None and is_model_path(pair["path"]):
             cover_asset_id = asset_id
     if not members:
         raise RuntimeError(
-            f"none of the {len(pairs)} planned file(s) are registered under {args['key']!r} "
-            "after a scan; nothing was created"
+            f"none of the {len(pairs)} planned file(s) are registered under {args['key']!r}; "
+            "nothing was created"
         )
     if misses:
         raise RuntimeError(
             f"{len(misses)} of {len(pairs)} planned file(s) did not register under "
-            f"{args['key']!r} after a scan: "
-            + ", ".join(sorted(pair["entry"] for pair in misses))
+            f"{args['key']!r}: "
+            + ", ".join(sorted(misses))
         )
     return {
         "key": args["key"],
         "members": members,
         "count": len(members),
         "cover_asset_id": cover_asset_id,
+        "registered": [entry.rel_path for entry in result.entries if entry.created],
+        "known": [entry.rel_path for entry in result.known],
+        "absent": list(result.absent),
+        "failed": list(result.failed),
     }
 
 
@@ -564,14 +590,23 @@ def _create_project(operation_id: str, step_index: int, args: dict) -> dict:
     are only honest when both come from the reviewed plan rather than from a second
     reading of the disk.
 
-    `resolve_from` is extract-and-create's shape: the members are the SCAN step's
+    `resolve_from` is extract-and-create's shape: the members are the REGISTER step's
     verified set (and its cover), not a set named at plan time, because no asset id
-    exists until the walk has registered the files. `provenance` makes the marker:
-    the archive's identity as the key, the twin as `rel_dir`, and the door's own
-    block carrying the archive, the planned/resolved counts, the listing's
-    fingerprint, its common root and its groups. `create_origin`/`project_origin`
-    pick the door's marker discriminator and the `Project.origin` column; both
-    default to what every other caller already got.
+    exists until the files have rows. That indirection is guarded, not trusted
+    (Oracle B-11): the resolve_from step's OWN `args_json` is re-read and the
+    ORDERED member paths must equal the paths the plan named - a difference is a
+    FAILURE naming both lists' first divergence, never a warning, because a create
+    that re-resolved from the key would attach files nobody approved. The outcome
+    must also be `created`, with ONE named exception: a run-time dedupe hit
+    (`already_created`) is an identity answer - it keeps the pre-existing project
+    untouched and creates nothing - and it is narrated in the result as
+    `deduped: True`, whose `members` count is the existing project's, not the
+    planned count. `provenance` makes the marker: the archive's identity as the
+    key, the twin as `rel_dir`, and the door's own block carrying the archive, the
+    planned/resolved counts, the listing's fingerprint, its common root and its
+    groups. `create_origin`/`project_origin` pick the door's marker discriminator
+    and the `Project.origin` column; both default to what every other caller
+    already got.
     """
     resolve_from = args.get("resolve_from")
     provenance = args.get("provenance")
@@ -593,6 +628,17 @@ def _create_project(operation_id: str, step_index: int, args: dict) -> dict:
             cover_asset_id = resolved.get("cover_asset_id") if isinstance(resolved, dict) else None
             if not member_rows:
                 raise RuntimeError(f"step {resolve_from} resolved no members to create from")
+            # Oracle B-11: the resolve_from step's own args ARE the plan's list, and
+            # the create must attach that list in that order. A difference is a
+            # failed step, never a warning: a register step that re-resolved from the
+            # key would attach files the operator never approved.
+            planned_paths = _planned_paths_of(step)
+            member_paths = [entry["path"] for entry in member_rows]
+            if member_paths != planned_paths:
+                raise RuntimeError(
+                    f"step {resolve_from} did not keep the plan's member list: "
+                    + _first_divergence(member_paths, planned_paths)
+                )
         else:
             member_rows = args["members"]
             cover_asset_id = args["cover_asset_id"]
@@ -644,14 +690,64 @@ def _create_project(operation_id: str, step_index: int, args: dict) -> dict:
         )
     if outcome.status == project_create_service.STATUS_REFUSED:
         raise RuntimeError(f"create refused: {outcome.reason}")
+    deduped = outcome.status == project_create_service.STATUS_ALREADY_CREATED
+    if not deduped and outcome.status != project_create_service.STATUS_CREATED:
+        raise RuntimeError(
+            f"create answered {outcome.status!r} for {args['name']!r}: only a created "
+            "project, or the already_created identity answer, confirms one"
+        )
     return {
         "project_id": outcome.project_id,
         "name": outcome.name,
         "status": outcome.status,
         "match": outcome.match,
         "created": outcome.status == project_create_service.STATUS_CREATED,
+        # A run-time dedupe hit is an identity answer, not a create: this project
+        # already existed and is untouched, so `members` below is the EXISTING
+        # project's count, not the planned one.
+        "deduped": deduped,
         "members": len(outcome.members),
     }
+
+
+def _planned_paths_of(step: OperationStep) -> List[str]:
+    """The ORDERED paths a register step's own args named: the plan's list, re-read.
+
+    Read off the OPENED step row's `args_json`, not a fresh resolve from the key, so
+    a register step that attached a file nobody named (or dropped one the plan
+    named) is caught at the create rather than passed through.
+    """
+    try:
+        resolved_args = json.loads(step.args_json or "{}")
+    except (TypeError, ValueError):
+        return []
+    return [
+        pair["path"]
+        for pair in (resolved_args.get("paths") or [])
+        if isinstance(pair, dict) and "path" in pair
+    ]
+
+
+def _first_divergence(actual_paths: List[str], planned_paths: List[str]) -> str:
+    """The sentence naming where two ordered member lists part company.
+
+    Both counts and the first divergent position with both entries: 20 paths in a
+    sentence do not help an operator locate the one that moved, and a silent
+    difference is exactly the drift this guard exists to refuse.
+    """
+    shared = min(len(actual_paths), len(planned_paths))
+    divergence = shared
+    for index in range(shared):
+        if actual_paths[index] != planned_paths[index]:
+            divergence = index
+            break
+    actual = actual_paths[divergence] if divergence < len(actual_paths) else "nothing"
+    planned = planned_paths[divergence] if divergence < len(planned_paths) else "nothing"
+    return (
+        f"registered {len(actual_paths)} member(s) but the plan named {len(planned_paths)}; "
+        f"the ordered lists first diverge at position {divergence}: "
+        f"registered {actual!r}, planned {planned!r}"
+    )
 
 
 def _verify_members(operation_id: str, step_index: int, args: dict) -> dict:
@@ -774,7 +870,7 @@ def _refresh_groups(operation_id: str, step_index: int, args: dict) -> dict:
 _STEP_BODIES = {
     "extract": _extract,
     "move": _move,
-    "scan": _scan,
+    "register": _register,
     "create-project": _create_project,
     "adopt": _adopt,
     "refresh-groups": _refresh_groups,

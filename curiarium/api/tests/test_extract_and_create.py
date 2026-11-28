@@ -6,7 +6,7 @@ same job - "an extraction phase and then the existing create-project after movin
 the parent archive into the extracted path" - as four visible steps in one
 operation:
 
-    extract -> move (the archive under <twin>/_source) -> scan -> create-project
+    extract -> move (the archive under <twin>/_source) -> register -> create-project
 
 The deleted route could select a subset of entries, list them before writing,
 report per-entry failures without aborting the rest, refuse a partial extraction,
@@ -21,10 +21,10 @@ Why every test here is written to fail if the feature is absent:
 * **four steps, once, in order** - the Wizard-Tower shape: 20 payload entries
   under `01_Wizard/`, two junk members and a hidden member beside them, one submit
   that puts every planned file on disk, files the archive under
-  `<twin>/_source/<archive>.zip`, registers the tree and creates ONE project with
-  20 members and the first model as its cover. A planner that skipped the scan, a
-  create that re-resolved from the key, or a move that left the archive beside the
-  twin all fail it.
+  `<twin>/_source/<archive>.zip`, registers those planned files and creates ONE
+  project with 20 members and the first model as its cover. A planner that skipped
+  the register step, a create that re-resolved from the key, or a move that left the
+  archive beside the twin all fail it.
 * **the extract door's refusals, not copies of them** - a pre-occupied destination
   refuses AT the extract step with the extract route's own sentence, nothing is
   extracted, no rows exist and the tree is byte-identical.
@@ -328,6 +328,24 @@ def members(project_id: str) -> set[str]:
         )
 
 
+def member_storage_paths(project_id: str) -> list[str]:
+    """A project's member paths in the ORDER the create wrote them (``position``).
+
+    Ordered, not a set: the plan names its members in listing order, the register
+    step hands that list over in that order, and the create writes
+    ``ProjectAsset.position`` by ``enumerate`` - so this column IS the plan's order
+    surviving the write.
+    """
+    with Session(engine) as session:
+        rows = session.exec(
+            select(Asset.storage_path)
+            .join(ProjectAsset, ProjectAsset.asset_id == Asset.id)
+            .where(ProjectAsset.project_id == project_id)
+            .order_by(ProjectAsset.position)
+        ).all()
+    return [path for path in rows if path]
+
+
 def marker(project_id: str) -> dict:
     with Session(engine) as session:
         project = session.get(Project, project_id)
@@ -391,18 +409,18 @@ def sign_in(client: TestClient, token: str, username: str, password: str, role: 
 def test_the_four_steps_run_in_order_and_leave_the_tree_the_review_promised(
     client: TestClient, storage: Path
 ) -> None:
-    """AC-1. Mutation: a planner that skipped the scan, a create that re-resolved from the key.
+    """AC-1. Mutation: a planner that skipped the register step, a create that re-resolved from the key.
 
     One submit must: write all twenty planned files, file the archive under
-    `<twin>/_source`, register the tree, and create ONE project with twenty
-    members and the first model as its face - with every step visible, in order,
-    on one operation row.
+    `<twin>/_source`, register those planned files, and create ONE project with
+    twenty members and the first model as its face - with every step visible, in
+    order, on one operation row.
     """
     register_archive()
     assert assets_by_path()[ARCHIVE] is not None
 
     plan = plan_extract(client)
-    assert [step["op"] for step in plan["steps"]] == ["extract", "move", "scan", "create-project"]
+    assert [step["op"] for step in plan["steps"]] == ["extract", "move", "register", "create-project"]
     review = plan["review"]
     assert review["workflow"] == "extract-and-create"
     assert review["members"] == 20
@@ -422,7 +440,7 @@ def test_the_four_steps_run_in_order_and_leave_the_tree_the_review_promised(
     # the loose bucket, and sum(groups) == members structurally.
     assert review["groups"] == [{"name": "", "members": 20, "models": 15}]
     assert sum(group["members"] for group in review["groups"]) == review["members"]
-    # The cover is a PATH at plan time: no asset id exists until the scan runs.
+    # The cover is a PATH at plan time: no asset id exists until the register step runs.
     assert review["cover"]["asset_id"] is None
     assert review["cover"]["rel_path"] == f"{TWIN}/{FIRST_MODEL}"
     # The archive's new home is on the wire, in the one move the plan declares.
@@ -431,7 +449,7 @@ def test_the_four_steps_run_in_order_and_leave_the_tree_the_review_promised(
     ]
 
     body = run_workflow(client)
-    assert ops(body) == ["extract", "move", "scan", "create-project"]
+    assert ops(body) == ["extract", "move", "register", "create-project"]
     assert [step["status"] for step in body["steps"]] == ["done", "done", "done", "done"]
     ledger_id = step_of(body, "move")["result"]["ledger_id"]
     assert isinstance(ledger_id, str) and ledger_id
@@ -444,7 +462,8 @@ def test_the_four_steps_run_in_order_and_leave_the_tree_the_review_promised(
     assert not (storage / ARCHIVE).exists()
     assert not any((storage / TWIN / name).exists() for name in (*JUNK, HIDDEN))
 
-    # One project, twenty members, the cover the plan named (resolved by the scan).
+    # One project, twenty members, the cover the plan named (resolved by the
+    # register step).
     rows = projects()
     assert len(rows) == 1
     created = rows[0]
@@ -478,6 +497,143 @@ def test_the_four_steps_run_in_order_and_leave_the_tree_the_review_promised(
     by_path = assets_by_path()
     assert FILED in by_path and ARCHIVE not in by_path
     assert by_path[FILED].id is not None
+
+
+# --- 1b: no scan step, and the one list --------------------------------------
+
+
+def test_the_workflow_contains_no_scan_step(client: TestClient, storage: Path) -> None:
+    """AC-4. Mutation: a scan sneaking back in by op name, step body or call.
+
+    The ticket's inversion, asserted structurally rather than by grep: this workflow
+    knows its own file list, so it may not discover anything. Four independent
+    witnesses, because there are four ways a scan comes back - a planner emitting the
+    op, a step body left in the runner, a plan literal naming it, or a runner calling
+    the whole-root primitive. `library_scan.scan_storage_root` and
+    `POST /library/scan` remain the rescan primitive; they are simply not this
+    operation's job.
+    """
+    register_archive()
+    plan = plan_extract(client)
+    assert [step["op"] for step in plan["steps"]] == [
+        "extract",
+        "move",
+        "register",
+        "create-project",
+    ]
+    assert "scan" not in operations_runner._STEP_BODIES
+    assert "register" in operations_runner._STEP_BODIES
+
+    service_tree = _module_tree("operations_service.py")
+    assert _dicts_naming(service_tree, "op", "scan") == [], "no plan names a scan step"
+    # The walk above is only evidence if it can SEE an op literal, so the same pass
+    # over the same tree must find the one the planner really emits.
+    assert _dicts_naming(service_tree, "op", "register"), "the AST pass can see an op literal"
+
+    runner = _module_tree("operations_runner.py")
+    assert _calls_in(runner, "library_scan", "register") == 1
+    assert _calls_in(runner, "library_scan", "scan_storage_root") == 0
+
+
+def test_the_plan_names_every_member_before_anything_is_written(
+    client: TestClient, storage: Path
+) -> None:
+    """AC-2/AC-3. Mutation: a plan whose member list is resolved from the key at run time.
+
+    The listing is read at PLAN time (`archive_service.plan_extraction` opens the zip
+    for its listing only) and the names travel in the register step's own args - the
+    WINNING list is the one the operator reviewed, not a directory read at run time.
+    So planning writes no byte (the tree is identical before and after, mtime
+    included), and the step's `paths` are exactly the listing's planned library paths
+    in listing order, with the archive's filed home riding along as `archive_path`
+    (it gets a row; it is not a member).
+    """
+    register_archive()
+    before = tree_digest(storage)
+    plan = plan_extract(client)
+    assert tree_digest(storage) == before, "planning opened the archive and wrote nothing"
+
+    # `args` never reach the wire, so the step's own dict is read back through the
+    # plan it was built from (the idiom test_adopt_workflow.py uses).
+    replay = operations_service.recompute_plan(plan["plan_id"])
+    register_step = next(step for step in replay.steps if step["op"] == "register")
+    named = [{"path": f"{TWIN}/{entry}", "entry": entry} for entry in PAYLOAD]
+    assert register_step["args"]["paths"] == named
+    assert register_step["args"]["archive_path"] == FILED
+    assert register_step["args"]["key"] == TWIN
+    assert tree_digest(storage) == before, "reading the plan back wrote nothing either"
+
+
+def test_the_register_step_attaches_exactly_the_planned_members_in_order(
+    client: TestClient, storage: Path
+) -> None:
+    """AC-3. Mutation: a create that resolves the twin instead of reading the register step.
+
+    One list, carried end to end: the plan's listing order, the register step's
+    members in that order, and the `ProjectAsset.position` column the create writes by
+    `enumerate` - asserted as an ORDERED comparison, not a set, because "the right
+    twenty files in the wrong order" is a different product from the reviewed one. The
+    cover is the first planned MODEL, resolved to an id by the register step.
+    """
+    register_archive()
+    plan = plan_extract(client)
+    submitted = submit_of(client, plan)
+    run_to_completion()
+    body = operation_of(client, submitted["id"])
+    assert body["status"] == "done", json.dumps(body, indent=2)
+
+    planned = [f"{TWIN}/{entry}" for entry in PAYLOAD]
+    register = step_of(body, "register")["result"]
+    register_paths = [member["path"] for member in register["members"]]
+    assert register_paths == planned, "the register step holds the plan's list, in listing order"
+    assert plan["review"]["members"] == len(register["members"]) == len(planned) == 20
+
+    created = projects()[0]
+    assert member_storage_paths(created.id) == register_paths, (
+        "the project's member rows are the register step's verified list in its own "
+        "order - a create that re-resolved the twin could attach a different twenty"
+    )
+    assert members(created.id) == {assets_by_path()[path].id for path in planned}
+
+    # The cover: chosen at plan time as the first planned model's PATH (no id exists
+    # then), resolved by the register step, and written by the create.
+    assert plan["review"]["cover"]["rel_path"] == f"{TWIN}/{FIRST_MODEL}"
+    assert register["cover_asset_id"] == assets_by_path()[f"{TWIN}/{FIRST_MODEL}"].id
+    assert created.cover_asset_id == register["cover_asset_id"]
+
+
+def test_the_filed_archive_gains_a_row_even_when_it_had_none(
+    client: TestClient, storage: Path
+) -> None:
+    """Decision (a). Mutation: a register step that drops `args["archive_path"]`.
+
+    Today's scan left a row at `<twin>/_source/<archive>.zip` after a run, and a filed
+    archive without one would be a silent regression. So the register step is handed
+    the archive's filed home too - it registers the path but never adds it to
+    `members`, because the create reads only `paths`. Pinned from the harder side: the
+    archive's row is deleted first, so the run cannot inherit it from the move and the
+    register step has to make it while attaching exactly the planned twenty.
+    """
+    register_archive()
+    assert ARCHIVE in assets_by_path()
+    with Session(engine) as session:
+        session.exec(delete(Asset).where(Asset.storage_path == ARCHIVE))
+        session.commit()
+    assert ARCHIVE not in assets_by_path()
+
+    body = run_workflow(client)
+    register = step_of(body, "register")["result"]
+    created = projects()[0]
+    held = members(created.id)
+
+    assert len(held) == 20, "the create reads `paths`, not the register's whole report"
+    by_path = assets_by_path()
+    assert FILED in by_path, "the filed archive's row came back"
+    # Not a member: the archive is a file the twin OWNS, not a part of the product.
+    assert by_path[FILED].id not in held
+    # And the row is the register step's, which is what "decision (a)" buys: with no
+    # row to inherit, the only step that could have written it is this one.
+    assert FILED in register["registered"]
 
 
 def test_the_plan_is_the_entries_door_listing(client: TestClient, storage: Path) -> None:
@@ -566,23 +722,23 @@ def test_a_pre_occupied_destination_refuses_at_the_extract_step_and_creates_noth
     assert not (storage / FILED).exists()
 
 
-def test_a_planned_entry_that_never_registers_fails_the_scan_step_naming_every_miss(
+def test_a_planned_entry_that_never_registers_fails_the_register_step_naming_every_miss(
     client: TestClient, storage: Path
 ) -> None:
-    """AC-4 (partial resolution). Mutation: a scan that accepts whatever registered.
+    """AC-4 (partial resolution). Mutation: a register step that accepts whatever registered.
 
-    A member the scan never registers means the archive's promise was not kept.
-    The step refuses once, naming EVERY miss by the ENTRY the operator saw, and
+    A member the register step never registers means the archive's promise was not
+    kept. The step refuses once, naming EVERY miss by the ENTRY the operator saw, and
     nothing is created - a create over the survivors would present a partial
     extraction as a whole model.
     """
     register_archive()
-    # A file the extract wrote disappears between the extract and the walk, so the
-    # scan cannot register it while every other planned file registers normally.
-    # The seam is the runner's own guard, which runs BEFORE the step body, so the
-    # loss is the test's and not a second implementation of the extract.
+    # A file the extract wrote disappears between the extract and the register step,
+    # so the primitive cannot register it while every other planned file registers
+    # normally. The seam is the runner's own guard, which runs BEFORE the step body,
+    # so the loss is the test's and not a second implementation of the extract.
     def drop_one(operation: Operation, step: OperationStep) -> None:
-        if step.op == "scan":
+        if step.op == "register":
             (storage / TWIN / FIRST_MODEL).unlink()
 
     operations_runner.set_step_guard(drop_one)
@@ -593,43 +749,48 @@ def test_a_planned_entry_that_never_registers_fails_the_scan_step_naming_every_m
     body = operation_of(client, submitted["id"])
 
     assert body["status"] == "failed"
-    scan = step_of(body, "scan")
-    assert scan["status"] == "failed"
-    assert "1 of 20 planned file(s) did not register" in scan["error"]
-    assert FIRST_MODEL in scan["error"]
+    register = step_of(body, "register")
+    assert register["status"] == "failed"
+    assert "1 of 20 planned file(s) did not register" in register["error"]
+    # The runner names the miss by its ENTRY, not its rendered library path: it maps
+    # `path -> entry` off the step's own args, and `FIRST_MODEL` is that entry name
+    # (`01_Wizard/Wizard_Tray_DiceHold_v1.4.stl`), which is what the operator saw in
+    # the listing.
+    assert FIRST_MODEL in register["error"]
+    assert f"{TWIN}/{FIRST_MODEL}" not in register["error"]
     assert projects() == []
     assert membership_rows() == 0
-    # The archive is already filed: the move step ran before the scan.
+    # The archive is already filed: the move step ran before the register step.
     assert (storage / FILED).is_file()
 
 
-def test_a_re_plan_after_a_scan_failure_answers_the_two_remaining_steps(
+def test_a_re_plan_after_a_register_failure_answers_the_two_remaining_steps(
     client: TestClient, storage: Path
 ) -> None:
-    """The archive is filed, the project does not exist: plan [scan, create-project], not 404.
+    """The archive is filed, the project does not exist: plan [register, create-project], not 404.
 
     Mutation: a planner that only knows the declared path would 404 on a file its
-    own previous run moved - a dead end after the first bad scan.
+    own previous run moved - a dead end after the first bad register.
     """
     register_archive()
 
-    def fail_the_scan(operation: Operation, step: OperationStep) -> None:
-        if step.op == "scan":
-            raise RuntimeError("the walk was interrupted")
+    def fail_the_register(operation: Operation, step: OperationStep) -> None:
+        if step.op == "register":
+            raise RuntimeError("the primitive was interrupted")
 
-    operations_runner.set_step_guard(fail_the_scan)
+    operations_runner.set_step_guard(fail_the_register)
     plan = plan_extract(client)
     submitted = submit_of(client, plan)
     run_to_completion()
     operations_runner.set_step_guard(None)
     failed = operation_of(client, submitted["id"])
     assert failed["status"] == "failed", failed
-    assert step_of(failed, "scan")["status"] == "failed"
+    assert step_of(failed, "register")["status"] == "failed"
     assert (storage / FILED).is_file()
     assert projects() == []
 
     replanned = plan_extract(client)
-    assert [step["op"] for step in replanned["steps"]] == ["scan", "create-project"]
+    assert [step["op"] for step in replanned["steps"]] == ["register", "create-project"]
     assert replanned["review"]["moves"] == 0
     assert replanned["review"]["move_list"] == []
     assert replanned["review"]["members"] == 20
@@ -821,12 +982,12 @@ def test_a_two_step_re_plan_undo_removes_its_project_and_leaves_the_filed_archiv
     than a surprise.
     """
 
-    def fail_the_scan(operation: Operation, step: OperationStep) -> None:
-        if step.op == "scan":
-            raise RuntimeError("the walk was interrupted")
+    def fail_the_register(operation: Operation, step: OperationStep) -> None:
+        if step.op == "register":
+            raise RuntimeError("the primitive was interrupted")
 
     register_archive()
-    operations_runner.set_step_guard(fail_the_scan)
+    operations_runner.set_step_guard(fail_the_register)
     first = plan_extract(client)
     submitted = submit_of(client, first)
     run_to_completion()
@@ -834,7 +995,7 @@ def test_a_two_step_re_plan_undo_removes_its_project_and_leaves_the_filed_archiv
     assert operation_of(client, submitted["id"])["status"] == "failed"
 
     second = run_workflow(client)
-    assert ops(second) == ["scan", "create-project"]
+    assert ops(second) == ["register", "create-project"]
     project_id = projects()[0].id
     answer = client.post(f"/operations/{second['id']}/undo")
     assert answer.status_code == 200, answer.text
@@ -882,13 +1043,16 @@ def test_a_plan_over_an_archive_that_changed_is_refused_and_writes_no_operation(
 def test_the_vendor_wrapper_is_not_stripped_because_this_route_never_stripped_one(
     client: TestClient, storage: Path
 ) -> None:
-    """AC-7, capability 6 as a NEGATIVE. Mutation: inventing a wrapper strip to satisfy prose.
+    """AC-5, capability 6 as a NEGATIVE. Mutation: inventing a wrapper strip to satisfy prose.
 
     `archive_project_service` never imported `proposal_engine` and its destination
     was always `<parent>/<sanitised stem>`: it wrote nothing itself. So no route
     on this path ever hoisted `01_Wizard/` out of the twin, and this workflow does
-    not invent that behaviour. The wrapper survives, the group census sees it, and
-    the project holds the wrapped paths.
+    not invent that behaviour - the ticket forbids adding, dropping or reordering a
+    member, and hoisting is a rename. The listing is rendered with its INTERNAL
+    paths under the twin: every one of the 20 member storage paths still begins
+    `<twin>/01_Wizard/`, the wrapper is the marker's honest `common_root`, and the
+    twin's children are exactly the wrapper and `_source` - nothing was flattened.
 
     The closure evidence for the deleted module is in the ticket note and in the
     commit: `git show` the pre-deletion file and look for `proposal_engine` - there
@@ -899,13 +1063,22 @@ def test_the_vendor_wrapper_is_not_stripped_because_this_route_never_stripped_on
     for entry in PAYLOAD:
         assert entry.startswith(f"{PAYLOAD_ROOT}/")
         assert (storage / TWIN / entry).is_file()
+    project_id = projects()[0].id
+    # The wrapper survives in the MEMBERS, not only on disk: no step hoisted a
+    # member up to the twin, and no member was renamed on its way in.
+    paths = member_storage_paths(project_id)
+    assert len(paths) == 20
+    assert all(path.startswith(f"{TWIN}/{PAYLOAD_ROOT}/") for path in paths), paths
+    held = members(project_id)
+    assert held == {assets_by_path()[f"{TWIN}/{entry}"].id for entry in PAYLOAD}
+    # The marker records the wrapper as the listing's own common root: the plan
+    # answers "what would the strip have been" as a FACT, not as a transformation.
+    assert marker(project_id)["archive_extract"]["common_root"] == PAYLOAD_ROOT
     # Nothing was hoisted above the twin: the twin's only children are the wrapper
     # directory and `_source`.
     assert sorted(path.name for path in (storage / TWIN).iterdir()) == sorted(
         [PAYLOAD_ROOT, "_source"]
     )
-    held = members(projects()[0].id)
-    assert held == {assets_by_path()[f"{TWIN}/{entry}"].id for entry in PAYLOAD}
 
 
 # --- 8: the old route is gone everywhere -----------------------------------
@@ -1096,6 +1269,31 @@ def _calls_in(tree: ast.Module, module: str, function: str) -> int:
     return count
 
 
+def _dicts_naming(tree: ast.Module, key: str, value: str) -> list[ast.Dict]:
+    """Every dict LITERAL in `tree` whose `key` field is the constant string `value`.
+
+    A structural read of the step plan (`{"op": "scan", ...}`), not a grep: a
+    comment or a docstring that mentions the word is not a step, and a dict built
+    from a variable is not one either. `key`/`value` must both be `ast.Constant`
+    strings - the shape a hand-written plan dict has.
+    """
+    found: list[ast.Dict] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for index, pair_key in enumerate(node.keys):
+            pair_value = node.values[index]
+            if (
+                isinstance(pair_key, ast.Constant)
+                and pair_key.value == key
+                and isinstance(pair_value, ast.Constant)
+                and pair_value.value == value
+            ):
+                found.append(node)
+                break
+    return found
+
+
 def test_the_extract_step_executes_the_entry_policy_instead_of_restating_it() -> None:
     """AC-11. Mutation: a planner or runner that re-implements the selection.
 
@@ -1116,7 +1314,12 @@ def test_the_extract_step_executes_the_entry_policy_instead_of_restating_it() ->
 
     runner = _module_tree("operations_runner.py")
     assert _calls_in(runner, "archive_service", "extract_out") == 1
-    assert _calls_in(runner, "library_scan", "scan_storage_root") == 1
+    # ZERO walk calls, and that inversion is the ticket: the register step is handed
+    # the plan's own file list, so a workflow that knows which files it wrote may not
+    # discover anything. `library_scan.scan_storage_root` stays the rescan primitive.
+    assert _calls_in(runner, "library_scan", "scan_storage_root") == 0
+    # ... and the primitive the workflow DOES call is the explicit one, once.
+    assert _calls_in(runner, "library_scan", "register") == 1
     service = _module_tree("operations_service.py")
     # Two call sites, one primitive: the declared path and the filed copy.
     assert _calls_in(service, "archive_service", "plan_extraction") == 2
@@ -1264,7 +1467,8 @@ def test_an_already_extracted_tree_is_an_idempotent_extract_then_registers_and_c
     """Mutation: an extract step that refuses a tree it already wrote.
 
     The extract door answers `files=0, already_present=True` and writes nothing when
-    every destination is there; the scan then registers the tree and the create runs.
+    every destination is there; the register step then registers the planned files
+    and the create runs.
     This is the state a previous run that died after its extract leaves.
     """
     register_archive()

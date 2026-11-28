@@ -3,7 +3,7 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from math import ceil
 from pathlib import Path
 from typing import Callable, Optional
@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import event
+from sqlalchemy import event, update
 from sqlmodel import Session, select
 
 import asset_service
@@ -1807,3 +1807,329 @@ def test_is_counted_entry_asks_the_scan_its_own_predicate() -> None:
     assert library_scan.is_skipped_name("._a.stl", include_hidden=True) is False
     assert library_scan.is_skipped_name(".hidden.stl", include_hidden=True) is False
     assert library_scan.is_skipped_name(".DS_Store", include_hidden=True) is True
+
+
+# --- the explicit register door (Mf-u2el) ------------------------------------
+#
+# `register(paths)` is named its files; it never walks for discovery. Every test
+# below uses `temp_library` - an isolated storage root with
+# `library_scan.STORAGE` monkeypatched - and asserts only against rows it made,
+# because the database is shared for the whole session.
+
+
+def _asset_row_count() -> int:
+    with Session(engine) as session:
+        return len(session.exec(select(Asset.id)).all())
+
+
+def _folder_row_count() -> int:
+    with Session(engine) as session:
+        return len(session.exec(select(Folder.id)).all())
+
+
+def _stamp_missing_since(rel_paths, stamp: str) -> None:
+    """Flag rows the way a scan would, without walking a whole root."""
+    with Session(engine) as session:
+        ids = session.exec(select(Asset.id).where(Asset.storage_path.in_(list(rel_paths)))).all()
+        session.execute(update(Asset).where(Asset.id.in_(list(ids))).values(missing_since=stamp))
+        session.commit()
+
+
+def _delete_folders_under(prefix: str) -> None:
+    with Session(engine) as session:
+        for folder in list(session.exec(select(Folder))):
+            if (folder.storage_path or "").startswith(prefix):
+                session.delete(folder)
+        session.commit()
+
+
+def _row_shape(prefix: str) -> dict:
+    """``storage_path -> (name, filename, folder's storage_path)`` for a prefix."""
+    with Session(engine) as session:
+        folders = {folder.id: folder.storage_path for folder in session.exec(select(Folder)).all()}
+        return {
+            asset.storage_path: (asset.name, asset.filename, folders.get(asset.folder_id))
+            for asset in session.exec(select(Asset)).all()
+            if (asset.storage_path or "").startswith(prefix)
+        }
+
+
+def test_register_writes_exactly_the_named_paths(temp_library: Path) -> None:
+    """Mutation: register the named directory's whole listing instead of the names.
+
+    An unnamed sibling sitting beside the named file is the witness: a walk-shaped
+    implementation registers it and `set(rows)` reds.
+    """
+    _write_under(temp_library, "reg-exact/named.stl", b"solid named\n")
+    _write_under(temp_library, "reg-exact/sibling.stl", b"solid sibling\n")
+    # a file at the root of storage exercises the empty `rel_dir`"s listing too
+    _write_under(temp_library, "reg-root-only.stl", b"solid root\n")
+
+    result = library_scan.register(["reg-exact/named.stl", "reg-root-only.stl"])
+
+    assert [(entry.rel_path, entry.created) for entry in result.entries] == [
+        ("reg-exact/named.stl", True),
+        ("reg-root-only.stl", True),
+    ]
+    assert result.known == ()
+    assert result.absent == ()
+    assert result.failed == ()
+    assert set(_library_rows("reg-exact/")) == {"reg-exact/named.stl"}
+    assert set(_library_rows("reg-root-only.stl")) == {"reg-root-only.stl"}
+    assert result.state.registered == 2
+    assert result.state.known == 0
+
+
+def test_register_reports_a_known_path_without_writing_a_second_row(temp_library: Path) -> None:
+    """Mutation: call a duplicate or an already-tracked path newly created.
+
+    `created`/`known` must answer "nothing was written", the row count must stay
+    at one, and a path repeated in one call must collapse to one entry.
+    """
+    _write_under(temp_library, "reg-known/part.stl", b"solid part\n")
+
+    first = library_scan.register(["reg-known/part.stl"])
+    second = library_scan.register(["reg-known/part.stl", "reg-known/./part.stl"])
+
+    assert first.entries[0].created is True
+    assert second.entries[0].created is False
+    assert second.entries[0].asset_id == first.entries[0].asset_id
+    assert [entry.rel_path for entry in second.known] == ["reg-known/part.stl"]
+    assert second.state.registered == 0
+    assert second.state.known == 1
+    assert set(_library_rows("reg-known/")) == {"reg-known/part.stl"}
+
+
+def test_register_reports_an_absent_path_without_aborting_the_rest(temp_library: Path) -> None:
+    """Mutation: silently skip a named path that is not a regular file on disk.
+
+    A missing file, a directory named as if it were a file, and a path whose
+    parent does not exist are all reported; the present one still registers in the
+    same call.
+    """
+    _write_under(temp_library, "reg-absent/present.stl", b"solid present\n")
+    _write_under(temp_library, "reg-absent/nested/deep.stl", b"solid deep\n")
+
+    result = library_scan.register(
+        [
+            "reg-absent/present.stl",
+            "reg-absent/missing.stl",
+            "reg-absent/nested",
+            "reg-absent/nodir/deep.stl",
+        ]
+    )
+
+    assert result.absent == ("reg-absent/missing.stl", "reg-absent/nested", "reg-absent/nodir/deep.stl")
+    assert [entry.rel_path for entry in result.entries] == ["reg-absent/present.stl"]
+    assert result.state.registered == 1
+    assert set(_library_rows("reg-absent/")) == {"reg-absent/present.stl"}
+
+
+@pytest.mark.parametrize(
+    "rel_path",
+    [
+        "",
+        "   ",
+        "/etc/passwd",
+        "../outside.stl",
+        "~",
+        "~/x.stl",
+        "thumbs/x.png",
+        "bundles/x.stl",
+        ".git/x.stl",
+        "reg-parent/.hidden.stl",
+        "Thumbs.db",
+        "reg-parent/.DS_Store",
+    ],
+)
+def test_register_refuses_an_unregistrable_path_and_writes_no_rows(
+    temp_library: Path, rel_path: str
+) -> None:
+    """Mutation: validate after the session, or reuse the wrong path guard.
+
+    Each case is one rule of the walk - outside the root, an app-owned root
+    directory (`thumbs/`, `bundles/`), a hidden segment, tool debris, an empty
+    name - and the row/folder counts are compared before and after, so "refused"
+    cannot quietly mean "wrote and then raised".
+    """
+    _write_under(temp_library, "reg-parent/present.stl", b"solid present\n")
+    assets_before = _asset_row_count()
+    folders_before = _folder_row_count()
+
+    with pytest.raises(library_scan.RegisterPathError):
+        library_scan.register([rel_path])
+
+    assert (_asset_row_count(), _folder_row_count()) == (assets_before, folders_before)
+    assert _library_rows("reg-parent/") == {}
+
+
+def test_register_refuses_a_symlinked_file(temp_library: Path) -> None:
+    """Mutation: follow a symlink and write a row for a link instead of a file.
+
+    The link lives inside the root and its target is a real library file, so only
+    the explicit symlink refusal keeps the row from being written; the real file
+    right beside it still registers.
+    """
+    target = _write_under(temp_library, "reg-link/real.stl", b"solid real\n")
+    (temp_library / "reg-link/link.stl").symlink_to(target)
+    assets_before = _asset_row_count()
+
+    with pytest.raises(library_scan.RegisterPathError):
+        library_scan.register(["reg-link/link.stl"])
+
+    assert _asset_row_count() == assets_before
+    assert _library_rows("reg-link/") == {}
+    assert library_scan.register(["reg-link/real.stl"]).entries[0].created is True
+
+
+def test_register_never_claims_the_scan_slot(
+    temp_library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: route register through `_begin_run` (claim or publish the slot).
+
+    `scan_status()` must be byte-identical, and a later `start_scan()` must still
+    be the call that claims the slot. The worker is parked on an Event this test
+    owns and then closed WITHOUT a walk, so no assertion races it and no scan of
+    this temp root flags the session's other rows absent.
+    """
+    _write_under(temp_library, "reg-slot/part.stl", b"solid part\n")
+    before = library_scan.scan_status()
+
+    library_scan.register(["reg-slot/part.stl"])
+
+    assert library_scan.scan_status() == before
+
+    parked = threading.Event()
+    release = threading.Event()
+
+    def parked_scan(state=None):
+        parked.set()
+        # bounded, so a failed assertion still lets the run close its slot
+        release.wait(timeout=SCAN_WAIT_SECONDS * 3)
+        # close the slot the way a finished walk would, without walking
+        library_scan._finish_run(state)
+        return state
+
+    monkeypatch.setattr(library_scan, "scan_storage_root", parked_scan)
+    try:
+        assert library_scan.start_scan() is True
+        assert parked.wait(timeout=SCAN_WAIT_SECONDS), "the background run never reached the parked scanner"
+        assert library_scan.scan_status()["running"] is True
+    finally:
+        release.set()
+        _wait_for_scan_status(
+            library_scan.scan_status,
+            _scan_is_finished,
+            message="the released background run never closed its slot",
+        )
+
+
+def test_register_clears_missing_since_only_on_named_present_paths(temp_library: Path) -> None:
+    """Mutation: run the scan's missing pass (`_flag_missing_assets`) from register.
+
+    Three witnesses in one call: a named present row is cleared, a named ABSENT row
+    is never stamped, and an unrelated flagged row nobody named is untouched. The
+    scan's pass would stamp the absent row and report the unrelated one missing.
+    """
+    _write_under(temp_library, "reg-flag/kept.stl", b"solid kept\n")
+    _write_under(temp_library, "reg-flag/unrelated.stl", b"solid unrelated\n")
+    vanished = _write_under(temp_library, "reg-flag/vanished.stl", b"solid vanished\n")
+    library_scan.register(["reg-flag/kept.stl", "reg-flag/unrelated.stl", "reg-flag/vanished.stl"])
+
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _stamp_missing_since(["reg-flag/kept.stl", "reg-flag/unrelated.stl"], stamp)
+    vanished.unlink()
+
+    result = library_scan.register(["reg-flag/kept.stl", "reg-flag/vanished.stl"])
+
+    rows = _library_rows("reg-flag/")
+    assert result.absent == ("reg-flag/vanished.stl",)
+    assert rows["reg-flag/kept.stl"].missing_since is None
+    assert rows["reg-flag/vanished.stl"].missing_since is None
+    assert rows["reg-flag/unrelated.stl"].missing_since == stamp
+    assert result.state.missing == 0
+
+
+def test_register_names_and_folders_match_a_real_scan(temp_library: Path) -> None:
+    """Mutation: derive names from the named subset, or resolve folders pathless.
+
+    The storage scan is the reference door on the very same tree. `part` is named
+    in both formats (so it must split into `part (stl)`/`part (3mf)`), while
+    `pair/a.stl` is named and its same-stem sibling `pair/a.3mf` is NOT: the
+    scan's answer for the named file is `a (stl)` because naming is a function of
+    the whole listing, so a subset-derived name (`a`) reds here - and the sibling
+    still gets no row. Every folder row must also carry the same real storage path
+    (not NULL, not sanitised).
+    """
+    tree = [
+        "reg-parity/part.stl",
+        "reg-parity/part.3mf",
+        "reg-parity/sub/solo.step",
+        "reg-parity/pair/a.stl",
+        "reg-parity/pair/a.3mf",
+    ]
+    for rel_path in tree:
+        _write_under(temp_library, rel_path, b"model\n")
+    named = [rel_path for rel_path in tree if rel_path != "reg-parity/pair/a.3mf"]
+
+    library_scan.scan_storage_root()
+    scanned = _row_shape("reg-parity/")
+    assert set(scanned) == set(tree)
+
+    _delete_rows_under("reg-parity/")
+    _delete_folders_under("reg-parity")
+    assert _row_shape("reg-parity/") == {}
+
+    library_scan.register(named)
+
+    registered = _row_shape("reg-parity/")
+    # the unnamed sibling is the one row that differs: no row, no folder orphan
+    assert set(registered) == set(named)
+    for rel_path in named:
+        assert registered[rel_path] == scanned[rel_path], rel_path
+    assert registered["reg-parity/part.stl"][:2] == ("part (stl)", "part.stl")
+    assert registered["reg-parity/part.3mf"][:2] == ("part (3mf)", "part.3mf")
+    assert registered["reg-parity/pair/a.stl"][:2] == ("a (stl)", "a.stl")
+    assert {rel_path: shape[2] for rel_path, shape in registered.items()} == {
+        "reg-parity/part.stl": "reg-parity",
+        "reg-parity/part.3mf": "reg-parity",
+        "reg-parity/sub/solo.step": "reg-parity/sub",
+        "reg-parity/pair/a.stl": "reg-parity/pair",
+    }
+
+
+def test_register_batches_without_changing_a_name(
+    temp_library: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation: derive a name per flush batch instead of per directory.
+
+    Five named paths in one directory, three of them sharing a stem, with
+    BATCH_SIZE=2: a per-batch derivation cannot see the sibling still waiting and
+    names the third one differently, so the names must equal the BATCH_SIZE=200
+    run's.
+    """
+    rel_paths = [f"reg-batch/part{suffix}" for suffix in (".stl", ".3mf", ".step")]
+    rel_paths += ["reg-batch/solo-a.stl", "reg-batch/solo-b.stl"]
+    for rel_path in rel_paths:
+        _write_under(temp_library, rel_path, b"model\n")
+
+    real_batch_size = library_scan.BATCH_SIZE
+    monkeypatch.setattr(library_scan, "BATCH_SIZE", 2)
+    small = library_scan.register(rel_paths)
+    small_rows = _library_rows("reg-batch/")
+
+    _delete_rows_under("reg-batch/")
+    monkeypatch.setattr(library_scan, "BATCH_SIZE", real_batch_size)
+    large = library_scan.register(rel_paths)
+    large_rows = _library_rows("reg-batch/")
+
+    assert len(small_rows) == len(large_rows) == len(rel_paths)
+    assert small.state.registered == large.state.registered == len(rel_paths)
+    assert {rel_path: asset.name for rel_path, asset in small_rows.items()} == {
+        rel_path: asset.name for rel_path, asset in large_rows.items()
+    }
+    assert {small_rows[rel_path].name for rel_path in rel_paths[:3]} == {
+        "part (stl)",
+        "part (3mf)",
+        "part (step)",
+    }
