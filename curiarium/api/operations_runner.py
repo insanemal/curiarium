@@ -25,19 +25,23 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Callable, Dict, List, Optional, Set
 
+from fastapi import HTTPException
 from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, select
 
 import adopt_service
+import archive_service
 import audit
 import bundle_service
 import folder_service
+import library_scan
 import move_service
 import operations_service
 import project_create_service
 import project_service
 from db import engine
+from file_utils import is_model_path
 from models import Folder, Operation, OperationLock, OperationStep, Project, ProjectAsset
 
 log = logging.getLogger(__name__)
@@ -360,7 +364,103 @@ def _complete_step(operation_id: str, step_index: int, result: dict) -> None:
 # Each body takes `(operation_id, step_index, args)` and returns a JSON-safe
 # result dict; an exception is what marks the step (and operation) failed.
 # `adopt`/`refresh-groups` are the adopt workflow's two writes: membership, then
-# the marker's group list the plan measured.
+# the marker's group list the plan measured. `extract`/`scan` are
+# extract-and-create's: the extractor's own write, then the walk that turns its
+# files into rows, refused while any planned file is missing.
+
+
+def _refusal_detail(error: HTTPException) -> str:
+    """One HTTP refusal's sentence, without its status prefix.
+
+    `str(HTTPException)` is `"409: <detail>"`: a step that let it through would put
+    a status code in front of the extract door's own words, and the operator reads
+    the row as the refusal. One helper, so every step body that can meet a door
+    refusal spells it the same way.
+    """
+    detail = error.detail
+    return detail if isinstance(detail, str) else str(detail)
+
+
+def _extract(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `extract` step body: `archive_service.extract_out`, the one extractor.
+
+    `start_scan=False` is the step order, not an optimisation: the next step files
+    the archive beside its twin and the step after THAT owns the scan. A walk
+    started here would race the move and register the archive at its old path.
+
+    The entry policy is EXECUTED, never restated: this body hands the selection to
+    the same `extract_out` the extract route calls, so junk, the budget, the
+    no-clobber arbiter and the all-or-nothing preflight are that door's, and a
+    refusal arrives with that door's sentence (and nothing written).
+    """
+    try:
+        result = archive_service.extract_out(
+            args["path"], args.get("entries"), None, start_scan=False
+        )
+    except HTTPException as error:
+        raise RuntimeError(_refusal_detail(error)) from error
+    return {
+        "path": result.path,
+        "destination": result.destination,
+        "files": result.files,
+        "bytes": result.bytes,
+        "already_present": result.already_present,
+        "scan_started": result.scan_started,
+    }
+
+
+def _scan(operation_id: str, step_index: int, args: dict) -> dict:
+    """The `scan` step body: walk, then resolve the REVIEWED paths, all or nothing.
+
+    The walk is `library_scan.scan_storage_root`, the one registering step the
+    library already has; this body owns nothing about discovery. What it owns is
+    the comparison: every planned path must now be a registered asset under the
+    twin. Every miss is collected before the refusal, so one entry the archive
+    lied about cannot hide the other nineteen - and the refusal names the ENTRY,
+    which is what the operator saw in the listing, not the rendered library path.
+
+    Zero resolved is its own sentence naming the twin: "none of them registered"
+    sends the operator to a different place than "these three did not".
+
+    The cover is resolved here because this is the first moment an asset id
+    exists for it: the plan named the first planned model PATH, and the first such
+    path in planned order wins.
+    """
+    library_scan.scan_storage_root()
+    pairs = args.get("paths") or []
+    with Session(engine) as session:
+        registered = {
+            asset.path: asset.id
+            for asset in bundle_service.registered_assets(session, args["key"])
+        }
+    members: List[dict] = []
+    misses: List[dict] = []
+    cover_asset_id: Optional[str] = None
+    for pair in pairs:
+        asset_id = registered.get(pair["path"])
+        if asset_id is None:
+            misses.append(pair)
+            continue
+        members.append({"asset_id": asset_id, "path": pair["path"]})
+        if cover_asset_id is None and is_model_path(pair["path"]):
+            cover_asset_id = asset_id
+    if not members:
+        raise RuntimeError(
+            f"none of the {len(pairs)} planned file(s) are registered under {args['key']!r} "
+            "after a scan; nothing was created"
+        )
+    if misses:
+        raise RuntimeError(
+            f"{len(misses)} of {len(pairs)} planned file(s) did not register under "
+            f"{args['key']!r} after a scan: "
+            + ", ".join(sorted(pair["entry"] for pair in misses))
+        )
+    return {
+        "key": args["key"],
+        "members": members,
+        "count": len(members),
+        "cover_asset_id": cover_asset_id,
+    }
 
 
 def _project_id_from_step(session: Session, operation_id: str, step_index: int) -> str:
@@ -463,20 +563,84 @@ def _create_project(operation_id: str, step_index: int, args: dict) -> dict:
     printed parts are facts the plan measured, and the marker's `attached` counts
     are only honest when both come from the reviewed plan rather than from a second
     reading of the disk.
+
+    `resolve_from` is extract-and-create's shape: the members are the SCAN step's
+    verified set (and its cover), not a set named at plan time, because no asset id
+    exists until the walk has registered the files. `provenance` makes the marker:
+    the archive's identity as the key, the twin as `rel_dir`, and the door's own
+    block carrying the archive, the planned/resolved counts, the listing's
+    fingerprint, its common root and its groups. `create_origin`/`project_origin`
+    pick the door's marker discriminator and the `Project.origin` column; both
+    default to what every other caller already got.
     """
+    resolve_from = args.get("resolve_from")
+    provenance = args.get("provenance")
     with Session(engine) as session:
+        if resolve_from is not None:
+            step = session.exec(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation_id,
+                    OperationStep.step_index == int(resolve_from),
+                )
+            ).first()
+            if step is None or not step.result_json:
+                raise RuntimeError(f"step {resolve_from} has no result to create from")
+            try:
+                resolved = json.loads(step.result_json)
+            except (TypeError, ValueError):
+                resolved = {}
+            member_rows = resolved.get("members") if isinstance(resolved, dict) else None
+            cover_asset_id = resolved.get("cover_asset_id") if isinstance(resolved, dict) else None
+            if not member_rows:
+                raise RuntimeError(f"step {resolve_from} resolved no members to create from")
+        else:
+            member_rows = args["members"]
+            cover_asset_id = args["cover_asset_id"]
+
+        marker = {
+            **args.get(
+                "marker",
+                {"key": args["key"], "detector": "operations", "rel_dir": args["key"]},
+            )
+        }
+        if provenance is not None:
+            # The provenance block is the listing's own story, written at create
+            # time: the archive, the twin, planned vs RESOLVED (measured now, not
+            # promised by the plan), the fingerprint that makes a changed listing
+            # visible, and the listing's structure.
+            marker = {
+                "key": project_create_service.archive_identity(provenance.get("archive")),
+                "rel_dir": provenance.get("twin") or args["key"],
+                project_create_service.ORIGIN_ARCHIVE_EXTRACT: {
+                    **provenance,
+                    "resolved": len(member_rows),
+                },
+            }
+            marker = {name: value for name, value in marker.items() if value is not None}
+
+        dedupe = None
+        if args.get("archive"):
+            # The two identities this workflow holds: the archive as itself, and the
+            # twin as the key a detection-created project would carry.
+            dedupe = project_create_service.Dedupe(
+                key=args["key"], archive=args["archive"]
+            )
+
         outcome = bundle_service.create_project(
             session,
             key=args["key"],
             name=args["name"],
             members=[
                 project_create_service.MemberCandidate(entry["asset_id"], entry["path"])
-                for entry in args["members"]
+                for entry in member_rows
             ],
             model_ids=args.get("model_ids") or None,
-            marker={**args.get("marker", {"key": args["key"], "detector": "operations", "rel_dir": args["key"]})},
+            marker=marker,
             groups=args.get("groups") or (),
-            cover_asset_id=args["cover_asset_id"],
+            cover_asset_id=cover_asset_id,
+            dedupe=dedupe,
+            origin=args.get("create_origin") or project_create_service.ORIGIN_DETECTION,
+            project_origin=args.get("project_origin") or "own",
         )
     if outcome.status == project_create_service.STATUS_REFUSED:
         raise RuntimeError(f"create refused: {outcome.reason}")
@@ -608,7 +772,9 @@ def _refresh_groups(operation_id: str, step_index: int, args: dict) -> dict:
 
 
 _STEP_BODIES = {
+    "extract": _extract,
     "move": _move,
+    "scan": _scan,
     "create-project": _create_project,
     "adopt": _adopt,
     "refresh-groups": _refresh_groups,

@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
+from uuid import uuid4
 from zipfile import ZipFile
 
 import pytest
@@ -35,7 +36,6 @@ from PIL import Image
 from sqlalchemy import event
 from sqlmodel import Session, select
 
-import archive_project_service
 import asset_file_service
 import asset_service
 import audit
@@ -47,6 +47,8 @@ import file_utils
 import import_resolvers
 import library_scan
 import main
+import operations_runner
+import operations_service
 import project_create_service
 import project_service
 import settings_service
@@ -6822,10 +6824,11 @@ def test_no_blocked_reason_outside_the_published_vocabulary(
 # --- one dedupe for all three project-creation doors (Mf-yhjo) ----------------
 #
 # Three doors make a project: the typed form (``POST /projects``), the folder the
-# detector read (``POST /bundles/create``) and the archive that twins that folder
-# (``POST /import/archive/project``). Before this ticket each of them decided
-# SEPARATELY whether the thing already existed, and two of the three decided by
-# DIFFERENT rules - so the one live tower became TWO projects with TWO names
+# detector read (``POST /bundles/create``) and the archive that twins that folder -
+# which since Mf-hebx is the ``extract-and-create`` OPERATIONS WORKFLOW, not the
+# deleted one-call ``POST /import/archive/project``. Before Mf-yhjo each of them
+# decided SEPARATELY whether the thing already existed, and two of the three decided
+# by DIFFERENT rules - so the one live tower became TWO projects with TWO names
 # (``Fates End - Wizard Tower`` from the folder, ``01_Fates End - Wizard Tower`` from
 # the ``.zip`` beside it) and the operator was asked to confirm one product twice.
 #
@@ -6836,20 +6839,72 @@ def test_no_blocked_reason_outside_the_published_vocabulary(
 # previous click, and that is worth nothing to an operator who clicked the other one.
 # The direction is load-bearing and both halves are pinned separately, because the two
 # directions are not the same read - a folder project is recognised from the archive
-# door through the twin the create recorded in its marker, and an archive project is
+# workflow through the twin its own marker key names, and an archive project is
 # recognised from the report through the ``archive:``-prefixed key its own create wrote.
+#
+# The archive half is now TWO requests (a plan, then a submit the runner executes), so
+# the helper below drives the real routes and reads the finished operation row. That is
+# deliberate: a service-level call would be a workflow the HTTP layer is not really
+# running, and the zero-step plan - the answer a second click gets - is a plan-time
+# fact the operation row cannot show.
 
 
-def archive_project_create(client: TestClient, headers: dict, path: str = TOWER_ZIP) -> dict:
-    """The OTHER door: ``POST /import/archive/project`` over one library archive.
+def extract_and_create(
+    client: TestClient, headers: dict, path: str = TOWER_ZIP, name: Optional[str] = None
+) -> dict:
+    """The archive door as the operations workflow, read into the old witnesses' shape.
 
-    The archive door's own suite is ``tests/test_archive_project.py``; this file reaches
-    it because the ticket is about the two doors meeting, and a door imported through a
-    helper would be a door the HTTP layer is not really running.
+    ``status``/``project``/``planned``/``resolved`` are the four facts the witnesses
+    below were written against, derived from the plan and the runner's own step rows -
+    never re-decided here. A ZERO-STEP plan (a project already exists) answers
+    ``already_created`` with ``reads_the_archive == False``: since Mf-hebx the dedupe is
+    asked BEFORE the zip is opened, so a second click answers from the marker alone.
     """
-    response = client.post("/import/archive/project", json={"path": path}, headers=headers)
-    assert response.status_code == 200, response.text
-    return response.json()
+    params = {"name": name} if name else {}
+    planned = client.post(
+        "/operations/plan",
+        json={"workflow": "extract-and-create", "target": path, "params": params},
+        headers=headers,
+    )
+    assert planned.status_code == 200, planned.text
+    plan = planned.json()
+    if not plan["steps"]:
+        return {
+            "status": "already_created",
+            "plan": plan,
+            "operation": None,
+            "steps": {},
+            "project": {
+                "id": plan["review"]["existing_project_id"],
+                "name": plan["review"]["existing_project_name"],
+            },
+            "planned": 0,
+            "resolved": 0,
+            "reads_the_archive": False,
+        }
+    submitted = client.post(
+        "/operations",
+        json={"plan_id": plan["plan_id"], "idempotency_key": uuid4().hex},
+        headers=headers,
+    )
+    assert submitted.status_code == 202, submitted.text
+    operations_runner.dispatch_once()
+    operations_runner.wait_idle(timeout=30)
+    body = client.get(f"/operations/{submitted.json()['id']}", headers=headers).json()
+    assert body["status"] == "done", body
+    steps = {step["op"]: step for step in body["steps"]}
+    create = steps["create-project"]["result"]
+    scan = steps["scan"]["result"]
+    return {
+        "status": "created" if create["created"] else "already_created",
+        "plan": plan,
+        "operation": body,
+        "steps": steps,
+        "project": {"id": create["project_id"], "name": create["name"]},
+        "planned": plan["review"]["members"],
+        "resolved": scan["count"],
+        "reads_the_archive": True,
+    }
 
 
 def bundle_drift_of(client: TestClient, headers: dict, project_id: str) -> dict:
@@ -6917,24 +6972,29 @@ def test_a_project_created_from_the_bundle_is_the_project_its_twin_archive_would
 
     Measured on the real fixture through both real routes: the bundle create makes one
     project (``Fates End - Wizard Tower``, 15 models out of ``01_Wizard``), and the
-    archive door asked about the very ``.zip`` that twins that folder answers
-    ``already_created`` carrying **the same project id**, with the full ``planned``/
-    ``resolved`` 20/20 it computed before it decided to write nothing. One ``Project``
-    row stands at the end, and the create attached nothing a second time.
+    extract-and-create workflow asked about the very ``.zip`` that twins that folder
+    answers a ZERO-STEP plan naming **the same project id**. One ``Project`` row stands
+    at the end, and nothing was attached a second time.
 
-    The identity that answers is the twin the bundle create recorded in its marker
-    (``archive: import/...zip`` sits in the marker's ``archive`` field), which is the
-    dedupe's second leg seen from the other door - ``MATCH_MARKER``, not a fifth
-    verdict. The old door answered ``created`` with a second row named
-    ``01_Fates End - Wizard Tower`` and two ``Project`` rows; that is what this file
-    did not have before Mf-yhjo and what it must never lose.
+    The identity that answers is the twin, which the workflow asks as `Dedupe.key` - the
+    folder project's marker key IS that path - so this is the dedupe's second leg seen
+    from the other door, not a fifth verdict. The old door answered ``created`` with a
+    second row named ``01_Fates End - Wizard Tower`` and two ``Project`` rows; that is
+    what this file did not have before Mf-yhjo and what it must never lose.
+
+    Re-derived for Mf-hebx, and the change is the point: the deleted door opened the zip
+    FIRST and reported ``planned``/``resolved`` 20/20 even when it wrote nothing, while
+    the workflow asks the dedupe BEFORE the zip is opened and answers a zero-step plan
+    with ``members == 0``. The witness now asserts THAT - ``reads_the_archive`` False -
+    and the deleted-archive survival is pinned in
+    ``tests/test_extract_and_create.py::test_a_second_plan_is_a_zero_step_answer_that_survives_filing_and_deletion``.
 
     Mutation (each of these is measured red, and each is a different half of the
-    answer). Drop ``key=twin_rel`` from ``archive_project_service``'s
-    ``Dedupe(key=twin_rel, archive=normalized)`` - the leg this direction runs on, since
-    the folder project's marker key IS the twin path - and the door answers ``created``
-    with a second row. Stop ``bundle_service._create_one`` writing ``"key": key`` into
-    its marker, and there is no identity left to find. Let ``create_project_from_members``
+    answer). Drop the twin leg from ``_plan_extract_and_create``'s second
+    ``find_existing_project`` call - the leg this direction runs on, since the folder
+    project's marker key IS the twin path - and the plan answers 20 members and creates
+    a second row. Stop ``bundle_service._create_one`` writing ``"key": key`` into its
+    marker, and there is no identity left to find. Let ``create_project_from_members``
     write through the dedupe answer (skip its ``find_existing_project`` call) and the
     second project appears whatever the door asks. And the honest bound, stated because
     it is not this witness: dropping ``archive=`` from the BUNDLE door's own ``Dedupe``
@@ -6965,7 +7025,7 @@ def test_a_project_created_from_the_bundle_is_the_project_its_twin_archive_would
         "every registered file under the key (Mf-7oow)"
     )
 
-    body = archive_project_create(client, headers)
+    body = extract_and_create(client, headers)
 
     assert body["status"] == "already_created", (
         "the `.zip` beside the folder this door already made into a project is not a "
@@ -6974,9 +7034,13 @@ def test_a_project_created_from_the_bundle_is_the_project_its_twin_archive_would
     assert body["project"] is not None, "a refusal carries no project; an already-created answer carries THE one"
     assert body["project"]["id"] == project_id, "the same project, not a second one with a second name"
     assert body["project"]["name"] == "Fates End - Wizard Tower", "the folder's name survives, not the twin's"
-    assert (body["planned"], body["resolved"]) == (20, 20), (
-        "the door still read the listing and still resolved every entry - it refused "
-        "at the dedupe, after the comparison, so a changed archive cannot hide"
+    assert body["plan"]["steps"] == [], (
+        "nothing to run: the plan names the project that already covers this archive"
+    )
+    assert (body["planned"], body["resolved"]) == (0, 0)
+    assert body["reads_the_archive"] is False, (
+        "the dedupe is asked BEFORE the zip is opened, which is what lets the answer "
+        "survive the archive being filed and deleted"
     )
 
     assert table_counts()["projects"] == 1, "TWO rows is the defect this ticket exists to close"
@@ -7034,7 +7098,7 @@ def test_a_project_created_from_the_archive_is_the_project_its_twin_folder_would
     scan()
     headers = auth_header(client)
 
-    body = archive_project_create(client, headers)
+    body = extract_and_create(client, headers)
 
     assert body["status"] == "created", "the archive door goes first, so it really writes"
     assert (body["planned"], body["resolved"]) == (20, 20)
@@ -7091,13 +7155,19 @@ def test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower(
     """AC-5's non-regression, pinned: the archive door's member set did not move.
 
     Mf-wsdo and Mf-7oow changed ONE door - the bundle door's member set - and the claim
-    is that the archive door is untouched, because it never had a suffix table at all:
-    what the operator ticked IS the file set, and ``create_project_from_extract`` hands
-    the primitive every entry it resolved. So the same live tower through
-    ``POST /import/archive/project`` resolves 20 of 20 and attaches all twenty - fifteen
-    STLs, three PNGs, the vendor ``.txt`` AND the nested deliverable zip - and its cover
-    is still the first member ``is_model_path`` answers for, which is
+    is that the archive workflow is untouched, because it never had a suffix table at
+    all: the plan's listing IS the file set, and its create step hands the primitive
+    every entry its scan resolved. So the same live tower resolves 20 of 20 and attaches
+    all twenty - fifteen STLs, three PNGs, the vendor ``.txt`` AND the nested deliverable
+    zip - and its cover is still the first member ``is_model_path`` answers for, which is
     ``file_utils.MODEL_SUFFIXES``, a third table neither ticket touches.
+
+    Re-derived for Mf-hebx: the archive is FILED under ``<twin>/_source`` by the move
+    step, so the registered set under the twin is 21, not 20 - the archive itself is a
+    registered archive-role asset under the project's own root. The twenty MEMBERS do
+    not move (the create takes the scan's verified planned set, never a re-read of the
+    key), and that new row is named here rather than silently excluded, because it is a
+    real consequence of the owner's ``_source`` rule and a follow-up owns it.
 
     It is also the producer of the archive door's measurement artifact (AGENTS.md wants
     the data, not the count: ``.plans/measurements/2026-11-10-bundle-members-mf-wsdo-archive-*.json``,
@@ -7106,16 +7176,16 @@ def test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower(
     every member named on both sides, not a ``member_count == 20`` that would also be
     true of a door that attached the wrong twenty files.
 
-    Mutation: filter the archive door's ``resolved`` list by any suffix table (the
-    bundle door's deleted one included) and 20 becomes 18, red here and at
-    ``planned``/``resolved``, while the ``.txt`` and the nested ``.zip`` drop out of the
-    member set. That is the pair of artifacts this witness exists to keep comparable.
+    Mutation: filter the workflow's scan result by any suffix table (the bundle door's
+    deleted one included) and 20 becomes 18, red here and at ``planned``/``resolved``,
+    while the ``.txt`` and the nested ``.zip`` drop out of the member set. That is the
+    pair of artifacts this witness exists to keep comparable.
     """
     live_tower_extraction(isolated_storage)
     scan()
     headers = auth_header(client)
 
-    body = archive_project_create(client, headers)
+    body = extract_and_create(client, headers)
     project_id = body["project"]["id"]
 
     _member_artifact(
@@ -7137,9 +7207,16 @@ def test_the_archive_door_still_attaches_every_resolved_entry_of_the_tower(
     with Session(engine) as session:
         registered = {asset.path for asset in bundle_service.registered_assets(session, TOWER_DIR)}
 
-    assert member_paths == registered, (
-        "all twenty registered files under the twin, including the two the bundle door "
-        "excludes - the two doors answer different questions and their member sets "
+    filed = f"{TOWER_DIR}/_source/{Path(TOWER_ZIP).name}"
+    assert filed in registered, (
+        "the move step filed the archive inside the twin, so the scan registered it as "
+        "an archive-role asset under the project's own root"
+    )
+    assert member_paths == registered - {filed}, (
+        "all twenty planned files are members - the two the bundle door excludes "
+        "included - and the filed archive is the ONE registered path that is not, "
+        "because the create takes the scan's verified planned set and never re-reads "
+        "the key. The two doors answer different questions and their member sets "
         "legitimately differ, which is why this one is pinned here and not shared"
     )
 
@@ -7158,7 +7235,7 @@ def test_the_archive_door_never_answers_from_what_a_project_already_holds(
     click, because the operator asked for the archive's own project and no marker can
     undo a merge made on somebody else's file list.
 
-    Mutation: ``assets=True`` in ``archive_project_service``'s ``Dedupe`` - the shape the
+    Mutation: ``assets=True`` in the workflow's create step's ``Dedupe`` - the shape the
     bundle door uses - and the click answers ``already_created`` carrying the hand-made
     id and one ``Project`` row stands. Its partner,
     ``test_the_bundle_door_answers_from_what_a_project_already_holds``, is the half that
@@ -7175,7 +7252,7 @@ def test_the_archive_door_never_answers_from_what_a_project_already_holds(
     assert len(held) >= 15, held
     hand_made_project("Someone else's wizard pile", held)
 
-    body = archive_project_create(client, headers)
+    body = extract_and_create(client, headers)
 
     assert body["status"] == "created", (
         "the archive door answered from what a project already holds: containment is "
@@ -7311,7 +7388,7 @@ def test_an_archive_created_project_still_covers_the_folder_after_a_model_lands_
     scan()
     headers = auth_header(client)
 
-    body = archive_project_create(client, headers)
+    body = extract_and_create(client, headers)
 
     assert body["status"] == "created"
     project_id = body["project"]["id"]
@@ -7375,7 +7452,7 @@ def test_an_archive_created_projects_drift_answer_is_membership_not_a_snapshot(
     scan()
     headers = auth_header(client)
 
-    body = archive_project_create(client, headers)
+    body = extract_and_create(client, headers)
 
     assert body["status"] == "created"
     project_id = body["project"]["id"]
@@ -7458,7 +7535,7 @@ def test_a_project_written_before_the_marker_namespace_is_still_found_by_the_ded
     scan()
     headers = auth_header(client)
 
-    body = archive_project_create(client, headers)
+    body = extract_and_create(client, headers)
 
     assert body["status"] == "created"
     project_id = body["project"]["id"]
@@ -7526,8 +7603,9 @@ def _callee_name(call: ast.Call) -> Optional[str]:
     """The function one call names, spelled either way: ``f(...)`` or ``pkg.f(...)``.
 
     The two doors reach the seam differently - ``bundle_service`` goes through the
-    module attribute, ``archive_project_service`` through ``project_create_service.`` -
-    and a pin that only saw one spelling would be a pin on one door.
+    module attribute, the extract-and-create workflow through ``project_create_service.``
+    or ``operations_runner.`` - and a pin that only saw one spelling would be a pin on
+    one door.
     """
     if isinstance(call.func, ast.Name):
         return call.func.id
@@ -7934,13 +8012,27 @@ def test_the_member_set_is_decided_once_by_the_detectors_own_classifier() -> Non
         node for node in ast.walk(seam_tree) if isinstance(node, ast.Attribute) and node.attr == "suffix"
     ] == [], "the project-writing module reads no file extension, let alone filters on one"
 
-    archive_body = _top_level_function(archive_project_service, "create_project_from_extract")
-    archive_calls = {
-        name for name in (_callee_name(node) for node in ast.walk(archive_body) if isinstance(node, ast.Call)) if name
-    }
-    assert not archive_calls & {"_suffix", "_members_of", "classify_entry"}, (
-        "the archive door consults no bundle rule: the entries the operator ticked ARE the member set"
-    )
+    # The extract-and-create workflow is the third caller of this create, and it too
+    # consults no bundle member rule: its planner reads the archive's LISTING
+    # (`archive_service.plan_extraction`) and its create step writes the scan's
+    # verified set. A planner or a step that named `_members_of`/`classify_entry` would
+    # be a second member rule, and the two doors would start disagreeing about which
+    # files are one product.
+    for workflow_body, where in (
+        (_top_level_function(operations_service, "_plan_extract_and_create"), "the extract planner"),
+        (_top_level_function(operations_runner, "_create_project"), "the create step"),
+    ):
+        workflow_calls = {
+            name
+            for name in (_callee_name(node) for node in ast.walk(workflow_body) if isinstance(node, ast.Call))
+            if name
+        }
+        assert not workflow_calls & {"_suffix", "_members_of", "classify_entry", "members_of"}, (
+            f"{where} consults no bundle member rule: the listing the operator approved IS the member set"
+        )
+        assert not [
+            text for text in _string_comparands(workflow_body) if text.lower().endswith(KIND_SUFFIXES)
+        ], f"{where} compares against a model or image suffix literal"
 
 
 def test_asking_with_no_key_matches_no_project(
@@ -7960,7 +8052,7 @@ def test_asking_with_no_key_matches_no_project(
     scan()
     headers = auth_header(client)
 
-    project_id = archive_project_create(client, headers)["project"]["id"]
+    project_id = extract_and_create(client, headers)["project"]["id"]
 
     with Session(engine) as session:
         project = session.get(Project, project_id)
@@ -7974,8 +8066,18 @@ def test_asking_with_no_key_matches_no_project(
         # The ask a door makes when it holds no identity of its own: every leg falsy.
         assert project_create_service.find_existing_project(session) is None
         assert project_create_service.find_existing_project(session, key=None) is None
-        # A real key finds nothing either - the marker has none to answer with.
-        assert project_create_service.find_existing_project(session, key=TOWER_DIR) is None
+        # A key the marker does not name finds nothing - a keyless marker must not
+        # answer `None == None`.
+        assert (
+            project_create_service.find_existing_project(session, key="import/Something Else")
+            is None
+        )
+        # The project's OWN folder still finds it: since Mf-hebx the archive-extract
+        # project's twin is the marker's `rel_dir`, which is the identity the folder
+        # door asks with once the `.zip` has been filed under `_source` and no longer
+        # pairs with the folder beside it.
+        found = project_create_service.find_existing_project(session, key=TOWER_DIR)
+        assert found is not None and found.project.id == project_id
 
 
 def test_the_create_door_asks_the_ownership_map_the_report_answered_with(
@@ -8261,6 +8363,13 @@ def test_the_zip_row_keeps_its_extract_door_after_its_archive_became_a_project(
     whose marker names THIS archive, and the row that names the same path is still the
     only place the operator can re-extract from.
 
+    The create is called at the SERVICE level below, with the same verb and the same
+    marker the workflow's `create-project` step builds, because that step also FILES the
+    archive under `<twin>/_source` and this witness is about a `.zip` row at its own
+    path. Driving the workflow would move the very API ahead of the row whose identity
+    is under test; calling the verb keeps the state the deleted door left (the archive
+    and its project at once), and the identity rule is the same code either way.
+
     So the row must keep its own answer. It does, because an archive-extract marker's
     ``key`` is the archive's IDENTITY (``archive:`` + the path,
     ``project_create_service.archive_identity``) and not the path: the marker leg
@@ -8306,11 +8415,35 @@ def test_the_zip_row_keeps_its_extract_door_after_its_archive_became_a_project(
     assert extracted.json()["destination"] == twin_rel
     scan()
 
-    made = client.post("/import/archive/project", json={"path": zip_rel}, headers=headers)
-    assert made.status_code == 200, made.text
-    body = made.json()
-    assert (body["status"], body["planned"], body["resolved"]) == ("created", 4, 4)
-    project_id = body["project"]["id"]
+    with Session(engine) as session:
+        registered = list(bundle_service.registered_assets(session, twin_rel))
+        assert len(registered) == 4, "the extract's four files, registered by the scan"
+        made = bundle_service.create_project(
+            session,
+            key=twin_rel,
+            name=twin_rel.rsplit("/", 1)[-1],
+            members=[
+                project_create_service.MemberCandidate(asset.id, asset.path)
+                for asset in registered
+            ],
+            marker={
+                "key": project_create_service.archive_identity(zip_rel),
+                "rel_dir": twin_rel,
+                project_create_service.ORIGIN_ARCHIVE_EXTRACT: {
+                    "archive": zip_rel,
+                    "twin": twin_rel,
+                    "planned": 4,
+                    "resolved": 4,
+                    "fingerprint": "0" * 16,
+                    "common_root": "01_Wizard",
+                    "groups": [],
+                },
+            },
+            dedupe=project_create_service.Dedupe(key=twin_rel, archive=zip_rel),
+            origin=project_create_service.ORIGIN_ARCHIVE_EXTRACT,
+        )
+    assert made.status == project_create_service.STATUS_CREATED
+    project_id = made.project_id
 
     # The state that asks the question: the project stands, the twin it was built from
     # is gone, and the archive the row names has not moved.

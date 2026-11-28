@@ -13,13 +13,11 @@ import {
 // Domain module, not the `../../lib/api` barrel: the tests replace that barrel
 // with a fixed object (that is what `ArchiveExtractAction` reaches), so a named
 // runtime import from it would throw "No export is defined on the mock".
-import {
-  createProjectFromExtract,
-  extractArchive,
-  listArchiveEntries,
-  type ArchiveExtractResult,
-} from "../../lib/api/imports";
+import { listArchiveEntries, type ArchiveExtractResult } from "../../lib/api/imports";
 import { fileUrl } from "../../lib/api/mediaUrls";
+// The bulk door drives the same ledger the panels do, so its three calls are
+// imported from the domain module for the same reason.
+import { getOperation, planOperation, submitOperation } from "../../lib/api/operations";
 import { extOf } from "../../lib/assetKinds";
 import { copyText } from "../../lib/clipboard";
 import type { ResolvedTheme } from "../../lib/settings";
@@ -27,13 +25,10 @@ import { notifyError, notifyInfo } from "../../lib/toast";
 import { useFileGrants } from "../../lib/useFileGrants";
 import ArchiveExtractAction from "../archive/ArchiveExtractAction";
 import ArchiveExtractDialog, { type ExtractTarget } from "../archive/ArchiveExtractDialog";
-import { archivePlanLines } from "../archive/archivePlan";
 import ErrorBoundary from "../ErrorBoundary";
 import { ModelSnapshot } from "../ModelViewer";
 import {
   BUNDLE_FILTERS,
-  EXTRACT_AND_CREATE_HINT,
-  EXTRACT_AND_CREATE_LABEL,
   SHAPE_COMPOUND,
   actableMode,
   actableReason,
@@ -88,15 +83,13 @@ import {
   bulkStopLine,
   bulkSummaryLine,
   bulkVerdictLines,
-  outcomeLine,
-  phaseLine,
   planExtractAndCreateMany,
-  runExtractAndCreate,
   runExtractAndCreateMany,
   type BulkArchiveTarget,
   type BulkPlan,
   type BulkRunResult,
 } from "./extractAndCreate";
+import ExtractAndCreatePanel from "./ExtractAndCreatePanel";
 import GuidedImportPanel from "./GuidedImportPanel";
 import ReviewQueueView from "./ReviewQueueView";
 import ScanFidelityNotice from "./ScanFidelityNotice";
@@ -474,6 +467,15 @@ export default function BundleReviewView({
     onFoldersChanged?.();
   }, [refresh, onProjectsChanged, onFoldersChanged]);
 
+  // The extract-and-create panel's ONE completion signal. An extraction writes a
+  // new tree of files and (usually) one project, so the queue is re-walked and
+  // the project list is bumped; an undo changes the same two things back. The
+  // panel narrates its own run, so nothing here has a sentence to add.
+  const handleArchiveCreated = React.useCallback((): void => {
+    void refresh();
+    onProjectsChanged?.();
+  }, [refresh, onProjectsChanged]);
+
   const [filter, setFilter] = React.useState<BundleFilter>("all");
   const [selectedKeys, setSelectedKeys] = React.useState<string[]>([]);
   const [names, setNames] = React.useState<Record<string, string>>({});
@@ -502,30 +504,14 @@ export default function BundleReviewView({
   } | null>(null);
   const [settling, setSettling] = React.useState<string | null>(null);
   const [settleTimedOut, setSettleTimedOut] = React.useState(false);
-  // The one-step door's narration. It lives in the VIEW, not in the hook: a
-  // successful create hides the row, and the hook clears `notice` on every
-  // mutation. `key` is the row it belongs to; `running` is the run's own
-  // in-flight flag, and it reaches every mutating door through `actionsLocked`
-  // below.
-  const [extractAndCreate, setExtractAndCreate] = React.useState<{
-    key: string;
-    line: string | null;
-    running: boolean;
-  } | null>(null);
-  // What the run is about to release, said while it runs rather than only after:
-  // the one-step door has no confirm step of its own, so this is where the
-  // operator learns the models were inside a nested archive (Mf-0ck5). Same
-  // classifier, and the same three lines, as `ArchiveExtractAction`'s panel.
-  const [extractPlan, setExtractPlan] = React.useState<{ key: string; lines: string[] } | null>(null);
-  // The many-archive form of the same door. Planning writes nothing, so the
-  // click reads every listing first and renders the aggregate payload inline in
-  // the bulk bar before anything is extracted; confirming then runs one archive
-  // at a time. `rows` and `targets` are the click's own snapshot, which is what
-  // the stale check below is derived from.
+  // The many-archive door. Planning writes nothing, so the click reads every
+  // listing first and renders the aggregate payload inline in the bulk bar before
+  // anything is queued; confirming then drives one archive at a time through the
+  // operations ledger. `rows` and `targets` are the click's own snapshot, which is
+  // what the stale check below is derived from.
   const [bulkExtract, setBulkExtract] = React.useState<BulkExtractState | null>(null);
   // The bulk door's verdicts, at queue level: every successful create hides its
-  // own row, so a per-row notice would vanish with the row it describes - the same
-  // reason the one-step door's line lives in the notices slot.
+  // own row, so a per-row notice would vanish with the row it describes.
   const [bulkNotice, setBulkNotice] = React.useState<{
     summary: string | null;
     stop: string | null;
@@ -535,32 +521,21 @@ export default function BundleReviewView({
   const bulkExtractButtonRef = React.useRef<HTMLButtonElement | null>(null);
   // Set by the cancel, consumed by the effect below once the lock is gone.
   const bulkReturnFocus = React.useRef(false);
-  const extractAndCreateRunning = extractAndCreate?.running === true;
   // A confirm step is a door held open on a snapshot, so it holds the queue's
   // writes exactly as an in-flight run does.
   const bulkLocking = bulkExtract !== null;
   // One gate on every MUTATING door in the queue: the five bulk buttons, the bulk
   // door's own button and its confirm, the detail pane's create/dismiss/enrich,
   // the detail pane's own extract action, the blocked-reason cell and Enter on a
-  // zip-only row. `busy` alone reports
-  // only the final `creating` phase, while a one-step run owns the queue's
-  // writes across all four of its phases, from the listing to the create - so
-  // its own `running` flag locks its siblings for the whole of it. The run is
-  // not cancellable, and a dismissal written mid-run would either have to be
-  // undone or would still race the in-flight create; leaving the queue is the
-  // cancellation (`afterExtract` answers `cancelled` on unmount, and
-  // `runExtractAndCreate` then creates nothing). The controls it leaves alone
-  // are the ones that cannot race the run: the filters, the reveal toggles,
-  // Refresh, `Select all shown` / `Clear selection` and the typed-name and
-  // group-include inputs, because the run snapshots what it needs when it
-  // starts. It does shut two things that write nothing on their own - the
-  // extract action's listing trigger and its confirm panel's `Cancel` - and
-  // that is the action's own contract: every control of an instance whose
-  // write would race the run refuses. `bulkLocking` is the same rule for the
-  // many-archive door: planning, confirming and running all hold the queue, so no
-  // other write can land between the summary the operator read and the writes it
-  // described.
-  const actionsLocked = busy || extractAndCreateRunning || bulkLocking;
+  // zip-only row. `bulkLocking` is the many-archive door's rule: planning,
+  // confirming and running all hold the queue, so no other write can land between
+  // the summary the operator read and the writes it described. The controls it
+  // leaves alone are the ones that cannot race the run: the filters, the reveal
+  // toggles, Refresh, `Select all shown` / `Clear selection` and the typed-name
+  // and group-include inputs. The extract-and-create panel narrates a
+  // server-owned operation and owns no client-side write, so it does not lock its
+  // siblings - exactly as the split door does not.
+  const actionsLocked = busy || bulkLocking;
   const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
   // Where the active row sat before a refetch reordered or removed it. A key
   // survives a reorder; the remembered index is only the fallback for a row
@@ -890,16 +865,10 @@ export default function BundleReviewView({
 
   // The timeout line tells the operator to refresh once the scan finishes, so
   // acting on that advice has to clear it: a notice that outlives its own
-  // instructions is a lie the next reader would believe. The one-step door's
-  // verdict is the other notice this Refresh answers, so its line clears too - a
-  // "Refresh this queue" that leaves the stale verdict standing is the same
-  // complaint in a second place. Only the line goes: a run still in flight keeps
-  // `running`, so refreshing cannot re-enable the button under it.
+  // instructions is a lie the next reader would believe.
   const refreshNow = () => {
     setSettling(null);
     setSettleTimedOut(false);
-    setExtractAndCreate(current => (current ? { ...current, line: null } : null));
-    setExtractPlan(null);
     void state.refresh();
   };
 
@@ -934,81 +903,6 @@ export default function BundleReviewView({
     // operator the guided panel, which is the path that can finish the job.
     setAutoFailure(result.reason ?? null);
     setGuidedForKey(guidedKey);
-  };
-
-  // One action, four named phases, and the server as the readiness authority:
-  // the orchestration itself is `runExtractAndCreate` (React-free, unit-tested),
-  // so this only supplies the real deps and paints what each phase said.
-  const startExtractAndCreate = (row: BundleDetectItem) => {
-    const path = extractPathFor(row);
-    if (!canContribute || !path) return;
-    const key = row.key;
-    // Each update is a function of the current state so a run that was
-    // superseded (or cleared) is never resurrected by a late phase.
-    const update = (line: string | null, running: boolean) => {
-      setExtractAndCreate(current =>
-        current && current.key === key ? { key, line, running } : current,
-      );
-    };
-    setExtractAndCreate({ key, line: phaseLine("listing"), running: true });
-    setExtractPlan({ key, lines: [] });
-    void runExtractAndCreate({
-      archivePath: path,
-      item: { name: typedName(names, row) || null },
-      deps: {
-        listEntries: listArchiveEntries,
-        extract: extractArchive,
-        settle: results => state.afterExtract(results),
-        // The extract-and-create door, called straight: it answers one verdict
-        // for one archive, so there is no per-row key to match and no bundle
-        // report to consult. Its refusal sentences are built from the counts it
-        // measured, which is why nothing here infers a reason.
-        create: payload => createProjectFromExtract(payload),
-        // The cover is cosmetic and must never block or fail the action, exactly
-        // as the other create doors treat it.
-        beforeCreate: () => {
-          void primeModelCovers([row], { mediaUrl: fileUrl });
-        },
-        onPhase: phase => update(phaseLine(phase), true),
-        onPlan: plan => {
-          const lines = archivePlanLines(plan);
-          setExtractPlan(current => (current && current.key === key ? { key, lines } : current));
-        },
-      },
-    }).then(outcome => {
-      update(outcomeLine(outcome), false);
-      // The list owner hears about the one verdict that wrote a project. This
-      // door asks for one archive, so a `created` verdict is one project and the
-      // operator lands on it - the row is the server's own re-read `ProjectOut`,
-      // which is the only reason App can be handed an id at all; nothing here
-      // invents a Project client-side. A `created` that named no row is still a
-      // new project, so it gets the bump instead of the landing. `already_created`
-      // wrote nothing this run and so reports nothing.
-      let landedOn = null as string | null;
-      if (outcome.kind === "created") {
-        const createdId = outcome.project?.id;
-        // Only a host that CAN land counts as landed: with no callback the queue
-        // stays on screen, so the re-walk below is still the answer.
-        if (createdId && onProjectImported) {
-          onProjectImported(createdId);
-          landedOn = createdId;
-        } else {
-          onProjectsChanged?.();
-        }
-      }
-      // The door writes no bundle report of its own, so the queue is re-walked
-      // once a project actually exists - including the already-created verdict,
-      // whose row is created too and should read that way. A LANDING is the one
-      // case that skips it, and that is not an omission: leaving Review
-      // deactivates the hook, which bumps its request sequence
-      // (`useBundleDetect.ts`'s `seq`), so a walk started now fails its own
-      // newest-wins guard and its answer is thrown away - a whole-library server
-      // walk for nothing. Re-entering the queue re-arms the activation effect and
-      // walks properly then (pinned by App.review's "refetches once on re-entry").
-      if (!landedOn && (outcome.kind === "created" || outcome.kind === "already-created")) {
-        void state.refresh();
-      }
-    });
   };
 
   // The many-archive door, step one: read every listing and say what the whole
@@ -1072,10 +966,10 @@ export default function BundleReviewView({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [bulkExtract?.phase, cancelBulkExtractAndCreate]);
 
-  // Step two: the confirmed click. One archive at a time, in queue order, then
-  // ONE re-walk of the report - the bulk door settles through
-  // `state.waitAfterExtract`, which is the settle alone, because `afterExtract`
-  // also walks the whole library and N of those would be N+1 walks for one click.
+  // Step two: the confirmed click. One archive at a time, in queue order, each
+  // driven through the operations ledger (plan -> submit -> poll), then ONE
+  // re-walk of the report. The server's own queue serialises the writes, so this
+  // loop never needs to wait on a scan itself.
   const confirmBulkExtractAndCreate = (): void => {
     if (bulkExtract?.phase !== "confirm" || bulkConfirmStale) return;
     const { rows, targets, plan } = bulkExtract;
@@ -1083,20 +977,14 @@ export default function BundleReviewView({
       phase: "running",
       rows,
       targets,
-      line: bulkPhaseLine(1, targets.length, "listing"),
+      line: bulkPhaseLine(1, targets.length, "planning"),
     });
     void runExtractAndCreateMany({
       plan,
       deps: {
-        extract: extractArchive,
-        create: payload => createProjectFromExtract(payload),
-        settle: results => state.waitAfterExtract(results),
-      },
-      // A cover is cosmetic and must never block or fail a write, exactly as the
-      // other create doors treat it.
-      beforeCreate: archive => {
-        const row = rows.find(item => extractPathFor(item) === archive.path);
-        if (row) void primeModelCovers([row], { mediaUrl: fileUrl });
+        plan: planOperation,
+        submit: submitOperation,
+        read: getOperation,
       },
       onProgress: line =>
         setBulkExtract(current =>
@@ -1121,10 +1009,16 @@ export default function BundleReviewView({
         stop: bulkStopLine(result),
         verdicts: bulkVerdictLines(result.verdicts),
       });
+      // A lost session is the shell's news, not a sentence here: sign out and
+      // leave the verdicts already spoken standing.
+      if (result.unauthorized) {
+        onUnauthorized?.();
+        return;
+      }
       // A landing is single-archive parity: land, no bump, no walk. Anything else
       // reports the change, and re-walks the queue at most once.
-      if (result.landing && onProjectImported) {
-        onProjectImported(result.landing.id);
+      if (result.landing !== null && onProjectImported) {
+        onProjectImported(result.landing);
         return;
       }
       if (result.created > 0) onProjectsChanged?.();
@@ -1333,37 +1227,10 @@ export default function BundleReviewView({
       )}
       {report && <DuplicateArchivesPanel report={report} />}
       {report && <ScanFidelityNotice report={report} />}
-      {/* A one-way write must leave a sentence behind even when its own row is
-          hidden by the create, so the verdict lives here rather than in the aside. */}
-      {extractPlan && extractPlan.lines.length > 0 && (
-        /* The listing was read back before anything was written, which is what
-           lets the one-step door - it has no confirm panel - say what the archive
-           holds at all. It says it mid-run: these lines appear after the
-           extraction has been dispatched, and the only exit left is leaving the
-           queue, which does not undo that write. What protects the operator here
-           is the door's own refusals, not the choice this sentence reads as. */
-        <div className="flex flex-col gap-1" data-extract-and-create-plan={extractPlan.key}>
-          {extractPlan.lines.map(line => (
-            <p key={line} className="review-notice">
-              {line}
-            </p>
-          ))}
-        </div>
-      )}
-      {extractAndCreate?.line && (
-        <p
-          className="review-notice"
-          role="status"
-          aria-live="polite"
-          data-extract-and-create-notice={extractAndCreate.key}
-        >
-          {extractAndCreate.line}
-        </p>
-      )}
       {/* The many-archive door's verdicts. ONE live container: the summary, then
           the named verdicts in queue order, each naming its own archive. Queue
-          level for the same reason the one-step line is: a successful create
-          hides its own row, so a per-row sentence would vanish with the row. */}
+          level because a successful create hides its own row, so a per-row
+          sentence would vanish with the row it describes. */}
       {bulkNotice !== null && (
         <div
           role="status"
@@ -1821,25 +1688,10 @@ export default function BundleReviewView({
                       </span>
                     )}
                     <div className="review-detail-actions">
-                      {/* The one-step door. A zip-only row is blocked, so the plain Create button
-                          beside it is disabled - this is the action that makes the row creatable
-                          without a second click after a wait. */}
-                      {canExtractAndCreate(activeRow) && (
-                        <button
-                          type="button"
-                          className={PRIMARY_BUTTON}
-                          data-extract-and-create="true"
-                          disabled={actionsLocked}
-                          title={EXTRACT_AND_CREATE_HINT}
-                          onClick={() => startExtractAndCreate(activeRow)}
-                        >
-                          {EXTRACT_AND_CREATE_LABEL}
-                        </button>
-                      )}
-                      {/* One predicate, three renders: AUTO gets the one-step
-                          button plus the panel's door, a guided row gets only
-                          that door ("do it anyway" is a review, never a silent
-                          auto), and a row with no door keeps the inert button. */}
+                      {/* One predicate, three renders: AUTO gets the panel's
+                          door, a guided row gets only that door ("do it anyway"
+                          is a review, never a silent auto), and a row with no
+                          door keeps the inert button. */}
                       {!activeRow.existing_project_id && (
                         <>
                           {actableMode(activeRow) === "auto" && (
@@ -1944,6 +1796,21 @@ export default function BundleReviewView({
                         </span>
                       )}
                     </div>
+                    {/* The extract-and-create door: ONE server-computed plan and
+                        one action, exactly as the split door beside it. Keyed by
+                        the archive path so a row change remounts the panel and
+                        plans the new archive rather than painting the old one's
+                        preview. */}
+                    {canExtractAndCreate(activeRow) && activeExtractPath !== null && (
+                      <ExtractAndCreatePanel
+                        key={activeExtractPath}
+                        archivePath={activeExtractPath}
+                        canContribute={canContribute}
+                        name={typedName(names, activeRow)}
+                        onChanged={handleArchiveCreated}
+                        onUnauthorized={onUnauthorized}
+                      />
+                    )}
                     {/* The guided door, mounted below the action row beside the
                         split door so one read can finish the import. A stale key
                         never matches, so a row or shape change unmounts it. */}

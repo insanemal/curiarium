@@ -1150,19 +1150,26 @@ def test_a_workflow_with_no_table_entry_is_refused_rather_than_defaulted_to_cont
 def test_a_declared_workflow_without_a_planner_yet_resolves_to_contribute() -> None:
     """The owner rubric, table-levelled: organising and relocating are contribute.
 
-    Honest scope, in two halves. `relocate` is still a DECLARATION FOR THE RECORD -
-    it is not in `operations_service.WORKFLOWS`, so its level is a table-level
-    assertion and nothing more. `adopt` and `split-and-create` left that set when
-    their planners landed (`adopt` in Mf-ytig, `split-and-create` in Mf-g759): they
-    are real workflows now and are asserted end to end, roles included, in
-    `tests/test_adopt_workflow.py` and `tests/test_split_and_create.py`. Both halves
-    fail the moment somebody changes a level, and the first fails the moment a
+    Honest scope, in two halves. `relocate`, `import-folder`, `import-zip`,
+    `import-link`, `enrich` and `library-scan` are still DECLARATIONS FOR THE RECORD -
+    they are not in `operations_service.WORKFLOWS`, so their level is a table-level
+    assertion and nothing more. `adopt`, `split-and-create` and `extract-and-create`
+    left that set when their planners landed (`adopt` in Mf-ytig, `split-and-create`
+    in Mf-g759, `extract-and-create` in Mf-hebx): they are real workflows now and are
+    asserted end to end, roles included, in `tests/test_adopt_workflow.py`,
+    `tests/test_split_and_create.py` and `tests/test_extract_and_create.py`. Both
+    halves fail the moment somebody changes a level, and the first fails the moment a
     declaration starts claiming to run.
     """
-    assert set(operations_service.WORKFLOWS) == {"create-project", "split-and-create", "adopt"}
-    for workflow in ("relocate",):
+    assert set(operations_service.WORKFLOWS) == {
+        "create-project",
+        "split-and-create",
+        "adopt",
+        "extract-and-create",
+    }
+    for workflow in ("relocate", "import-folder", "import-zip", "import-link", "enrich", "library-scan"):
         assert workflow not in operations_service.WORKFLOWS, (
             f"{workflow} has a planner now; move it out of the declaration-only list"
         )
-    for workflow in ("adopt", "split-and-create", "relocate"):
+    for workflow in ("adopt", "split-and-create", "extract-and-create", "relocate"):
         assert operations_service.level_for_workflow(workflow) == permissions.CONTRIBUTE, workflow

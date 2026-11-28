@@ -956,9 +956,10 @@ def test_audit_the_snapshot_actions_are_declared_and_carried_by_their_routes() -
     # over the six routes the matrix gained (112 = 106 + 6, and the plan route
     # is exempt because it writes nothing). Mf-g759 then deletes the arrange
     # pair: its two actions and their two routes go with the surface, so
-    # 60 = 62 - 2 and 51 = 53 - 2.
-    assert len(audit.ACTIONS) == 60
-    assert len(audit.ROUTE_ACTIONS) == 51
+    # 60 = 62 - 2 and 51 = 53 - 2. Mf-hebx deletes the archive project create
+    # door and its one action, so 59 = 60 - 1 and 50 = 51 - 1.
+    assert len(audit.ACTIONS) == 59
+    assert len(audit.ROUTE_ACTIONS) == 50
     assert audit.assert_audit_coverage() == audit.ROUTE_ACTIONS
 
 
@@ -993,13 +994,13 @@ def test_audit_docs_describe_the_snapshot_actions() -> None:
     path = _repo_path("docs", "AUDIT.md")
 
     text = path.read_text(encoding="utf-8")
-    assert "exactly these 60 strings" in text
+    assert "exactly these 59 strings" in text
     for needle in ("snapshot.create", "snapshot.prune", "snapshot.delete", "snapshot.restore", "snapshot.schedule.skipped", "snapshot.schedule.failed"):
         assert needle in text
     # The prose is hard-wrapped, so the sentence is pinned with its whitespace
     # normalised: the words are byte-for-byte, the wrap points are not.
     assert (
-        "The matrix has 109 routes, 43 of them `GET`; the remaining 66 split into 51 audited keys and 15 exempt keys."
+        "The matrix has 108 routes, 43 of them `GET`; the remaining 65 split into 50 audited keys and 15 exempt keys."
         in " ".join(text.split())
     )
     assert "fail-loud" in text

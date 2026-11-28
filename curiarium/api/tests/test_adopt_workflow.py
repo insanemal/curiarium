@@ -474,7 +474,14 @@ def test_adopt_is_a_registry_workflow_whose_steps_a_client_cannot_author(
     """
     project_id = seed_stagetop(storage)
 
-    assert set(operations_service.WORKFLOWS) == {"create-project", "split-and-create", "adopt"}
+    # Four, since Mf-hebx landed `extract-and-create`: `WORKFLOWS` is the set that
+    # RUNS, and a workflow added here without a planner is caught by its own suite.
+    assert set(operations_service.WORKFLOWS) == {
+        "create-project",
+        "split-and-create",
+        "adopt",
+        "extract-and-create",
+    }
 
     plan = plan_adopt(client, project_id)
     assert [step["op"] for step in plan["steps"]] == ["adopt", "refresh-groups", "verify-members"]

@@ -23,12 +23,24 @@ plans `move_service.preflight_refusals` over the hoists `proposal_engine` implie
 and then one `create-project` per hoisted folder, using the same member rule and
 the same create verb `create-project` uses. Its undo folds the move ledger back
 and deletes only the projects its own create steps reported creating.
+
+`extract-and-create` is the same kind of composition, and it is what replaced the
+deleted one-call `POST /import/archive/project`: `archive_service.plan_extraction`
+reads the archive's listing once and names every file the run would write (and
+every member it would leave out), `archive_service.extract_out` writes them, the
+`move` step files the archive under `<twin>/_source/<archive>.zip`, a `scan` step
+registers the tree and refuses a partial result naming every miss, and the
+`create-project` step creates the project from the scan's VERIFIED set. The
+archive's new home is `_source`, not the review queue, because the review row for
+a `.zip` is how the door is offered; filing it beside its twin is the owner's
+existing rule for an archive that became a folder.
 """
 
 import base64
 import hashlib
 import json
 import os
+import posixpath
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Sequence, Tuple
@@ -39,6 +51,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, select
 
 import adopt_service
+import archive_service
 import audit
 import bundle_drift
 import bundle_service
@@ -51,10 +64,11 @@ import proposal_engine
 import seams
 from auth import AuthContext
 from db import engine
+from file_utils import is_model_path
 from models import Asset, Folder, Operation, OperationLock, OperationStep, Project, ProjectAsset
 
 PLAN_VERSION = 1
-WORKFLOWS = ("create-project", "split-and-create", "adopt")
+WORKFLOWS = ("create-project", "split-and-create", "adopt", "extract-and-create")
 
 # The two shapes a split can enact, and the one it defaults to.
 DEFAULT_SPLIT_SHAPE = "split-top-folders"
@@ -223,6 +237,8 @@ def build_plan(session: Session, workflow: str, target: str, params: Optional[di
         steps, review, declared = _plan_split_and_create(session, normalized, params or {})
     elif workflow == "adopt":
         steps, review, declared = _plan_adopt(session, normalized, params or {})
+    elif workflow == "extract-and-create":
+        steps, review, declared = _plan_extract_and_create(session, normalized, params or {})
     else:  # pragma: no cover - decode/`WORKFLOWS` refuse this before it can be built
         raise HTTPException(status_code=400, detail=f"unknown workflow {workflow!r}")
     digest = plan_digest(intent, steps, review)
@@ -750,6 +766,288 @@ def _plan_split_and_create(session: Session, target: str, params: dict) -> Tuple
     return steps, review, [key, *roots]
 
 
+# The sentence an undo answers with, and the reason it is a sentence rather than a
+# silent fact: an undo that restored the archive but left 467 MB of extracted
+# bytes on disk has not undone the run, and the operator is owed that in words.
+EXTRACT_PAYLOAD_RESIDUE = (
+    "the extracted files stay: no ledger records those bytes, and un-extracting would "
+    "delete registered assets; only the project and the archive's move are undone"
+)
+
+
+# --- extract-and-create -------------------------------------------------------
+
+
+def _plan_extract_and_create(
+    session: Session, target: str, params: dict
+) -> Tuple[list, dict, List[str]]:
+    """The `extract-and-create` planner: a `.zip` in, extract + file + scan + create out.
+
+    This is the workflow that replaced `POST /import/archive/project`. The order
+    below is the contract:
+
+      1. the DEDUPE is asked FIRST, before the zip is opened, so a second click
+         answers the zero-step already-created plan even after the archive has been
+         filed under `_source` and deleted. Nothing in this plan reads the disk
+         before this question: the answer that survives the run's own side effects
+         is what keeps a re-plan from a 404;
+      2. the archive is resolved - the declared path, else the copy an earlier run
+         already filed at `<twin>/_source/<basename>` - so a re-plan after a failed
+         scan or create answers the two remaining steps instead of 404ing on a file
+         the run itself moved;
+      3. the listing is read ONCE, through `archive_service.plan_extraction`, which
+         is the extractor's own rule (`entry_policy`) and the extractor's own
+         refusals; the plan's members and exclusions are that listing;
+      4. the archive's move is pre-flighted by `move_service.preflight_refusals`, so
+         a blocked destination refuses before the extraction writes a byte.
+
+    Every count in the review is the listing's: `members` is the number of files the
+    extract would write, `groups` is the listing's own subdirectories below its
+    common root (with `""` for the files sitting directly in it, the same loose
+    bucket `create-project` uses), the cover is the first planned model PATH, and
+    `excluded` names every member the extractor would leave out. The cover is a
+    path rather than an id because no asset row exists until the scan has run; the
+    scan step resolves it.
+    """
+    archive = (target or "").strip().strip("/")
+    if not archive:
+        raise HTTPException(
+            status_code=409, detail="the target must be a library-relative archive path"
+        )
+    entries = params.get("entries")
+    if entries is not None and (
+        not isinstance(entries, list) or any(not isinstance(name, str) for name in entries)
+    ):
+        # A selection is a list of archive-relative names; a bare string would be
+        # iterated character by character and a number would die inside the
+        # normaliser, so the shape is checked before the zip is opened.
+        raise HTTPException(
+            status_code=400, detail="params.entries must be a list of entry paths, or omitted"
+        )
+
+    existing = project_create_service.find_existing_project(session, archive=archive)
+    twin_rel: Optional[str] = None
+    if existing is None:
+        # The SECOND identity this door holds, and the one Mf-yhjo built this dedupe
+        # for: a folder the detection door already made into a project carries the
+        # twin as its marker key, so the `.zip` beside it answers already-created
+        # rather than becoming a second product with a second name. The archive leg
+        # is asked first because it is the one that survives the archive's own filing
+        # and deletion; the twin leg needs only a name, so neither opens the zip.
+        try:
+            twin_rel = archive_service.twin_rel_for(archive)
+        except HTTPException:
+            twin_rel = None
+        if twin_rel is not None:
+            existing = project_create_service.find_existing_project(session, key=twin_rel)
+    if existing is not None:
+        # A ZERO-STEP plan: the run this click asks for has already happened. This
+        # is what a second plan answers, and it is asked before the archive is
+        # opened, so it also answers after the archive was filed and deleted.
+        return [], _extract_already_created_review(archive, existing), [archive]
+
+    if seams.scan_status().get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"a library scan is running; nothing was planned for {archive!r}. "
+                "Try again when it finishes"
+            ),
+        )
+
+    twin_rel = twin_rel or archive_service.twin_rel_for(archive)
+    home = posixpath.join(twin_rel, "_source", posixpath.basename(archive))
+    selection, filed = _resolve_extract_source(archive, twin_rel, home, entries)
+    planned = list(selection.planned)
+    if not planned:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"nothing to create from {archive!r}: every selected entry is junk, a directory "
+                "member, or a name the library scan would never register"
+            ),
+        )
+
+    name = (params.get("name") or "").strip() or posixpath.basename(selection.twin)
+    moves: List[dict] = []
+    if not filed:
+        refusal = move_service.preflight_refusals(
+            [move_service.Pair(archive, home, "file")], session, Path(bundle_service.STORAGE)
+        )
+        if refusal:
+            # The mover's own sentence and its own status: a plan that said a
+            # different thing from the run would be the drift this delegation exists
+            # to prevent.
+            raise HTTPException(
+                status_code=refusal[0]["status"], detail=refusal[0]["detail"]
+            )
+        moves = [
+            {"source": archive, "target": home, "kind": "file", "action": "file-archive"}
+        ]
+
+    cover = next((entry for entry in planned if is_model_path(entry.rel_path)), None)
+    source_dir = posixpath.join(selection.twin, "_source")
+    paths = [{"path": entry.rel_path, "entry": entry.entry} for entry in planned]
+    steps: List[dict] = []
+    if not filed:
+        steps.append(
+            {
+                "index": 0,
+                "op": "extract",
+                "summary": (
+                    f"extract {len(planned)} file(s) from {posixpath.basename(archive)!r} "
+                    f"into {selection.twin!r}"
+                ),
+                # The PLANNED entries, not the raw selection: the review says what
+                # this run writes, so the extract writes exactly that - a hidden or
+                # junk member the plan excluded is not written behind the operator's
+                # back. And the scan is the next-but-one step's job: an extract that
+                # started its own walk would register the tree while the archive was
+                # still beside it.
+                "args": {
+                    "path": archive,
+                    "entries": [entry.entry for entry in planned],
+                    "twin": selection.twin,
+                },
+            }
+        )
+        steps.append(
+            {
+                "index": 1,
+                "op": "move",
+                "summary": (
+                    f"file {posixpath.basename(archive)!r} under {source_dir!r} "
+                    "so the twin owns its archive"
+                ),
+                "args": {
+                    "key": selection.twin,
+                    "pairs": [[archive, home, "file"]],
+                    "creates": [source_dir],
+                    # The rows that already existed at `_source`: undo may delete the
+                    # row this run made, and only if it was not one of these.
+                    "folders": _folder_snapshot(session, source_dir),
+                },
+            }
+        )
+
+    scan_index = len(steps)
+    steps.append(
+        {
+            "index": scan_index,
+            "op": "scan",
+            "summary": (
+                f"scan the library and resolve {len(planned)} planned file(s) "
+                f"under {selection.twin!r}"
+            ),
+            "args": {"key": selection.twin, "paths": paths},
+        }
+    )
+    steps.append(
+        {
+            "index": scan_index + 1,
+            "op": "create-project",
+            "summary": f"create project {name!r} from {len(planned)} member file(s)",
+            "args": {
+                # The reviewed set is the SCAN's verified set, never a second
+                # resolve: a rescan between the review and the run must not attach
+                # files nobody approved.
+                "resolve_from": scan_index,
+                "key": selection.twin,
+                "name": name,
+                "archive": archive,
+                "create_origin": project_create_service.ORIGIN_ARCHIVE_EXTRACT,
+                "provenance": {
+                    "archive": archive,
+                    "twin": selection.twin,
+                    "planned": len(planned),
+                    "fingerprint": selection.fingerprint,
+                    "common_root": selection.common_root,
+                    "groups": [
+                        {"name": group.name, "count": group.members}
+                        for group in selection.groups
+                    ],
+                },
+            },
+        }
+    )
+
+    review = {
+        "workflow": "extract-and-create",
+        "target": archive,
+        "moves": len(moves),
+        "creates": 1,
+        "adopts": 0,
+        "deletes": 0,
+        "members": len(planned),
+        "groups": [
+            {"name": group.name, "members": group.members, "models": group.models}
+            for group in selection.groups
+        ],
+        # A PATH, not an id: the scan step resolves the cover from the listing it
+        # verified. An id here would be a client-visible value nothing has produced.
+        "cover": (
+            {
+                "asset_id": None,
+                "rel_path": cover.rel_path,
+                "reason": "the first model file in the listing",
+            }
+            if cover is not None
+            else None
+        ),
+        "excluded": list(selection.excluded),
+        "existing_project_id": None,
+        "existing_project_name": None,
+        "move_list": moves,
+        "projects": [{"name": name, "root": selection.twin, "members": len(planned)}],
+    }
+    return steps, review, [archive, selection.twin]
+
+
+def _resolve_extract_source(
+    archive: str, twin_rel: str, home: str, entries: Optional[list]
+) -> Tuple[archive_service.ExtractionPlan, bool]:
+    """The archive's listing, from its declared path or the copy a run already filed.
+
+    A 404 on the declared path is the ONLY status that falls through: the archive
+    may already be at `<twin>/_source/<basename>` because an earlier run's scan or
+    create step failed after the move. Any other refusal (400, 413, 415) is the
+    extractor's own and is re-raised untouched - a plan must never paper over a
+    broken archive by looking somewhere else for it.
+    """
+    try:
+        return archive_service.plan_extraction(archive, entries), False
+    except HTTPException as error:
+        if error.status_code != 404:
+            raise
+        missing = error
+    try:
+        return archive_service.plan_extraction(home, entries, twin=twin_rel), True
+    except HTTPException as fallback:
+        raise missing from fallback
+
+
+def _extract_already_created_review(
+    archive: str, existing: project_create_service.ExistingProject
+) -> dict:
+    """The review of a plan with nothing to do, naming the project that answers it."""
+    return {
+        "workflow": "extract-and-create",
+        "target": archive,
+        "moves": 0,
+        "creates": 0,
+        "adopts": 0,
+        "deletes": 0,
+        "members": 0,
+        "groups": [],
+        "cover": None,
+        "excluded": [],
+        "existing_project_id": existing.project.id,
+        "existing_project_name": existing.project.name,
+        "move_list": [],
+        "projects": [],
+    }
+
+
 # --- adopt -------------------------------------------------------------------
 
 
@@ -1210,6 +1508,8 @@ def undo(session: Session, operation_id: str, ctx: Optional[audit.AuditContext])
         return _undo_split_and_create(session, operation, ctx)
     if operation.workflow == "adopt":
         return _undo_adopt(session, operation, ctx)
+    if operation.workflow == "extract-and-create":
+        return _undo_extract_and_create(session, operation, ctx)
     raise HTTPException(
         status_code=409, detail=f"undo is not implemented for workflow {operation.workflow!r}"
     )
@@ -1411,6 +1711,150 @@ def _undo_split_and_create(
         "moves": folded,
         "projects_removed": removed,
     }
+
+
+def _undo_extract_and_create(
+    session: Session, operation: Operation, ctx: Optional[audit.AuditContext]
+) -> dict:
+    """Fold the archive back, delete only this run's project, and say what stays.
+
+    The order is the split's, for the split's reason:
+
+      1. `move_service.undo_ledger` folds the archive back beside its twin - bytes,
+         then the asset row's `storage_path`, then `undone = 1` - and the
+         `operation.undo` row is staged INTO that transaction, so the record and
+         the fold commit together. `AlreadyUndone` is tolerated: a run that folded
+         and died leaves a retry to finish the rest;
+      2. the `_source` folder row this run created is deleted, but ONLY when its
+         path is one of the step's own `creates` and was not in the plan's folder
+         snapshot, AND the directory is gone from disk. The second condition is the
+         measured one: `undo_ledger` prunes an emptied directory, so a directory
+         that still exists holds something this undo did not put there and its row
+         is not ours to delete;
+      3. only projects whose create step reported `created: true` are deleted. A
+         create that answered `already_created` raced the plan and is KEPT;
+      4. `undo_state = undone` is stamped LAST, one commit. A two-step re-plan (the
+         archive was already filed by an earlier operation) has no ledger of its
+         own: the audit row is staged into that final commit instead, so there is
+         exactly one `operation.undo` row either way.
+
+    What it does NOT do is un-extract. No ledger records those bytes, and removing
+    registered assets is not an undo - so the payload stays, and both the audit row
+    and the response say so in words. A two-step re-plan also cannot fold the
+    EARLIER operation's move (that operation owns it, and this run is superseded by
+    it the moment it finishes), so the archive stays filed; the response's
+    `payload_residue` names the files, and the module docstring names the archive.
+
+    Resumable, not atomic, exactly like the split's undo: EVERY step above is
+    idempotent, so a crash between the fold and the deletes is repaired by the next
+    attempt.
+    """
+    steps = steps_for(session, operation.id)
+    move_step = next((step for step in steps if step.op == "move"), None)
+    move_result = _result_of(move_step)
+    ledger_id = move_result.get("ledger_id") or move_service.ledger_id_for_intent(
+        move_intent(operation.id)
+    )
+
+    created: List[str] = []
+    kept: List[str] = []
+    for step in steps:
+        if step.op != "create-project":
+            continue
+        result = _result_of(step)
+        project_id = result.get("project_id")
+        if not isinstance(project_id, str) or not project_id:
+            continue
+        (created if result.get("created") else kept).append(project_id)
+
+    folded = 0
+    undo_event = audit.Event(
+        audit.OPERATION_UNDO,
+        operation.id,
+        {
+            "moves": int(move_result.get("landed") or 0),
+            "projects_removed": created,
+            "projects_kept": kept,
+            "payload_residue": EXTRACT_PAYLOAD_RESIDUE,
+        },
+    )
+    if ledger_id:
+        try:
+            outcome = move_service.undo_ledger(ledger_id, ctx=ctx, events=(undo_event,))
+            folded = len(outcome.pairs)
+        except move_service.AlreadyUndone:
+            # The row was written by the fold that already happened; staging it
+            # again would be a second record of one act.
+            folded = int(move_result.get("landed") or 0)
+
+    folders_removed = _remove_created_directories(move_step, move_result)
+
+    removed: List[str] = []
+    for project_id in created:
+        with Session(engine) as delete_session:
+            project = delete_session.get(Project, project_id)
+            if project is None:
+                continue
+            project_service.delete_project(delete_session, project, audit_ctx=None)
+        removed.append(project_id)
+
+    with Session(engine) as final:
+        current = final.get(Operation, operation.id)
+        if current is not None:
+            if not ledger_id:
+                # No move of its own to join: the row commits with the stamp.
+                audit.stage(final, ctx, undo_event)
+            current.undo_state = UNDO_UNDONE
+            final.add(current)
+            final.commit()
+
+    return {
+        "operation_id": operation.id,
+        "undone": True,
+        "moves": folded,
+        "projects_removed": removed,
+        "folders_removed": folders_removed,
+        "payload_residue": EXTRACT_PAYLOAD_RESIDUE,
+    }
+
+
+def _remove_created_directories(move_step: Optional[OperationStep], move_result: dict) -> List[str]:
+    """Delete the folder rows for directories THIS operation's move created.
+
+    Two conditions, both measured rather than assumed: the path must be in the
+    step's own `creates` and absent from the plan's folder snapshot (so an
+    operator's pre-existing `_source` row is never deleted), and the directory
+    must be gone from disk (so a directory that still holds someone else's bytes
+    keeps its row - the undo pruned only what it emptied).
+    """
+    if move_step is None:
+        return []
+    try:
+        args = json.loads(move_step.args_json or "{}")
+    except (TypeError, ValueError):
+        return []
+    pre_existing = {
+        entry.get("storage_path")
+        for entry in args.get("folders") or []
+        if isinstance(entry, dict)
+    }
+    root = Path(bundle_service.STORAGE)
+    removed: List[str] = []
+    for relative in move_result.get("creates") or []:
+        if not isinstance(relative, str) or relative in pre_existing:
+            continue
+        if (root / relative).exists():
+            continue
+        with Session(engine) as session:
+            folder = session.exec(
+                select(Folder).where(Folder.storage_path == relative)
+            ).first()
+            if folder is None:
+                continue
+            session.delete(folder)
+            session.commit()
+        removed.append(relative)
+    return removed
 
 
 def _undo_adopt(

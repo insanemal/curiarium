@@ -473,8 +473,10 @@ def test_a_contributor_action_is_audited_with_the_contributor_role(client: TestC
     # create route (47 -> 48), and Mf-5t30 the operations trio (51 = 48 + 3)
     # - which is why the number here is not the contributor ticket's. Mf-g759
     # deleted the arrange apply and undo pair with the surface: those two
-    # audited keys are gone, so the 53 this counter once read is 51.
+    # audited keys are gone, so the 53 this counter once read is 51. Mf-hebx
+    # deleted the archive project create route and its action with the door, so
+    # the 51 is 50.
     assert audit.ROUTE_ACTIONS[("POST", "/upload")] == (audit.ASSET_CREATE,)
     assert audit.assert_audit_coverage() is audit.ROUTE_ACTIONS
-    assert len(audit.ROUTE_ACTIONS) == 51
+    assert len(audit.ROUTE_ACTIONS) == 50
     assert len(audit.EXEMPT_ROUTES) == 15

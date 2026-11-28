@@ -33,13 +33,13 @@ only module that owns either:
     `project_service.create_project_with_members`, in one transaction. Either the
     project and every member row land, or nothing does.
   * the coarse PATH-keyed verb (`create_project`) lives in `bundle_service`, not
-    here, and the reason is a firewall rather than taste: the archive-extract door
-    imports this module, and `tests/test_archive_project.py` refuses to let a bundle
-    module appear anywhere in that door's static import closure. A `create_project`
-    here would have to name `bundle_service.members_of`, and the walker sees a
-    function-local import as an edge like any other. So this module keeps the write
-    half and the dedupe, and the verb that resolves a path lives with the member
-    rule it asks.
+    here, because it has to name `bundle_service.members_of` and the marker
+    vocabulary, and that module's member rule is what the verb asks. This module
+    keeps the write half and the dedupe; the verb that resolves a path lives with
+    the member rule it asks. The `extract-and-create` operations workflow calls
+    that verb too, with its own marker discriminator (`origin`) and its own
+    `Project.origin` (`project_origin`), so all four creating doors still share
+    one write and one dedupe.
 
 Two rules the shape of this module exists to keep:
 
@@ -448,6 +448,23 @@ def find_existing_project(
         # whose marker carries no key, and `None == None` is a match that hands
         # every keyless candidate the first project in the table.
         if wanted_key and marker.get("key") == wanted_key:
+            return ExistingProject(project, MATCH_MARKER)
+        # An archive-extract project's TOP-LEVEL `key` is the archive's IDENTITY
+        # (`archive:` + its path), never a folder path: a bare `.zip` path in that
+        # field would make the queue's own zip row read already_created and vanish
+        # behind the web layer's "show created" toggle. The folder that project was
+        # built from is the payload's `twin`, promoted into `rel_dir` when the marker
+        # is written - so a candidate asking with THAT folder's key is asking about
+        # this project. The leg is load-bearing since Mf-hebx: the archive-extract
+        # workflow files the `.zip` under `<twin>/_source`, after which the report can
+        # no longer pair the folder with a zip beside it, and without this the folder
+        # row would fall to the assets identity (and, once the folder grows, to no
+        # identity at all - a duplicate project on the next create).
+        if (
+            wanted_key
+            and marker.get(ORIGIN_FIELD) == ORIGIN_ARCHIVE_EXTRACT
+            and marker.get("rel_dir") == wanted_key
+        ):
             return ExistingProject(project, MATCH_MARKER)
         if wanted_archive and marker.get("archive") == wanted_archive:
             return ExistingProject(project, MATCH_MARKER)

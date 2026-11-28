@@ -10,7 +10,6 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within, type RenderRe
 const archiveApi = vi.hoisted(() => ({
   listArchiveEntries: vi.fn(),
   extractArchive: vi.fn(),
-  createProjectFromExtract: vi.fn(),
 }));
 vi.mock("../../lib/api", () => ({
   listArchiveEntries: archiveApi.listArchiveEntries,
@@ -20,7 +19,6 @@ vi.mock("../../lib/api/imports", async importOriginal => ({
   ...(await importOriginal<typeof import("../../lib/api/imports")>()),
   listArchiveEntries: archiveApi.listArchiveEntries,
   extractArchive: archiveApi.extractArchive,
-  createProjectFromExtract: archiveApi.createProjectFromExtract,
 }));
 
 // The cover's derived half renders a snapshot. Hoisted so the props can be
@@ -69,8 +67,6 @@ vi.mock("../../lib/api/operations", async importOriginal => ({
 }));
 
 import { extractArchive, listArchiveEntries, type ArchiveExtractResult } from "../../lib/api";
-import { createProjectFromExtract, type ArchiveProjectResult } from "../../lib/api/imports";
-import type { Project } from "../../lib/api/projects";
 import type { LibraryScanStatus } from "../../lib/api/settings";
 import {
   ENRICH_MAX_KEYS,
@@ -82,6 +78,7 @@ import {
   type BundleReport,
 } from "../../lib/api/bundles";
 import {
+  getOperation,
   planOperation,
   submitOperation,
   undoOperation,
@@ -97,7 +94,6 @@ import { getToasts, resetToasts } from "../../lib/toast";
 import Toaster from "../Toaster";
 import BundleReviewView from "./BundleReviewView";
 import {
-  EXTRACT_AND_CREATE_HINT,
   EXTRACT_AND_CREATE_ROW_TITLE,
   NO_PAYLOAD_DOOR_REASON,
   NO_SOURCE_PAGE_REASON,
@@ -112,10 +108,10 @@ import type { LibraryScanState } from "./useLibraryScan";
 
 const listArchiveEntriesMock = vi.mocked(listArchiveEntries);
 const extractArchiveMock = vi.mocked(extractArchive);
-const createProjectFromExtractMock = vi.mocked(createProjectFromExtract);
 const planOperationMock = vi.mocked(planOperation);
 const submitOperationMock = vi.mocked(submitOperation);
 const undoOperationMock = vi.mocked(undoOperation);
+const getOperationMock = vi.mocked(getOperation);
 
 const ARCHIVE_ENTRIES = [
   { path: "Moai.stl", size: 2048 },
@@ -624,51 +620,6 @@ function scanFidelityPanel(): HTMLElement {
   return node as HTMLElement;
 }
 
-/** The row `POST /import/archive/project` sends back for a verdict that has one:
- *  the server's OWN re-read `ProjectOut` (`routers/imports.py` serialises it
- *  through `project_service.project_with_stats` after the write), which is the
- *  only reason a door can hand App an id at all. Hoisted out of the extract block
- *  so the project hand-off block reads one definition rather than a copy that can
- *  drift from it. */
-function createdProjectRow(overrides: Partial<Project> = {}): Project {
-  return {
-    id: "p1",
-    name: "Moai zip",
-    description: null,
-    creator: null,
-    source_url: null,
-    licence: null,
-    licence_url: null,
-    origin: "own",
-    cover_asset_id: null,
-    cover_thumb_url: null,
-    asset_count: 2,
-    total_size: 2560,
-    metadata_json: {},
-    created_at: "2026-01-01T00:00:00Z",
-    updated_at: "2026-01-01T00:00:00Z",
-    ...overrides,
-  };
-}
-
-/** One door verdict, shaped the way `ArchiveProjectOut` answers. The project is
- *  only present on the two verdicts that have one, so a fixture cannot claim a
- *  created project alongside `partial`. */
-function makeVerdict(overrides: Partial<ArchiveProjectResult> = {}): ArchiveProjectResult {
-  const status = overrides.status ?? "created";
-  const hasProject = status === "created" || status === "already_created";
-  return {
-    status,
-    archive: "import/Moai.zip",
-    twin: "import/Moai",
-    planned: 2,
-    resolved: hasProject ? 2 : 0,
-    failed: [],
-    project: hasProject ? createdProjectRow() : null,
-    ...overrides,
-  };
-}
-
 function makeState(overrides: Partial<BundleDetectState> = {}): BundleDetectState {
   return {
     report: makeReport([moai, cableClip, legacyVase, moaiZip]),
@@ -848,38 +799,18 @@ beforeEach(() => {
   listArchiveEntriesMock.mockResolvedValue({ path: "Moai.zip", entries: ARCHIVE_ENTRIES });
   extractArchiveMock.mockReset();
   extractArchiveMock.mockResolvedValue(EXTRACT_RESULT);
-  createProjectFromExtractMock.mockReset();
-  createProjectFromExtractMock.mockResolvedValue({
-    status: "created",
-    archive: "import/Moai.zip",
-    twin: "import/Moai",
-    planned: 2,
-    resolved: 2,
-    failed: [],
-    project: {
-      id: "p1",
-      name: "Moai zip",
-      description: null,
-      creator: null,
-      source_url: null,
-      licence: null,
-      licence_url: null,
-      origin: "own",
-      cover_asset_id: null,
-      cover_thumb_url: null,
-      asset_count: 2,
-      total_size: 2560,
-      metadata_json: {},
-      created_at: "2026-01-01T00:00:00Z",
-      updated_at: "2026-01-01T00:00:00Z",
-    },
-  });
-  // The split door plans on mount, so a test that reaches it without saying what
-  // the server answers gets a real plan rather than an undefined `.then`. The
-  // suites that care assert the call; the ones that do not are unaffected.
+  // Both operation doors plan on mount, so a test that reaches one without
+  // saying what the server answers gets a real plan rather than an undefined
+  // `.then`. The suite that cares asserts the call; the others are unaffected.
   planOperationMock.mockReset();
-  planOperationMock.mockResolvedValue(makeOperationPlan());
+  planOperationMock.mockImplementation(async input =>
+    input.workflow === "extract-and-create"
+      ? extractPlanFor(input.target)
+      : makeOperationPlan(),
+  );
   submitOperationMock.mockReset();
+  getOperationMock.mockReset();
+  undoOperationMock.mockReset();
 });
 
 afterEach(() => {
@@ -2175,7 +2106,7 @@ describe("BundleReviewView offers only the actions that can succeed", () => {
     expect(statusCell(orphan.key).textContent).not.toContain("Blocked - ");
     // And no extraction in place, no one-step: `extractPathFor` answers null, so
     // neither control renders.
-    expect(detail().querySelector("[data-extract-and-create]")).toBeNull();
+    expect(detail().querySelector("[data-extract-plan]")).toBeNull();
     expect(within(detail()).queryByRole("button", { name: /^Extract/ })).toBeNull();
   });
 
@@ -3763,25 +3694,35 @@ describe("BundleReviewView scan fidelity", () => {
   });
 });
 
-describe("BundleReviewView extract and create", () => {
-  /** The narration, found by the row key it belongs to. Its own attribute, so it
-   *  cannot be confused with the button's. */
-  function narration(key: string): HTMLElement | null {
-    return document.querySelector<HTMLElement>(`[data-extract-and-create-notice="${key}"]`);
+describe("BundleReviewView extract and create door", () => {
+  /** The panel's preview, found by the attribute the shared operation panels use. */
+  function extractPanel(): HTMLElement | null {
+    return detail().querySelector<HTMLElement>("[data-extract-plan]");
   }
 
-  function oneStepButton(): HTMLElement | null {
-    return within(detail()).queryByRole("button", { name: "Extract and create project" });
+  function extractAction(): HTMLButtonElement | null {
+    return detail().querySelector<HTMLButtonElement>("[data-extract-action-button]");
   }
 
-  it("offers one action on a zip-only row, and only there", () => {
+  it("mounts the panel on a zip-only row, and only there", async () => {
+    // Catches a viewer gate that still plans, and a door left on a row that has
+    // nothing to extract: the panel is the only extract-and-create door left.
     renderView(makeState({ report: makeReport([moaiZip]) }));
-    expect(oneStepButton()).toBeTruthy();
+    await waitFor(() => expect(extractPanel()).toBeTruthy());
+    expect(planOperationMock).toHaveBeenCalledWith({
+      workflow: "extract-and-create",
+      target: "import/Moai.zip",
+      params: { name: "Moai zip" },
+    });
     cleanup();
 
     // A ready row needs no extraction, so the door is not offered.
+    planOperationMock.mockClear();
     renderView(makeState({ report: makeReport([moai]) }));
-    expect(oneStepButton()).toBeNull();
+    expect(detail().querySelector("[data-extract-plan]")).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ workflow: "extract-and-create" }),
+    );
     cleanup();
 
     // A zip-only row that already became a project has nothing left to do.
@@ -3792,181 +3733,26 @@ describe("BundleReviewView extract and create", () => {
     });
     renderView(makeState({ report: makeReport([alreadyCreated]), showCreated: true }));
     expect(detailTitle()).toBe("Moai zip");
-    expect(oneStepButton()).toBeNull();
+    expect(detail().querySelector("[data-extract-plan]")).toBeNull();
     cleanup();
 
-    // A viewer never sees a write door.
+    // A viewer never sees a write door, and must not cause a plan request.
+    planOperationMock.mockClear();
     renderView(makeState({ report: makeReport([moaiZip]) }), false);
-    expect(oneStepButton()).toBeNull();
+    expect(detail().querySelector("[data-extract-plan]")).toBeNull();
+    expect(planOperationMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ workflow: "extract-and-create" }),
+    );
   });
 
-  it("runs listing, extracting, scanning and creating, then names the project", async () => {
-    const state = makeState({ report: makeReport([moaiZip]) });
-    const view = renderView(state);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-
-    // The first phase is painted before anything has answered, so the operator
-    // is never looking at a silent button.
-    expect(narration("import/Moai.zip")?.textContent).toBe("Reading the archive's file list…");
-
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
-    );
-
-    expect(listArchiveEntriesMock).toHaveBeenCalledWith("import/Moai.zip");
-    expect(extractArchiveMock).toHaveBeenCalledWith({ path: "import/Moai.zip", entries: null });
-    expect(state.afterExtract).toHaveBeenCalledTimes(1);
-    expect(state.afterExtract).toHaveBeenCalledWith([EXTRACT_RESULT]);
-    expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1);
-    // One archive and the operator's typed name: no bundle key, because the door
-    // is keyed by the archive path and asks detection for nothing.
-    expect(createProjectFromExtractMock).toHaveBeenCalledWith({ path: "import/Moai.zip", name: "Moai zip" });
-    // The bulk doors are untouched by the one-step door: they still go through
-    // the hook's void `create`.
-    expect(state.create).not.toHaveBeenCalled();
-    // A project now exists, so the queue is re-walked: the door writes no bundle
-    // report of its own, and the row should stop reading as zip-only.
-    await waitFor(() => expect(state.refresh).toHaveBeenCalledTimes(1));
-
-    // The four dependencies are reached in the phase order, not merely at all.
-    const calls = [
-      listArchiveEntriesMock.mock.invocationCallOrder[0],
-      extractArchiveMock.mock.invocationCallOrder[0],
-      vi.mocked(state.afterExtract).mock.invocationCallOrder[0],
-      createProjectFromExtractMock.mock.invocationCallOrder[0],
-    ];
-    expect(calls).toEqual([...calls].sort((a, b) => a - b));
-
-    // The create hides its own row (`showCreated` off), so the narration lives
-    // in the queue's notices and must survive that hiding: a one-way write
-    // leaves a sentence behind even when the row it was about is gone.
-    view.rerender(
-      <BundleReviewView
-        {...scanProps()}
-        state={makeState({
-          report: makeReport([
-            moai,
-            { ...moaiZip, existing_project_id: "p1", existing_project_name: "Moai zip" },
-          ]),
-        })}
-        canContribute
-      />,
-    );
-    expect(rowKeys()).not.toContain("import/Moai.zip");
-    expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip.");
-    // Queue level, not aside level: the paragraph must not live in the panel
-    // whose row just vanished.
-    expect(detail().contains(narration("import/Moai.zip"))).toBe(false);
-  });
-
-  it("reports already-created rather than making a second project", async () => {
-    createProjectFromExtractMock.mockResolvedValue(makeVerdict({ status: "already_created" }));
-    const state = makeState({ report: makeReport([moaiZip]) });
-    renderView(state);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("Already created"),
-    );
-    expect(narration("import/Moai.zip")?.textContent).toContain("no second project");
-    expect(state.create).not.toHaveBeenCalled();
-  });
-
-  it("still calls the door when the scan refuses to settle, and says what it said", async () => {
-    // The settle is a courtesy, not the proof (Mf-0ck5): the door compares the
-    // planned entries against registered assets itself, so a walk that never
-    // proved itself answers "none of them is registered, look in import/Moai/"
-    // instead of the old "the scan did not settle, try later".
-    createProjectFromExtractMock.mockResolvedValue(
-      makeVerdict({ status: "nothing_resolved", planned: 2, resolved: 0, failed: ["Moai.stl", "readme.txt"] }),
-    );
-    const state = makeState({
-      report: makeReport([moaiZip]),
-      afterExtract: vi.fn(async (): Promise<SettleOutcome> => "timeout"),
-    });
-    renderView(state);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("none of the 2 entries"),
-    );
-    expect(narration("import/Moai.zip")?.textContent).toContain("import/Moai/");
-    expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1);
-    expect(state.refresh).not.toHaveBeenCalled();
-  });
-
-  it("says what the archive holds while the one-step run is in flight", async () => {
-    // The door has no confirm panel of its own, so the listing it read is said
-    // aloud here - the same classifier the plain Extract panel renders.
-    let settle: (outcome: SettleOutcome) => void = () => {};
-    const state = makeState({
-      report: makeReport([moaiZip]),
-      afterExtract: () => new Promise<SettleOutcome>(resolve => { settle = resolve; }),
-    });
-    renderView(state);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
-    );
-
-    const plan = document.querySelector('[data-extract-and-create-plan="import/Moai.zip"]');
-    expect(plan?.textContent).toContain("It holds 1 model, 1 document.");
-    expect(plan?.textContent).toContain("The entries sit loose at the top of the new folder.");
-    settle("settled");
-  });
-
-  it("clears the verdict when the queue is refreshed, as its own sentence asks", async () => {
-    createProjectFromExtractMock.mockResolvedValue(
-      makeVerdict({ status: "partial", planned: 2, resolved: 1, failed: ["readme.txt"] }),
-    );
-    const state = makeState({ report: makeReport([moaiZip]) });
-    renderView(state);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("1 entry never arrived"),
-    );
-    // That sentence tells the operator to refresh once the scan finishes, so
-    // taking its advice has to clear it.
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(narration("import/Moai.zip")).toBeNull());
-    expect(state.refresh).toHaveBeenCalledTimes(1);
-  });
-
-  it("creates nothing when the archive held no extractable files", async () => {
-    extractArchiveMock.mockResolvedValue({
-      path: "import/Moai.zip",
-      destination: "import/Moai",
-      files: 0,
-      bytes: 0,
-      already_present: false,
-      scan_started: false,
-    });
-    const state = makeState({ report: makeReport([moaiZip]) });
-    renderView(state);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("Nothing will register"),
-    );
-    expect(state.afterExtract).not.toHaveBeenCalled();
-    expect(createProjectFromExtractMock).not.toHaveBeenCalled();
-  });
-
-  it("keeps plain Extract beside the one-step door, and the bulk label byte-identical", () => {
+  it("keeps plain Extract beside the panel, and the bulk label byte-identical", async () => {
     renderView(makeState({ report: makeReport([moaiZip]) }));
+    await waitFor(() => expect(extractPanel()).toBeTruthy());
 
-    // Both doors in the aside at once: the one-step button is added, not
-    // swapped in for plain Extract, which runs the same extraction and wait.
+    // Both doors in the aside at once: the panel is added, not swapped in for
+    // plain Extract, which extracts and waits without creating a project.
     expect(within(detail()).getByRole("button", { name: "Extract Moai zip" })).toBeTruthy();
-    const oneStep = within(detail()).getByRole("button", { name: "Extract and create project" });
-    expect(oneStep.getAttribute("title")).toBe(EXTRACT_AND_CREATE_HINT);
+    expect(extractAction()?.textContent).toBe("Extract and create 'Moai' from 2 files");
 
     // The row's blocked-reason cell points at the whole job and keeps its click
     // behaviour: it is a text edit, not a new control.
@@ -3981,257 +3767,61 @@ describe("BundleReviewView extract and create", () => {
     expect(screen.getByRole("button", { name: "Extract selected archives (1)" })).toBeTruthy();
   });
 
-  /** A zip-only row that also names a source page, so the detail pane renders
-   *  its enrich door beside the one-step door and the gate can be seen on
-   *  both. */
-  function enrichableZip(): BundleDetectItem {
-    return makeBundle({
-      ...moaiZip,
-      source_url: "https://www.thingiverse.com/thing:2493386",
-    });
-  }
-
-  it("locks every other mutating door while the one-step run is in flight", async () => {
-    let settle: (outcome: SettleOutcome) => void = () => {};
-    const afterExtract = vi.fn(
-      () =>
-        new Promise<SettleOutcome>(resolve => {
-          settle = resolve;
-        }),
-    );
-    const state = makeState({
-      report: makeReport([autoRow(), enrichableZip()]),
-      afterExtract,
-    });
-    renderView(state);
-
-    // The ready row is selected first, so the bulk create door is live on its
-    // own account and disabling it below can only be the run's doing.
-    fireEvent.click(selectionCheck("Moai"));
-    fireEvent.click(rowElement("import/Moai.zip"));
-    expect(detailTitle()).toBe("Moai zip");
-    const bulkCreate = screen.getByRole("button", {
-      name: "Create selected (1)",
-    }) as HTMLButtonElement;
-    expect(bulkCreate.disabled).toBe(false);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
-    );
-
-    // `busy` is false here: this is the scan wait, not the final create, and
-    // the run still owns the queue's writes for the whole of it.
-    expect(state.busy).toBe(false);
-    expect((oneStepButton() as HTMLButtonElement).disabled).toBe(true);
-    expect(
-      (within(detail()).getByRole("button", { name: "Dismiss" }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-    expect(
-      (within(detail()).getByRole("button", { name: "Enrich from source page" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
-    expect(bulkCreate.disabled).toBe(true);
-    expect(
-      (screen.getByRole("button", { name: /^Dismiss selected/ }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-
-    // The ready row is a second detail target, so its own Create project door
-    // is gated by the run too: it is not merely disabled by its own row.
-    fireEvent.click(rowElement("Moai"));
-    expect(detailTitle()).toBe("Moai statue");
-    expect(
-      (within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-
-    settle("settled");
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
-    );
-
-    // The run has answered, so every door it held comes back.
-    expect(
-      (within(detail()).getByRole("button", { name: "Create project" }) as HTMLButtonElement).disabled,
-    ).toBe(false);
-    expect(bulkCreate.disabled).toBe(false);
-    fireEvent.click(rowElement("import/Moai.zip"));
-    expect((oneStepButton() as HTMLButtonElement).disabled).toBe(false);
-  });
-
-  it("cannot dismiss the row being processed, so a dismissed row cannot still create", async () => {
-    let settle: (outcome: SettleOutcome) => void = () => {};
-    const afterExtract = vi.fn(
-      () =>
-        new Promise<SettleOutcome>(resolve => {
-          settle = resolve;
-        }),
-    );
-    const state = makeState({ report: makeReport([moaiZip]), afterExtract });
-    renderView(state);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
-    );
-
-    // The very row the run is processing: a dismissal written now would hide
-    // it while the run's create still lands, so nothing may be written.
-    fireEvent.click(within(detail()).getByRole("button", { name: "Dismiss" }));
-    expect(state.dismiss).not.toHaveBeenCalled();
-
-    settle("settled");
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
-    );
-    expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("shuts the plain extract door while the one-step run is in flight", async () => {
-    let settle: (outcome: SettleOutcome) => void = () => {};
-    const afterExtract = vi.fn(
-      () =>
-        new Promise<SettleOutcome>(resolve => {
-          settle = resolve;
-        }),
-    );
-    const state = makeState({
-      report: makeReport([moaiZip]),
-      afterExtract,
-    });
-    renderView(state);
-
-    /** The detail pane's own AT-safe extract door, named for the archive. */
-    function detailExtract(): HTMLButtonElement {
-      return within(detail()).getByRole("button", {
-        name: "Extract Moai zip",
-      }) as HTMLButtonElement;
-    }
-
-    // Both plain doors are live before the run, so what the assertions below
-    // see can only be the run's doing.
-    expect(detailExtract().disabled).toBe(false);
-    expect(rowElement("import/Moai.zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
-    expect(statusCell("import/Moai.zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
-    );
-
-    // (a) A second extract landing now would run a second settle and a second
-    // refetch, so the detail pane's own extract action refuses at every stage.
-    expect(detailExtract().disabled).toBe(true);
-
-    // (b) The row's blocked-reason cell is the mouse's door. It keeps its
-    // sentence but loses the door: a click on it opens nothing, and it no
-    // longer reads as a control.
-    const cell = statusCell("import/Moai.zip");
-    expect(cell.getAttribute("title")).toBeNull();
-    expect(cell.className).toBe("review-row-status");
-    fireEvent.click(cell);
-    expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
-
-    // (c) Enter on the option is that same door from the keyboard: it opens
-    // nothing, and the option stops advertising the shortcut it cannot honour.
-    fireEvent.keyDown(rowElement("import/Moai.zip"), { key: "Enter" });
-    expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
-    expect(rowElement("import/Moai.zip").getAttribute("aria-keyshortcuts")).toBeNull();
-
-    settle("settled");
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
-    );
-
-    // The run has answered, so the door comes back - and it is a door again,
-    // not a cell that looks live while refusing.
-    expect(detailExtract().disabled).toBe(false);
-    expect(rowElement("import/Moai.zip").getAttribute("aria-keyshortcuts")).toBe("Enter");
-    expect(statusCell("import/Moai.zip").getAttribute("title")).toBe(EXTRACT_AND_CREATE_ROW_TITLE);
-    fireEvent.click(statusCell("import/Moai.zip"));
-    expect(screen.getByRole("dialog", { name: "Extract Moai zip" })).toBeTruthy();
-  });
-
-  it("shuts the confirm panel it already had open, so no second extract can fire", async () => {
-    let settle: (outcome: SettleOutcome) => void = () => {};
-    const afterExtract = vi.fn(
-      () =>
-        new Promise<SettleOutcome>(resolve => {
-          settle = resolve;
-        }),
-    );
-    const state = makeState({
-      report: makeReport([moaiZip]),
-      afterExtract,
-    });
-    renderView(state);
-
-    // A panel the operator already opened and whose count is on screen: its
-    // "Extract 2 files" button is the very second extract the run must refuse,
-    // because it would run a second settle and a second refetch.
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract Moai zip" }));
-    const confirmButton = (await screen.findByRole("button", {
-      name: "Extract 2 files",
-    })) as HTMLButtonElement;
-    expect(confirmButton.disabled).toBe(false);
-
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
-    );
-
-    const extractsBefore = extractArchiveMock.mock.calls.length;
-    expect(confirmButton.disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
-    fireEvent.click(confirmButton);
-
-    expect(extractArchiveMock.mock.calls.length).toBe(extractsBefore);
-    expect(afterExtract).toHaveBeenCalledTimes(1);
-
-    settle("settled");
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
-    );
-    // The panel is a door again once the run has answered.
-    expect(confirmButton.disabled).toBe(false);
-  });
-
-  it("still selects the row when the shut blocked-reason cell is clicked", async () => {
-    let settle: (outcome: SettleOutcome) => void = () => {};
-    const afterExtract = vi.fn(
-      () =>
-        new Promise<SettleOutcome>(resolve => {
-          settle = resolve;
-        }),
-    );
-    renderView(
-      makeState({
-        report: makeReport([moai, moaiZip]),
-        afterExtract,
+  it("reports a completed run to the host: the queue is re-walked and the list bumped", async () => {
+    // The one-step door's landing machinery is gone with the route it called, so
+    // the panel only says "something changed": the host re-walks the queue and
+    // bumps the project list once.
+    planOperationMock.mockResolvedValue(makeExtractPlan());
+    submitOperationMock.mockResolvedValue(
+      makeOperation({
+        status: "done",
+        steps: [
+          makeOperationStep({ index: 0, op: "extract" }),
+          makeOperationStep({ index: 1, op: "move" }),
+          makeOperationStep({ index: 2, op: "scan" }),
+          makeOperationStep({
+            index: 3,
+            op: "create-project",
+            result: { project_id: "p1", name: "Moai", status: "created", created: true },
+          }),
+        ],
       }),
     );
-
-    fireEvent.click(rowElement("import/Moai.zip"));
-    fireEvent.click(within(detail()).getByRole("button", { name: "Extract and create project" }));
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toContain("Waiting for the library scan"),
+    const onProjectsChanged = vi.fn();
+    const state = makeState({ report: makeReport([moaiZip]) });
+    render(
+      <BundleReviewView
+        {...scanProps()}
+        state={state}
+        canContribute
+        onProjectsChanged={onProjectsChanged}
+      />,
     );
+    await waitFor(() => expect(extractAction()).toBeTruthy());
 
-    fireEvent.click(rowElement("Moai"));
-    expect(detailTitle()).toBe("Moai statue");
+    fireEvent.click(extractAction() as HTMLButtonElement);
 
-    // The shut cell opens nothing, and the click still reaches the row: moving
-    // the detail target is a read, so the lock must not swallow it.
-    fireEvent.click(statusCell("import/Moai.zip"));
-
-    expect(detailTitle()).toBe("Moai zip");
-    expect(screen.queryByRole("dialog", { name: /^Extract / })).toBeNull();
-
-    settle("settled");
-    await waitFor(() =>
-      expect(narration("import/Moai.zip")?.textContent).toBe("Created project Moai zip."),
+    await waitFor(() => expect(state.refresh).toHaveBeenCalledTimes(1));
+    expect(onProjectsChanged).toHaveBeenCalledTimes(1);
+    // The dialog narrates the operation rather than replacing it with a notice.
+    expect(detail().querySelector("[data-extract-result]")?.textContent).toBe(
+      "Done: project 'Moai' created",
     );
+  });
+
+  it("forwards a 401 from the panel's plan read to the shell's sign-out", async () => {
+    // Catches a view that mounts the panel without the shell's sign-out: every
+    // other door on this screen signs the operator out, so this one must too.
+    const onUnauthorized = vi.fn();
+    planOperationMock.mockImplementation(async input => {
+      if (input.workflow === "extract-and-create") throw new UnauthorizedError();
+      return makeOperationPlan();
+    });
+    renderView(makeState({ report: makeReport([moaiZip]) }), true, { onUnauthorized });
+
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1));
+    // The session's news is the shell's; the panel writes no sentence of its own.
+    expect(detail().querySelector("[data-extract-failure]")).toBeNull();
   });
 });
 
@@ -4361,12 +3951,6 @@ describe("BundleReviewView project list hand-off", () => {
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 0));
     });
-  }
-
-  async function oneStepDoor(): Promise<void> {
-    fireEvent.click(
-      within(detail()).getByRole("button", { name: "Extract and create project" }),
-    );
   }
 
   it("keeps working for a host that passes no callbacks at all", async () => {
@@ -4545,75 +4129,6 @@ describe("BundleReviewView project list hand-off", () => {
     expect(onProjectImported).not.toHaveBeenCalled();
   });
 
-  it("lands from the one-step door on the project the server created", async () => {
-    const onProjectImported = vi.fn();
-    const onProjectsChanged = vi.fn();
-    createProjectFromExtractMock.mockResolvedValue(makeVerdict());
-    const state = handoff(
-      {},
-      { onProjectImported, onProjectsChanged },
-      makeReport([moaiZip]),
-    );
-    oneStepDoor();
-
-    // The id is the server's row's id (`routers/imports.py` re-reads the project
-    // after the write); the queue invents nothing.
-    await waitFor(() => expect(onProjectImported).toHaveBeenCalledWith("p1"));
-    expect(onProjectsChanged).not.toHaveBeenCalled();
-    // And it asks for NO re-walk: leaving Review deactivates the hook and bumps
-    // its request sequence, so a walk started from here fails its own newest-wins
-    // guard and its answer is discarded. Re-entering the queue walks properly.
-    await flush();
-    expect(state.refresh).not.toHaveBeenCalled();
-  });
-
-  it("bumps instead of landing when the create named no row", async () => {
-    const onProjectImported = vi.fn();
-    const onProjectsChanged = vi.fn();
-    // A `created` verdict with no row is still a project that now exists; the
-    // queue cannot name it, so it says "something changed" and stays put.
-    createProjectFromExtractMock.mockResolvedValue(makeVerdict({ project: null }));
-    handoff({}, { onProjectImported, onProjectsChanged }, makeReport([moaiZip]));
-    oneStepDoor();
-
-    await waitFor(() => expect(onProjectsChanged).toHaveBeenCalledTimes(1));
-    expect(onProjectImported).not.toHaveBeenCalled();
-  });
-
-  it("reports nothing for the already-created verdict, because this run wrote no project", async () => {
-    const onProjectImported = vi.fn();
-    const onProjectsChanged = vi.fn();
-    createProjectFromExtractMock.mockResolvedValue(makeVerdict({ status: "already_created" }));
-    const state = handoff(
-      {},
-      { onProjectImported, onProjectsChanged },
-      makeReport([moaiZip]),
-    );
-    oneStepDoor();
-
-    await waitFor(() => expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1));
-    await flush();
-    expect(onProjectImported).not.toHaveBeenCalled();
-    expect(onProjectsChanged).not.toHaveBeenCalled();
-    // The queue still re-walks, so the row reads as created: the skip above is
-    // scoped to the landing path alone.
-    await waitFor(() => expect(state.refresh).toHaveBeenCalled());
-  });
-
-  it("reports nothing for the verdicts that created nothing", async () => {
-    const onProjectImported = vi.fn();
-    const onProjectsChanged = vi.fn();
-    createProjectFromExtractMock.mockResolvedValue(
-      makeVerdict({ status: "partial", resolved: 1, failed: ["Moai.stl"], project: null }),
-    );
-    handoff({}, { onProjectImported, onProjectsChanged }, makeReport([moaiZip]));
-    oneStepDoor();
-
-    await waitFor(() => expect(createProjectFromExtractMock).toHaveBeenCalledTimes(1));
-    await flush();
-    expect(onProjectImported).not.toHaveBeenCalled();
-    expect(onProjectsChanged).not.toHaveBeenCalled();
-  });
 });
 
 describe("BundleReviewView bulk extract and create", () => {
@@ -4637,16 +4152,40 @@ describe("BundleReviewView bulk extract and create", () => {
   }
 
   /** The queue-level verdicts: one live region holding the summary and the named
-   *  verdicts. Its own attribute, so it cannot be confused with the one-step door's
-   *  `data-extract-and-create-notice`. */
+   *  verdicts. */
   function bulkNotice(): HTMLElement | null {
     return document.querySelector<HTMLElement>("[data-bulk-extract-and-create-notice]");
+  }
+
+  /** One archive's finished operation, with the create step the server reports. */
+  function createdOperation(
+    target: string,
+    projectId: string,
+    name: string,
+    status = "created",
+  ): Operation {
+    return makeOperation({
+      id: `op:${target}`,
+      target,
+      status: "done",
+      steps: [
+        makeOperationStep({ index: 0, op: "extract" }),
+        makeOperationStep({ index: 1, op: "move" }),
+        makeOperationStep({ index: 2, op: "scan" }),
+        makeOperationStep({
+          index: 3,
+          op: "create-project",
+          result: { project_id: projectId, name, status, created: status === "created" },
+        }),
+      ],
+    });
   }
 
   it("states the aggregate payload and writes nothing until confirmed", async () => {
     installArchiveListings();
     const state = makeState({ report: makeReport([alphaZip, betaZip]) });
     renderView(state);
+    planOperationMock.mockClear();
 
     fireEvent.click(selectionCheck(ALPHA_KEY));
     fireEvent.click(selectionCheck(BETA_KEY));
@@ -4665,10 +4204,13 @@ describe("BundleReviewView bulk extract and create", () => {
     expect((confirmPanel() as HTMLElement).textContent).toContain(
       "Extracting 2 archives: 2 models, 1 image, 2 documents, 5 files in all.",
     );
-    // One listing per archive, read once, before anything is written.
+    // One listing per archive, read once, before anything is queued. (The detail
+    // pane's own panel may have planned for the active row; that is a READ.)
     expect(listArchiveEntriesMock).toHaveBeenCalledTimes(2);
-    expect(extractArchiveMock).not.toHaveBeenCalled();
-    expect(createProjectFromExtractMock).not.toHaveBeenCalled();
+    expect(
+      planOperationMock.mock.calls.filter(([input]) => input.workflow === "extract-and-create"),
+    ).toEqual([]);
+    expect(submitOperationMock).not.toHaveBeenCalled();
     expect(state.waitAfterExtract).not.toHaveBeenCalled();
   });
 
@@ -4698,18 +4240,13 @@ describe("BundleReviewView bulk extract and create", () => {
     expect(screen.queryByRole("button", { name: /^Extract and create \(/ })).toBeNull();
   });
 
-  it("stays in the queue and reports Created 2 projects when the click named two archives", async () => {
+  it("drives one operation per archive and reports Created 2 projects", async () => {
     installArchiveListings();
-    createProjectFromExtractMock.mockImplementation(async payload =>
-      makeVerdict({
-        status: "created",
-        archive: payload.path,
-        project:
-          payload.path === ALPHA_KEY
-            ? createdProjectRow({ id: "p-alpha", name: "Alpha" })
-            : createdProjectRow({ id: "p-beta", name: "Beta" }),
-      }),
-    );
+    planOperationMock.mockImplementation(async input => extractPlanFor(input.target));
+    submitOperationMock.mockImplementation(async input => {
+      const target = input.planId.replace("plan-extract:", "");
+      return createdOperation(target, target === ALPHA_KEY ? "p-alpha" : "p-beta", target.replace(/\.zip$/, ""));
+    });
     const onProjectsChanged = vi.fn();
     const onProjectImported = vi.fn();
     const state = makeState({ report: makeReport([alphaZip, betaZip]) });
@@ -4727,32 +4264,41 @@ describe("BundleReviewView bulk extract and create", () => {
     fireEvent.click(selectionCheck(BETA_KEY));
     fireEvent.click(screen.getByRole("button", { name: "Extract and create (2)" }));
     await waitFor(() => expect(confirmPanel()).toBeTruthy());
+    // The detail pane's own panel may have planned for the active row already:
+    // what this click drives is what happens from here on.
+    const plannedBefore = planOperationMock.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Extract and create 2 projects" }));
 
     await waitFor(() => expect(bulkNotice()?.textContent).toContain("Created 2 projects."));
 
+    // One plan and one submit per archive, in queue order, each keyed on its own
+    // path - the ledger does the work the dead route used to.
+    expect(
+      planOperationMock.mock.calls
+        .slice(plannedBefore)
+        .filter(([input]) => input.workflow === "extract-and-create")
+        .map(([input]) => input.target),
+    ).toEqual([ALPHA_KEY, BETA_KEY]);
+    expect(submitOperationMock.mock.calls.map(([input]) => input.planId)).toEqual([
+      `plan-extract:${ALPHA_KEY}`,
+      `plan-extract:${BETA_KEY}`,
+    ]);
     // Two archives is never a landing: there is no single project to land on, so
     // the list is bumped and the operator stays in the queue.
     expect(onProjectImported).not.toHaveBeenCalled();
     expect(onProjectsChanged).toHaveBeenCalledTimes(1);
-    // Exactly one whole-library walk at the end, and the per-archive waiter did
-    // the settling: `afterExtract` would have walked the report once per archive.
+    // Exactly one whole-library walk at the end; the bulk path never settles or
+    // extracts through the hook.
     expect(state.refresh).toHaveBeenCalledTimes(1);
     expect(state.afterExtract).not.toHaveBeenCalled();
-    expect(state.waitAfterExtract).toHaveBeenCalledTimes(2);
-    // The bulk path never goes through the hook's void `create`.
+    expect(state.waitAfterExtract).not.toHaveBeenCalled();
     expect(state.create).not.toHaveBeenCalled();
   });
 
   it("lands on the project when the click named exactly one archive", async () => {
     installArchiveListings();
-    createProjectFromExtractMock.mockResolvedValue(
-      makeVerdict({
-        status: "created",
-        archive: ALPHA_KEY,
-        project: createdProjectRow({ id: "p-alpha", name: "Alpha" }),
-      }),
-    );
+    planOperationMock.mockImplementation(async input => extractPlanFor(input.target));
+    submitOperationMock.mockResolvedValue(createdOperation(ALPHA_KEY, "p-alpha", "Alpha"));
     const onProjectsChanged = vi.fn();
     const onProjectImported = vi.fn();
     const state = makeState({ report: makeReport([alphaZip]) });
@@ -4771,7 +4317,7 @@ describe("BundleReviewView bulk extract and create", () => {
     await waitFor(() => expect(confirmPanel()).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Extract and create 1 project" }));
 
-    // Single-archive parity: the id is the server's own re-read row's id.
+    // Single-archive parity: the id is the create step's own project_id.
     await waitFor(() => expect(onProjectImported).toHaveBeenCalledWith("p-alpha"));
     // Landing already bumps the list (`handleProjectImported`), and leaving the
     // queue would throw a walk away, so neither the bump nor the walk happens.
@@ -4781,36 +4327,37 @@ describe("BundleReviewView bulk extract and create", () => {
 
   it("the notice names every archive it acted on", async () => {
     installArchiveListings();
-    createProjectFromExtractMock.mockImplementation(async payload => {
-      if (payload.path === ALPHA_KEY) {
-        return makeVerdict({
-          status: "created",
-          archive: ALPHA_KEY,
-          project: createdProjectRow({ id: "p-alpha", name: "Alpha" }),
+    planOperationMock.mockImplementation(async input => {
+      if (input.target === GAMMA_KEY) {
+        // The server's own zero-step answer: this archive already has a project,
+        // so nothing is submitted for it.
+        return makeExtractPlan(GAMMA_KEY, {
+          steps: [],
+          review: {
+            ...makeExtractPlan(GAMMA_KEY).review,
+            moves: 0,
+            creates: 0,
+            existing_project_id: "p-gamma",
+            existing_project_name: "Gamma",
+            move_list: [],
+            projects: [],
+          },
         });
       }
-      if (payload.path === BETA_KEY) {
-        // The server's own counts: the listing promised three entries and two are
-        // registered, so this run wrote nothing.
-        return makeVerdict({
-          status: "partial",
-          archive: BETA_KEY,
-          planned: 3,
-          resolved: 2,
-          failed: ["beta_foot.stl"],
-          project: null,
+      return extractPlanFor(input.target);
+    });
+    submitOperationMock.mockImplementation(async input => {
+      const target = input.planId.replace("plan-extract:", "");
+      if (target === BETA_KEY) {
+        // The server's own sentence for a run that could not finish.
+        return makeOperation({
+          id: `op:${target}`,
+          target,
+          status: "failed",
+          error: "the archive was deleted mid-run",
         });
       }
-      // The idempotency lookup runs by archive path before the archive is opened
-      // (`archive_project_service.py:181-196`), so a repeat click answers this -
-      // and it is success-with-no-write, not an error.
-      return makeVerdict({
-        status: "already_created",
-        archive: GAMMA_KEY,
-        planned: 0,
-        resolved: 0,
-        project: createdProjectRow({ id: "p-gamma", name: "Gamma" }),
-      });
+      return createdOperation(target, "p-alpha", "Alpha");
     });
     const state = makeState({ report: makeReport([alphaZip, betaZip, gammaZip]) });
     renderView(state);
@@ -4828,17 +4375,24 @@ describe("BundleReviewView bulk extract and create", () => {
     const notice = bulkNotice() as HTMLElement;
     expect(notice.getAttribute("role")).toBe("status");
     expect(notice.getAttribute("aria-live")).toBe("polite");
-    // The already-created verdict wrote nothing, which is a notice, not an alarm.
+    // The already-existing verdict wrote nothing, which is a notice, not an alarm.
     expect(notice.getAttribute("role")).not.toBe("alert");
 
     const text = notice.textContent ?? "";
     expect(text).toContain("Alpha - Created project Alpha.");
-    expect(text).toContain("Beta - ");
-    expect(text).toContain("1 entry never arrived");
-    expect(text).toContain("Gamma - Already created as project Gamma");
-
+    expect(text).toContain(
+      "Beta - The project could not be created: the archive was deleted mid-run. Nothing was rolled back.",
+    );
+    expect(text).toContain(
+      "Gamma - Already created as project Gamma - this run created no second project.",
+    );
+    // Gamma never reached the ledger: the zero-step plan is the server's answer.
+    expect(submitOperationMock.mock.calls.map(([input]) => input.planId)).toEqual([
+      `plan-extract:${ALPHA_KEY}`,
+      `plan-extract:${BETA_KEY}`,
+    ]);
     expect(state.create).not.toHaveBeenCalled();
-    expect(state.waitAfterExtract).toHaveBeenCalledTimes(3);
+    expect(state.waitAfterExtract).not.toHaveBeenCalled();
     expect(state.afterExtract).not.toHaveBeenCalled();
     expect(state.refresh).toHaveBeenCalledTimes(1);
   });
@@ -4874,28 +4428,22 @@ describe("BundleReviewView bulk extract and create", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => expect(confirmPanel()).toBeNull());
     expect(document.activeElement).toBe(bulk);
+    expect(submitOperationMock).not.toHaveBeenCalled();
   });
 
   it("does not let Escape abandon a run that is already writing", async () => {
     installArchiveListings();
-    createProjectFromExtractMock.mockResolvedValue(
-      makeVerdict({
-        status: "created",
-        archive: ALPHA_KEY,
-        project: createdProjectRow({ id: "p-alpha", name: "Alpha" }),
+    planOperationMock.mockImplementation(async input => extractPlanFor(input.target));
+    // The submit is held open, so the run is mid-flight: the archive may already
+    // be being written and the progress line is the only door state on screen.
+    let finish: (value: Operation) => void = () => {};
+    submitOperationMock.mockReturnValue(
+      new Promise<Operation>(resolve => {
+        finish = resolve;
       }),
     );
-    // The settle is held open, so the run is mid-flight: the archive is being
-    // written and the progress line is the only door state on screen.
-    let settle: (outcome: SettleOutcome) => void = () => {};
-    const waitAfterExtract = vi.fn(
-      () =>
-        new Promise<SettleOutcome>(resolve => {
-          settle = resolve;
-        }),
-    );
     const onProjectImported = vi.fn();
-    const state = makeState({ report: makeReport([alphaZip]), waitAfterExtract });
+    const state = makeState({ report: makeReport([alphaZip]) });
     render(
       <BundleReviewView
         {...scanProps()}
@@ -4919,7 +4467,7 @@ describe("BundleReviewView bulk extract and create", () => {
     const bar = document.querySelector<HTMLElement>("[data-bulk-extract-and-create-bar]");
     expect(bar).toBeTruthy();
     expect(within(bar as HTMLElement).queryByRole("button", { name: "Cancel" })).toBeNull();
-    expect(state.waitAfterExtract).toHaveBeenCalledTimes(1);
+    expect(submitOperationMock).toHaveBeenCalledTimes(1);
 
     // Escape belongs to the confirm and the planning pass; a run that is already
     // writing projects is deliberately not cancellable.
@@ -4927,7 +4475,9 @@ describe("BundleReviewView bulk extract and create", () => {
     expect(document.querySelector("[data-bulk-extract-and-create-progress]")).toBeTruthy();
     expect(state.refresh).not.toHaveBeenCalled();
 
-    settle("settled");
+    await act(async () => {
+      finish(createdOperation(ALPHA_KEY, "p-alpha", "Alpha"));
+    });
     await waitFor(() => expect(bulkNotice()?.textContent).toContain("Created project Alpha."));
     // One archive is a landing: the id goes to the host and the queue is not
     // re-walked, exactly as the one-archive bulk landing pins.
@@ -5118,6 +4668,51 @@ function makeOperationPlan(overrides: Partial<OperationPlan> = {}): OperationPla
     review: makeOperationReview(),
     ...overrides,
   };
+}
+
+/** The plan the extract-and-create door is issued from. The project's name is
+ *  derived from the archive path the way the server derives its default, so a
+ *  fixture reads as the server's own answer rather than a label a test invented. */
+function makeExtractPlan(
+  target = "import/Moai.zip",
+  overrides: Partial<OperationPlan> = {},
+): OperationPlan {
+  const name = target.split("/").pop()?.replace(/\.zip$/, "") ?? "Archive";
+  return {
+    plan_id: `plan-extract:${target}`,
+    workflow: "extract-and-create",
+    target,
+    steps: [
+      { index: 0, op: "extract", summary: "extract 2 files" },
+      { index: 1, op: "move", summary: "file the archive" },
+      { index: 2, op: "scan", summary: "register 2 files" },
+      { index: 3, op: "create-project", summary: "create 1 project" },
+    ],
+    review: {
+      workflow: "extract-and-create",
+      target,
+      moves: 1,
+      creates: 1,
+      adopts: 0,
+      deletes: 0,
+      members: 2,
+      groups: [{ name: "", members: 2, models: 1 }],
+      cover: { asset_id: null, rel_path: "Moai/moai.stl", reason: "first model" },
+      excluded: [],
+      existing_project_id: null,
+      existing_project_name: null,
+      move_list: [
+        { source: target, target: `${name}/_source/${name}.zip`, kind: "file", action: "file-archive" },
+      ],
+      projects: [{ name, root: name, members: 2 }],
+    },
+    ...overrides,
+  };
+}
+
+/** The same plan, named after the archive, for a bulk run's per-archive answer. */
+function extractPlanFor(target: string): OperationPlan {
+  return makeExtractPlan(target);
 }
 
 function makeOperationStep(overrides: Partial<OperationStep> = {}): OperationStep {

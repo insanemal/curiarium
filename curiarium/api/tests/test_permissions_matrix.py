@@ -685,12 +685,6 @@ def call_import_archive(client: TestClient, headers: dict[str, str], ids: Ids, m
     return client.post("/import/archive", json={"path": "missing.zip"}, headers=headers)
 
 
-def call_import_archive_project(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
-    # Mf-0ck5: no project carries this archive path and the archive is not in the
-    # library, so the door answers the honest 404 having read and written nothing.
-    return client.post("/import/archive/project", json={"path": "missing.zip"}, headers=headers)
-
-
 def call_upload_supporting_file(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     return client.post(
         f"/asset/{ids.asset_id}/files",
@@ -1303,7 +1297,6 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/import/zip"): call_import_zip,
     ("GET", "/import/archive/entries"): call_import_archive_entries,
     ("POST", "/import/archive"): call_import_archive,
-    ("POST", "/import/archive/project"): call_import_archive_project,
     ("GET", "/imports/runs"): call_list_import_runs,
     ("GET", "/imports/runs/{run_id}"): call_import_run_detail,
     ("POST", "/asset/{asset_id}/files"): call_upload_supporting_file,
@@ -1399,7 +1392,6 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     # 404 without reading or writing anything.
     ("GET", "/import/archive/entries"): 404,
     ("POST", "/import/archive"): 404,
-    ("POST", "/import/archive/project"): 404,
     ("GET", "/file/{asset_id}/{name}"): 200,
     ("GET", "/asset/{asset_id}/files"): 200,
     ("GET", "/asset/{asset_id}/files/{file_id}"): 200,
@@ -1620,7 +1612,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 109 routes - 11 public / 39 read / 28 contribute / 13 write / 18 admin.
+    """The matrix is pinned at 108 routes - 11 public / 39 read / 27 contribute / 13 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1632,17 +1624,19 @@ def test_the_matrix_is_the_documented_size() -> None:
     rubric - an operation is contribute unless its workflow can REMOVE data - so
     the split became 28/15. Mf-g759 deleted the three arrange routes - one read
     (the preview) and two writes (apply and undo) - so the total fell 112 -> 109,
-    read 40 -> 39 and write 15 -> 13.
+    read 40 -> 39 and write 15 -> 13. Mf-hebx deleted the archive-project door
+    (the extract-and-create workflow replaced it), so the total fell 109 -> 108
+    and contribute 28 -> 27.
     """
     counts = {
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 109, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 108, counts
     assert counts == {
         permissions.PUBLIC: 11,
         permissions.READ: 39,
-        permissions.CONTRIBUTE: 28,
+        permissions.CONTRIBUTE: 27,
         permissions.WRITE: 13,
         permissions.ADMIN: 18,
     }, counts
@@ -1865,7 +1859,6 @@ def test_the_measured_levels_do_not_drift() -> None:
         ("POST", "/projects"),
         ("POST", "/project/{project_id}/assets"),
         ("POST", "/bundles/create"),
-        ("POST", "/import/archive/project"),
     ):
         assert matrix[key] == permissions.CONTRIBUTE, key
 

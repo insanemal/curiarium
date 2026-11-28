@@ -10,9 +10,15 @@ import {
   type BundleSuggestion,
 } from "../../lib/api/bundles";
 import {
+  type Operation,
+  type OperationCover,
   type OperationExcluded,
+  type OperationGroup,
   type OperationMove,
+  type OperationPlan,
+  type OperationReview,
   type OperationStep,
+  type OperationUndo,
 } from "../../lib/api/operations";
 import { DRIFT_KNOWN, DRIFT_NOT_APPLICABLE } from "../projectBundleDrift";
 // Declaration-only import cycles, proved green by these suites: this module
@@ -331,26 +337,16 @@ export function isArchiveOnly(row: BundleDetectItem): boolean {
   return extractPathFor(row) !== null;
 }
 
-export const EXTRACT_AND_CREATE_LABEL = "Extract and create project";
-
-/** The new door's hover sentence: what it does that plain Extract does not.
- *  Plain Extract runs the same extraction and the same settle wait
- *  (`BundleReviewView.handleExtracted` -> `state.afterExtract`); the only step
- *  it omits is the project, so the hint must not claim otherwise. Plain Extract
- *  is named by what it does rather than by a quoted label: its visible text is
- *  "Extract archive" while its accessible name is `Extract <title>`, so a quote
- *  would be a name neither the operator nor a screen reader hears. */
-export const EXTRACT_AND_CREATE_HINT =
-  "Extracts the archive in place, waits for the library scan to register the files, then creates one project from the result. The plain Extract button does the extraction and the wait, and stops before the project.";
-
-/** The cell's title for a row both doors can serve. It quotes the new button's
- *  own accessible name, which is a label the detail panel really carries. */
+/** The cell's title for a row both doors can serve. The detail panel's own door
+ *  is named by what it makes rather than by a quoted label: its text names the
+ *  project and the file count, which changes with the plan, so a quote here would
+ *  be a name the operator never reads. */
 export const EXTRACT_AND_CREATE_ROW_TITLE =
-  "Extract this archive in place (Enter). The detail panel's 'Extract and create project' does the whole job: extract, wait for the scan, then create the project.";
+  "Extract this archive in place (Enter). The detail panel's extract-and-create door does the whole job: extract, wait for the scan, then create the project.";
 
-/** A row the one-step door may run on: the zip-only row, and not one that
- *  already became a project. The server's `already_created` is the real belt;
- *  this is the pre-flight that keeps the button off a finished row. */
+/** A row the extract-and-create door may run on: the zip-only row, and not one
+ *  that already became a project. The server's zero-step plan is the real belt;
+ *  this is the pre-flight that keeps the panel off a finished row. */
 export function canExtractAndCreate(row: BundleDetectItem): boolean {
   return isArchiveOnly(row) && !row.existing_project_id;
 }
@@ -888,6 +884,13 @@ function stepLine(status: string, phrases: StepPhrases): string {
  *  verbatim: the client invents no word for a step it does not know. */
 export function operationStatusLine(step: OperationStep): string {
   switch (step.op) {
+    case "extract":
+      return stepLine(step.status, {
+        done: "extracted the archive",
+        running: "extracting the archive\u2026",
+        failed: "the extraction was refused",
+        pending: "waiting to extract the archive",
+      });
     case "move":
       return stepLine(step.status, {
         done: "moved the folders",
@@ -909,6 +912,16 @@ export function operationStatusLine(step: OperationStep): string {
         failed: "the project's files did not match",
         pending: "waiting to check the files",
       });
+    case "scan":
+      // The extract-and-create runner's walk: it registers the files it just
+      // wrote, so the phrase is about registration rather than about a scan of
+      // the whole library.
+      return stepLine(step.status, {
+        done: "registered the extracted files",
+        running: "waiting for the library scan to register the files\u2026",
+        failed: "the scan did not register the files",
+        pending: "waiting for the library scan",
+      });
     default:
       return `${step.op} ${step.status}`;
   }
@@ -922,4 +935,94 @@ export function operationStatusLine(step: OperationStep): string {
 export function isArrangable(row: BundleDetectItem, shape: string): boolean {
   const match = importMatches(row).find(entry => entry.shape === shape);
   return match !== undefined && !isEnactable(match);
+}
+
+// The extract-and-create door's narration. Everything below is pure: the plan and
+// the operation are the server's, and these functions only say what one of their
+// lines reads as - never what the server should have done.
+
+/** `1 file` / `9 files`, so a count of one does not read as a bug. */
+function fileCount(count: number): string {
+  return `${count} ${count === 1 ? "file" : "files"}`;
+}
+
+/** One group the plan would write. The `""` bucket is the archive's own root
+ *  files, not a folder: the server keeps it so `sum(groups) === members` holds
+ *  structurally, and calling it a directory would point the operator at a folder
+ *  that does not exist. */
+export function extractGroupLine(group: OperationGroup): string {
+  const label = group.name === "" ? "loose files" : group.name;
+  const models = `${group.models} ${group.models === 1 ? "model" : "models"}`;
+  return `${label} - ${fileCount(group.members)}, ${models}`;
+}
+
+/** How much the plan would write, said once above the groups. */
+export function extractSummaryLine(review: OperationReview): string {
+  return `Would write ${fileCount(review.members)}.`;
+}
+
+/** Where the archive would be filed. `move_list` carries exactly one move for
+ *  this workflow, and a plan with none is an archive already in its place - the
+ *  server said so by naming no move, so no sentence is invented for a target. */
+export function extractArchiveHomeLine(review: OperationReview): string | null {
+  const move = review.move_list[0];
+  if (move === undefined) return null;
+  return `The archive moves to "${move.target}".`;
+}
+
+/** The planned cover, by path. The asset id is resolved later by the server, so
+ *  only the path is shown - a null path means the plan named no cover at all. */
+export function extractCoverLine(cover: OperationCover | null): string | null {
+  if (cover === null || cover.rel_path === null) return null;
+  return `The project's cover is "${cover.rel_path}".`;
+}
+
+/** The zero-step plan's sentence: the server found a project already, so there is
+ *  nothing to approve. The name is the server's `existing_project_name`; a null
+ *  name is reported as unavailable rather than guessed from the archive path. */
+export function extractExistingLine(review: OperationReview): string {
+  const name = (review.existing_project_name ?? "").trim();
+  if (!name) return "This archive already has a project, so there is nothing to create.";
+  return `The project "${name}" already exists, so there is nothing to create.`;
+}
+
+/** The one action's label, named for the OUTCOME and never for the subsystem.
+ *  Counts and the project name come from the plan the server issued, so the
+ *  button promises exactly what the review measured. A zero-step plan gets no
+ *  label at all, because it gets no button. */
+export function extractActionLabel(review: OperationReview): string {
+  const name = (review.projects[0]?.name ?? review.existing_project_name ?? "").trim();
+  const subject = name ? `'${name}'` : "a project";
+  return `Extract and create ${subject} from ${fileCount(review.members)}`;
+}
+
+/** The dialog's done line, read from the CREATE STEP's own result. The server can
+ *  lose a race at run time, so a step that answers `already_created` must say so
+ *  instead of claiming a create the runner did not perform. */
+export function extractDoneLine(operation: Operation, plan: OperationPlan): string {
+  const create = operation.steps.find(step => step.op === "create-project");
+  if (create === undefined) return "Done: no project was created";
+  const status = create.result?.status;
+  const resultName = create.result?.name;
+  const plannedName = plan.review.projects[0]?.name ?? plan.review.existing_project_name;
+  const name = typeof resultName === "string" && resultName ? resultName : (plannedName ?? "");
+  const subject = name ? `project '${name}'` : "the project";
+  if (status === "already_created") {
+    return `Done: ${subject} already existed - nothing new was created`;
+  }
+  return `Done: ${subject} created`;
+}
+
+/** The news an undo answers with. The extracted files deliberately stay (the
+ *  server documents the residue), so the sentence says so rather than implying an
+ *  undo erased the tree. Every number is the server's own answer. */
+export function extractUndoLine(answer: OperationUndo): string {
+  if (!answer.undone) return "Nothing was undone.";
+  const removed = answer.projects_removed ?? [];
+  const moves = answer.moves ?? 0;
+  const projects =
+    removed.length === 0
+      ? "no projects removed"
+      : `removed ${removed.length} ${removed.length === 1 ? "project" : "projects"}`;
+  return `Undone: ${moves} ${moves === 1 ? "move" : "moves"} folded back, ${projects}. The extracted files stay in the library.`;
 }

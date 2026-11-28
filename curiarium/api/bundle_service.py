@@ -1159,15 +1159,23 @@ def create_project(
     require_members: bool = True,
     refuse: Optional[str] = None,
     asset_index: Optional[Mapping[str, Tuple[str, ...]]] = None,
+    origin: str = project_create_service.ORIGIN_DETECTION,
+    project_origin: str = "own",
 ) -> project_create_service.CreateOutcome:
     """Create the project a library PATH describes, once, whatever the caller re-tries.
 
     This lives here, beside `members_of` and `attached_by_group`, because the verb
     asks the member rule and the marker vocabulary; `project_create_service` owns the
     dedupe and the single write it delegates to, and it deliberately cannot name this
-    module - the archive-extract door imports it, and
-    `tests/test_archive_project.py` keeps every bundle module out of that door's
-    static import closure.
+    module - it is the write half the bundle doors share, and a second create
+    implementation is exactly what this verb exists to prevent.
+
+    `origin`/`project_origin` are the two additive seams the `extract-and-create`
+    workflow needs: its create step is this verb (the same member write, the same
+    dedupe, the same marker merge, the same undo), but the marker it writes is the
+    archive door's discriminator and its `Project.origin` is the door's own. Both
+    default to what every pre-existing caller already got, so a caller that does
+    not name them is byte-identical to before.
 
     The order is the contract:
 
@@ -1228,7 +1236,7 @@ def create_project(
     return project_create_service.create_project_from_members(
         session,
         name=resolved_name,
-        origin=project_create_service.ORIGIN_DETECTION,
+        origin=origin,
         members=members,
         # ALWAYS a marker: this verb's identity is the path, and the marker's `key`
         # is the only place that identity is written. A create from a path with no
@@ -1240,6 +1248,7 @@ def create_project(
         require_members=require_members,
         refuse=refuse,
         asset_index=asset_index,
+        project_origin=project_origin,
     )
 
 
@@ -2720,9 +2729,10 @@ def _create_one(
                     name=name,
                     # Containment is this door's identity to hold: it is asking about a
                     # folder a scan registered, and a hand-made project over those same
-                    # files IS the answer. The archive door deliberately does not ask
-                    # this leg (`archive_project_service`), because what it holds is one
-                    # click on one archive.
+                    # files IS the answer. The extract-and-create workflow deliberately
+                    # does not ask this leg: what it holds is one click on one archive,
+                    # and letting a project that happens to hold the same files swallow
+                    # that click would answer a question the operator never asked.
                     assets=True,
                     # ... and it is asked with the MODEL set, not with the (wider) set
                     # the project is about to hold: "does a project already hold this
